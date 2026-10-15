@@ -1,0 +1,8 @@
+# LF in the repository, CRLF only for Windows scripts in the working copy.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.ico binary
+*.bin binary
+*.BIN binary

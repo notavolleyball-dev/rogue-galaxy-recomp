@@ -1,0 +1,117 @@
+# Metrowerks MWo3 overlay table: Rogue Galaxy NTSC-U (SCUS_974.90, v1.01).
+#
+# Decoded from the 0x40-byte header of each BIN/*.BIN and cross-checked by
+# `python setup.py info` against the seven zero-filesz PT_LOAD segments of the
+# main ELF: reservation N (in program-header order) belongs to overlay id N and
+# its memsz equals 0x40 + text + data + bss exactly, for all seven.
+#
+# MWo3 header (little-endian u32 unless noted):
+#   0x00 char[4]  magic       "MWo3"
+#   0x04 u32      id          1..7, see below
+#   0x08 u32      load_addr   where the whole file (header included) is read
+#   0x0C u32      text_size   .text follows the header in the file
+#   0x10 u32      data_size   .data follows .text
+#   0x14 u32      bss_size    zeroed after .data in RAM (not in the file)
+#   0x18 u32      ctor_begin  static-constructor pointer table [begin, end)
+#   0x1C u32      ctor_end
+#   0x20 char[32] name        NUL-padded
+# File = [header][.text][.data], so file size = 0x40 + text + data (true for
+# all seven files). The same files are on both DVD layers, byte-identical.
+#
+# Exactly one overlay is resident at a time, all in one arena. VIEWER and
+# LAUNCHER are empty placeholders (0xC0 zero bytes of "text").
+
+version = "SCUS_974.90"
+
+[arena]
+start = 0x004E9E80
+end = 0x00528200        # = start + largest memsz (NORMAL); also the ELF's last PT_LOAD vaddr
+text_start = 0x004E9EC0 # start + 0x40
+
+# Loader path in the main ELF. Names follow RGDecomp (config/main.symbols.txt).
+[loader]
+# Picks an overlay by id from a 7-slot path table and loads it.
+select = 0x001C3210         # OverlayLoad_1c3210
+# int load(fd/path, u8 *header): reads the file to the arena, calls the notify
+# stub with a0 = header, FlushCache(0)/(2), zeroes .bss, runs the ctor table.
+load_file = 0x00100410      # OverlayLoadFile_100410
+# `jr ra; nop` (verified in the ELF). Called once per load, after the read and
+# before .bss/ctors: the hook point for switching dispatch to the loaded overlay.
+image_loaded_hook = 0x00100400
+paths = [
+  "cdrom0:\\BIN\\<NAME>.BIN;1", # retail
+  "cdrom1:\\BIN\\<NAME>.BIN;1", # also referenced by the ELF
+  "host0:BIN/<NAME>.BIN",       # development builds
+]
+
+[[overlay]]
+id = 1
+name = "viewer"
+file = "BIN/VIEWER.BIN"
+text_size = 0xC0
+data_size = 0x0
+bss_size = 0x0
+mem_size = 0x100
+ctors = [0x004E9F80, 0x004E9F80]
+empty = true
+
+[[overlay]]
+id = 2
+name = "title"
+file = "BIN/TITLE.BIN"
+text_size = 0x7540
+data_size = 0x500
+bss_size = 0x280
+mem_size = 0x7D00
+ctors = [0x004F18A0, 0x004F18B0]
+
+[[overlay]]
+id = 3
+name = "insmenu"
+file = "BIN/INSMENU.BIN"
+text_size = 0xF8C0
+data_size = 0xA00
+bss_size = 0x180
+mem_size = 0x10480
+ctors = [0x004FA140, 0x004FA148]
+
+[[overlay]]
+id = 4
+name = "launcher"
+file = "BIN/LAUNCHER.BIN"
+text_size = 0xC0
+data_size = 0x0
+bss_size = 0x0
+mem_size = 0x100
+ctors = [0x004E9F80, 0x004E9F80]
+empty = true
+
+[[overlay]]
+id = 5
+name = "normal"           # field + battle: the bulk of the game
+file = "BIN/NORMAL.BIN"
+text_size = 0x3AE40
+data_size = 0x2300
+bss_size = 0x1200
+mem_size = 0x3E380
+ctors = [0x00526F60, 0x00526FA4]
+
+[[overlay]]
+id = 6
+name = "factory"
+file = "BIN/FACTORY.BIN"
+text_size = 0x215C0
+data_size = 0x4880
+bss_size = 0xF00
+mem_size = 0x26D80
+ctors = [0x0050FC50, 0x0050FCA8]
+
+[[overlay]]
+id = 7
+name = "insect"           # Insectron battles
+file = "BIN/INSECT.BIN"
+text_size = 0x39C40
+data_size = 0x2300
+bss_size = 0x280
+mem_size = 0x3C200
+ctors = [0x00525D60, 0x00525DA4]

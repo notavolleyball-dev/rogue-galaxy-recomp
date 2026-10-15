@@ -1,0 +1,3 @@
+[submodule "thirdparty/PS2Recomp"]
+	path = thirdparty/PS2Recomp
+	url = https://github.com/Sinan-Karakaya/PS2Recomp.git

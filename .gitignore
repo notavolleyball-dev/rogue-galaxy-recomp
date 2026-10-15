@@ -1,0 +1,24 @@
+# Game data: never commit anything read from the disc.
+/disc/
+*.iso
+*.ISO
+*.bin.part
+*.part
+
+# Build trees and logs
+/build/
+/out/
+*.log
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+.cache/
+Thumbs.db
+.DS_Store

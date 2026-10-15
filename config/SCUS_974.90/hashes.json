@@ -1,0 +1,931 @@
+{
+  "version": "SCUS_974.90",
+  "title": "Rogue Galaxy",
+  "serial": "SCUS-97490",
+  "region": "NTSC-U",
+  "disc_version": "1.01",
+  "exe_date": "2006-11-14",
+  "elf": "SCUS_974.90",
+  "comment": "Known-good Redump dump (http://redump.org/disc/6567/). iso.crc32/md5/sha1 are Redump's values; 'files' keys are paths relative to the disc root, 'layers' lists the DVD layers holding identical copies. Regenerate with `python setup.py make-hashes --iso ...`.",
+  "generated": "2026-10-15",
+  "iso": {
+    "name": "Rogue Galaxy (USA).iso",
+    "redump": "http://redump.org/disc/6567/",
+    "layerbreak": 1646704,
+    "crc32": "044f1164",
+    "md5": "86170ff39c8e02c82bc043c9fe42baaf",
+    "sha1": "87377e721be58e8b6a5a7501721563500d237df7",
+    "size": 6967721984,
+    "sectors": 3402208,
+    "volume_starts": [
+      0,
+      1646688
+    ],
+    "sha256": "53662d331b9e5ce3dbe02ba08f9523b101d86fc2ee346bc133b8a4d5c7f98948"
+  },
+  "files": {
+    "BIN/FACTORY.BIN": {
+      "size": 155264,
+      "sha256": "8b6bb35bcf6835f80bc4155cece829967cd2a195caa69532d2bd0647a5fc0d44",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/INSECT.BIN": {
+      "size": 245632,
+      "sha256": "d5952e0cc532848df285b5d0beef35bb9543fc24b72403629869a3eccef16127",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/INSMENU.BIN": {
+      "size": 66304,
+      "sha256": "b49192dbe7f8864654800783fad5b4fa7194d3e961924c6aea5789768704108e",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/LAUNCHER.BIN": {
+      "size": 256,
+      "sha256": "4fbc1bee1d114a7c9012b69cccbfb5c1ad1dd4d4722c5da9b6e1613e039a4f37",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/NORMAL.BIN": {
+      "size": 250240,
+      "sha256": "f4367290742c4448a296649a13ecd9014341a235b74abc1dc8cf257b7a166c88",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/TITLE.BIN": {
+      "size": 31360,
+      "sha256": "7ac87e9ebd32a7460e885ca69aeba5357126056f5accbb53fdb8c9680ac71467",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "BIN/VIEWER.BIN": {
+      "size": 256,
+      "sha256": "a6789815b10417de6a791e7e74c611f983c113d15291a4ba7b3e7fbe006bbcd2",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "DATA0_0.DAT": {
+      "size": 1320284160,
+      "sha256": "679f2fc877845e8c10e5b090470a1f194b26c215951ba917420aeb165792b368",
+      "layers": [
+        0
+      ]
+    },
+    "DATA0_0.HD6": {
+      "size": 261688,
+      "sha256": "c921f956940ae325a8d32f9044eac0b1dd6cf52cabe3497b9b7239ef79288aa6",
+      "layers": [
+        0
+      ]
+    },
+    "DATA0_1.DAT": {
+      "size": 938082304,
+      "sha256": "35290f2948b0a31b17da821ecbaa7abbc7c014ae453686b7e87959d561aa373a",
+      "layers": [
+        0
+      ]
+    },
+    "DATA0_1.HD6": {
+      "size": 97128,
+      "sha256": "4bcaf22382766f2941429d7d336a74a6652ee59ec399cab6e06ca4a510946c1b",
+      "layers": [
+        0
+      ]
+    },
+    "DATA1_0.DAT": {
+      "size": 1355851776,
+      "sha256": "2ea1e7c4842a67786a4441ecaa3f771255705dadb3c00ccd3acf338fb660a013",
+      "layers": [
+        1
+      ]
+    },
+    "DATA1_0.HD6": {
+      "size": 264360,
+      "sha256": "38f2db64c792fa1a1e8f4b77180fc32334adf3a3da7e75303f82b8d0f9803725",
+      "layers": [
+        1
+      ]
+    },
+    "DATA1_1.DAT": {
+      "size": 959963136,
+      "sha256": "553e770e48cb2d0261828d6d0e7d5196544e06a566e0e671e1225bca4e0a429a",
+      "layers": [
+        1
+      ]
+    },
+    "DATA1_1.HD6": {
+      "size": 93216,
+      "sha256": "37e17cad26dc147570a0f03e8d916bd5ba1f4e8afd6684c0ace82f4963e070c8",
+      "layers": [
+        1
+      ]
+    },
+    "MODULES/CDVDSTM.IRX": {
+      "size": 33521,
+      "sha256": "276c175fe4a6d83d43baeb86b40cd5a7c3fc7b13b15df6da541040f926d5eb07",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/IOPRP300.IMG": {
+      "size": 278305,
+      "sha256": "8e11fc76bbdd5770a47a56549d861c0caebc9f9190a1cf936990dcff9e5a86c5",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/LIBSD.IRX": {
+      "size": 28661,
+      "sha256": "d26a8dcd121ff4ded9c819b72864ea7f4e723932cc2eab1b4f0f1c93faad43ef",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/MCMAN.IRX": {
+      "size": 96181,
+      "sha256": "e4e2afe72c123faa7c5f86624185479cd800d94c065ce5d023c540aa0935830a",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/MCSERV.IRX": {
+      "size": 7385,
+      "sha256": "dd33d243b91adb6fb5587ee77b212ca7fe6bb24bffa6cd128bc3d59e6cf6e6d2",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/MODHSYN.IRX": {
+      "size": 63037,
+      "sha256": "804a40a38d620ecc88b81b90afb8aab262f0540187e8db25eed1ede69131fed1",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/MODMIDI.IRX": {
+      "size": 21941,
+      "sha256": "c22df1c868d4baa4f51ab45e319e6b76fcab7fe0be7f0d5493a9f60285501489",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/MODMSIN.IRX": {
+      "size": 1929,
+      "sha256": "b1a46d7ff1379222af01662b03a972b8e7d23cf2360cbe20c44569df788821ba",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/PADMAN.IRX": {
+      "size": 45797,
+      "sha256": "7362ff796dced5c94a99d04fd50a774d92aa23d5605eb04d84997dd7cb5508c0",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/PCMPLAY.IRX": {
+      "size": 8704,
+      "sha256": "d7bc9308e46a0d341f39948a12f7bf86e94adfe34c22ed92a4a51712d00b6cc3",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SDRDRV.IRX": {
+      "size": 9161,
+      "sha256": "85a465ab251bde0c3d33151b3a67ec2780d57cc40ebb7df9d5ecb7bad3396b16",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SIO2MAN.IRX": {
+      "size": 6641,
+      "sha256": "565ec77e75f174cfddf72c41ccc446c1c07a3d5fb0a2ccfefad337cb8a7d0728",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SKHSYNTH.IRX": {
+      "size": 9601,
+      "sha256": "54eab0f13efde56c65fd8b441c50ee86b88d71f1288691f4607deb975d256c83",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SKMIDI.IRX": {
+      "size": 12973,
+      "sha256": "71894d60cde7a1fbfdb13d153d125509c6d0323db2ff181f965339e23141d45d",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SKMSIN.IRX": {
+      "size": 8317,
+      "sha256": "b077d1f3263a49a346a127a6914b2e0798a8b2c35da946382f44065a308da27f",
+      "layers": [
+        0
+      ]
+    },
+    "MODULES/SKSOUND.IRX": {
+      "size": 9717,
+      "sha256": "7897d526b167bc347fed9aeb6275f995566f7bfa52111a7fbc84cef61f58baf0",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/00/GAMEOVER.MVI": {
+      "size": 2195460,
+      "sha256": "e142c65f538aa31b773ab4ffd44477cb2bb8e9b863c440f0d90a1f899c4a7dfa",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/M_TRAINA.MVI": {
+      "size": 3096580,
+      "sha256": "ffb81acd30ac2d2796d89f975c060556870746a53b344e79a2a1db64d1aa8737",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/M_TRAINB.MVI": {
+      "size": 3571716,
+      "sha256": "e9714d7deb44764eef69020dcc624a31b2723b50efea1b61ea469fd78474e3ef",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/M_TRAINC.MVI": {
+      "size": 4096004,
+      "sha256": "41be89e2073ad0b39e16cea29dab58ec5ae5b345c4074556dfc1bd9a53ea838d",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/M_TRAIND.MVI": {
+      "size": 3358724,
+      "sha256": "7f96d13d9aafa5f82a0a9a7b304bd32e7c1c9b9287fbbc7964159222a9a84d62",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/RUSH.MVI": {
+      "size": 76251140,
+      "sha256": "c09cf935e24c6a2c38c609fbe1c6eb2ea10590ecd5d4673a1285d964b9302680",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/TITLE01.MVI": {
+      "size": 8404996,
+      "sha256": "8a13aaba8c9a99a03af46e73324734a11e2a05ca2be70a09c091ea364ec4732c",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/TITLE02.MVI": {
+      "size": 30965764,
+      "sha256": "34640a8e4e15e2e4b202ceecf7aa45116a0b289b8c213476c18776e74e8209db",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ARISA.MVI": {
+      "size": 6455300,
+      "sha256": "5f0c7457a0da01f0671a01018ad6a8b42afe5bbc0604a909414d71d373f62836",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ARISB.MVI": {
+      "size": 25362436,
+      "sha256": "ded45484d6fecd1530d905546542f41bfd888bcf36ae86865baa3cbc01428ced",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ARISC.MVI": {
+      "size": 4784132,
+      "sha256": "1f87ea086b3233ec5403799799b2a77a2b900f09dc135dcb5074e6c2c4441162",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_BEDANA.MVI": {
+      "size": 5783556,
+      "sha256": "a55ea749180a7749d11b53a7de4bc7c12d293b41d7c0e6d3e7d13d95feb5f54a",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_BEDANB.MVI": {
+      "size": 7569412,
+      "sha256": "67205dad05cfc3e1d96ec1bae3894a3058285a65715a63856cf33a9a9cdfbc76",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_EDENA.MVI": {
+      "size": 10534916,
+      "sha256": "1edb2ffb82d737859fd7c1a1caef1cb4c243cd65fdd08b5b7b8876563e5b0902",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_EDENB.MVI": {
+      "size": 15007748,
+      "sha256": "858d3be734f3314a8aeb98acc3475a3b4a9da99fe3105e6621f92a96bb763dca",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_GHOSTA.MVI": {
+      "size": 9846788,
+      "sha256": "45e0d0a46127f7dae25b9f7d991c553c632bfc5fcd3fff007c343748dfc91494",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_GHOSTB.MVI": {
+      "size": 5685252,
+      "sha256": "b5267f4f70fb85cd3c025f26b66adbbabbf021d6af02e4e43cf94f7a400ce2e9",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_JYURAA.MVI": {
+      "size": 4653060,
+      "sha256": "8975701162853eb386aee2cfdf1e761641fd799acdab450883d7502899cdfb8b",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_JYURAB.MVI": {
+      "size": 7667716,
+      "sha256": "989f039609d0c9ba7317cc67b9dae29dd8b3936729d8623c95964f98561044bf",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_JYURAC.MVI": {
+      "size": 9306116,
+      "sha256": "9fb54b158bb651bbf81c01b340155a1663dbaa57d66a0500ab5f53c096eda68e",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ROSEA.MVI": {
+      "size": 4407300,
+      "sha256": "63a56c605ee29887fc7030f77abedee161dcef2a75c3e39434e926ae221e187a",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ROSEB.MVI": {
+      "size": 2686980,
+      "sha256": "8b86237f68e8472373c6e2788b916df0324bc16d89948dfcca9b010207521cb2",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ROZAA.MVI": {
+      "size": 4390916,
+      "sha256": "bbd91a6f0d6ec396c3edfb4606e0f88ecdc1e49dd717bb028d07f358aa02eeaa",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ROZAB.MVI": {
+      "size": 5701636,
+      "sha256": "e553610da3ea697599f8921b695e42040ea5ddeabe51c89bc8c1aaef0dbbda95",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ZERAA.MVI": {
+      "size": 7536644,
+      "sha256": "a1c494daca62c104f1f57277f16bd2a6841aa4ba4547bbefacdcdfacb2714369",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/00/W_ZERAB.MVI": {
+      "size": 5160964,
+      "sha256": "5b4b421ad1711da7ae2bead02763e9306e71359ba407b20138511e1fd3ecf23b",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "MOVIE/01/01_01.MVI": {
+      "size": 39550980,
+      "sha256": "191779729038782210210c2988851e999d0cf058397220788835d1acc2112eaa",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/01/01_11.MVI": {
+      "size": 2818052,
+      "sha256": "4f4ec8639785a730076f6556a181a6778b82fb5b2b6dd38a7e3816fd3f67db95",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/02/02_01.MVI": {
+      "size": 4390916,
+      "sha256": "bbd91a6f0d6ec396c3edfb4606e0f88ecdc1e49dd717bb028d07f358aa02eeaa",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/02/02_05.MVI": {
+      "size": 135430148,
+      "sha256": "c7fa3ca68458a0400e1ddd9f9ff58221755489ed153ae90a456a5d20e39098d5",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/04/04_01_3.MVI": {
+      "size": 3457028,
+      "sha256": "25411162b9647e21459323904b1976ce4fb56cde3b14a996cd01f1962012d5d3",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/04/04_03.MVI": {
+      "size": 8470532,
+      "sha256": "bd22cdc61dceb2c3ef2a073bb3e9df137111fdeb7c61288ba9aac2e68c62f7c0",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/06/06_03.MVI": {
+      "size": 21381124,
+      "sha256": "136501f5693fb92553e183b1093e3676aa489dd20f945daa5976e1ba5f5edd36",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_01A.MVI": {
+      "size": 6111236,
+      "sha256": "6f8143f6e5404be0092d0cfa823118951832dd2b22476aa714a25cdaafd5d723",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_01B.MVI": {
+      "size": 10207236,
+      "sha256": "dcdb7261189cfbbe568a20638164801f98a05b6efe304666396ac1ff5189c471",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_03A.MVI": {
+      "size": 9158660,
+      "sha256": "79e207faf34e05b1f096aaed9be97e79f51c9378de760230f89b2843cc042d72",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_03B.MVI": {
+      "size": 11239428,
+      "sha256": "1dabb0b2c52d7ba2c706f14186821d03eabab380413ff29cf0506b60064918b8",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_05.MVI": {
+      "size": 8077316,
+      "sha256": "a0d80f55faebc77e4b9cf955da5faf064cccd46debe4a347aa3dfe818a70d37b",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_06A.MVI": {
+      "size": 11190276,
+      "sha256": "27337f9a2fa698f6ed90109f2969fba48e8afb021b7ac799c5e49133183bea8b",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/07/07_06B.MVI": {
+      "size": 18251780,
+      "sha256": "1d3cd09574fe8454db8f3e5d3a85595e01c4e683f4a76fa766884eb770b935d7",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/09/09_17A.MVI": {
+      "size": 3457028,
+      "sha256": "d4bcfbd6c5e382539f6b58d840077f067e96fe40e703d42e9c2289da20bdfe91",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/09/09_17B.MVI": {
+      "size": 6782980,
+      "sha256": "016fd064f19c5ccabf7d2f3af5d51068293f690df8d601456aa378ef813a8183",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/09/09_17C.MVI": {
+      "size": 9617412,
+      "sha256": "f1b9f90aae3594f9203e917e2015ecc58e23bc4889edc22335ef523b01908e13",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/10/10_12A.MVI": {
+      "size": 20955140,
+      "sha256": "2fd13ce8809064a5a04e37ae63a9ab6b53726373465fd3be249097ebba0bd0e4",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/10/10_12B.MVI": {
+      "size": 5062660,
+      "sha256": "995a0a63f7423d300093a2b251659ada9c8f543b03e43d3db8a6d10ffff7a949",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/11/11_01E.MVI": {
+      "size": 14811140,
+      "sha256": "fdcd3996253cf240d2e6e88dbfd393eec28fb0971a6cb898c00841a5b0b18844",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/11/11_01G.MVI": {
+      "size": 12009476,
+      "sha256": "5a72f2c6843939b947f6d177a81447488338edf31a9606b69136934fff6cd36e",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/13/13_07_1A.MVI": {
+      "size": 6750212,
+      "sha256": "8b82bf2f7218185d4701daa39ddae88b540b84059d013bfc2de61aa7c36f7696",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/13/13_07_2C.MVI": {
+      "size": 3407876,
+      "sha256": "5f78038380d41cb5571ea204a0846d3d414f3f28c838be3475ee1973847780e1",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/13/13_07_2G.MVI": {
+      "size": 5652484,
+      "sha256": "480cd45d1cc3a2a98cc5e8442b023fd963eeec5fc51ffae5c9ea667e08a0d3e6",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/97/01_14.MVI": {
+      "size": 209453060,
+      "sha256": "311a2024047438e8d2e51a4f307fa4363f0b0cb9e516dc8609c5205e91ca6667",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/02_06A.MVI": {
+      "size": 11550724,
+      "sha256": "c5d4a26cfdfe6e7007f48c3808418a8a90d24bc51fa55f90784e57a4b3b47fb1",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/02_06B.MVI": {
+      "size": 7634948,
+      "sha256": "94179f4ad3d06dfda7add02db02344622f4d7c07ff8e8dd50bde5f7a09e822ea",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/02_06C.MVI": {
+      "size": 21250052,
+      "sha256": "7b6f3a8c398c7485b36e716085b0f2cfc5f572b3b4da0b273372d43c91bac60f",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/04_015.MVI": {
+      "size": 40681476,
+      "sha256": "58b97ffa17cc8444324d6f0af6fef4e84691d39b00e683f3b8b0e7cfc8ee75cd",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/04_01_1.MVI": {
+      "size": 27983876,
+      "sha256": "cbad44a60790ef98462b297b7897438e6e6c8458838e7a729eb5c0c0f188ec72",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/04_14.MVI": {
+      "size": 43057156,
+      "sha256": "bdb28692690425eb2325b15571bbe42ba8d3dfccf824197803c14730c6f3c8f3",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/06_13.MVI": {
+      "size": 19628036,
+      "sha256": "6d5525477b4746dd62b7139eefbe5b66837d9b0d54e19c468ae13f50ebb46682",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/06_15A.MVI": {
+      "size": 11321348,
+      "sha256": "1b30948ebebc3de202ba45b80248b543d700d26ff9a935c74510da66408dcce4",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/06_15B.MVI": {
+      "size": 11157508,
+      "sha256": "a9de530f3ea42ca920faba124934b39d5761c4e2399f2ae5a75ece4d52069474",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/06_15C.MVI": {
+      "size": 5554180,
+      "sha256": "467767c32a4673fa5df44487d1c347da210bcce75069490fff947e42b57ce83d",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/97/07_02.MVI": {
+      "size": 117456900,
+      "sha256": "9cd82c9ba94b2db23b6d85232d0c2a9f3e2a5517a5f4ca0752a750e18ceeef2a",
+      "layers": [
+        0
+      ]
+    },
+    "MOVIE/98/09_03.MVI": {
+      "size": 15826948,
+      "sha256": "b45a3110ec86e4a2a2ad57382d9e689ef82e5af28eb3dd0574207ca427483980",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_05.MVI": {
+      "size": 47087620,
+      "sha256": "0a5c54bb4c8a92ffd63e7c9e66337f89fd0102bf7b0f8af33eab9d7422e1ce26",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_06A.MVI": {
+      "size": 44269572,
+      "sha256": "6e946d706bafe11db59618ddb3b31b1ecfe034147c89e624d48fec1b2a4cb2c2",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_06B.MVI": {
+      "size": 41959428,
+      "sha256": "c1c8635aa6aee63e05fbc84c5da76716ace451cf3888edb814a2ca98b24992e3",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_08_1.MVI": {
+      "size": 85884932,
+      "sha256": "86862a4b1c72be99643121e161e981dd88cad7204dc279d74031ea76b2a9121d",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_08_2A.MVI": {
+      "size": 43417604,
+      "sha256": "f24d59a8fd1f93d28a80498e589fe71c57245ab299f8529a1cb6e00a53f58b38",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/98/09_08_2B.MVI": {
+      "size": 9175044,
+      "sha256": "a5984a46dda371e8df279e0aef1d0c6752df218e9598af4004dfe43b0ef497b2",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01A.MVI": {
+      "size": 13352964,
+      "sha256": "19a2cd6b2d28a0af85fa9e2b0c66a206a26548ead4bfbed19c1382e7a2367340",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01B.MVI": {
+      "size": 18907140,
+      "sha256": "6465d9209b36bd747db524114f035decfa4ef1aca46d3adc0a0c522f86ea3150",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01C.MVI": {
+      "size": 10665988,
+      "sha256": "c60cababc7cafba7cfc3258ba421c13991056e6a8835dc44f85d3b2dd85f7d8a",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01D.MVI": {
+      "size": 17793028,
+      "sha256": "41f71e7b729b4da4136a56ddfb402d59b509d624ba84cf3413a4f195aaf5443f",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01F.MVI": {
+      "size": 13533188,
+      "sha256": "c9bfee42e6defc8be629584ccda7413ea0c42c581c2c28a6addcea9b5071d6f9",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/11_01H.MVI": {
+      "size": 19611652,
+      "sha256": "732d0c7a5f2dacb90d6f935adbd8a967b55034c7611a7c5cf55824e2e904a409",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_05A.MVI": {
+      "size": 27443204,
+      "sha256": "8f18030e23373ff3a4cb96a744fe3da113e3a92e208f484ce9dac4bbced95d48",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_05B.MVI": {
+      "size": 23085060,
+      "sha256": "61c6a19ab9bd2735b2dab8c1f1390903149046c9c5411760c2cae2131d9074a5",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_05C.MVI": {
+      "size": 41943044,
+      "sha256": "660d1eaf53ea0fc2845a7c00fe800e6f5f1dd8721dce1931eaa49cbc61c33ddd",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_07_1B.MVI": {
+      "size": 89473028,
+      "sha256": "c1a9b8dae1b8caafdff689625dc3e1ee443680d9f7ed6808801de770dabbb4b9",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_07_2A.MVI": {
+      "size": 7782404,
+      "sha256": "3694a30e23f41445e2684ed150ffb5343db4c3ccddc1835f0bb3d93f1b183282",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_07_2B.MVI": {
+      "size": 27803652,
+      "sha256": "2f95579b506b6f3ce50a2d3b55b1cb2f488dfb9a43cb834ea97b75690eeebca1",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55A.MVI": {
+      "size": 6520836,
+      "sha256": "74fa30759b1a92b1c5e895b99dba843bce3c8d5370c0afb792f98690f540a8eb",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55B.MVI": {
+      "size": 8241156,
+      "sha256": "5c074cae117878b5f8965cebb6783cb6b99a26562e145bdb89c8a9d577c39e91",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55C.MVI": {
+      "size": 6275076,
+      "sha256": "68683e4ed23ea7573d934c792dd738975b6bb34a437af1fa78870b10ddbe3cbc",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55D.MVI": {
+      "size": 7979012,
+      "sha256": "0ea0aa25233c536e699d0329b9f7ea6d26e36bf03d80ceea029acc7de63672dd",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55E.MVI": {
+      "size": 5816324,
+      "sha256": "baf9ea9eb60af233adc0ba5a4a0ac501f454cf56d296f4e87421615492fbb6c4",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55F.MVI": {
+      "size": 6651908,
+      "sha256": "46fe22155747d8363eed39e090c0745bf21360ddd0eb28276c66fb76027deb38",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/13_55G.MVI": {
+      "size": 7405572,
+      "sha256": "951e4d755412f27c4086357931194732957f914be2300af54f4eaac6718a1200",
+      "layers": [
+        1
+      ]
+    },
+    "MOVIE/99/STAFF_A.MVI": {
+      "size": 249774084,
+      "sha256": "057dadc24fce5c22181dc72e3e59d33ed36b8735f1f0b57083594cf7305ce264",
+      "layers": [
+        1
+      ]
+    },
+    "RGDMY.DAT": {
+      "size": 16777216,
+      "sha256": "b76a667e5103cba4e541e6e9532f5eb218a994677a206658712ebdf3e9ffe11d",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "RGSYS.DAT": {
+      "size": 1024,
+      "sha256": "82736c2ffad53ffb735848efcf8b87d9ce4a753451dc7b5d14e06f1fb88bbfd4",
+      "layers": [
+        0,
+        1
+      ]
+    },
+    "SCUS_974.90": {
+      "size": 3675336,
+      "sha256": "545ff663e947050b6682dc256e6d0413ff20cd6fed5c746ec9110896955a0cca",
+      "layers": [
+        0
+      ]
+    },
+    "SYSTEM.CNF": {
+      "size": 57,
+      "sha256": "97ac24a725961accdcaa29f4e545188d2d3769f2edd434610f5e2cc332ed1cf3",
+      "layers": [
+        0
+      ]
+    }
+  }
+}
