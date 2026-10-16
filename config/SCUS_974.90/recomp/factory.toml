@@ -1,0 +1,17 @@
+# ps2_recomp configuration: Rogue Galaxy NTSC-U overlay BIN/FACTORY.BIN (MWo3 id 6).
+# Input is the ELF wrapper from `python setup.py overlays`. Paths are relative
+# to the repository root; run ps2_recomp from there.
+[general]
+input = "build/overlays/factory.elf"
+ghidra_output = "config/SCUS_974.90/functions_factory.csv"
+output = "build/generated/factory"
+single_file_output = false
+low_memory_mode = false
+output_worker_threads = 0  # 0 = auto
+patch_syscalls = false
+patch_cop0 = true
+patch_cache = true
+
+# Overlays call the SDK through the main executable, which holds the bindings.
+stubs = []
+skip = []

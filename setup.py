@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Rogue Galaxy Recompiled: disc tooling.
+"""Rogue Galaxy Recompiled: disc and recompiler-input tooling.
 
-    python setup.py verify  --iso "Rogue Galaxy (USA).iso" [--full]
-    python setup.py extract --iso "Rogue Galaxy (USA).iso" [--out disc] [--force]
-    python setup.py info    [--disc disc]
+    python setup.py verify   --iso "Rogue Galaxy (USA).iso" [--full]
+    python setup.py extract  --iso "Rogue Galaxy (USA).iso" [--out disc] [--force]
+    python setup.py info     [--disc disc]
+    python setup.py overlays [--disc disc] [--out build/overlays]
+    python setup.py check    [--disc disc]
 
 `verify` checks a dump against config/<version>/hashes.json without writing
 anything. `extract` unpacks both DVD layers into one tree (the runtime boots
 the ELF from that folder) and hashes every file while copying. `info` decodes
-the MWo3 overlay table from an extracted tree. `make-hashes` (maintainers)
-regenerates hashes.json from a known-good dump.
+the MWo3 overlay table from an extracted tree. `overlays` wraps each code
+overlay as an ELF for ps2_recomp. `check` verifies the function maps and
+recompiler configs against the extracted disc and the pinned framework.
+
+Maintainers: `make-hashes` regenerates hashes.json from a known-good dump;
+`maps --rgdecomp <checkout>` regenerates the function maps.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import argparse
 import hashlib
 import json
 import sys
+import tomllib
 import zlib
 from datetime import date
 from pathlib import Path
@@ -26,14 +33,24 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from disc.iso9660 import SECTOR, Entry, IsoImage  # noqa: E402
+from funcmap import check as fmcheck  # noqa: E402
+from funcmap import funcmap  # noqa: E402
+from funcmap.images import load_main, load_overlay  # noqa: E402
+from funcmap.runtime_calls import RuntimeCalls  # noqa: E402
 from mwo3 import mwo3  # noqa: E402
 
 DEFAULT_VERSION = "SCUS_974.90"
 QUICK_LIMIT = 32 << 20  # files up to this size are hashed by plain `verify`
+FRAMEWORK = ROOT / "thirdparty" / "PS2Recomp"
 
 
 def config_dir(version: str) -> Path:
     return ROOT / "config" / version
+
+
+def load_toml(path: Path) -> dict:
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
 def load_hashes(version: str) -> dict:
@@ -232,8 +249,83 @@ def cmd_make_hashes(args: argparse.Namespace) -> int:
     return 0
 
 
+def map_csv(version: str, image: str) -> Path:
+    return config_dir(version) / f"functions_{image}.csv"
+
+
+def cmd_maps(args: argparse.Namespace) -> int:
+    spec = load_toml(config_dir(args.version) / "funcmap.toml")
+    src = Path(args.rgdecomp) / "config"
+    for fname, want in spec["source"]["sha256"].items():
+        got = hashlib.sha256((src / fname).read_bytes()).hexdigest()
+        if got != want:
+            sys.exit(f"{src / fname}: sha256 {got} is not the pinned {want} (RGDecomp {spec['source']['commit'][:7]})")
+    for image, ispec in spec["image"].items():
+        funcs, log = funcmap.build(image, ispec, funcmap.read_rgdecomp(src / ispec["symbols"]))
+        funcmap.write_csv(map_csv(args.version, image), funcs)
+        print(f"{image:<8} {len(funcs):>6} functions  ({'; '.join(log) or 'as RGDecomp'})")
+    return 0
+
+
+def cmd_overlays(args: argparse.Namespace) -> int:
+    spec = load_toml(config_dir(args.version) / "funcmap.toml")
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for image, ispec in spec["image"].items():
+        if "overlay" in ispec:
+            elf = mwo3.to_elf((Path(args.disc) / ispec["overlay"]).read_bytes())
+            (out / f"{image}.elf").write_bytes(elf)
+            print(f"wrote {out / (image + '.elf')} ({len(elf)} bytes)")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    cdir = config_dir(args.version)
+    spec = load_toml(cdir / "funcmap.toml")
+    known = load_hashes(args.version)
+    arena = load_toml(cdir / "overlays.toml")["arena"]
+    disc = Path(args.disc)
+
+    calls = None
+    if (FRAMEWORK / "ps2xRuntime").is_dir():
+        calls = RuntimeCalls.load(FRAMEWORK)
+    images, maps = {}, {}
+    for image, ispec in spec["image"].items():
+        if "overlay" in ispec:
+            images[image] = load_overlay(image, disc / ispec["overlay"])
+        else:
+            images[image] = load_main(disc / known["elf"], [tuple(r) for r in ispec["code"]])
+        maps[image] = funcmap.read_csv(map_csv(args.version, image))
+
+    report = fmcheck.check_names(maps, calls)
+    for image, ispec in spec["image"].items():
+        gaps = [tuple(g["range"]) for g in ispec.get("known_gap", [])]
+        report.merge(fmcheck.check_layout(images[image], maps[image], gaps))
+        if images[image].header:
+            report.merge(fmcheck.check_ctors(images[image], fmcheck.Index(maps[image])))
+    report.merge(fmcheck.check_control_flow(images, maps, (arena["start"], arena["end"])))
+    for image in spec["image"]:
+        cfg_path = cdir / "recomp" / f"{image}.toml"
+        if not cfg_path.is_file():
+            report.problems.append(f"{image}: no recompiler config at {cfg_path.relative_to(ROOT)}")
+            continue
+        cfg = load_toml(cfg_path)
+        if Path(cfg["general"].get("ghidra_output", "")) != map_csv(args.version, image).relative_to(ROOT):
+            report.problems.append(f"{image}: {cfg_path.name} does not point ghidra_output at its map")
+        report.merge(fmcheck.check_recomp_config(image, cfg, fmcheck.Index(maps[image]), calls))
+
+    for n in report.notes:
+        print(" ", n)
+    if calls is None:
+        print("  (thirdparty/PS2Recomp missing: runtime handler checks skipped)")
+    for p in report.problems:
+        print("PROBLEM:", p)
+    print("OK" if not report.problems else f"{len(report.problems)} problem(s)")
+    return 1 if report.problems else 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Rogue Galaxy Recompiled disc tooling")
+    ap = argparse.ArgumentParser(description="Rogue Galaxy Recompiled: disc and recompiler-input tooling")
     ap.add_argument("--version", default=DEFAULT_VERSION, help=f"config/<version> to use (default {DEFAULT_VERSION})")
     sub = ap.add_subparsers(dest="command", required=True)
 
@@ -252,9 +344,22 @@ def main() -> int:
     p.add_argument("--disc", default=str(ROOT / "disc"))
     p.set_defaults(func=cmd_info)
 
+    p = sub.add_parser("overlays", help="wrap each code overlay as an ELF for ps2_recomp")
+    p.add_argument("--disc", default=str(ROOT / "disc"))
+    p.add_argument("--out", default=str(ROOT / "build" / "overlays"))
+    p.set_defaults(func=cmd_overlays)
+
+    p = sub.add_parser("check", help="verify function maps and recompiler configs against the disc")
+    p.add_argument("--disc", default=str(ROOT / "disc"))
+    p.set_defaults(func=cmd_check)
+
     p = sub.add_parser("make-hashes", help="(maintainers) regenerate hashes.json from a known-good dump")
     p.add_argument("--iso", required=True)
     p.set_defaults(func=cmd_make_hashes)
+
+    p = sub.add_parser("maps", help="(maintainers) regenerate functions_*.csv from an RGDecomp checkout")
+    p.add_argument("--rgdecomp", required=True, help="RGDecomp checkout at the commit pinned in funcmap.toml")
+    p.set_defaults(func=cmd_maps)
 
     args = ap.parse_args()
     return args.func(args)

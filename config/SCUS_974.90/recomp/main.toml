@@ -1,0 +1,445 @@
+# ps2_recomp configuration: Rogue Galaxy NTSC-U main executable (SCUS_974.90).
+# Paths are relative to the repository root; run ps2_recomp from there.
+[general]
+input = "disc/SCUS_974.90"
+ghidra_output = "config/SCUS_974.90/functions_main.csv"
+output = "build/generated/main"
+single_file_output = false
+low_memory_mode = false
+output_worker_threads = 0  # 0 = auto
+
+# Syscalls are translated at the `syscall` instruction; COP0 and cache ops
+# are patched (framework defaults, as in DQ8-Recompiled).
+patch_syscalls = false
+patch_cop0 = true
+patch_cache = true
+
+# SDK functions the runtime implements, as handler@address. Map names carry
+# their address, so nothing binds by name alone: this list is the whole set.
+#
+# Seed (phase 1): the bindings DQ8-Recompiled uses with the same framework
+# (its pin 888ec47 is the parent of ours) and the same SDK generation, located
+# here by ps2_analyzer's SDK signatures and RGDecomp's names, minus handlers
+# that are TODOs in our pin (sceDmaRecv*/Watch/Pause, sceDeci2*, sceTty*,
+# sceMpegGetPictureRAW8*): those throw, so the guest code runs instead.
+# Like DQ8 it leaves the allocator (malloc and friends), sceGifPk*, syscall
+# wrappers and private SDK entry points translated. Phase 3 validates each.
+# `python setup.py check` verifies every entry against the map and the pinned
+# runtime. A trailing comment gives the map name where it differs.
+stubs = [
+    # libgraph
+    "sceGsResetGraph@0x00108110",
+    "sceGsResetPath@0x001082B0",
+    "sceGsSetDefDispEnv@0x001083C8",
+    "sceGsPutDispEnv@0x00108740",
+    "sceGszbufaddr@0x00108800",
+    "sceGsSetDefDrawEnv@0x001088C8",
+    "sceGsSetDefClear@0x00108AB0",
+    "sceGsPutDrawEnv@0x00108BB8",
+    "sceGsSetDefDBuff@0x00108CA0",
+    "sceGsSwapDBuff@0x00108F38",
+    "sceGsSyncV@0x00108F98",
+    "sceGsSyncPath@0x00109030",
+    "sceGsSetDefStoreImage@0x00109348",
+    "sceGsExecStoreImage@0x00109488",
+    "sceGsSyncVCallback@0x00109B18",
+    # libdma, libvu0
+    "memclr@0x00109CD8",
+    "sceDmaGetChan@0x00109D10",
+    "sceDmaReset@0x00109D38",
+    "sceDmaPutEnv@0x00109E18",
+    "sceDmaGetEnv@0x00109FF0",
+    "sceDmaSend@0x0010A040",
+    "sceDmaSendN@0x0010A0A8",
+    "sceDmaSendI@0x0010A120",
+    "sceDmaSync@0x0010A2E0",
+    "sceVu0ApplyMatrix@0x0010A8C0",  # MtxMulVec4_10a8c0
+    "sceVu0MulMatrix@0x0010A8F0",
+    "sceVu0InnerProduct@0x0010A958",
+    "sceVu0Normalize@0x0010A980",
+    "sceVu0TransposeMatrix@0x0010A9C0",
+    "sceVu0InversMatrix@0x0010AA08",
+    "sceVu0DivVector@0x0010AA78",
+    "sceVu0DivVectorXYZ@0x0010AA98",
+    "sceVu0InterVector@0x0010AAB8",
+    "sceVu0TransMatrix@0x0010AB40",
+    "sceVu0CopyMatrix@0x0010AB80",
+    "sceVu0UnitMatrix@0x0010ABE8",
+    "sceVu0RotMatrixZ@0x0010AC88",
+    "sceVu0RotMatrixX@0x0010AD30",
+    "sceVu0RotMatrixY@0x0010ADD8",
+    "sceVu0RotMatrix@0x0010AE80",
+    "sceVu0ClampVector@0x0010AED0",
+    "sceVu0CameraMatrix@0x0010AEF8",
+    "sceVu0NormalLightMatrix@0x0010AFA8",
+    "sceVu0LightColorMatrix@0x0010B068",
+    "sceVu0ViewScreenMatrix@0x0010B0D0",
+    "sceVu0DropShadowMatrix@0x0010B1D8",
+    "sceVu0RotTransPersN@0x0010B368",
+    "sceVu0RotTransPers@0x0010B3C0",
+    "sceVu0InterVectorXYZ@0x0010B428",
+    "sceVu0ClipScreen@0x0010B470",
+    "sceVu0ClipScreen3@0x0010B4B8",
+    "sceVu0ClipAll@0x0010B518",
+    "sceVpu0Reset@0x0010B5A8",
+    # libmpeg, libipu
+    "sceMpegCreate@0x001104A8",  # MpegCreate_1104a8
+    "sceMpegInit@0x00111050",  # MpegStopDmaMaybe_111050
+    "sceMpegAddBs@0x00111108",
+    "sceMpegGetPicture@0x00111148",  # MpegGetPicture_111148
+    "sceMpegReset@0x001111E8",  # MpegReset_1111e8
+    "sceMpegGetDecodeMode@0x001112A0",  # MpegGetDecodeMode_1112a0
+    "sceMpegAddCallback@0x001112C0",  # MpegAddCallback_1112c0
+    "sceMpegClearRefBuff@0x00111478",  # MpegClearRefBuffMaybe_111478
+    "sceMpegDemuxPssRing@0x00115340",  # MpegDemuxPssRing_115340
+    "sceMpegAddStrCallback@0x00115740",  # MpegAddStrCallback_115740
+    "sceIpuStopDMA@0x00115C18",  # IpuStopDma_115c18
+    "sceIpuRestartDMA@0x00115D00",  # IpuRestartDma_115d00
+    "sceIpuSync@0x00115E50",  # IpuSync_115e50
+    "sceIpuInit@0x00115F30",  # IpuInit_115f30
+    # libkernl: TTY, SIF commands and RPC, file I/O, IOP heap and modules
+    "write@0x00116B68",
+    "read@0x00116BE8",
+    "sceSifInitCmd@0x00119400",
+    "sceSifExitCmd@0x00119680",
+    "sceSifAddCmdHandler@0x001196E8",
+    "sceSifRemoveCmdHandler@0x00119760",
+    "sceSifSendCmd@0x001198E8",
+    "sceSifWriteBackDCache@0x00119AB0",
+    "sceSifInitRpc@0x00119B60",
+    "sceSifGetOtherData@0x0011A040",
+    "sceSifBindRpc@0x0011A308",
+    "sceSifCallRpc@0x0011A4E8",
+    "sceSifCheckStatRpc@0x0011A6E8",
+    "sceSifSetRpcQueue@0x0011A728",
+    "sceSifRegisterRpc@0x0011A7C0",
+    "sceSifRemoveRpc@0x0011A890",
+    "sceSifRemoveRpcQueue@0x0011A928",
+    "sceSifGetNextRequest@0x0011A9B8",
+    "sceSifExecRequest@0x0011AA10",
+    "sceSifRpcLoop@0x0011ABD8",
+    "sceFsInit@0x0011B428",  # SceFsInit_11b428
+    "sceFsReset@0x0011B6C0",
+    "sceOpen@0x0011B928",
+    "sceClose@0x0011BBB8",
+    "sceLseek@0x0011BD30",
+    "sceRead@0x0011BF70",
+    "sceWrite@0x0011C1E0",
+    "sceIoctl@0x0011C4A0",
+    "sceSifInitIopHeap@0x0011E850",
+    "sceSifAllocIopHeap@0x0011E8D8",
+    "sceSifAllocSysMemory@0x0011E948",
+    "sceSifLoadIopHeap@0x0011EA60",
+    "sceSifLoadFileReset@0x0011EF30",
+    "sceSifLoadModule@0x0011F7A0",
+    "sceSifLoadElf@0x0011F908",
+    "sceSifGetIopAddr@0x0011F930",
+    "sceSifSetIopAddr@0x0011FA20",
+    "sceSifResetIop@0x0011FB00",
+    "sceSifIsAliveIop@0x0011FC58",
+    "sceSifSyncIop@0x0011FC80",
+    "sceSifRebootIop@0x0011FCD0",
+    # libm
+    "__ieee754_rem_pio2f@0x001255D8",  # RemPio2f_1255d8
+    "__kernel_cosf@0x00127020",  # KernelCosf_127020
+    "__kernel_sinf@0x001279D8",  # KernelSinf_1279d8
+    "atan@0x00127D68",  # AtanDouble_127d68
+    "cos@0x00128278",  # Cos_128278
+    "fabs@0x001283A0",  # FabsDouble_1283a0
+    "floor@0x001283F8",  # FloorDouble_1283f8
+    "sin@0x00128880",  # Sin_128880
+    "tan@0x001289B8",  # Tan_1289b8
+    # libcdvd
+    "sceCdCallback@0x001291D8",
+    "sceCdInitEeCB@0x001293B0",
+    "sceCdSearchFile@0x00129AE0",
+    "sceCdNcmdDiskReady@0x00129C58",
+    "sceCdSync@0x00129CF0",
+    "sceCdSyncS@0x00129D90",
+    "sceCdInit@0x0012A008",
+    # The public entry. Its helper sceCdDiskReady_12a2f0 is only called from here.
+    "sceCdDiskReady@0x0012A508",  # CdDiskReadyNewMaybe_12a508
+    "sceCdRead@0x0012A728",
+    "sceCdSeek@0x0012A908",
+    # Both disk-type entries: the game calls the inner one (RPC, -1 on failure)
+    # from CdDiskWatchThread_17fdc0; the outer one maps -1 to 0.
+    "sceCdGetDiskType@0x0012A9D8",
+    "sceCdGetDiskType@0x0012AA70",  # CdGetDiskTypeOrNoneMaybe_12aa70
+    "sceCdGetError@0x0012AA98",
+    "sceCdMmode@0x0012ADA0",
+    "sceCdTrayReq@0x0012AE98",
+    # libpad
+    "scePadInit@0x0012AF88",
+    "scePadInit2@0x0012B110",  # PadInitAfterBindMaybe_12b110
+    "scePadEnd@0x0012B208",
+    "scePadPortOpen@0x0012B3B0",
+    "scePadPortClose@0x0012B598",
+    "scePadGetDmaStr@0x0012B650",
+    "scePadGetFrameCount@0x0012B7A8",
+    "scePadRead@0x0012B800",
+    "scePadGetState@0x0012B878",
+    "scePadStateIntToStr@0x0012B8F0",
+    "scePadSetReqState@0x0012B928",
+    "scePadGetReqState@0x0012B9E0",
+    "scePadInfoAct@0x0012BA70",
+    "scePadInfoComb@0x0012BB88",
+    "scePadInfoMode@0x0012BCA0",
+    "scePadSetMainMode@0x0012BDD8",
+    "scePadSetActDirect@0x0012BE90",
+    "scePadSetActAlign@0x0012BF58",
+    "scePadGetButtonMask@0x0012C030",
+    "scePadSetButtonInfo@0x0012C0E0",
+    "scePadInfoPressMode@0x0012C190",
+    "scePadEnterPressMode@0x0012C1F0",
+    "scePadExitPressMode@0x0012C248",
+    "scePadSetVrefParam@0x0012C2A0",
+    "scePadGetPortMax@0x0012C370",
+    "scePadGetSlotMax@0x0012C3D8",
+    "scePadGetModVersion@0x0012C440",
+    "scePadSetWarningLevel@0x0012C4A8",
+    # libmc
+    "sceMcInit@0x0012C648",
+    "sceMcEnd@0x0012C870",
+    "sceMcChangeThreadPriority@0x0012C8D8",
+    "sceMcGetSlotMax@0x0012C998",
+    "sceMcOpen@0x0012CA58",
+    "sceMcMkdir@0x0012CB80",
+    "sceMcClose@0x0012CBB8",
+    "sceMcSeek@0x0012CC78",
+    "mceIntrReadFixAlign@0x0012CD58",
+    "sceMcRead@0x0012CE08",
+    "sceMcWrite@0x0012CF20",
+    "sceMcSync@0x0012D098",
+    "mceGetInfoApdx@0x0012D160",  # McGetInfoCb_12d160
+    "sceMcGetInfo@0x0012D1B8",
+    "sceMcGetDir@0x0012D3A8",
+    "mceStorePwd@0x0012D4F8",
+    "sceMcChdir@0x0012D588",
+    "sceMcFormat@0x0012D6C8",
+    "sceMcDelete@0x0012D798",
+    "sceMcFlush@0x0012D8B8",
+    "sceMcSetFileInfo@0x0012D978",
+    "sceMcRename@0x0012DB48",
+    "sceMcUnformat@0x0012DCA0",
+    "sceMcGetEntSpace@0x0012DD70",
+    # libc (not the allocator)
+    "exit@0x0012F4E0",  # Exit_12f4e0
+    "fflush@0x0012F590",  # Fflush_12f590
+    "fseek@0x0012FE60",  # Fseek_12fe60
+    "ftell@0x00130370",  # Ftell_130370
+    "memchr@0x00131830",
+    "memcmp@0x00131910",
+    "memcpy@0x001319A8",
+    "memmove@0x00131A58",
+    "memset@0x00131B60",
+    "rand@0x00133710",  # Rand_133710
+    "strcasecmp@0x001345B8",  # Strcasecmp_1345b8
+    "strcat@0x00134690",
+    "strchr@0x001347C0",  # Strchr_1347c0
+    "strcmp@0x00134950",
+    "strcpy@0x00134A98",
+    "strlen@0x00134BB0",
+    "strncmp@0x00134DC0",
+    "strncpy@0x00134F78",
+    "strstr@0x00135138",  # Strstr_135138
+    "__divdi3@0x00139188",  # Divdi3_139188
+    # Game-side copies of libvu0 functions, byte-identical to the library ones
+    "sceVu0InnerProduct@0x0013BD60",  # Vu0InnerProduct_13bd60
+    "sceVu0Normalize@0x0013BD90",  # VecNormalize_13bd90
+    "sceVu0ApplyMatrix@0x0013C900",  # MtxMulVec4_13c900
+    "sceVu0InnerProduct@0x0013D300",  # Vu0InnerProduct_13d300
+]
+
+skip = []
+
+# Loads/stores whose target is a known EE hardware register: instruction
+# address -> register. ps2_recomp routes these through the runtime's device
+# models instead of plain memory. From ps2_analyzer, minus 4 sites in the
+# kernel payloads the map leaves out (0x446d18, 0x446d20, 0x446d4c, 0x447414).
+[mmio]
+"0x10b5b8" = "0x10000000"
+"0x10b5c0" = "0x10000000"
+"0x10b5cc" = "0x10000000"
+"0x10bf28" = "0x10000000"
+"0x10c828" = "0x10000000"
+"0x10c838" = "0x10000000"
+"0x10c8c4" = "0x10000000"
+"0x10c918" = "0x10000000"
+"0x10c960" = "0x10000000"
+"0x10ca64" = "0x10000000"
+"0x10ca74" = "0x10000000"
+"0x10cb04" = "0x10000000"
+"0x10cb58" = "0x10000000"
+"0x10cd68" = "0x10000000"
+"0x10cd90" = "0x10000000"
+"0x10ce9c" = "0x10000000"
+"0x10cec4" = "0x10000000"
+"0x10cf2c" = "0x10000000"
+"0x10cf54" = "0x10000000"
+"0x10d088" = "0x10000000"
+"0x10d0b0" = "0x10000000"
+"0x10d358" = "0x10000000"
+"0x10d380" = "0x10000000"
+"0x10d874" = "0x10000000"
+"0x10d898" = "0x10000000"
+"0x10db58" = "0x10000000"
+"0x10dccc" = "0x10000000"
+"0x10ddb8" = "0x10000000"
+"0x10de2c" = "0x10000000"
+"0x10dea8" = "0x10000000"
+"0x10e290" = "0x10000000"
+"0x10f014" = "0x10000000"
+"0x10f01c" = "0x10000000"
+"0x10f02c" = "0x10000000"
+"0x10f5b4" = "0x10000000"
+"0x10f608" = "0x10000000"
+"0x10f62c" = "0x10000000"
+"0x10f63c" = "0x10000000"
+"0x10f64c" = "0x10000000"
+"0x10f65c" = "0x10002000"
+"0x10f6b4" = "0x10000000"
+"0x10f708" = "0x10000000"
+"0x10f72c" = "0x10000000"
+"0x10f73c" = "0x10000000"
+"0x10f748" = "0x10000000"
+"0x10f768" = "0x10002000"
+"0x10fb20" = "0x10000000"
+"0x10fb60" = "0x10000000"
+"0x10fc58" = "0x10000000"
+"0x10fccc" = "0x10002010"
+"0x10fcf4" = "0x10002010"
+"0x10fcfc" = "0x10002010"
+"0x10fd24" = "0x10002010"
+"0x10fd2c" = "0x10002010"
+"0x10fd54" = "0x10002010"
+"0x10ffd8" = "0x10000000"
+"0x110184" = "0x10000000"
+"0x1103e8" = "0x10000000"
+"0x1107a4" = "0x10000000"
+"0x1107ac" = "0x10000000"
+"0x1107bc" = "0x10000000"
+"0x110808" = "0x10000000"
+"0x110838" = "0x10000000"
+"0x110870" = "0x10000000"
+"0x110878" = "0x10000000"
+"0x110880" = "0x10000000"
+"0x110898" = "0x10000000"
+"0x1118b8" = "0x10000000"
+"0x1118c0" = "0x10000000"
+"0x1118cc" = "0x10000000"
+"0x1118d8" = "0x10000000"
+"0x111900" = "0x10000000"
+"0x111934" = "0x10000000"
+"0x11193c" = "0x10000000"
+"0x111948" = "0x10000000"
+"0x111954" = "0x10000000"
+"0x111978" = "0x10000000"
+"0x1119a0" = "0x10000000"
+"0x112320" = "0x10000000"
+"0x112344" = "0x10000000"
+"0x112354" = "0x10000000"
+"0x112360" = "0x10000000"
+"0x112384" = "0x10000000"
+"0x1123e0" = "0x10000000"
+"0x11247c" = "0x10000000"
+"0x112490" = "0x10002010"
+"0x1124a0" = "0x10000000"
+"0x1124cc" = "0x10000000"
+"0x112560" = "0x10000000"
+"0x11257c" = "0x10000000"
+"0x112584" = "0x10000000"
+"0x112594" = "0x10000000"
+"0x112624" = "0x10000000"
+"0x11262c" = "0x10000000"
+"0x11263c" = "0x10000000"
+"0x112660" = "0x10000000"
+"0x1126b8" = "0x10000000"
+"0x1126e0" = "0x10000000"
+"0x112750" = "0x10000000"
+"0x1127d4" = "0x10000000"
+"0x1127dc" = "0x10000000"
+"0x1127ec" = "0x10000000"
+"0x112810" = "0x10000000"
+"0x112868" = "0x10000000"
+"0x112890" = "0x10000000"
+"0x112910" = "0x10000000"
+"0x112928" = "0x10000000"
+"0x11293c" = "0x10000000"
+"0x112984" = "0x10000000"
+"0x112990" = "0x1000b020"
+"0x1129a0" = "0x1000b000"
+"0x112a20" = "0x1000b020"
+"0x112a28" = "0x1000b000"
+"0x112a58" = "0x10000000"
+"0x112a90" = "0x10000000"
+"0x112aa8" = "0x10000000"
+"0x112ae8" = "0x10000000"
+"0x112b04" = "0x10000000"
+"0x115948" = "0x10000000"
+"0x1159a4" = "0x10000000"
+"0x1159ac" = "0x10000000"
+"0x1159bc" = "0x10000000"
+"0x115a08" = "0x10000000"
+"0x115a34" = "0x10000000"
+"0x115a84" = "0x10000000"
+"0x115b4c" = "0x10000000"
+"0x115bc4" = "0x10000000"
+"0x115edc" = "0x10000000"
+"0x116a4c" = "0x10000000"
+"0x116a70" = "0x10000000"
+"0x116aa0" = "0x10000000"
+"0x116aec" = "0x10000000"
+"0x116b10" = "0x10000000"
+"0x116b3c" = "0x1000f000"
+"0x118008" = "0x10000000"
+"0x121050" = "0x10000000"
+"0x1211a0" = "0x10000000"
+"0x1211d0" = "0x10000000"
+"0x121260" = "0x10000000"
+"0x1212f4" = "0x10000000"
+"0x1213c8" = "0x10000000"
+"0x12157c" = "0x10000000"
+"0x121580" = "0x10000000"
+"0x1215c0" = "0x10001000"
+"0x1216d8" = "0x10000000"
+"0x1216e0" = "0x10000000"
+"0x121710" = "0x10001000"
+"0x12173c" = "0x10001000"
+"0x121744" = "0x10001010"
+"0x121774" = "0x10001000"
+"0x1217c8" = "0x10000010"
+"0x12182c" = "0x10000010"
+"0x141c6c" = "0x10000000"
+"0x141ccc" = "0x10000000"
+"0x142184" = "0x10000000"
+"0x1439b0" = "0x10000000"
+"0x143e64" = "0x10000000"
+"0x15dd78" = "0x10000010"
+"0x15e190" = "0x10000000"
+"0x15e1a4" = "0x10003c10"
+"0x1d39d0" = "0x10002020"
+"0x1d3e3c" = "0x1000b420"
+"0x1d3e40" = "0x1000b410"
+"0x1d3e44" = "0x1000b430"
+"0x1d40ac" = "0x1000b010"
+"0x1d40b4" = "0x1000b020"
+"0x1d40d4" = "0x10002010"
+"0x1d40f8" = "0x10002010"
+"0x1d4118" = "0x1000b410"
+"0x1d411c" = "0x1000b430"
+"0x1d4120" = "0x1000b420"
+"0x1d4144" = "0x10002010"
+"0x1d41a8" = "0x1000b410"
+"0x1d41b0" = "0x1000b430"
+"0x1d41b8" = "0x1000b420"
+"0x1d41cc" = "0x10002010"
+"0x1d41f8" = "0x1000b010"
+"0x1d4200" = "0x1000b020"
+"0x1d4290" = "0x1000b400"
+"0x1d4294" = "0x1000b410"
+"0x1d46a4" = "0x1000b420"
+"0x1d47bc" = "0x1000f520"
+"0x1d481c" = "0x1000f520"
+"0x1d5efc" = "0x1000e000"
+"0x1d5f04" = "0x1000e000"
+"0x1d5f08" = "0x1000e010"

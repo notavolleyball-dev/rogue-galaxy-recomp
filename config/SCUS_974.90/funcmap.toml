@@ -1,0 +1,211 @@
+# Function maps for SCUS_974.90: what functions_<image>.csv contain beyond
+# RGDecomp's symbol files, and why.
+#
+#   python setup.py maps --rgdecomp <RGDecomp checkout>   (regenerate the CSVs)
+#   python setup.py check                                 (verify them against disc/)
+#
+# Every correction below was found by `check` against the retail images and
+# confirmed by reading the code. See docs/MAPS.md for the method.
+
+[source]
+url = "https://github.com/Dorgengoa/RGDecomp"
+commit = "c8c8b3cd9e36826b5378731b93819e1a23fecbfb"
+license = "CC0-1.0"
+
+# SHA-256 of config/<file> at that commit. `maps` refuses other inputs.
+[source.sha256]
+"main.symbols.txt" = "73df877ebf0d5ec8c759d42f622bf3a497468aabd674abafb0de0a2f90bcb42e"
+"title.symbols.txt" = "dbe158419a22ff34ba4027cb3dd7d77c6fab78f50408ef0805fdb9fb80f3b87a"
+"insmenu.symbols.txt" = "cd0c1d2862f38315e3715a0494820e483501e7279d48032de8623b5748807004"
+"normal.symbols.txt" = "f81a236f0f62b69e9af6ca9e2806ad7a533c694fcdad0046b30a35b8f948bb97"
+"factory.symbols.txt" = "ed23cea7b247dedbe15d64bbc46bf3ae94b91d38c5357a73f9c8f04d471d6579"
+"insect.symbols.txt" = "23eefc9428fb81bcdd17e040e356e8d1d2789698da1b3dc46fcc79d8978a2f68"
+
+# ---------------------------------------------------------------------------
+# Main ELF. Its single RWX PROGBITS (0x00100000..0x00481080) holds, in order:
+#   0x00100000..0x00436958  EE code
+#   0x00436980..0x00446470  VU microcode (VIF MPG packets) and rodata
+#   0x00446470..0x00447768  kernel-mode payloads (see the removal below)
+#   0x00447768..0x00469300  rodata and data (CD library state lives at 0x4479xx)
+#   0x00469300..0x0046F9BC  static constructors (StaticInit*)
+#   0x0046F9C0..0x00481080  .data
+# ---------------------------------------------------------------------------
+[image.main]
+symbols = "main.symbols.txt"
+code = [[0x00100000, 0x00436958], [0x00469300, 0x0046F9BC]]
+
+[[image.main.remove]]
+range = [0x00436D00, 0x00436D18]
+why = """VuMicrocodeData_436d00/_436d10: VU instruction pairs inside a VIF MPG
+packet (DMA tag at 0x436980, MPG at 0x43698C), not EE code. Decoded as EE they
+are jumps to 0x41C015C/0x4112004."""
+
+[[image.main.remove]]
+range = [0x00446470, 0x00447768]
+why = """Kernel-mode payloads of the SDK's kernel patches (TLB, ExecPS2, alarms,
+iSetAlarm). InitTLBFunctions_11ff30, InitTLB32MB_1200f8, InitExecPS2_120a40
+and InitAlarm_120df8 copy them into kernel RAM; they are linked for kernel
+addresses (their JALs go to 0x0007xxxx) and never run where they sit. The
+runtime provides those services as syscalls."""
+
+[[image.main.resize]]
+start = 0x00207A80
+end = 0x00207A88
+why = """TaskLoadSound_207a80 is two functions: a thunk `j 0x207a90` with a0 = 0,
+then the real function. TITLE.BIN calls 0x207a90 directly (jal at 0x4f1254),
+so it needs its own entry in the main image."""
+
+[[image.main.add]]
+name = "TaskLoadSoundArg"
+range = [0x00207A90, 0x00207AC0]
+why = "Second half of TaskLoadSound_207a80, see the resize above."
+
+# Code RGDecomp's map leaves out: functions only ever reached through
+# pointers, so Ghidra saw no call. Names from ps2_analyzer's SDK signatures
+# where it has one.
+[[image.main.add]]
+name = "MpegReportErrorThunk"
+range = [0x0010FDD8, 0x0010FDE4]
+why = "j MpegReportError_115a90 with a1 = 0x456348; pointer at 0x4563DC."
+
+[[image.main.add]]
+name = "MpegReportErrorThunk"
+range = [0x0010FDE8, 0x0010FDF4]
+why = "j MpegReportError_115a90 with a1 = 0x456380; pointer at 0x4563E0."
+
+[[image.main.add]]
+name = "sceMpegAddBs"
+range = [0x00111108, 0x00111144]
+why = "libmpeg; same offset from sceMpegInit as in DQ8's copy of the library."
+
+[[image.main.add]]
+name = "kCopy"
+range = [0x0011FED8, 0x0011FF10]
+why = "Word copy loop (ps2_analyzer: kCopy), right after the syscall 0x5A wrapper KCopy_11fec8."
+
+[[image.main.add]]
+name = "kCopy"
+range = [0x00120748, 0x00120780]
+why = "Second copy, after KCopy_120738; passed as a function pointer to 0x1207c0 (at 0x120874, 0x1208bc)."
+
+[[image.main.add]]
+name = "TimerFreq2BusClock"
+range = [0x00122208, 0x0012223C]
+why = "147456000.0 / freq, then FloatToU64; follows TimerBusClock2Freq_1221b0 as in libkernl."
+
+[[image.main.add]]
+name = "sceSifSetRebootNotifyBuffer"
+range = [0x00122658, 0x001226D4]
+why = "libkernl IOP reboot notification."
+
+[[image.main.add]]
+name = "sceSdCallBackMaybe"
+range = [0x001229C8, 0x001229E4]
+why = "libsdr: stores a callback and gp at 0x4478d0/0x4478d4, returns the old one."
+
+[[image.main.add]]
+name = "sceCdCallback"
+range = [0x001291D8, 0x00129240]
+why = "libcdvd."
+
+[[image.main.add]]
+name = "_sceCdSC"
+range = [0x00129F58, 0x0012A008]
+why = "libcdvd."
+
+[[image.main.add]]
+name = "PadSetInitFlagMaybe"
+range = [0x0012C638, 0x0012C648]
+why = "Last libpad function before sceMcInit: stores a0 to 0x449514 (read by scePadInit2), returns 1."
+
+[[image.main.add]]
+name = "McRpcEndSignal"
+range = [0x0012C8C8, 0x0012C8D4]
+why = "j iSignalSema with the libmc semaphore: the RPC end callback, registered at 12 sites."
+
+[[image.main.add]]
+name = "sceMcChangeThreadPriority"
+range = [0x0012C8D8, 0x0012C994]
+why = "libmc."
+
+[[image.main.add]]
+name = "mceIntrReadFixAlign"
+range = [0x0012CD58, 0x0012CE08]
+why = "libmc read callback; address loaded at 0x12ceb8."
+
+[[image.main.add]]
+name = "Cleanup"
+range = [0x0012F898, 0x0012F8B4]
+why = "newlib _cleanup(): _cleanup_r(_impure_ptr)."
+
+[[image.main.add]]
+name = "InitSignal"
+range = [0x00134278, 0x00134294]
+why = "newlib _init_signal(): _init_signal_r(_impure_ptr)."
+
+[[image.main.add]]
+name = "Sigtramp"
+range = [0x00134298, 0x001342B8]
+why = "newlib __sigtramp(sig): __sigtramp_r(_impure_ptr, sig)."
+
+[[image.main.known_gap]]
+range = [0x00119B5C, 0x00119B60]
+why = """A lone `jr ra` after sceSifWriteBackDCache whose delay slot is the next
+function's `addiu sp, sp, -64`: unreachable, and wrong if it ever ran."""
+
+# ---------------------------------------------------------------------------
+# Overlays. Every one keeps its static constructors in .data, between the
+# data and the ctor table the loader walks after each load. RGDecomp clamps
+# its maps to the header's .text, so none of them is mapped there. Bounds:
+# from each table entry to its `jr ra` + delay slot, zero padding after.
+# ---------------------------------------------------------------------------
+[image.title]
+symbols = "title.symbols.txt"
+overlay = "BIN/TITLE.BIN"
+static_init = [
+  [0x004F1700, 0x004F1754], [0x004F1760, 0x004F17D8], [0x004F17E0, 0x004F182C],
+  [0x004F1830, 0x004F18A0],
+]
+
+[image.insmenu]
+symbols = "insmenu.symbols.txt"
+overlay = "BIN/INSMENU.BIN"
+static_init = [[0x004FA080, 0x004FA0DC], [0x004FA0E0, 0x004FA138]]
+
+[image.normal]
+symbols = "normal.symbols.txt"
+overlay = "BIN/NORMAL.BIN"
+static_init = [
+  [0x00526980, 0x005269CC], [0x005269D0, 0x00526A1C], [0x00526A20, 0x00526A6C],
+  [0x00526A70, 0x00526AC8], [0x00526AD0, 0x00526B1C], [0x00526B20, 0x00526B6C],
+  [0x00526B70, 0x00526BBC], [0x00526BC0, 0x00526C1C], [0x00526C20, 0x00526C6C],
+  [0x00526C70, 0x00526CC8], [0x00526CD0, 0x00526D1C], [0x00526D20, 0x00526D84],
+  [0x00526D90, 0x00526DDC], [0x00526DE0, 0x00526E2C], [0x00526E30, 0x00526E7C],
+  [0x00526E80, 0x00526F08], [0x00526F10, 0x00526F5C],
+]
+
+[image.factory]
+symbols = "factory.symbols.txt"
+overlay = "BIN/FACTORY.BIN"
+static_init = [
+  [0x0050D880, 0x0050D8E0], [0x0050D8E0, 0x0050D92C], [0x0050D930, 0x0050D97C],
+  [0x0050D980, 0x0050D9CC], [0x0050D9D0, 0x0050DA1C], [0x0050DA20, 0x0050DA6C],
+  [0x0050DA70, 0x0050DABC], [0x0050DAC0, 0x0050DB0C], [0x0050DB10, 0x0050DB5C],
+  [0x0050DB60, 0x0050DBAC], [0x0050DBB0, 0x0050DBFC], [0x0050DC00, 0x0050DC4C],
+  [0x0050DC50, 0x0050DC9C], [0x0050DCA0, 0x0050DCEC], [0x0050DCF0, 0x0050DD3C],
+  [0x0050DD40, 0x0050DD8C], [0x0050DD90, 0x0050DDDC], [0x0050DDE0, 0x0050DE2C],
+  [0x0050DE30, 0x0050DE7C], [0x0050DE80, 0x0050FBA8], [0x0050FBB0, 0x0050FBFC],
+  [0x0050FC00, 0x0050FC4C],
+]
+
+[image.insect]
+symbols = "insect.symbols.txt"
+overlay = "BIN/INSECT.BIN"
+static_init = [
+  [0x00525800, 0x0052584C], [0x00525850, 0x0052589C], [0x005258A0, 0x005258F8],
+  [0x00525900, 0x0052594C], [0x00525950, 0x0052599C], [0x005259A0, 0x005259EC],
+  [0x005259F0, 0x00525A3C], [0x00525A40, 0x00525A8C], [0x00525A90, 0x00525ADC],
+  [0x00525AE0, 0x00525B2C], [0x00525B30, 0x00525B7C], [0x00525B80, 0x00525BCC],
+  [0x00525BD0, 0x00525C1C], [0x00525C20, 0x00525C6C], [0x00525C70, 0x00525CBC],
+  [0x00525CC0, 0x00525D0C], [0x00525D10, 0x00525D5C],
+]
