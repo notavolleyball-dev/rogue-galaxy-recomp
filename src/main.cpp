@@ -15,12 +15,14 @@
 #include <string>
 
 #include "debug/call_trace.h"
+#include "debug/crash_report.h"
 #include "debug/input_script.h"
 #include "debug/sampler.h"
 #include "debug/selftest.h"
 #include "overlay/overlay_manager.h"
 #include "flip_pacing.h"
 #include "graphics.h"
+#include "scene_timing.h"
 #include "vif1_thread.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_native_iop.h"
@@ -115,6 +117,7 @@ int run(int argc, char **argv)
     }
     rg::graphics::installFlipHook(runtime);
     rg::vif1::install(runtime);
+    rg::timing::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
@@ -138,6 +141,7 @@ int run(int argc, char **argv)
 int main(int argc, char **argv)
 {
     int status = 1;
+    rg::debug::installCrashReport();
     try
     {
         if (!rg::debug::runSelfTestIfRequested(status))

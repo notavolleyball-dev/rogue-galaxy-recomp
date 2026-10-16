@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -158,6 +159,15 @@ std::vector<uint8_t> gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, boo
     return out;
 }
 
+// One handed-over list, with the VU1 D/T-bit enables (VU0 FBRST bits 10 and
+// 11) the game thread had when it started it.
+struct List
+{
+    std::vector<uint8_t> data;
+    bool dBit = false;
+    bool tBit = false;
+};
+
 class Vif1Thread
 {
 public:
@@ -168,7 +178,7 @@ public:
         m_thread.detach();
     }
 
-    void submit(std::vector<uint8_t> list)
+    void submit(List list)
     {
         {
             std::lock_guard lock(m_mutex);
@@ -177,6 +187,34 @@ public:
         }
         m_work.notify_one();
     }
+
+    // MSCAL/MSCNT from the list being run. The runtime's own callbacks read
+    // the D/T enables from, and write VPU_STAT into, the context of whatever
+    // guest thread the scheduler is running, which from this thread can be
+    // mid-change or already freed; these use the list's enables and keep the
+    // stop bits for the game thread (takeVpuStat).
+    void runVu1(bool resume, uint32_t startPC, uint32_t top, uint32_t itop)
+    {
+        PS2Memory &memory = m_runtime.memory();
+        VU1Interpreter &vu1 = m_runtime.vu1();
+        vu1.state().dBitEnabled = m_current.dBit;
+        vu1.state().tBitEnabled = m_current.tBit;
+        if (resume)
+        {
+            vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                       m_runtime.gs(), &memory, top, itop, 65536);
+        }
+        else
+        {
+            vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                        m_runtime.gs(), &memory, startPC, top, itop, 65536);
+        }
+        m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
+                        std::memory_order_release);
+    }
+
+    // VPU_STAT's VU1 D/T stop bits after the last MSCAL/MSCNT.
+    uint32_t takeVpuStat() const { return m_vpuStat.load(std::memory_order_acquire); }
 
     // Waits until every list handed over has run. A no-op on the VIF1
     // thread itself, which never starts DMA but could reach a hook.
@@ -212,18 +250,17 @@ private:
         PS2Memory &memory = m_runtime.memory();
         for (;;)
         {
-            std::vector<uint8_t> list;
             {
                 std::unique_lock lock(m_mutex);
                 m_work.wait(lock, [&] { return !m_lists.empty(); });
-                list = std::move(m_lists.front());
+                m_current = std::move(m_lists.front());
                 m_lists.pop_front();
             }
             try
             {
-                if (!list.empty())
+                if (!m_current.data.empty())
                 {
-                    memory.processVIF1Data(list.data(), static_cast<uint32_t>(list.size()));
+                    memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
                 }
             }
             catch (const std::exception &error)
@@ -247,7 +284,9 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_work;
     std::condition_variable m_idle;
-    std::deque<std::vector<uint8_t>> m_lists;
+    std::deque<List> m_lists;
+    List m_current; // the VIF1 thread's
+    std::atomic<uint32_t> m_vpuStat{0u};
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
     uint64_t m_reported = 0u;
@@ -265,11 +304,18 @@ uint32_t channelOf(R5900Context *ctx)
     return getRegU32(ctx, 4) & 0x1FFFFF00u;
 }
 
-// The DMAC completion the stub dispatches right after a transfer, for the
-// lists that have finished since; on the game's thread, where handlers run.
-void reportFinished(uint8_t *rdram, PS2Runtime *runtime)
+// What the stub does right after a transfer, for the lists that have
+// finished since, on the game's thread: VU1's D/T stop bits into VPU_STAT,
+// and the DMAC completion handlers.
+void reportFinished(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    for (uint64_t n = g_thread->takeFinished(); n > 0u; --n)
+    const uint64_t finished = g_thread->takeFinished();
+    if (finished == 0u)
+    {
+        return;
+    }
+    ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & ~0x0600u) | g_thread->takeVpuStat();
+    for (uint64_t n = finished; n > 0u; --n)
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 1u);
     }
@@ -293,24 +339,26 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     PS2Memory &memory = runtime->memory();
     const uint32_t chcr = memory.readIORegister(kVif1Channel);
     const uint32_t address = toDmaPhys(getRegU32(ctx, 5));
-    std::vector<uint8_t> list;
+    List list;
+    list.dBit = (ctx->vu0_fbrst & (1u << 10)) != 0u;
+    list.tBit = (ctx->vu0_fbrst & (1u << 11)) != 0u;
     if (normal)
     {
         const uint32_t qwc = getRegU32(ctx, 6) & 0xFFFFu;
         try
         {
-            appendBytes(memory, list, address, qwc * 16u);
+            appendBytes(memory, list.data, address, qwc * 16u);
         }
         catch (const std::exception &)
         {
-            list.clear();
+            list.data.clear();
         }
     }
     else
     {
-        list = gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u);
+        list.data = gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u);
     }
-    reportFinished(rdram, runtime);
+    reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
     setReturnS32(ctx, 0);
 }
@@ -335,7 +383,7 @@ void dmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     g_thread->drain();
-    reportFinished(rdram, runtime);
+    reportFinished(rdram, ctx, runtime);
     setReturnS32(ctx, 0);
 }
 
@@ -394,6 +442,12 @@ void install(PS2Runtime &runtime)
         gs.processGIFPacket(data, size);
     });
     // DMA the game starts through the registers rather than sceDmaSend.
+    // VU1 started by the lists, without the guest thread context the
+    // runtime's callbacks reach into (see Vif1Thread::runVu1).
+    memory.setVu1MscalCallback([](uint32_t startPC, uint32_t top, uint32_t itop) {
+        g_thread->runVu1(false, startPC, top, itop);
+    });
+    memory.setVu1MscntCallback([](uint32_t top, uint32_t itop) { g_thread->runVu1(true, 0u, top, itop); });
     memory.setDmaStartObserver([](uint32_t channel) {
         if (channel == kGifChannel || channel == kVif1Channel)
         {

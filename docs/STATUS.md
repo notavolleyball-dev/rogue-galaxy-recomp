@@ -5,7 +5,8 @@ game, plays the opening movie and the real-time cutscenes in Salgin, and
 fights the first battles (HUD, damage, allies, results screen) at the game's
 own 30 frames per second, every frame presented once, with the GS on the
 GPU, VU1 compiled ahead of time and on a thread of its own, music and sound
-effects, keyboard or gamepad. The heaviest scenes so far dip to about 25.
+effects, keyboard or gamepad. The first battle, the heaviest scene so far,
+dips to about 22 and then runs in slow motion.
 Known gaps: movie audio is noise, and the remaining phase 5 work
 (widescreen, 60 fps logic, a launcher, self-contained packaging).
 
@@ -314,6 +315,29 @@ caller.
 
 At 144 Hz a 30 fps game shows each frame for 4 or 5 refreshes, which reads
 as judder; 120 Hz (4 each) or variable refresh avoids it.
+
+**Frame-time compensation.** Played by hand, the first battle then went
+wrong: characters' facing flipped from frame to frame. GfxEndFrame times
+each frame with EE timer 0, and from the VIF1 list's completion interrupt
+(D_004810B4), and GameSceneTimeScaleUpdate scales the next frame's logic by
+it, up to two steps. With the list on its own thread its real duration
+became visible: in the battle about half the frames took three vblanks, and
+the logic ran 1.5 to 2 times per frame, so turning overshot. Timer 0 follows
+the host clock, so host slowness reads as slow frames, which an emulator's
+guest clock never shows. `src/scene_timing.cpp` leaves the scene's step and
+time scale at 1 after the update (slow motion, as an emulator gives, when
+the host is slow); music still follows the measured time
+(`RG_TIME_SCALE=game` restores the game's scaling).
+
+**A VIF1-thread race.** The runtime's MSCAL/MSCNT callbacks read FBRST's
+D/T enables from, and wrote VPU_STAT into, the context of whatever guest
+thread the scheduler was running; from the VIF1 thread that context could be
+an interrupt invocation being popped. `vif1_thread.cpp` installs its own,
+which take the enables captured when the list was started and leave the stop
+bits for the game thread. One device loss (`VK_ERROR_DEVICE_LOST`) at the
+Story-to-cutscene transition remains unexplained (once in about fifty
+runs); `src/debug/crash_report.cpp` now prints the exception and the call
+stack of any crash into the log.
 
 ## Open questions
 

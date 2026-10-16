@@ -62,10 +62,13 @@ add_executable(roguegalaxy
     main.cpp
     graphics.cpp
     depth_reads.cpp
+    ee_fpu.cpp
     flip_pacing.cpp
+    scene_timing.cpp
     vif1_thread.cpp
     overlay/overlay_manager.cpp
     debug/call_trace.cpp
+    debug/crash_report.cpp
     debug/gs_timing.cpp
     debug/input_script.cpp
     debug/sampler.cpp
@@ -80,3 +83,17 @@ if(RG_GS_SDLGPU)
 endif()
 # On Windows the runtime's FFmpeg is DLLs; put them beside the executable.
 ps2x_stage_ffmpeg_runtime_dlls(roguegalaxy)
+
+# So do clang's MinGW C++ runtime DLLs, so the game starts without the
+# toolchain on PATH (from Explorer or RogueGalaxy.bat).
+if(MINGW)
+    get_filename_component(rg_toolchain_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(dll libc++.dll libunwind.dll libwinpthread-1.dll)
+        if(EXISTS "${rg_toolchain_bin}/${dll}")
+            add_custom_command(TARGET roguegalaxy POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${rg_toolchain_bin}/${dll}"
+                        "$<TARGET_FILE_DIR:roguegalaxy>"
+                VERBATIM)
+        endif()
+    endforeach()
+endif()

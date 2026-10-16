@@ -7,7 +7,7 @@ native PC executable, built on [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 |---|---|
 | Release | NTSC-U, **SCUS-97490** v1.01 (one DVD9) |
 | Framework | [Sinan-Karakaya/PS2Recomp](https://github.com/Sinan-Karakaya/PS2Recomp) fork, pinned in `thirdparty/PS2Recomp` |
-| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 25 in the heaviest scenes (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. Movie audio is still noise. See [`docs/STATUS.md`](docs/STATUS.md). |
+| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 22 in the first battle, where it then runs in slow motion rather than skipping (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. Movie audio is still noise. See [`docs/STATUS.md`](docs/STATUS.md). |
 
 ## Setup
 
@@ -89,6 +89,13 @@ or variable refresh looks smoother.
 
 ## Running
 
+On Windows, double-click `RogueGalaxy.bat` (or run it from a terminal): it
+starts the built game on `disc/SCUS_974.90` and writes the game's log to
+`build/last-run.log`. The build copies the FFmpeg and clang runtime DLLs
+next to `roguegalaxy.exe`, so it needs nothing on PATH. To set any of the
+variables below, add a `set` line to the batch file (it has examples) or set
+them in the terminal before running it.
+
 | Variable | Effect |
 |---|---|
 | `RG_GS=sw` | Software GS rasterizer instead of the SDL3 GPU backend |
@@ -98,6 +105,8 @@ or variable refresh looks smoother.
 | `RG_PRESENT_MODE=vsync\|immediate` | Present mode (default mailbox) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
+| `RG_TIME_SCALE=game` | Let the game speed its logic up after frames the host was too slow for (off by default: it makes characters' turning oscillate) |
+| `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
 | `RG_GS_DEPTH_READS=queue` | Serve the game's depth readbacks through the GS worker queue |
 | `RG_MUTE=1` | No sound output (the IOP still runs) |
 | `RG_INPUT="30:CROSS:150,..."` | Scripted pad input: seconds, buttons (`+`-joined; `LUP` etc. for the left stick), milliseconds |

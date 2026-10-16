@@ -18,8 +18,15 @@
 // animation clock (AnimKeyFindSpan, the cvt.w.s at 0x0015600C) then picks the
 // next key with a negative blend that clamps to zero, so characters snap from
 // key to key and animate at half their key rate.
+// RG_EE_CVT=round brings back the runtime's rounding, to compare (ee_fpu.cpp).
+extern const bool rgEeCvtRoundToNearest;
+
 static inline int32_t rgEeCvtWS(float value)
 {
+    if (rgEeCvtRoundToNearest) [[unlikely]]
+    {
+        return static_cast<int32_t>(nearbyintf(value));
+    }
     uint32_t bits;
     std::memcpy(&bits, &value, sizeof(bits));
     if ((bits & 0x7F800000u) < 0x4F000000u)
