@@ -1,34 +1,41 @@
 # Status
 
-**Phase 1 (function maps) is done.** All six code images recompile to C++
-cleanly; nothing is built into an executable yet.
+**The game runs.** `roguegalaxy` boots to the title screen, starts a new
+game, plays the opening movie and the real-time cutscenes in Salgin, and
+fights the first battles (HUD, damage, allies, results screen) at the game's
+own 30 frames per second, every frame presented once, with the GS on the
+GPU, VU1 compiled ahead of time and on a thread of its own, music and sound
+effects, keyboard or gamepad. The heaviest scenes so far dip to about 25.
+Known gaps: movie audio is noise, and the remaining phase 5 work
+(widescreen, 60 fps logic, a launcher, self-contained packaging).
 
 | Phase | Goal | State |
 |---|---|---|
 | 0 | Repo, framework pin, disc verify/extract, overlay table | done |
 | 1 | Function maps for the ELF and the 5 real overlays | done |
-| 2 | Build ELF + overlays into one executable; overlay-aware dispatch | next |
-| 3 | Boot to the title screen | |
-| 4 | Field, battle, movies, sound | |
-| 5 | Performance, widescreen, 60 fps, launcher | |
+| 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
+| 3 | Boot to the title screen | done |
+| 4 | Field, battle, movies, sound | done, except movie audio |
+| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere; rest next |
 
 ## Phase 1 in short
 
 Details in [MAPS.md](MAPS.md).
 
 - One map per image (`config/SCUS_974.90/functions_<image>.csv`), from
-  RGDecomp's symbol files with 62 constructors and 17 other functions added,
-  13 removed and one split in two, each justified in
-  [`funcmap.toml`](../config/SCUS_974.90/funcmap.toml). The
+  RGDecomp's symbol files with 62 overlay constructors, 4 main constructors
+  and 17 other functions added, 13 removed and two functions split, each
+  justified in [`funcmap.toml`](../config/SCUS_974.90/funcmap.toml). The
   big one: every overlay's static constructors live in its .data, where no
-  map had them, so the first overlay load would have failed.
+  map had them, so the first overlay load would have failed. (The main ELF's
+  constructor fixes came from the first boot, in phase 2.)
 - One ps2_recomp config per image (`config/SCUS_974.90/recomp/`). The main
-  one binds 208 SDK functions to runtime handlers, seeded from
-  DQ8-Recompiled's list for the same framework, and routes 186 hardware
-  register accesses through the runtime.
+  one binds 208 SDK functions (205 since phase 4) to runtime handlers, seeded from
+  DQ8-Recompiled's list for the same framework. (It also carried
+  ps2_analyzer's MMIO table until phase 3 showed that table was wrong.)
 - `python setup.py check` proves coverage, bounds, cross-image control flow,
   constructors, names and bindings against the retail bytes; it passes.
-- Smoke test: the pinned `ps2_recomp` recompiles all 20,067 functions with no
+- Smoke test: the pinned `ps2_recomp` recompiles all 20,072 functions with no
   decode failure and no unhandled instruction. 186 functions (183 in the main
   ELF) have computed jumps it could not resolve and fall back to making every
   instruction an entry point.
@@ -99,23 +106,218 @@ auto flush (lamp glow), round sprite (minimap/menu), preloaded frame data
 **Timing.** Game logic runs at 30 fps; the PAL 60 fps pnach has to patch
 gravity and timers too.
 
-## Phase 2 plan
+## Phase 2: one executable
 
-1. Build the six generated trees and the fork's runtime into one executable
-   (CMake), with the generated function names kept apart per image.
-2. Overlay manager: hook 0x00100400, read the MWo3 id from the header at a0,
-   switch the arena's `FunctionRegion` to that overlay's table; nothing
-   resident means arena calls fail loudly.
-3. Keep each overlay's bootstrap entry (0x004E9EC0) out of the boot path.
-4. Feed real jump tables (`[jump_tables]`) for the 186 functions that fall
-   back, starting with the hottest.
+- `python setup.py recompile` runs `check`, wraps the overlays as ELFs and
+  runs ps2_recomp on all six images into clean `build/generated/<image>/`
+  trees, refusing any skipped function, decode failure or unhandled
+  instruction. For each overlay it also writes `overlay_info.h`, the MWo3
+  header that tree was generated from.
+- The top-level `CMakeLists.txt` builds the framework runtime only, and
+  `src/CMakeLists.txt` one static library per generated tree (unity batches
+  of 64, a shared PCH). The main tree's `register_functions.cpp` defines the
+  runtime's own function table; each overlay's is compiled through
+  `src/overlay/overlay_table.cpp.in`, which renames those globals and exposes
+  the table as a `FunctionRegion`.
+- `src/overlay/overlay_manager.cpp` replaces the `jr ra` stub at 0x00100400.
+  On every load it reads the header at a0, refuses it unless it matches the
+  header its tree was generated from field by field, and points the
+  runtime's region resolver for the arena at that overlay's table (VIEWER and
+  LAUNCHER, which hold no code, leave the arena without one). Arena calls
+  with nothing resident fail loudly through the runtime's missing-function
+  report.
+- `src/main.cpp` loads the ELF from the extracted disc, sets the guest memory
+  layout (below), installs the manager and runs.
+- Build: clang 22 (LLVM MinGW) with Ninja; the generated code compiles in
+  about 4 minutes on 16 threads into a 113 MB executable. The runtime's
+  Release LTO is switched off: with clang on MinGW it drops the TLS
+  initializer of an `inline thread_local` with a destructor and the link
+  fails.
+
+**Memory layout.** The game sizes its main memory stack (mgCMemory at
+0x4A6FA0, one 24.7 MB memalign) to nearly all the heap, which on hardware
+runs up to the main thread's stack at 0x01FD0000. The runtime caps the guest
+heap at 0x01F00000, so that memalign failed, the game went on with a null
+base, and its first clear wiped RAM from address 0 (the overlay path table
+went with it). `main.cpp` now gives the game the heap up to 0x01F80000, keeps
+the runtime's callback stacks between that and the main stack, and moves the
+runtime's own small heap to 0x00080000..0x00100000 (EE kernel space, unused
+here). If more than 20 callback stacks are ever needed they would grow into
+the game heap; the executable reports it on exit.
+
+**First boot.** CRT and all 233 constructors run; the IOP is rebooted and
+the game's IRX modules load (CDVDSTM, the sk sound kit, PCMPLAY, ...); the CD
+code finds all seven overlays; TITLE.BIN loads and the manager makes it
+resident; the title code opens `cddat:menu/rc/menu_static_res_EN.pac` from
+the DATA archives (via the HD6 index) and reads it with raw sector reads
+(`sceCdRead` at the file's sector plus an offset, which the runtime's
+pseudo-LBN mapping serves). Then nothing more is read and every frame is
+black, at about 58 frames per second, with no error logged.
+
+**Debugging aids.** `RG_TRACE=0xADDR,...` logs calls of main-ELF functions
+(arguments, strings they point at, return value; `RG_TRACE_LIMIT`,
+`RG_TRACE_PEEK=0xADDR,...` to print guest words at each call).
+`DQ8_GFX_SCREENSHOT_DIR` + `DQ8_GFX_SCREENSHOT_EVERY=N` (framework) write
+every Nth frame as PPM.
+
+## Phase 3: to the title screen and into the game
+
+The black screen after TITLE.BIN loaded was the main thread asleep in
+`DelayThread`, waiting for a libkernl timer alarm that never fired. Three
+fixes got the game from there to the title screen, NEW GAME and the opening:
+
+- **No `[mmio]` table.** ps2_analyzer's MMIO table recorded only the page
+  base, 0x10000000, for 137 instruction sites, and an `[mmio]` entry
+  overrides the address ps2_recomp resolves itself. Every listed timer access
+  went to Timer 0's count: `StartTimerSystemTime` read Timer 2's mode from
+  there, got 0, and wrote back a mode with no clock source, so Timer 2 never
+  reached its compare value. ps2_recomp needs no table (it routes statically
+  resolved hardware addresses through the runtime, and READ/WRITE check at
+  run time), so `recomp/main.toml` now has none.
+- **Callbacks the main ELF points into overlays.** Three `return 1` menu
+  callbacks in TITLE.BIN sit right after the `jr ra` of the function
+  RGDecomp merged them into, and only the main ELF's widget tables point at
+  them. Split out in `funcmap.toml`.
+- **Vtable getters.** `rg_entry_002d94b0` was eight 8-byte getters a vtable
+  points at one by one; `funcmap.toml` now supports `split = [...]`.
+- `setup.py check` now also flags any code address taken as data (in any
+  image's data, or built with lui/addiu) that lands after a `jr ra` and its
+  padding inside a mapped function, the shape all of these had, across
+  images (overlays are only matched against themselves and the main ELF).
+
+**Result.** Memory card check, Japan Studio and Level-5 logos, title screen
+(NEW GAME / CONTINUE / OPTIONS), NEW GAME, the "Story" text with its loading
+bar, NORMAL.BIN loaded and made resident, then the opening in the desert of
+Rosa and the town of Salgin, with subtitles. No error in the log.
+
+**Test aids.** `RG_INPUT="SECONDS:BUTTON[+BUTTON]:MS,..."` presses pad
+buttons on a schedule (unattended runs); `RG_WATCH=0xADDR,...` prints guest
+words, I/O registers included, every `RG_WATCH_MS`. `setup.py recompile`
+now rewrites only the generated files that changed, so a rebuild after a
+map or config change takes seconds instead of minutes.
+
+Still open from the first boot: `sceCdReadDvdDualInfo` (0x12ACD0) runs as
+guest code and its S-command RPC (server 0x80000593, rpc 0x27) is unhandled,
+so the game takes the disc for single-layer. That works with the extracted
+tree, which holds both layers' files in one folder.
+
+## Phase 4: sound and speed
+
+**Sound.** The disc's sound drivers (LIBSD, SDRDRV, the Sound Kit and
+PCMPLAY, the same set DQ8-Recompiled runs) now load onto the framework's
+emulated IOP with an SPU2 (`ps2_native_iop::setModules` in `main.cpp`), so the
+game's libsdr and sound RPCs run their real code. Music and sound effects
+play (`PS2X_AUDIO_DUMP` confirms a clean music signal on the title screen).
+Movie audio does not: during the opening movie the output is noise (a sign
+change on nearly every sample). `RG_MUTE=1` silences the output.
+
+**Speed.** In the first 3D scene (Salgin, the soldiers' cutscene) the game
+ran at 2.7 frames per second. Profiling (`RG_PROFILE`, below) showed why, in
+three steps:
+
+1. The software GS rasterizer ran on the game thread: now it runs on a
+   worker thread behind the framework's ordered queue (`GSThreadedBackend`).
+2. That left the worker saturated by full-screen effect passes, which a
+   per-pixel CPU rasterizer cannot keep up with. The GS now renders on the
+   GPU with the SDL3 GPU backend from DQ8-Recompiled (vendored in
+   `thirdparty/dq8-gfx/`, GPL-3.0), Vulkan on Windows, 2x internal
+   resolution, in its own window: 2.7 -> 20 frames per second.
+3. That left the game thread 85% inside the VU1 interpreter. VU1
+   microprograms are now compiled to C++ ahead of time from a recording of
+   the ones a run executes (`PS2_VU_PROGRAM_PROFILE=build/vu1-profile`,
+   picked up by CMake): 20 -> about 60 presents per second. (Presents, not
+   game frames: the game draws at most 30, and phase 5 below found that in
+   heavy scenes it drew far fewer.)
+
+The recorded microcode is game code, so it is not committed: a manifest,
+`config/SCUS_974.90/vu1-programs.txt`, names where each program sits in the
+game's files (48 footprints in the ELF and overlays, with a checksum and no
+data), and `setup.py recompile` rebuilds them from the user's disc into
+`build/vu1-manifest`. Programs it lacks run on the interpreter until a local
+recording (`build/vu1-profile`) adds them.
+
+**Field and battle.** With scripted input (`RG_INPUT`) the opening plays
+through to Jaster's first fights in Salgin: the battle tutorial (START pages
+through it), real-time combat against the Baphu with Steve and the Hooded
+Man, the results screen (EXP, skills, items), then the story carries on into
+the next fight and its tutorial. No error in the log, about 57 frames per
+second in battle.
+
+Bindings: `fflush`, `fseek` and `ftell` are no longer bound to the runtime.
+Its versions only know handles from its own `fopen`, and this game opens its
+files with its own newlib, so every call failed ("Invalid file handle").
+
+`RG_GS=sw` returns to the software rasterizer, `RG_GS_SCALE=N` sets the GPU
+internal resolution, `RG_GS_WORKER=0` puts the rasterizer back on the game
+thread.
+
+**Profiling.** `RG_PROFILE=out.txt` (with `RG_PROFILE_START`,
+`RG_PROFILE_SECONDS`) samples every thread's instruction pointer about every
+millisecond; `tools/profile/report.py out.txt build/game/src/roguegalaxy.exe`
+prints where each thread spends its time, by function.
+
+## Phase 5: a steady 30
+
+Played by hand, the real-time cutscenes looked choppy: characters visibly
+skipped animation frames. The game runs its logic at 30 frames per second
+(GfxFlipBuffers waits two vblanks), but a recording of the window showed the
+picture changing only 15 to 20 times a second in 3D scenes, and the time
+went in four places.
+
+**EE float conversion.** The runtime's `FPU_CVT_W_S` rounded to nearest;
+CVT.W.S on the R5900 truncates and saturates. 563 recompiled functions use
+it, among them the animation clock (`AnimKeyFindSpan`, the cvt.w.s at
+0x0015600C, the defect RGDecomp's notes name as the character-animation
+jerk). `src/ee_fpu.h` redefines it for the generated code, through its
+precompiled header.
+
+**Presenting.** The runtime's presenter samples the display at each host
+vblank and waits for the GS worker to reach that sample; with the worker
+busy those samples fell unevenly against the game's flips, so frames showed
+twice or never. `src/flip_pacing.cpp` hooks GfxFlipBuffers and prepares the
+presentation on the game's thread, in the GS stream right behind the flip's
+copy; the window shows exactly those frames, one each (`RG_PRESENT=vblank`
+for the old way). Mailbox replaces VSync as the present mode.
+
+**The lens-flare probe.** GfxEndFrame reads an 8x8 block of Z every frame
+(sceGsExecStoreImage, PSMZ32) for flare occlusion, and through the worker
+that drained the whole queue: a third of a frame waiting. The SDL GPU
+backend never reads depth back from the GPU, so it answered from local
+memory anyway; `src/depth_reads.cpp` answers depth reads from that same
+memory without the drain (`RG_GS_DEPTH_READS=queue` for the old way).
+
+**Throughput.** With every frame presented, heavy scenes still ran at 15
+to 25 frames per second: the GS worker and the game thread were both
+saturated. On the GS side (changes marked "Rogue Galaxy" in
+`thirdparty/dq8-gfx`): 4- and 8-bit texture uploads write runs instead of a
+dispatched call per pixel, 4-bit textures expand through the resolved
+palette (the general path re-read each texel's CLUT entry), and resolves
+reuse one download buffer and staging texture instead of creating them each
+time. `RG_SELFTEST=gs` checks the new writers and reader against GSMem.
+On the game thread two thirds of the time was the VIF1 list (VU1 and its GS
+packets), which the runtime runs inside sceDmaSend. The game starts each
+frame's list at the end of GfxEndFrame and waits for it at the start of the
+next, as the console runs VU1 beside the EE; `src/vif1_thread.cpp` now does
+the same, on a thread of its own (`RG_VIF1_THREAD=0` for the old way). The
+list's closing VIFcode interrupt still reaches the game's handler, which
+times it, so the frame-time compensation sees real GS time. GS packets go
+straight to the GS rather than through the framework's unlocked
+GifArbiter, and a framework patch (`patches/ps2recomp/`) lets DMA started
+through the registers wait for the lists in flight.
+
+Over the scripted run to the first battle, frames per second for each ten
+seconds went from dips of 12 to 24 in the cutscenes before the first battle
+to 25 at worst, 28 to 30 elsewhere. Tools: `RG_GS_TIMING=1` times every GS
+backend call on both sides of the worker queue; `RG_PROFILE_STACKS=1` adds
+call stacks to `RG_PROFILE`, so samples in drivers or waits name their
+caller.
+
+At 144 Hz a 30 fps game shows each frame for 4 or 5 refreshes, which reads
+as judder; 120 Hz (4 each) or variable refresh avoids it.
 
 ## Open questions
 
-- Whether the game ever reads raw sectors computed from search results
-  (the extracted tree keeps the original sector numbers in `disc/manifest.json`
-  in case it does).
-- Where the MVI XOR key comes from on this disc.
+- Where the MVI XOR key comes from on this disc, and why movie audio is noise.
 - The two `sceCdGetDiskType` entries (0x12A9D8, called by the game; 0x12AA70,
   the wrapper ps2_analyzer names) are both bound; phase 3 confirms which is
   the public one.

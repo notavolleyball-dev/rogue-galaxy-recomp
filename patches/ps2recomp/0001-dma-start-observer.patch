@@ -1,0 +1,38 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index de2f8ed..bab7517 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -321,6 +321,12 @@ public:
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+ 
++    // Called with the channel's register base whenever a CHCR write starts a
++    // DMA transfer, before the transfer runs. Lets an embedder that runs some
++    // channel's work elsewhere order the others behind it.
++    using DmaStartObserver = std::function<void(uint32_t channelBase)>;
++    void setDmaStartObserver(DmaStartObserver observer) { m_dmaStartObserver = std::move(observer); }
++
+     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
+     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
+@@ -403,6 +409,7 @@ public:
+     std::vector<TLBEntry> m_tlbEntries;
+ 
+     GifPacketCallback m_gifPacketCallback;
++    DmaStartObserver m_dmaStartObserver;
+     GifArbiter *m_gifArbiter = nullptr;
+     Vu1MscalCallback m_vu1MscalCallback;
+     Vu1MscntCallback m_vu1MscntCallback;
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index bf0c884..5e474f7 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1329,6 +1329,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+             }
+ 
+             const uint32_t channelBase = address & 0xFFFFFF00;
++            if (m_dmaStartObserver)
++                m_dmaStartObserver(channelBase);
+             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
+             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
+             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);

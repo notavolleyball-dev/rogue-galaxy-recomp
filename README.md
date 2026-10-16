@@ -7,13 +7,13 @@ native PC executable, built on [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 |---|---|
 | Release | NTSC-U, **SCUS-97490** v1.01 (one DVD9) |
 | Framework | [Sinan-Karakaya/PS2Recomp](https://github.com/Sinan-Karakaya/PS2Recomp) fork, pinned in `thirdparty/PS2Recomp` |
-| State | **Phase 1 done**: function maps and recompiler configs for the ELF and all five code overlays; all six recompile cleanly. Not playable yet, nothing builds into an executable yet. See [`docs/STATUS.md`](docs/STATUS.md). |
+| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 25 in the heaviest scenes (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. Movie audio is still noise. See [`docs/STATUS.md`](docs/STATUS.md). |
 
 ## Setup
 
-Requirements: Git, Python 3.11+, CMake 3.20+ with Ninja and a C++20 compiler
-(clang or MSVC), and your own dump of the game
-([`docs/DISC.md`](docs/DISC.md) lists the one that works).
+Requirements: Git, Python 3.11+, CMake 3.24+ with Ninja, clang with C++20,
+and your own dump of the game ([`docs/DISC.md`](docs/DISC.md) lists the one
+that works).
 
 ```bash
 git clone --recurse-submodules <this repo>
@@ -28,35 +28,99 @@ python setup.py extract --iso "/path/to/Rogue Galaxy (USA).iso"
 # SYSTEM.CNF and the MWo3 overlay table, cross-checked against the ELF
 python setup.py info
 
-# Wrap the code overlays as ELFs (build/overlays/), then check the function
-# maps and recompiler configs against your disc
-python setup.py overlays
+# Check the function maps and recompiler configs against your disc
 python setup.py check
 ```
 
-Build the recompiler tools from the pinned framework, then recompile each
-image to C++ in `build/generated/<image>/` (run from the repository root):
+## Build
+
+From the repository root. The generated code is built with clang (the flags
+are GNU-style; on Windows an LLVM MinGW clang works). Configuring the game
+downloads raylib, SDL3 and glslang (for the GPU backend's shaders) and, on
+Windows, a prebuilt LGPL FFmpeg whose hash the framework pins.
 
 ```bash
+# 1. The recompiler, from the pinned framework (once)
 cmake -S thirdparty/PS2Recomp -B build/tools -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF
 cmake --build build/tools --target ps2_recomp ps2_analyzer
 
-for image in main title insmenu normal factory insect; do
-  build/tools/ps2xRecomp/ps2_recomp config/SCUS_974.90/recomp/$image.toml
-done
+# 2. Recompile your disc's code to C++ in build/generated/<image>/ (about a
+#    minute): runs `check`, wraps the overlays, runs ps2_recomp on all six images
+python setup.py recompile
+
+# 3. Build the game against the framework runtime
+cmake -S . -B build/game -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/game
+
+# 4. Run it on your extracted disc
+build/game/src/roguegalaxy disc/SCUS_974.90
 ```
+
+Run `setup.py recompile` again after changing a map or config, then rebuild.
+
+**VU1 programs.** 3D scenes need the game's VU1 microprograms compiled ahead
+of time to run at full speed. `setup.py recompile` rebuilds them from
+[`config/SCUS_974.90/vu1-programs.txt`](config/SCUS_974.90/vu1-programs.txt)
+(where each one sits in the game's files, plus a checksum: no game data) and
+your disc into `build/vu1-manifest`, which CMake compiles into the runtime.
+Programs the manifest lacks run on the interpreter; record them with
+`PS2_VU_PROGRAM_PROFILE=build/vu1-profile` (CMake compiles that folder too),
+then configure and build again (maintainers: `python setup.py vu1-manifest`
+folds a recording into the manifest).
+
+## Controls
+
+The game window takes a keyboard or a gamepad (PlayStation layout).
+
+| Pad | Keyboard |
+|---|---|
+| Left stick | W A S D |
+| D-pad | Arrow keys |
+| ✕ / ○ / □ / △ | X or Space / C or Esc / Z / V |
+| L1 / R1 / L2 / R2 | Q / E / Left Shift / Right Shift |
+| Start / Select | Enter / Tab |
+| Right stick | I J K L |
+
+F11 toggles fullscreen. The game runs at 30 frames per second; on a 144 Hz
+monitor each frame lasts 4 or 5 refreshes, which reads as judder, so 120 Hz
+or variable refresh looks smoother.
+
+## Running
+
+| Variable | Effect |
+|---|---|
+| `RG_GS=sw` | Software GS rasterizer instead of the SDL3 GPU backend |
+| `RG_GS_SCALE=N` | GPU internal resolution multiplier (default 2) |
+| `RG_GS_NO_WINDOW=1` | Present through the runtime's window instead of SDL's |
+| `RG_SHOW_FPS=1` | Frames per second in the window title |
+| `RG_PRESENT_MODE=vsync\|immediate` | Present mode (default mailbox) |
+| `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
+| `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
+| `RG_GS_DEPTH_READS=queue` | Serve the game's depth readbacks through the GS worker queue |
+| `RG_MUTE=1` | No sound output (the IOP still runs) |
+| `RG_INPUT="30:CROSS:150,..."` | Scripted pad input: seconds, buttons (`+`-joined; `LUP` etc. for the left stick), milliseconds |
+| `RG_TRACE=0xADDR,...` | Log calls of main-ELF functions (`RG_TRACE_PEEK`, `RG_TRACE_LIMIT`) |
+| `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` |
+| `RG_PROFILE=out.txt` | Sample all threads; report with `tools/profile/report.py` (`RG_PROFILE_STACKS=1` adds callers) |
+| `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |
+| `RG_SELFTEST=gs` | Check the code changed in vendored dependencies, then exit |
+| `DQ8_GFX_SCREENSHOT_DIR`, `DQ8_GFX_SCREENSHOT_EVERY` | Framework: write every Nth frame as PPM |
+| `PS2X_AUDIO_DUMP=file` | Framework: copy of the audio output, raw 48 kHz s16 stereo |
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check` (and `make-hashes`, `maps` for maintainers) |
-| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings) |
+| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile` (and `make-hashes`, `maps` for maintainers) |
+| `CMakeLists.txt`, `src/` | The game executable: build of the generated trees, overlay manager (`src/overlay/`), call tracing (`src/debug/`), `main.cpp` |
+| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` (VU1 microcode locations) |
 | `tools/disc/iso9660.py` | Read-only ISO9660 reader for dual-layer PS2 DVDs |
 | `tools/mwo3/mwo3.py` | MWo3 overlay header parser, ELF cross-check, overlay-to-ELF wrapper |
 | `tools/funcmap/` | Function-map builder and the checks behind `setup.py check` |
-| `thirdparty/PS2Recomp` | Framework submodule |
+| `thirdparty/PS2Recomp` | Framework submodule; `patches/ps2recomp/` holds our changes to it, applied on configure ([`patches/README.md`](patches/README.md)) |
+| `thirdparty/dq8-gfx` | SDL3 GPU GS backend from DQ8-Recompiled (GPL-3.0), see its README |
 | `docs/` | [`STATUS.md`](docs/STATUS.md) (state, plan, what the game needs), [`DISC.md`](docs/DISC.md), [`MAPS.md`](docs/MAPS.md) (function maps, SDK bindings) |
 | `disc/` | Your extracted disc (gitignored) |
 
@@ -70,8 +134,9 @@ committed.
 
 - [PS2Recomp](https://github.com/ran-j/PS2Recomp) by ran-j, and the
   [fork](https://github.com/Sinan-Karakaya/PS2Recomp) by Sinan Karakaya.
-- [DQ8-Recompiled](https://github.com/Sinan-Karakaya/DQ8-Recompiled), the
-  reference for MWo3 overlays on PS2Recomp.
+- [DQ8-Recompiled](https://github.com/Sinan-Karakaya/DQ8-Recompiled) by Sinan
+  Karakaya, the reference for MWo3 overlays on PS2Recomp, and the source of
+  the SDL3 GPU GS backend in `thirdparty/dq8-gfx`.
 - [RGDecomp](https://github.com/Dorgengoa/RGDecomp) (CC0), the function maps
   and names for this build (`config/SCUS_974.90/functions_*.csv` derive from
   it).
