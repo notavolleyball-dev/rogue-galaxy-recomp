@@ -159,6 +159,57 @@ void GsTargetCache::reset() {
         SDL_ReleaseGPUTransferBuffer(m_device.handle(), m_upload);
     m_upload = nullptr;
     m_uploadCapacity = 0u;
+    if (m_download && m_device.valid())
+        SDL_ReleaseGPUTransferBuffer(m_device.handle(), m_download);
+    m_download = nullptr;
+    m_downloadCapacity = 0u;
+    if (m_resolveStaging && m_device.valid())
+        SDL_ReleaseGPUTexture(m_device.handle(), m_resolveStaging);
+    m_resolveStaging = nullptr;
+    m_resolveStagingWidth = m_resolveStagingHeight = 0u;
+}
+
+SDL_GPUTransferBuffer *GsTargetCache::acquireDownload(uint32_t bytes, std::string &error) {
+    if (m_download && m_downloadCapacity >= bytes)
+        return m_download;
+    if (m_download)
+        SDL_ReleaseGPUTransferBuffer(m_device.handle(), m_download);
+    // Grown in powers of two so a few sizes settle on one buffer.
+    uint32_t capacity = 64u * 1024u;
+    while (capacity < bytes)
+        capacity *= 2u;
+    SDL_GPUTransferBufferCreateInfo info{};
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    info.size = capacity;
+    m_download = SDL_CreateGPUTransferBuffer(m_device.handle(), &info);
+    m_downloadCapacity = m_download ? capacity : 0u;
+    if (!m_download)
+        error = std::string("SDL_CreateGPUTransferBuffer(resolve): ") + SDL_GetError();
+    return m_download;
+}
+
+SDL_GPUTexture *GsTargetCache::acquireResolveStaging(uint32_t width, uint32_t height, std::string &error) {
+    if (m_resolveStaging && m_resolveStagingWidth >= width && m_resolveStagingHeight >= height)
+        return m_resolveStaging;
+    if (m_resolveStaging)
+        SDL_ReleaseGPUTexture(m_device.handle(), m_resolveStaging);
+    m_resolveStagingWidth = std::max(width, m_resolveStagingWidth);
+    m_resolveStagingHeight = std::max(height, m_resolveStagingHeight);
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.width = m_resolveStagingWidth;
+    info.height = m_resolveStagingHeight;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    m_resolveStaging = SDL_CreateGPUTexture(m_device.handle(), &info);
+    if (!m_resolveStaging) {
+        m_resolveStagingWidth = m_resolveStagingHeight = 0u;
+        error = std::string("SDL_CreateGPUTexture(resolve staging): ") + SDL_GetError();
+    }
+    return m_resolveStaging;
 }
 
 void GsTargetCache::destroySurface(GsSurface &surface) {
@@ -627,15 +678,11 @@ bool GsTargetCache::resolveSurfaces(const std::vector<GsSurface *> &surfaces,
                      surfaces.size(), static_cast<unsigned long long>(bytes));
 
     SDL_GPUDevice *device = m_device.handle();
-    SDL_GPUTransferBufferCreateInfo info{};
-    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-    info.size = static_cast<uint32_t>(bytes);
-    SDL_GPUTransferBuffer *download = SDL_CreateGPUTransferBuffer(device, &info);
-    if (!download) {
-        error = std::string("SDL_CreateGPUTransferBuffer(resolve batch): ") + SDL_GetError();
+    SDL_GPUTransferBuffer *download = acquireDownload(static_cast<uint32_t>(bytes), error);
+    if (!download)
         return false;
-    }
-    auto release = [&]() { SDL_ReleaseGPUTransferBuffer(device, download); };
+    // Kept for the next resolve: this one waits for its fence before returning.
+    auto release = []() {};
     SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
     if (!commands) {
         error = std::string("SDL_AcquireGPUCommandBuffer(resolve batch): ") + SDL_GetError();
@@ -998,41 +1045,20 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
     uint32_t sourceY = region.y0;
 
     if (surface.scale != 1u) {
-        SDL_GPUTextureCreateInfo stagingInfo{};
-        stagingInfo.type = SDL_GPU_TEXTURETYPE_2D;
-        stagingInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-        stagingInfo.width = width;
-        stagingInfo.height = height;
-        stagingInfo.layer_count_or_depth = 1u;
-        stagingInfo.num_levels = 1u;
-        stagingInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        stagingInfo.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-        staging = SDL_CreateGPUTexture(device, &stagingInfo);
-        if (!staging) {
-            error = std::string("SDL_CreateGPUTexture(resolve staging): ") + SDL_GetError();
+        staging = acquireResolveStaging(width, height, error);
+        if (!staging)
             return false;
-        }
         native = staging;
         sourceX = 0u;
         sourceY = 0u;
     }
 
-    SDL_GPUTransferBufferCreateInfo transferInfo{};
-    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-    transferInfo.size = static_cast<uint32_t>(bytes);
-    SDL_GPUTransferBuffer *download = SDL_CreateGPUTransferBuffer(device, &transferInfo);
-    if (!download) {
-        error = std::string("SDL_CreateGPUTransferBuffer(resolve): ") + SDL_GetError();
-        if (staging)
-            SDL_ReleaseGPUTexture(device, staging);
+    SDL_GPUTransferBuffer *download = acquireDownload(static_cast<uint32_t>(bytes), error);
+    if (!download)
         return false;
-    }
 
-    auto release = [&]() {
-        SDL_ReleaseGPUTransferBuffer(device, download);
-        if (staging)
-            SDL_ReleaseGPUTexture(device, staging);
-    };
+    // Both are kept for the next resolve.
+    auto release = []() {};
 
     SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
     if (!commands) {

@@ -82,6 +82,19 @@ public:
     uint32_t read(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
     void write(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
 
+    // A host-to-local run of PSMT8 or PSMT4 pixels: `count` pixels from
+    // (x, y), wrapping to dsax at rowEnd, exactly as `count` calls to write()
+    // would store them. T4 takes two pixels per byte, low nibble first.
+    // (Rogue Galaxy: added. Its texture uploads are mostly 4- and 8-bit, and
+    // a write() per pixel was a fifth of the GS worker.)
+    void writeRunT8(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                    const uint8_t *src, uint32_t count);
+    void writeRunT4(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                    const uint8_t *src, uint32_t count);
+    // `count` PSMT4 indices of one row from (x, y), one per byte, as read()
+    // returns them (Rogue Galaxy: added, for texture expansion).
+    void readRowT4(uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t count, uint8_t *out) const;
+
 private:
     uint8_t *m_data = nullptr;
     uint32_t m_size = 0u;

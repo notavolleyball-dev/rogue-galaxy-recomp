@@ -234,6 +234,17 @@ private:
     std::array<CpuWords, kGsVramBytes / 256u> m_cpuWords{};
     SDL_GPUTransferBuffer *m_upload = nullptr;
     uint32_t m_uploadCapacity = 0u;
+    // Resolves wait for their own fence before returning, so the download
+    // buffer and the downscale staging texture are idle again by the next
+    // one and can be reused rather than created and released every time
+    // (Rogue Galaxy: added; it resolves about ten times a frame).
+    SDL_GPUTransferBuffer *acquireDownload(uint32_t bytes, std::string &error);
+    SDL_GPUTexture *acquireResolveStaging(uint32_t width, uint32_t height, std::string &error);
+    SDL_GPUTransferBuffer *m_download = nullptr;
+    uint32_t m_downloadCapacity = 0u;
+    SDL_GPUTexture *m_resolveStaging = nullptr;
+    uint32_t m_resolveStagingWidth = 0u;
+    uint32_t m_resolveStagingHeight = 0u;
     GsTargetCacheStats m_stats{};
 };
 

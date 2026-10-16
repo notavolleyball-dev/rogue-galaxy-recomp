@@ -240,6 +240,30 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
         }
     }
 
+    // The same for 8- and 4-bit indices (Rogue Galaxy: added; most of its
+    // per-frame texture uploads are these). T4 packs two pixels per byte,
+    // low nibble first, and an odd pixel count ends on a half-used byte, as
+    // in the loop below.
+    if ((dpsm == GS_PSM_T8 || dpsm == GS_PSM_T4) && m_partialPixelBytes == 0u &&
+        offset < sizeBytes && m_state.direction == kHostToLocal) {
+        const uint32_t remaining = m_state.totalPixels - m_state.copiedPixels;
+        const uint32_t bytes = sizeBytes - offset;
+        const uint32_t pixels = dpsm == GS_PSM_T8 ? std::min<uint32_t>(bytes, remaining)
+                                                  : std::min<uint32_t>(bytes * 2u, remaining);
+        if (pixels != 0u) {
+            const uint32_t rowEnd = dsax + rrw;
+            if (dpsm == GS_PSM_T8) {
+                m_vram.writeRunT8(dbp, dbw, dsax, rowEnd, m_state.x, m_state.y, data + offset, pixels);
+                offset += pixels;
+            } else {
+                m_vram.writeRunT4(dbp, dbw, dsax, rowEnd, m_state.x, m_state.y, data + offset, pixels);
+                offset += (pixels + 1u) / 2u;
+            }
+            wrote = true;
+            advance(pixels);
+        }
+    }
+
     while (offset < sizeBytes && m_state.direction == kHostToLocal) {
         switch (dpsm) {
         case GS_PSM_CT32:

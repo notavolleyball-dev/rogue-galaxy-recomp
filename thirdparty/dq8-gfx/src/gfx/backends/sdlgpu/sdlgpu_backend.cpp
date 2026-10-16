@@ -500,6 +500,9 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTexture *texture;
     };
     std::vector<FeedbackTexture> feedbackTextures;
+    // The snapshot tail upload, mapped with cycling each time.
+    SDL_GPUTransferBuffer *feedbackUpload = nullptr;
+    uint32_t feedbackUploadCapacity = 0u;
     // What the feedback batches at the end of the queue have drawn since their
     // snapshot. A draw that reads none of it can share that snapshot.
     GsRegion feedbackWritten;
@@ -507,6 +510,8 @@ struct SdlGpuBackend::Impl {
     // Set when this backend owns the window. Present() then composes into the
     // swapchain instead of handing pixels back through host memory.
     SDL_Window *window = nullptr;
+    // What openWindow was given; the FPS readout keeps it in front.
+    std::string windowTitle;
     // Staging for the fallback path, where the frame had to be composed on the
     // CPU and has to get back onto the GPU to be shown.
     SDL_GPUTexture *presentUpload = nullptr;
@@ -986,21 +991,30 @@ struct SdlGpuBackend::Impl {
             gsMarkPages(tailPages, surface.base, surface.bufferWidth, surface.psm,
                         region.width(), region.height(), region.x0, region.y0);
         }
-        const auto releaseUpload = [&](SDL_GPUTransferBuffer *buffer) {
-            SDL_ReleaseGPUTransferBuffer(device.handle(), buffer);
-        };
-        std::unique_ptr<SDL_GPUTransferBuffer, decltype(releaseUpload)> upload(nullptr, releaseUpload);
+        SDL_GPUTransferBuffer *upload = nullptr;
         if (uploadBytes != 0u) {
             if (!targets->resolve(tailPages, error)) return nullptr;
-            SDL_GPUTransferBufferCreateInfo info{};
-            info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-            info.size = uploadBytes;
-            upload.reset(SDL_CreateGPUTransferBuffer(device.handle(), &info));
-            if (!upload) {
-                error = std::string("SDL_CreateGPUTransferBuffer(feedback tail): ") + SDL_GetError();
-                return nullptr;
+            // One buffer, cycled on each map, instead of one created and
+            // released per snapshot (Rogue Galaxy: added; SDL hands back a
+            // free internal buffer while the last is still in flight).
+            if (feedbackUploadCapacity < uploadBytes) {
+                if (feedbackUpload)
+                    SDL_ReleaseGPUTransferBuffer(device.handle(), feedbackUpload);
+                feedbackUploadCapacity = 64u * 1024u;
+                while (feedbackUploadCapacity < uploadBytes)
+                    feedbackUploadCapacity *= 2u;
+                SDL_GPUTransferBufferCreateInfo info{};
+                info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+                info.size = feedbackUploadCapacity;
+                feedbackUpload = SDL_CreateGPUTransferBuffer(device.handle(), &info);
+                if (!feedbackUpload) {
+                    feedbackUploadCapacity = 0u;
+                    error = std::string("SDL_CreateGPUTransferBuffer(feedback tail): ") + SDL_GetError();
+                    return nullptr;
+                }
             }
-            auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device.handle(), upload.get(), false));
+            upload = feedbackUpload;
+            auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device.handle(), upload, true));
             if (!mapped) {
                 error = std::string("SDL_MapGPUTransferBuffer(feedback tail): ") + SDL_GetError();
                 return nullptr;
@@ -1030,7 +1044,7 @@ struct SdlGpuBackend::Impl {
                 }
                 offset += (region.width() * region.height() * scale * scale * 4u + 255u) & ~255u;
             }
-            SDL_UnmapGPUTransferBuffer(device.handle(), upload.get());
+            SDL_UnmapGPUTransferBuffer(device.handle(), upload);
         }
         SDL_GPUTexture *feedbackTexture = feedbackTextureFor(width, height, error);
         if (!feedbackTexture)
@@ -1061,7 +1075,7 @@ struct SdlGpuBackend::Impl {
             for (const auto &region : padding.uploads) {
                 if (region.empty()) continue;
                 SDL_GPUTextureTransferInfo from{};
-                from.transfer_buffer = upload.get();
+                from.transfer_buffer = upload;
                 from.offset = offset;
                 from.pixels_per_row = region.width() * scale;
                 from.rows_per_layer = region.height() * scale;
@@ -2733,18 +2747,19 @@ struct SdlGpuBackend::Impl {
         const double seconds = std::chrono::duration<double>(now - titleSampleStart).count();
         if (seconds < 2.0)
             return;
-        char title[128];
+        // Rogue Galaxy: the window's own title in front, not "DQ8Recomp".
+        char title[192];
         double renders = -1.0;
         if (completedRenderCounter) {
             const uint64_t completed = completedRenderCounter();
             renders = completed >= titleCompletedStart
                 ? (completed - titleCompletedStart) / seconds : 0.0;
-            std::snprintf(title, sizeof(title), "DQ8Recomp | %.1f render FPS | SDL GPU %.1f presents/s",
-                          renders, titlePresents / seconds);
+            std::snprintf(title, sizeof(title), "%s | %.1f render FPS | SDL GPU %.1f presents/s",
+                          windowTitle.c_str(), renders, titlePresents / seconds);
             titleCompletedStart = completed;
         } else {
-            std::snprintf(title, sizeof(title), "DQ8Recomp | SDL GPU: %.1f presents/s (%.1f active/s)",
-                          titlePresents / seconds, titleActiveFrames / seconds);
+            std::snprintf(title, sizeof(title), "%s | SDL GPU: %.1f presents/s (%.1f active/s)",
+                          windowTitle.c_str(), titlePresents / seconds, titleActiveFrames / seconds);
         }
         SDL_SetWindowTitle(window, title);
         if (renders >= 0.0) {
@@ -2946,6 +2961,8 @@ SdlGpuBackend::~SdlGpuBackend() {
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->dummyTexture);
         for (const auto &feedback : m_impl->feedbackTextures)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), feedback.texture);
+        if (m_impl->feedbackUpload)
+            SDL_ReleaseGPUTransferBuffer(m_impl->device.handle(), m_impl->feedbackUpload);
         if (m_impl->presentUpload)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->presentUpload);
         for (auto *scratch : {&m_impl->sharpTexture, &m_impl->compositeTexture, &m_impl->captureTexture})
@@ -3368,6 +3385,7 @@ bool SdlGpuBackend::openWindow(const char *title, uint32_t width, uint32_t heigh
         error = std::string("SDL_CreateWindow: ") + SDL_GetError();
         return false;
     }
+    m_impl->windowTitle = title ? title : "";
     setWindowIcon(m_impl->window);
     if (!SDL_ClaimWindowForGPUDevice(m_impl->device.handle(), m_impl->window)) {
         error = std::string("SDL_ClaimWindowForGPUDevice: ") + SDL_GetError();

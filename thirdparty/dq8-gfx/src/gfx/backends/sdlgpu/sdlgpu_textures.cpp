@@ -403,6 +403,22 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
                 std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x]], 4u);
             continue;
         }
+        case GS_PSM_T4: {
+            // Rogue Galaxy: added. Its textures are mostly 4-bit, and the
+            // general loop below re-read every texel's palette entry from
+            // local memory although buildPalette has already resolved them.
+            uint8_t *raw = m_idxRow.data();
+            m_vram.readRowT4(key.tbp0, key.tbw, region.x0, y, regionWidth, raw);
+            for (uint32_t x = 0u; x < regionWidth; ++x)
+                std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x] & 0x0fu], 4u);
+            // Hashed as two nibbles per byte, low first, like T4HL/T4HH.
+            const uint32_t pairs = (regionWidth + 1u) / 2u;
+            for (uint32_t p = 0u; p < pairs; ++p)
+                raw[p] = static_cast<uint8_t>(raw[p * 2u] |
+                                              ((p * 2u + 1u < regionWidth ? raw[p * 2u + 1u] : 0u) << 4u));
+            texelHash = hashBytes(texelHash, raw, pairs);
+            continue;
+        }
         case GS_PSM_T8H:
         case GS_PSM_T4HL:
         case GS_PSM_T4HH: {
