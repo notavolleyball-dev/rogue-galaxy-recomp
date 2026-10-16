@@ -6,7 +6,7 @@ exclusive) named by `ghidra_output` in that image's recompiler config:
 
 | Image | Map | Recompiler config | Functions |
 |---|---|---|---|
-| `SCUS_974.90` | [`functions_main.csv`](../config/SCUS_974.90/functions_main.csv) | [`recomp/main.toml`](../config/SCUS_974.90/recomp/main.toml) | 17,721 |
+| `SCUS_974.90` | [`functions_main.csv`](../config/SCUS_974.90/functions_main.csv) | [`recomp/main.toml`](../config/SCUS_974.90/recomp/main.toml) | 17,726 |
 | `BIN/TITLE.BIN` | [`functions_title.csv`](../config/SCUS_974.90/functions_title.csv) | [`recomp/title.toml`](../config/SCUS_974.90/recomp/title.toml) | 111 |
 | `BIN/INSMENU.BIN` | [`functions_insmenu.csv`](../config/SCUS_974.90/functions_insmenu.csv) | [`recomp/insmenu.toml`](../config/SCUS_974.90/recomp/insmenu.toml) | 367 |
 | `BIN/NORMAL.BIN` | [`functions_normal.csv`](../config/SCUS_974.90/functions_normal.csv) | [`recomp/normal.toml`](../config/SCUS_974.90/recomp/normal.toml) | 676 |
@@ -39,9 +39,9 @@ From the map, the code that runs and the cross-references:
 | 0x00100000..0x00436958 | EE code |
 | 0x00436980..0x00446470 | VU microcode (VIF MPG packets), rodata |
 | 0x00446470..0x00447768 | Kernel-mode payloads (TLB, ExecPS2, alarm patches), copied into kernel RAM by `InitTLBFunctions`, `InitExecPS2`, `InitAlarm` |
-| 0x00447768..0x00469300 | rodata and data (the CD library's state is at 0x4479xx) |
-| 0x00469300..0x0046F9BC | Static constructors |
-| 0x0046F9C0..0x00481080 | .data |
+| 0x00447768..0x00469180 | rodata and data (the CD library's state is at 0x4479xx) |
+| 0x00469180..0x0046F9BC | Static constructors |
+| 0x0046F9C0..0x00481080 | .data, starting with the constructor table (0x46F9C0..0x46FD64, 233 entries) |
 | 0x00481080..0x004E9E80 | .bss (no section header) |
 | 0x004E9E80..0x00528200 | Overlay arena (see [`overlays.toml`](../config/SCUS_974.90/overlays.toml)) |
 
@@ -65,6 +65,15 @@ Found by the checks below, then confirmed by reading the code.
   `_init_signal`, `__sigtramp`, and others.
 - **Main, merged pair.** `TaskLoadSound_207a80` is a thunk plus the real
   function at 0x207a90, which TITLE.BIN calls directly. Split in two.
+- **Main, constructors.** The CRT calls 233 constructors from the table at
+  0x46F9C0. The first two (0x469180, 0x469190) sit before the first one
+  RGDecomp maps, and `StaticInitTexAnimeCfg_4693a0` is four of them. The
+  first boot found this: its very first constructor call had no function.
+- **Callbacks and getters reached through pointers.** Three `return 1` menu
+  callbacks in TITLE.BIN that only the main ELF's widget tables point at, and
+  eight 8-byte getters a vtable points at, which RGDecomp had merged into the
+  functions before them (`split = [...]` in funcmap.toml). Found by the boot,
+  each as a call to an address with no function.
 - **Main, removed.** Two 8-byte "functions" that are VU microcode, and the
   11 kernel-mode payload functions, which never run at their EE address.
 
@@ -85,14 +94,20 @@ delay slot is the next function's first instruction.
   images it is not, since each image is recompiled alone: overlay calls into
   the main ELF must hit main function starts, and the main ELF's 263 direct
   calls into the arena must each hit a start in at least one overlay.
-- **Constructors.** Every overlay ctor-table entry is a function start.
+- **Constructors.** Every entry of the main ELF's constructor table and of
+  each overlay's is a function start.
+- **Pointers.** No code address taken as data (a word in any image's data, or
+  a lui/addiu pair) lands right after a `jr ra` and its padding inside a
+  mapped function: that shape is a merged function. Overlays are matched
+  against themselves and the main ELF only, as they are never resident
+  together.
 - **Names.** Unique across all images (after ps2_recomp's identifier
   sanitizing), no prefix ps2_recomp reserves (`sub_`, `FUN_`, `LAB_`, `DAT_`,
   `entry_`), and none that would bind to a runtime handler by name.
 - **Configs.** Each `stubs` entry is `handler@address` at a function start,
   and the pinned runtime implements that handler (a stub whose body is only
-  `TODO_NAMED` throws when called, so binding to it is refused). Each MMIO
-  site is inside a function.
+  `TODO_NAMED` throws when called, so binding to it is refused). Any `[mmio]`
+  site would have to be inside a function.
 
 ## Naming
 
@@ -106,7 +121,7 @@ RGDecomp's `entry` and `entry_002d94b0` become `rg_entry_...` because
 
 ## SDK bindings
 
-[`recomp/main.toml`](../config/SCUS_974.90/recomp/main.toml) binds 208 SDK
+[`recomp/main.toml`](../config/SCUS_974.90/recomp/main.toml) binds 205 SDK
 functions to runtime handlers. The seed is the list DQ8-Recompiled uses with
 the same framework (its pin is the parent commit of ours) and the same SDK
 generation, located in this ELF by ps2_analyzer's SDK signatures and
@@ -118,14 +133,19 @@ are bound because the game calls the inner one). Handlers
 that are TODOs in our pin are left out (sceDmaRecv*, sceDmaWatch/Pause,
 sceDeci2*, sceTty*, sceMpegGetPictureRAW8*), so the game's own code runs
 there. Like DQ8, the allocator, sceGifPk*, syscall wrappers and private SDK
-entry points stay translated.
+entry points stay translated, and so do `fflush`, `fseek` and `ftell` (DQ8 binds
+them, but the runtime's versions only know handles from its own `fopen`, and
+this game opens files with its own newlib).
 
 Not bound yet, and needing handlers in phase 3: `sceCdLayerSearchFile`
 (0x1297E0) and `sceCdReadDvdDualInfo` (0x12ACD0).
 
-The 186 MMIO sites (hardware register loads/stores the recompiler must route
-through the runtime's device models) come from ps2_analyzer, minus four in
-the kernel payloads.
+There is no `[mmio]` table. ps2_analyzer's recorded only the page base
+(0x10000000) for 137 of its 190 sites, and an `[mmio]` entry overrides the
+address ps2_recomp resolves on its own, so every listed timer access went to
+Timer 0's count and the game's timers stopped (see STATUS.md, phase 3).
+ps2_recomp already sends statically resolved hardware addresses through the
+runtime, and READ/WRITE check at run time otherwise.
 
 ps2_analyzer's eight suggested instruction patches ("potential self-modifying
 code") are not used: they would turn stores to the CD library's variables at
@@ -144,11 +164,13 @@ executable sections (the main ELF is one RWX section for the same reason).
 
 With the maps and configs above, the pinned `ps2_recomp` recompiles all six
 images with no decode failure and no unhandled instruction (main: 25 s,
-236 MB of C++ in 17,724 files):
+236 MB of C++ in 17,729 files):
+
+Counts as of phase 2 (later map fixes and binding changes moved them slightly):
 
 | Image | Functions | Recompiled | Bound to the runtime | Extra entry points | Functions with an unresolved JR |
 |---|---|---|---|---|---|
-| main | 17,721 | 17,513 | 208 | 84,048 | 183 (277 jumps) |
+| main | 17,726 | 17,518 | 208 | 84,067 | 183 (277 jumps) |
 | title | 111 | 111 | 0 | 1,170 | 1 |
 | insmenu | 367 | 367 | 0 | 2,046 | 0 |
 | normal | 676 | 676 | 0 | 6,800 | 0 |
@@ -157,12 +179,15 @@ images with no decode failure and no unhandled instruction (main: 25 s,
 
 "Extra entry points" are resume points ps2_recomp adds inside functions (after
 calls, branch targets). An unresolved JR is a computed jump whose targets it
-could not prove (mostly `switch` tables): every instruction of that function
-then becomes an entry point, which is correct but larger and slower. Phase 2
-can feed the real tables in through `[jump_tables]`.
+could not prove: every instruction of that function then becomes an entry
+point, which is correct but larger and slower. In the main ELF 271 of the 277
+are not `switch` tables but indirect tail calls through a pointer loaded from
+memory (`lw t9, ...; jr t9`, C++ virtual calls and callbacks), and only 4 are
+tables, so `[jump_tables]` would not help much. Treating such a `jr` as an
+indirect call is a recompiler change, left for the performance phase.
 
-Two things for phase 2 from this run. Each overlay's output registers its
-ELF entry (0x004E9EC0) as a bootstrap entry, which must stay out of the boot
-path. The main ELF has no .bss section header, so ps2_recomp's bootstrap
-clears no .bss; the game's own entry code clears 0x00481080..0x00528200
-before `main`, which covers it.
+The main ELF has no .bss section header, so ps2_recomp's bootstrap clears no
+.bss; the game's own entry code clears 0x00481080..0x00528200 before `main`,
+which covers it. Each overlay's table also registers the overlay's ELF entry
+(0x004E9EC0); that is just its first function (`<name>_entry`), so it is
+harmless.

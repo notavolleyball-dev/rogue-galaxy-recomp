@@ -124,6 +124,17 @@ def build(image: str, spec: dict, rgd: list[Function]) -> tuple[list[Function], 
         by_start[f.start] = Function(f.name, f.start, rs["end"])
         log.append(f"resized {f.name} to {f.start:#010x}..{rs['end']:#010x}")
 
+    # split: cut the function containing each address there; the tail becomes
+    # its own function. For runs of tiny functions RGDecomp merged into one.
+    for addr in sorted(spec.get("split", [])):
+        owner = next((f for f in by_start.values() if f.start < addr < f.end), None)
+        if owner is None:
+            raise ValueError(f"{image}: split {addr:#x} is not inside a function")
+        by_start[owner.start] = Function(owner.name, owner.start, addr)
+        by_start[addr] = Function("Fn", addr, owner.end)
+    if spec.get("split"):
+        log.append(f"split at {len(spec['split'])} address(es)")
+
     added = [(a["name"], *_range(a)) for a in spec.get("add", [])]
     added += [("StaticInit", lo, hi) for lo, hi in spec.get("static_init", [])]
     for name, lo, hi in added:

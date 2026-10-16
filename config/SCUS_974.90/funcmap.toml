@@ -26,13 +26,20 @@ license = "CC0-1.0"
 #   0x00100000..0x00436958  EE code
 #   0x00436980..0x00446470  VU microcode (VIF MPG packets) and rodata
 #   0x00446470..0x00447768  kernel-mode payloads (see the removal below)
-#   0x00447768..0x00469300  rodata and data (CD library state lives at 0x4479xx)
-#   0x00469300..0x0046F9BC  static constructors (StaticInit*)
-#   0x0046F9C0..0x00481080  .data
+#   0x00447768..0x00469180  rodata and data (CD library state lives at 0x4479xx)
+#   0x00469180..0x0046F9BC  static constructors (StaticInit*)
+#   0x0046F9C0..0x00481080  .data, starting with the constructor table
 # ---------------------------------------------------------------------------
 [image.main]
 symbols = "main.symbols.txt"
-code = [[0x00100000, 0x00436958], [0x00469300, 0x0046F9BC]]
+code = [[0x00100000, 0x00436958], [0x00469180, 0x0046F9BC]]
+# The static constructor table the CRT walks (a0..a1 at the call at 0x100e24).
+# Every entry must be a function start.
+ctor_table = [0x0046F9C0, 0x0046FD64]
+# Where a mapped function is really several, each its own function from here.
+# rg_entry_002d94b0 is eight 8-byte getters (jr ra + a load, then padding)
+# that a vtable at 0x471680 points at one by one; the game called 0x2D94D0.
+split = [0x002D94C0, 0x002D94D0, 0x002D94E0, 0x002D94F0, 0x002D9500, 0x002D9510, 0x002D9520]
 
 [[image.main.remove]]
 range = [0x00436D00, 0x00436D18]
@@ -59,6 +66,40 @@ so it needs its own entry in the main image."""
 name = "TaskLoadSoundArg"
 range = [0x00207A90, 0x00207AC0]
 why = "Second half of TaskLoadSound_207a80, see the resize above."
+
+# Static constructors the CRT calls from the table at 0x46F9C0 that the map
+# missed or merged. Found by the first boot: the CRT's first call through the
+# table (0x469180) had no function.
+[[image.main.add]]
+name = "StaticInitVuMicrocodeTable"
+range = [0x00469180, 0x0046918C]
+why = "Ctor table entry 0: j VuMicrocodeTableInitMaybe_152830 with a0 = 0x491280."
+
+[[image.main.add]]
+name = "StaticInit"
+range = [0x00469190, 0x00469300]
+why = "Ctor table entry 1, before the first StaticInit RGDecomp maps."
+
+[[image.main.resize]]
+start = 0x004693A0
+end = 0x004693AC
+why = """StaticInitTexAnimeCfg_4693a0 is four constructors: this thunk
+(j 0x164080) and the three below, each its own ctor table entry."""
+
+[[image.main.add]]
+name = "StaticInit"
+range = [0x004693B0, 0x0046941C]
+why = "Ctor table entry at 0x46F9D4, split out of StaticInitTexAnimeCfg_4693a0."
+
+[[image.main.add]]
+name = "StaticInit"
+range = [0x00469420, 0x00469440]
+why = "Ctor table entry at 0x46F9D8 (tail call to 0x100620), split out of StaticInitTexAnimeCfg_4693a0."
+
+[[image.main.add]]
+name = "StaticInit"
+range = [0x00469440, 0x00469448]
+why = "Ctor table entry at 0x46F9DC (clears a gp global), split out of StaticInitTexAnimeCfg_4693a0."
 
 # Code RGDecomp's map leaves out: functions only ever reached through
 # pointers, so Ghidra saw no call. Names from ps2_analyzer's SDK signatures
@@ -162,10 +203,44 @@ function's `addiu sp, sp, -64`: unreachable, and wrong if it ever ran."""
 [image.title]
 symbols = "title.symbols.txt"
 overlay = "BIN/TITLE.BIN"
+
 static_init = [
   [0x004F1700, 0x004F1754], [0x004F1760, 0x004F17D8], [0x004F17E0, 0x004F182C],
   [0x004F1830, 0x004F18A0],
 ]
+
+# Menu callbacks only the main ELF's widget tables point at (0x454D54,
+# 0x45482C, 0x454CFC), each right after the `jr ra` of the function RGDecomp
+# merged it into. The first boot reached 0x4EAA80 through one of them.
+[[image.title.resize]]
+start = 0x004E9FD0
+end = 0x004E9FF0
+why = "TitleDemoMenuCursorMoveCb_4e9fd0 ends at its jr ra; a callback follows."
+
+[[image.title.add]]
+name = "CbReturnTrue"
+range = [0x004E9FF0, 0x004E9FF8]
+why = "jr ra; li v0, 1. Pointed at from the main ELF at 0x454D54."
+
+[[image.title.resize]]
+start = 0x004EAA40
+end = 0x004EAA80
+why = "TitleSceneOverlayModeOn_4eaa40 ends at its jr ra; a callback follows."
+
+[[image.title.add]]
+name = "CbReturnTrue"
+range = [0x004EAA80, 0x004EAA88]
+why = "jr ra; li v0, 1. Pointed at from the main ELF at 0x45482C."
+
+[[image.title.resize]]
+start = 0x004EAA90
+end = 0x004EAB00
+why = "TitleMenuCursorMoveCb_4eaa90 ends at its jr ra; a callback follows."
+
+[[image.title.add]]
+name = "CbClearFlagReturnTrue"
+range = [0x004EAB00, 0x004EAB0C]
+why = "sh zero, -4084(gp); jr ra; li v0, 1. Pointed at from the main ELF at 0x454CFC."
 
 [image.insmenu]
 symbols = "insmenu.symbols.txt"

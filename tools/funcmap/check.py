@@ -94,15 +94,16 @@ def check_layout(img: Image, funcs: list[Function], known_gaps: list[tuple[int, 
     return r
 
 
-def check_ctors(img: Image, idx: Index) -> Report:
+def check_ctors(img: Image, idx: Index, table: tuple[int, int]) -> Report:
+    """Every entry of a static constructor table [begin, end) is a function start."""
     r = Report()
-    h = img.header
-    for slot in range(h.ctor_begin, h.ctor_end, 4):
+    begin, end = table
+    for slot in range(begin, end, 4):
         target = img.word(slot)
         if target not in idx.start_set:
             r.problems.append(f"{img.name}: ctor table entry {slot:#x} -> {target:#x} is not a function start")
     if not r.problems:
-        r.notes.append(f"{img.name}: {(h.ctor_end - h.ctor_begin) // 4} static constructors, all mapped")
+        r.notes.append(f"{img.name}: {(end - begin) // 4} static constructors, all mapped")
     return r
 
 
@@ -148,6 +149,64 @@ def check_control_flow(images: dict[str, Image], maps: dict[str, list[Function]]
             f"{name}: {len(mid_entries)} jump target(s) inside other functions (ps2_recomp adds entries)"
             + (f", {to_arena} direct call(s) into the overlay arena" if to_arena else "")
         )
+    return r
+
+
+def check_pointer_targets(images: dict[str, Image], maps: dict[str, list[Function]]) -> Report:
+    """Code addresses taken as data that point into the middle of a function.
+
+    A word in any image's data, or a lui/addiu (ori) pair in its code, whose
+    value lands right after a `jr ra` and its delay slot inside a mapped
+    function is almost always a function the map merged into its neighbour:
+    callbacks reached only through pointers, often from another image (the
+    main ELF's tables point into overlay code). Arbitrary mid-function values
+    are too common in data to flag; this shape is not.
+    """
+    r = Report()
+    idx = {name: Index(funcs) for name, funcs in maps.items()}
+    hits: dict[tuple[str, int], str] = {}
+
+    def follows_return(img: Image, f: Function, value: int) -> bool:
+        # `jr ra`, its delay slot (possibly a nop), then zero padding up to value.
+        addr = value - 4
+        while addr >= f.start and value - addr <= 16 and img.word(addr) == 0:
+            addr -= 4
+        if addr < f.start:
+            return False
+        if img.word(addr) == mips.JR_RA:
+            return addr + 8 <= value
+        return addr - 4 >= f.start and img.word(addr - 4) == mips.JR_RA
+
+    def consider(value: int, source: str, from_image: str) -> None:
+        if value % 4:
+            return
+        for name, img in images.items():
+            # Overlays are never resident together: one only points at itself or the main ELF.
+            if from_image != "main" and name not in ("main", from_image):
+                continue
+            if not img.in_code(value) or value in idx[name].start_set:
+                continue
+            f = idx[name].containing(value)
+            if f and follows_return(img, f, value):
+                hits.setdefault((name, value), f"{f.name}, from {source}")
+
+    for name, img in images.items():
+        own = idx[name]
+        for addr in range(img.base, img.end - 3, 4):
+            if own.containing(addr) is None:
+                consider(img.word(addr), f"{name} data at {addr:#x}", name)
+        for f in own.funcs:
+            high: dict[int, int] = {}
+            for addr in range(f.start, f.end, 4):
+                word = img.word(addr)
+                op, rs, rt, imm = word >> 26, (word >> 21) & 31, (word >> 16) & 31, word & 0xFFFF
+                if op == 15:
+                    high[rt] = imm << 16
+                elif op in (9, 13) and rs in high:
+                    low = imm - 0x10000 if op == 9 and imm & 0x8000 else imm
+                    consider((high[rs] + low) & 0xFFFFFFFF, f"{name} code at {addr:#x}", name)
+    for (name, value), where in sorted(hits.items()):
+        r.problems.append(f"{name}: {value:#x} follows a jr ra inside {where}: a merged function?")
     return r
 
 
