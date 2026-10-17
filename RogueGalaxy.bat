@@ -23,8 +23,11 @@ rem   set RG_MUTE=1
 
 echo Rogue Galaxy is running. Close the game window to quit.
 "%GAME%" "disc\SCUS_974.90" %* > "build\last-run.log" 2>&1
-if errorlevel 1 (
-    echo The game stopped with an error. The end of build\last-run.log:
+rem Not "if errorlevel 1": a crash exits with a negative code (0xC0000005).
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+    echo The game stopped with an error ^(exit code %RC%^). The end of build\last-run.log:
     powershell -NoProfile -Command "Get-Content -Tail 15 'build\last-run.log'"
     pause
 )
+exit /b %RC%

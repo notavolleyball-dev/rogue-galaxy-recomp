@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "ps2_runtime.h"
+#include "return_hook.h"
 #include "runtime/gs/gs_backend.h"
 
 namespace rg::graphics
@@ -150,15 +151,20 @@ private:
 FlipPacedBackend *g_paced = nullptr;
 PS2Runtime::RecompiledFunction g_originalFlip = nullptr;
 
-void flipHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void afterFlip(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    // Guest threads run on fibers, so a flip that blocks in its vsync wait
-    // keeps this native frame and returns only once it has finished.
-    g_originalFlip(rdram, ctx, runtime);
     if (g_paced)
     {
         g_paced->onGuestFlip();
     }
+}
+
+void flipHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // Its vsync wait blocks on a fiber and keeps this native frame, but a
+    // safe point inside the flip unwinds it: the frame is presented when the
+    // flip has really returned (return_hook.h).
+    rg::hooks::callThen(g_originalFlip, rdram, ctx, runtime, &afterFlip, 0u);
 }
 
 } // namespace

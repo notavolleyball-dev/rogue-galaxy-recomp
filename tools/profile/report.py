@@ -81,7 +81,7 @@ def main() -> int:
     per_func = collections.Counter()
     per_thread_func = collections.defaultdict(collections.Counter)
     for line in lines[1:]:
-        if line.startswith(("module ", "callers ")):
+        if line.startswith(("module ", "callers ", "stack ")):
             continue
         thread, rip, n = line.rsplit(" ", 2)
         rip, n = int(rip, 16), int(n)

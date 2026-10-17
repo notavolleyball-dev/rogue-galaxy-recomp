@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ps2_runtime.h"
+#include "runtime/ee_scheduler.h"
 
 namespace rg::debug
 {
@@ -120,7 +121,9 @@ void traced(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t a0 = getRegU32(ctx, 4);
     if (log)
     {
-        std::printf("[trace] 0x%08X #%u ra=0x%08X", address, call, getRegU32(ctx, 31));
+        const GuestThread *thread = runtime->eeScheduler().currentThread();
+        std::printf("[trace] 0x%08X #%u thread=%d sp=0x%08X ra=0x%08X", address, call, thread ? thread->id : -1,
+                    getRegU32(ctx, 29), getRegU32(ctx, 31));
         for (int reg = 4; reg <= 7; ++reg)
         {
             const uint32_t value = getRegU32(ctx, reg);
@@ -144,6 +147,56 @@ void traced(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         std::printf("\n");
         std::fflush(stdout);
+    }
+}
+
+// RG_DUMP=0xFUNC:path: FUNC(dst, src, size) calls, each appended to path as
+// dst and size (two little-endian words) and the size bytes at src.
+PS2Runtime::RecompiledFunction g_dumpOriginal = nullptr;
+FILE *g_dumpFile = nullptr;
+
+void dumped(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t dst = getRegU32(ctx, 4);
+    const uint32_t src = getRegU32(ctx, 5);
+    const uint32_t size = getRegU32(ctx, 6);
+    const uint32_t physical = src & 0x1FFFFFFFu;
+    if (size <= 0x100000u && physical + size <= PS2_RAM_SIZE)
+    {
+        const uint32_t header[2] = {dst, size};
+        std::fwrite(header, sizeof(header), 1, g_dumpFile);
+        std::fwrite(rdram + physical, 1, size, g_dumpFile);
+        std::fflush(g_dumpFile);
+    }
+    g_dumpOriginal(rdram, ctx, runtime);
+}
+
+void installDump(PS2Runtime &runtime)
+{
+    const char *spec = std::getenv("RG_DUMP");
+    if (!spec || !*spec)
+    {
+        return;
+    }
+    char *end = nullptr;
+    const uint32_t address = static_cast<uint32_t>(std::strtoul(spec, &end, 0));
+    if (!end || *end != ':')
+    {
+        return;
+    }
+    g_dumpOriginal = runtime.lookupFunction(address);
+    g_dumpFile = std::fopen(end + 1, "wb");
+    if (g_dumpOriginal && g_dumpFile && runtime.replaceFunction(address, &dumped))
+    {
+        std::printf("[trace] dumping calls to 0x%08X into %s\n", address, end + 1);
+        return;
+    }
+    std::fprintf(stderr, "[trace] RG_DUMP: 0x%08X is not a function in the main table, or %s cannot be written\n",
+                 address, end + 1);
+    if (g_dumpFile)
+    {
+        std::fclose(g_dumpFile);
+        g_dumpFile = nullptr;
     }
 }
 
@@ -178,6 +231,7 @@ void installWatch(PS2Runtime &runtime)
 void installCallTrace(PS2Runtime &runtime)
 {
     installWatch(runtime);
+    installDump(runtime);
     const char *list = std::getenv("RG_TRACE");
     if (!list || !*list)
     {

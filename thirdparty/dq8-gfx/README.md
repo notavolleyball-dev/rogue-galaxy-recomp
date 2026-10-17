@@ -38,3 +38,10 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
 - `sdlgpu_backend.cpp`: the feedback snapshot's tail upload reuses one
   transfer buffer mapped with cycling; the FPS readout keeps the window's
   own title in front instead of "DQ8Recomp".
+
+One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
+scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's
+menus) no longer grows the colour and depth surfaces past FBW pages unless
+the geometry reaches there (a clear never does), and a draw's host scissor
+and written region are clipped to its surface. Grown surfaces took in the page after the
+buffer; texture uploads to it then discarded the depth buffer mid-frame.

@@ -7,7 +7,7 @@ native PC executable, built on [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 |---|---|
 | Release | NTSC-U, **SCUS-97490** v1.01 (one DVD9) |
 | Framework | [Sinan-Karakaya/PS2Recomp](https://github.com/Sinan-Karakaya/PS2Recomp) fork, pinned in `thirdparty/PS2Recomp` |
-| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 22 in the first battle, where it then runs in slow motion rather than skipping (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. Movie audio is still noise. See [`docs/STATUS.md`](docs/STATUS.md). |
+| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 15 to 22 in the first battle, where it then runs in slow motion rather than skipping (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. See [`docs/STATUS.md`](docs/STATUS.md). |
 
 ## Setup
 
@@ -101,19 +101,26 @@ them in the terminal before running it.
 | `RG_GS=sw` | Software GS rasterizer instead of the SDL3 GPU backend |
 | `RG_GS_SCALE=N` | GPU internal resolution multiplier (default 2) |
 | `RG_GS_NO_WINDOW=1` | Present through the runtime's window instead of SDL's |
+| `RG_GS_WORKER=0` | Run the GS backend on the game's thread instead of its own worker thread |
 | `RG_SHOW_FPS=1` | Frames per second in the window title |
 | `RG_PRESENT_MODE=vsync\|immediate` | Present mode (default mailbox) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
-| `RG_TIME_SCALE=game` | Let the game speed its logic up after frames the host was too slow for (off by default: it makes characters' turning oscillate) |
+| `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
+| `RG_MOVIE_AUDIO=game` | The game's own movie PCM callback, which drops packets the runtime's demux delivers too early (noise) |
+| `PS2X_EE_ROUNDING=nearest` | Diagnostic: guest float math rounds to nearest, the host default, instead of toward zero as the EE does (patch 0003) |
 | `RG_GS_DEPTH_READS=queue` | Serve the game's depth readbacks through the GS worker queue |
 | `RG_MUTE=1` | No sound output (the IOP still runs) |
-| `RG_INPUT="30:CROSS:150,..."` | Scripted pad input: seconds, buttons (`+`-joined; `LUP` etc. for the left stick), milliseconds |
-| `RG_TRACE=0xADDR,...` | Log calls of main-ELF functions (`RG_TRACE_PEEK`, `RG_TRACE_LIMIT`) |
-| `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` |
-| `RG_PROFILE=out.txt` | Sample all threads; report with `tools/profile/report.py` (`RG_PROFILE_STACKS=1` adds callers) |
+| `RG_INPUT="30:CROSS:150,..."` | Scripted pad input: seconds, buttons (`+`-joined; `LUP` etc. for the left stick), milliseconds; with `RG_INPUT_CLOCK=pad` both numbers count the game's pad reads, so a script replays alike at any host speed |
+| `RG_TRACE=0xADDR,...` | Log calls of main-ELF functions with guest thread, sp, ra and a0-a3 (`RG_TRACE_PEEK` words, `RG_TRACE_ARG0` offsets from a0, `RG_TRACE_LIMIT` calls each, default 16) |
+| `RG_DUMP=0xFUNC:file` | Append each call of a `FUNC(dst, src, size)` to file: dst, size and the bytes at src |
+| `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` (default 1000) |
+| `RG_HWWATCH=0xADDR` | x86 debug register on a guest word: writes leaving a value in `RG_HWWATCH_RANGE=lo-hi` (default the main stack) print the writer's stack (`RG_HWWATCH_READS=1`, `RG_HWWATCH_READER=0xFUNC`, `RG_HWWATCH_DELAY=s`); Windows only |
+| `RG_PROFILE=out.txt` | Sample all threads for `RG_PROFILE_SECONDS` (default 20) from `RG_PROFILE_START` seconds in (default 0); report with `tools/profile/report.py` (`RG_PROFILE_STACKS=1` also records the callers of samples inside the executable, which the report skips) |
 | `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |
+| `RG_GS_CENSUS=1` | Every 2 s, the draw states the GPU backend only approximates (destination alpha test and the like), and draws whose scissor is wider than their buffer; `RG_GS_SKIP=MASK:VALUE` drops draws by TEST register |
+| `RG_GS_FRAMELOG=file@N` | Every batch, transfer and clear of one frame, once the game's pad read count reaches N, with GS memory as `file.vram` (`@N#K` also before batch K); `RG_GS_FRAMESKIP=A-B,...` leaves batches of that frame out (`A-` to the end) |
 | `RG_SELFTEST=gs` | Check the code changed in vendored dependencies, then exit |
 | `DQ8_GFX_SCREENSHOT_DIR`, `DQ8_GFX_SCREENSHOT_EVERY` | Framework: write every Nth frame as PPM |
 | `PS2X_AUDIO_DUMP=file` | Framework: copy of the audio output, raw 48 kHz s16 stereo |

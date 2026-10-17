@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "debug/gs_census.h"
 #include "debug/gs_timing.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
@@ -132,7 +133,8 @@ void Setup::install(PS2Runtime &runtime)
     {
         backend = std::make_unique<GSThreadedBackend>(debug::timeGsBackend(std::move(backend), "worker"));
     }
-    backend = paceOnFlips(serveDepthReadsLocally(debug::timeGsBackend(std::move(backend), "frontend")));
+    backend = paceOnFlips(serveDepthReadsLocally(
+        debug::censusGsBackend(debug::timeGsBackend(std::move(backend), "frontend"))));
     runtime.gs().setRasterBackend(std::move(backend));
     std::printf("[rg] GS backend: %s%s\n", m_name, env("RG_GS_WORKER", "1") != "0" ? " on its own thread" : "");
 }

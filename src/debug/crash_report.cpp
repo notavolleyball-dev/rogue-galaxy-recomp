@@ -47,10 +47,26 @@ LONG WINAPI report(EXCEPTION_POINTERS *info)
                  GetCurrentThreadId());
     if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2)
     {
-        std::fprintf(stderr, "[crash] %s address 0x%llx\n", record->ExceptionInformation[0] == 1 ? "writing" : "reading",
+        const ULONG_PTR access = record->ExceptionInformation[0];
+        std::fprintf(stderr, "[crash] %s address 0x%llx\n",
+                     access == 1 ? "writing" : access == 8 ? "executing" : "reading",
                      static_cast<unsigned long long>(record->ExceptionInformation[1]));
     }
     CONTEXT ctx = *info->ContextRecord;
+    if (ctx.Rip == 0)
+    {
+        // A call through a null pointer: the caller is at the top of the stack.
+        // Read through the kernel like the frames below: a bad stack pointer
+        // would otherwise fault again here and lose the whole report.
+        std::fprintf(stderr, "[crash]   #-- 0x0 (called through a null pointer)\n");
+        DWORD64 ret = 0;
+        if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(ctx.Rsp), &ret, sizeof(ret),
+                              nullptr))
+        {
+            ctx.Rip = ret;
+            ctx.Rsp += 8;
+        }
+    }
     for (int frame = 0; frame < 48 && ctx.Rip; ++frame)
     {
         describe(ctx.Rip, where, sizeof(where));

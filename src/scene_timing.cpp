@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "ps2_runtime.h"
+#include "return_hook.h"
 
 namespace rg::timing
 {
@@ -18,20 +19,26 @@ constexpr uint32_t kTimeScale = 0x5E0Cu; // f32: time scale this frame
 
 PS2Runtime::RecompiledFunction g_original = nullptr;
 
-void timeScaleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+// What the update itself leaves when the frame was on time.
+void afterUpdate(uint8_t *rdram, R5900Context *, PS2Runtime *, uint32_t scene)
 {
-    const uint32_t scene = getRegU32(ctx, 4);
-    g_original(rdram, ctx, runtime);
-    // What the update itself leaves when the frame was on time.
     const uint32_t steps = (scene + kStepCount) & 0x1FFFFFFCu;
     const uint32_t scale = (scene + kTimeScale) & 0x1FFFFFFCu;
-    if (scale + 4u <= PS2_RAM_SIZE)
+    // Each on its own: the mask can wrap one and not the other.
+    if (steps + 4u <= PS2_RAM_SIZE && scale + 4u <= PS2_RAM_SIZE)
     {
         const int32_t one = 1;
         const float unit = 1.0f;
         std::memcpy(rdram + steps, &one, sizeof(one));
         std::memcpy(rdram + scale, &unit, sizeof(unit));
     }
+}
+
+void timeScaleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // After the update has really returned: a safe point inside it would
+    // otherwise let it finish, and store its own scale, after these writes.
+    rg::hooks::callThen(g_original, rdram, ctx, runtime, &afterUpdate, getRegU32(ctx, 4));
 }
 
 } // namespace

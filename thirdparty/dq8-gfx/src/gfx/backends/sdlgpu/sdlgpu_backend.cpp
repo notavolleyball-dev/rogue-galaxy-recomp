@@ -1110,12 +1110,29 @@ struct SdlGpuBackend::Impl {
         if (!gsIsColorFramePsm(context.frame.psm))
             return;
 
-        const GsRegion written = primitiveBounds(batch);
+        GsRegion written = primitiveBounds(batch);
         if (written.empty())
             return;
 
-        const uint32_t neededWidth = static_cast<uint32_t>(context.scissor.x1) + 1u;
+        uint32_t neededWidth = static_cast<uint32_t>(context.scissor.x1) + 1u;
         const uint32_t neededHeight = static_cast<uint32_t>(context.scissor.y1) + 1u;
+        // Scissors often end one pixel past the buffer (0..512 with FBW 8 in
+        // Rogue Galaxy's menus). Growing the colour and depth surfaces for that
+        // makes them alias the page after the buffer, and every texture upload
+        // there then discarded the depth buffer mid-frame, so later geometry
+        // showed through walls. Only geometry reaching past the buffer widens
+        // them: a sprite or triangle edge at x == width covers no pixel there.
+        const uint32_t bufferPixels = context.frame.fbw * 64u;
+        if (neededWidth > bufferPixels && bufferPixels != 0u) {
+            const float offsetX = static_cast<float>(context.xyoffset.ofx) / 16.0f;
+            float maxX = -1.0f;
+            for (uint8_t i = 0u; i < batch.vertexCount; ++i)
+                maxX = std::max(maxX, batch.vertices[i].x - offsetX);
+            const bool thin = state.prim.type == GS_PRIM_POINT || state.prim.type == GS_PRIM_LINE ||
+                              state.prim.type == GS_PRIM_LINESTRIP;
+            if (std::isfinite(maxX) && maxX + (thin ? 1.0f : 0.0f) <= static_cast<float>(bufferPixels))
+                neededWidth = bufferPixels;
+        }
 
         std::string error;
         GsSurface *color = targets->acquire(context.frame.fbp << 5u, context.frame.fbw,
@@ -1135,6 +1152,11 @@ struct SdlGpuBackend::Impl {
             setError(std::move(error));
             return;
         }
+        // What lands outside the surface is not drawn (see neededWidth).
+        written.x1 = std::min(written.x1, color->width);
+        written.y1 = std::min(written.y1, color->height);
+        if (written.empty())
+            return;
 
         const GsTestState test = gsDecodeTest(context.test);
         // Inactive depth must not grow/discard a live surface during colour-only passes.
@@ -1416,10 +1438,14 @@ struct SdlGpuBackend::Impl {
         draw.fragmentUniforms.misc[1] = textureScale;
 
         const uint32_t scissorScale = color->scale;
+        // Within the surface: a scissor past the buffer no longer widens it
+        // (see neededWidth), and a host scissor past the attachment is invalid.
+        const uint32_t scissorX1 = std::min<uint32_t>(context.scissor.x1 + 1u, color->width);
+        const uint32_t scissorY1 = std::min<uint32_t>(context.scissor.y1 + 1u, color->height);
         draw.scissor.x = static_cast<int>(context.scissor.x0 * scissorScale);
         draw.scissor.y = static_cast<int>(context.scissor.y0 * scissorScale);
-        draw.scissor.w = static_cast<int>((context.scissor.x1 - context.scissor.x0 + 1u) * scissorScale);
-        draw.scissor.h = static_cast<int>((context.scissor.y1 - context.scissor.y0 + 1u) * scissorScale);
+        draw.scissor.w = static_cast<int>((scissorX1 - std::min<uint32_t>(context.scissor.x0, scissorX1)) * scissorScale);
+        draw.scissor.h = static_cast<int>((scissorY1 - std::min<uint32_t>(context.scissor.y0, scissorY1)) * scissorScale);
 
         const float offsetX = static_cast<float>(context.xyoffset.ofx) / 16.0f;
         const float offsetY = static_cast<float>(context.xyoffset.ofy) / 16.0f;
@@ -3215,11 +3241,16 @@ bool SdlGpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba) {
     if (!m_impl->flushDraws())
         return false;
 
+    // A clear covers the buffer and never the page after it: a scissor ending
+    // past FBW pages must not widen the surface (see neededWidth in submit).
+    const uint32_t bufferPixels = context.frame.fbw * 64u;
+    uint32_t width = static_cast<uint32_t>(context.scissor.x1) + 1u;
+    if (bufferPixels != 0u && width > bufferPixels)
+        width = bufferPixels;
     std::string error;
     GsSurface *surface = m_impl->targets->acquire(
         context.frame.fbp << 5u, context.frame.fbw, context.frame.psm, false,
-        static_cast<uint32_t>(context.scissor.x1) + 1u,
-        static_cast<uint32_t>(context.scissor.y1) + 1u, error);
+        width, static_cast<uint32_t>(context.scissor.y1) + 1u, error);
     if (!surface || !m_impl->targets->prepareColorView(*surface, error)) {
         m_impl->setError(std::move(error));
         return false;

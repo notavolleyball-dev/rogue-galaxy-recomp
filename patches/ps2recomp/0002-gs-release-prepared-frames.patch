@@ -1,0 +1,26 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 4511666..39e3ebd 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -299,6 +299,12 @@ struct GSThreadedBackend::Impl
+                         }
+                     }
+                     execute(command);
++                    // The prepared frame holds one of the backend's few
++                    // presentation slots. A ticket dropped before this ran
++                    // must free it now, not when the batch ends: a batch with
++                    // more presentations than slots would wait on itself.
++                    if (command.op == Op::Prepare)
++                        std::get<Prepare>(batch[index].data).result.reset();
+                     bytes += command.bytes();
+                     // A batch can hold most of a frame. Returning its space as
+                     // it drains keeps the producer going instead of stopping
+@@ -320,7 +326,7 @@ struct GSThreadedBackend::Impl
+                 error = std::current_exception();
+                 failed.store(true, std::memory_order_release);
+                 for (const auto &command : batch)
+-                    if (command.op == Op::Prepare)
++                    if (command.op == Op::Prepare && std::get<Prepare>(command.data).result)
+                         std::get<Prepare>(command.data).result->fail(error);
+                 for (const auto &command : pending)
+                     if (command.op == Op::Prepare)

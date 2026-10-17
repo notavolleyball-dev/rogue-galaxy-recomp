@@ -84,6 +84,12 @@ std::vector<Step> parse(const char *script)
     return steps;
 }
 
+// The game's reads of pad 1 so far: one per game frame while it polls.
+uint32_t padReads()
+{
+    return ps2_stubs::getPadDebugSnapshot().ports[0][0].readCount;
+}
+
 } // namespace
 
 void startInputScript()
@@ -94,16 +100,42 @@ void startInputScript()
         return;
     }
     std::vector<Step> steps = parse(script);
+    const char *clock = std::getenv("RG_INPUT_CLOCK");
+    const bool padClock = clock && std::strcmp(clock, "pad") == 0;
     const auto start = std::chrono::steady_clock::now();
-    std::thread([steps, start]() {
+    std::thread([steps, start, padClock]() {
         constexpr uint8_t kCenter = 0x80;
+        // Polled: the game reads the pad once a frame, far slower than this.
+        const auto waitForReads = [](uint32_t target) {
+            while (padReads() < target)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        };
         for (const Step &step : steps)
         {
-            std::this_thread::sleep_until(start + std::chrono::duration<double>(step.seconds));
-            std::printf("[input] %.1fs: buttons 0x%04X for %u ms\n", step.seconds, step.mask, step.ms);
+            if (padClock)
+            {
+                waitForReads(static_cast<uint32_t>(step.seconds));
+            }
+            else
+            {
+                std::this_thread::sleep_until(start + std::chrono::duration<double>(step.seconds));
+            }
+            const uint32_t pressedAt = padReads();
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            std::printf("[input] %.1fs, pad read %u: buttons 0x%04X for %u %s\n", elapsed, pressedAt, step.mask,
+                        step.ms, padClock ? "reads" : "ms");
             std::fflush(stdout);
             ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~step.mask), step.lx, step.ly, kCenter, kCenter);
-            std::this_thread::sleep_for(std::chrono::milliseconds(step.ms));
+            if (padClock)
+            {
+                waitForReads(pressedAt + step.ms);
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(step.ms));
+            }
             ps2_stubs::setPadOverrideState(0xFFFFu, kCenter, kCenter, kCenter, kCenter);
         }
         ps2_stubs::clearPadOverrideState();

@@ -6,9 +6,10 @@ fights the first battles (HUD, damage, allies, results screen) at the game's
 own 30 frames per second, every frame presented once, with the GS on the
 GPU, VU1 compiled ahead of time and on a thread of its own, music and sound
 effects, keyboard or gamepad. The first battle, the heaviest scene so far,
-dips to about 22 and then runs in slow motion.
-Known gaps: movie audio is noise, and the remaining phase 5 work
-(widescreen, 60 fps logic, a launcher, self-contained packaging).
+dips to 15 to 22 and then runs in slow motion.
+Known gaps: a rare hang after the Story loading screen (below), and the
+remaining phase 5 work (widescreen, 60 fps logic, self-contained
+packaging).
 
 | Phase | Goal | State |
 |---|---|---|
@@ -16,8 +17,8 @@ Known gaps: movie audio is noise, and the remaining phase 5 work
 | 1 | Function maps for the ELF and the 5 real overlays | done |
 | 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
 | 3 | Boot to the title screen | done |
-| 4 | Field, battle, movies, sound | done, except movie audio |
-| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere; rest next |
+| 4 | Field, battle, movies, sound | done |
+| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere, launcher; rest next |
 
 ## Phase 1 in short
 
@@ -209,8 +210,9 @@ PCMPLAY, the same set DQ8-Recompiled runs) now load onto the framework's
 emulated IOP with an SPU2 (`ps2_native_iop::setModules` in `main.cpp`), so the
 game's libsdr and sound RPCs run their real code. Music and sound effects
 play (`PS2X_AUDIO_DUMP` confirms a clean music signal on the title screen).
-Movie audio does not: during the opening movie the output is noise (a sign
-change on nearly every sample). `RG_MUTE=1` silences the output.
+Movie audio did not, until phase 5 (**Movie audio**, below): during the
+opening movie the output was noise (a sign change on nearly every sample).
+`RG_MUTE=1` silences the output.
 
 **Speed.** In the first 3D scene (Salgin, the soldiers' cutscene) the game
 ran at 2.7 frames per second. Profiling (`RG_PROFILE`, below) showed why, in
@@ -327,7 +329,70 @@ the host clock, so host slowness reads as slow frames, which an emulator's
 guest clock never shows. `src/scene_timing.cpp` leaves the scene's step and
 time scale at 1 after the update (slow motion, as an emulator gives, when
 the host is slow); music still follows the measured time
-(`RG_TIME_SCALE=game` restores the game's scaling).
+(`RG_TIME_SCALE=game` restores the game's scaling). The flips themselves
+turned out to have another cause, rounding (below), and came back by hand
+with the clamp in place. With rounding fixed, the game's own scaling turns
+cleanly in a scripted battle (4 single snaps in 556 updates of the leader,
+none swinging back), but the first play with it lost Jaster in battle, so
+the clamp stays the default until that is explained.
+
+**Rounding.** The EE's FPU and VU0 round every result toward zero. The
+host rounds to nearest, and code that rounds with the 1.5 * 2^23 trick
+(add and subtract 12582912) then gets the next integer up. AngleWrap
+(0x1CBF30) and VecWrapAngle (0x1CBE90) wrap an angle that way, so on the
+host a small angle such as -0.23 came back as 6.05, a full turn added.
+Turning code that takes the difference of two wrapped angles then turned
+the leader the wrong way at full rate, and in battle, whenever the stick
+was released, the leader swung 60 degrees each way around its target every
+frame: 497 jumps of over a radian in 966 movement updates. Guest code now
+runs toward zero, with denormals as zero, like PCSX2's default
+(`patches/ps2recomp/0003`, `PS2X_EE_ROUNDING=nearest` to compare): 2 in
+669, all angles within plus or minus pi. The mode belongs to the guest
+fibers: the executor's own stack keeps the host's, but the host code that
+guest code calls on a fiber (syscalls, stubs, the GS frontend) runs under
+it too, and its float work tolerates that (exact divisions by 16, no
+rounding to integers).
+
+**Story-transition hangs.** After the Story loading bar reached 100% the
+game could stop for good. One cause was the GS worker: it held every
+prepared presentation until the end of its batch, each holding one of the
+SDL backend's three slots, so a batch with four waited on itself
+(`patches/ps2recomp/0002`; a forced worker stall reproduced it). Another,
+in about one scripted run in ten, remains: the saved return address of
+CfgVmRun (0x42FA20) at 0x01FFEF30 is overwritten by CfgVmFindOp and
+DataTableFindByKey working through a stale VM pointer in the global data
+table (gp-0x2078, its +4), left from an earlier DataTableRunCfg frame; the
+main thread then returns into the stack and is put to sleep while the
+loading thread keeps drawing the full bar. `RG_HWWATCH` (an x86 debug
+register on a guest word) found the writers; what leaves the pointer stale
+is not known yet.
+
+**Hooks and safe points.** A hook that replaces a function's table entry
+and does its work after calling the original was wrong whenever a safe
+point inside the original unwound to the run loop: the original finished
+later, after the hook's work. `src/return_hook.cpp` runs that work when
+the call really returns, by taking over the return address's table entry
+until then; flip pacing, the scene timing and the movie audio use it.
+
+**Movie audio.** The opening movie's sound turned, part way through, into
+full-scale noise or a garbled version of itself. Movie files (.MVI) are
+program streams with every 2048-byte sector XORed by one keystream (seed
+times 0x02E90EDD per word, the seed from a key string the game decodes),
+which a sector's pack header gives away, so the disc's PCM could be
+compared with what the game sent to the IOP (`RG_DUMP` on
+SifDmaSendSync, 0x1D2C20) and with the output (`PS2X_AUDIO_DUMP`). The
+game's PCM callback (0x1D4CA0) copies each packet, after its four-byte
+sub-stream header, into a 48 KB ring that the read thread drains to
+pcmplay's 24 KB on the IOP, and drops what does not fit: the runtime's
+demux runs ahead of the IOP by wall-clock time, so whole packets went
+missing, 4059, then 8132, 12191 bytes into the stream. The "SShd"/"SSbd"
+stream is 16-bit stereo in 512-byte blocks per channel: an odd shift gave
+noise, an even one swapped channels block by block. `src/movie_audio.cpp`
+queues every packet and tops the ring up whenever the read thread has
+sent some of it (`RG_MOVIE_AUDIO=game` for the game's callback); the
+whole movie now matches the disc sample for sample, bar a click in its
+first 0.2 s. The SPU2 plays it at full scale, as the game sets it (BVOL
+0x7FFF, MVOL 0x3FFF on both cores).
 
 **A VIF1-thread race.** The runtime's MSCAL/MSCNT callbacks read FBRST's
 D/T enables from, and wrote VPU_STAT into, the context of whatever guest
@@ -339,9 +404,26 @@ Story-to-cutscene transition remains unexplained (once in about fifty
 runs); `src/debug/crash_report.cpp` now prints the exception and the call
 stack of any crash into the log.
 
+**Seeing through walls.** After some menus (the transporter's, and
+something after the first battle) the canal water, characters and props
+drew over walls: a glassy band across the screen by the canals, dark boxes
+in mid-air. The header strip of the transporter menu is drawn with a
+scissor of 0 to 512 on a 512-pixel buffer (FBW 8); the GPU backend sized
+its surfaces by the scissor, so the depth buffer at page 0xE0 grew to 513
+pixels and its page set took in page 0x150, one past its end. The game
+uploads textures there for every object, and each upload made the backend
+discard the depth buffer (7905 times by the frame examined), so whatever
+came after drew on cleared depth. The surfaces now grow past FBW only for
+geometry that reaches past it, and host scissors are clipped to the
+surface (`thirdparty/dq8-gfx`, see its README). Found with a frame log
+(`RG_GS_FRAMELOG`, every batch of one frame and GS memory beside it),
+rasterizing it offline with the right depth, skipping batch ranges of that
+frame (`RG_GS_FRAMESKIP`) and `DQ8_GFX_TRACE_TARGETS`; scripted runs
+replay alike with `RG_INPUT_CLOCK=pad`.
+
 ## Open questions
 
-- Where the MVI XOR key comes from on this disc, and why movie audio is noise.
+- What leaves the data table's VM pointer stale before the Story hang.
 - The two `sceCdGetDiskType` entries (0x12A9D8, called by the game; 0x12AA70,
   the wrapper ps2_analyzer names) are both bound; phase 3 confirms which is
   the public one.

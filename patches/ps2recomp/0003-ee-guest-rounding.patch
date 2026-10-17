@@ -1,0 +1,51 @@
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 0387318..991d90b 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -8,6 +8,7 @@
+ #include <atomic>
+ #include <bit>
+ #include <cassert>
++#include <cfenv>
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -2076,10 +2077,38 @@ void EeScheduler::fiberEntry(void *user)
+     }
+ }
+ 
++// The EE's FPU and VU0 round every result toward zero and read and write
++// denormals as zero, which is also PCSX2's default for both (MXCSR 0xFFC0).
++// Under the host's round-to-nearest, guest code that rounds with the
++// 1.5 * 2^23 trick gets the next integer up: Rogue Galaxy's angle wrap then
++// adds a full turn to small angles, and its characters turn the wrong way,
++// overshoot and swing back every frame. The mode belongs to the fiber: a
++// switch saves and restores it, so the executor's own stack keeps the host's,
++// but everything guest code calls on its fiber (syscalls, host stubs, the GS
++// frontend) runs under it too, and their float work tolerates that.
++// PS2X_EE_ROUNDING=nearest leaves the host's mode.
++static void enterGuestFloatMode()
++{
++    static const bool keepHost = [] {
++        const char *value = std::getenv("PS2X_EE_ROUNDING");
++        return value && std::strcmp(value, "nearest") == 0;
++    }();
++    if (keepHost)
++    {
++        return;
++    }
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++    _mm_setcsr((_mm_getcsr() & ~0x6000u) | 0x6000u /* toward zero */ | 0x8000u /* FTZ */ | 0x0040u /* DAZ */);
++#else
++    std::fesetround(FE_TOWARDZERO);
++#endif
++}
++
+ // Runs on the fiber's stack. Nothing may escape it: an exception unwinding past
+ // the fiber entry has no frame to land on.
+ void EeScheduler::runPendingGuestCall()
+ {
++    enterGuestFloatMode();
+     PS2Runtime::RecompiledFunction function = m_pendingFunction;
+     R5900Context *context = m_pendingContext;
+     m_pendingFunction = nullptr;

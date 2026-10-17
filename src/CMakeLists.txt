@@ -7,6 +7,13 @@ set(RG_OVERLAYS title insmenu normal factory insect)
 # integer arithmetic; keep the optimizer from assuming otherwise.
 set(RG_GENERATED_FLAGS -O2 -g0 -fno-strict-aliasing -fwrapv)
 
+# ee_fpu.h reaches the generated code only through its precompiled header;
+# without it the EE float conversions would quietly round again.
+if(CMAKE_DISABLE_PRECOMPILE_HEADERS)
+    message(FATAL_ERROR "The generated code needs its precompiled header (ee_fpu.h); "
+                        "configure without CMAKE_DISABLE_PRECOMPILE_HEADERS")
+endif()
+
 # One static library per generated tree. Each tree has its own
 # ps2_recompiled_functions.h behind the same include guard, so a tree's own
 # directory must come first on its include path and trees never share a TU.
@@ -64,12 +71,16 @@ add_executable(roguegalaxy
     depth_reads.cpp
     ee_fpu.cpp
     flip_pacing.cpp
+    movie_audio.cpp
+    return_hook.cpp
     scene_timing.cpp
     vif1_thread.cpp
     overlay/overlay_manager.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
+    debug/gs_census.cpp
     debug/gs_timing.cpp
+    debug/hw_watch.cpp
     debug/input_script.cpp
     debug/sampler.cpp
     debug/selftest.cpp

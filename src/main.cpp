@@ -16,12 +16,14 @@
 
 #include "debug/call_trace.h"
 #include "debug/crash_report.h"
+#include "debug/hw_watch.h"
 #include "debug/input_script.h"
 #include "debug/sampler.h"
 #include "debug/selftest.h"
 #include "overlay/overlay_manager.h"
 #include "flip_pacing.h"
 #include "graphics.h"
+#include "movie_audio.h"
 #include "scene_timing.h"
 #include "vif1_thread.h"
 #include "ps2_runtime.h"
@@ -118,7 +120,9 @@ int run(int argc, char **argv)
     rg::graphics::installFlipHook(runtime);
     rg::vif1::install(runtime);
     rg::timing::install(runtime);
+    rg::movie::install(runtime);
     rg::debug::installCallTrace(runtime);
+    rg::debug::installHardwareWatch(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
     std::printf("[rg] booting %s\n", elf.string().c_str());
@@ -141,6 +145,9 @@ int run(int argc, char **argv)
 int main(int argc, char **argv)
 {
     int status = 1;
+    // Redirected to a file (RogueGalaxy.bat), stdout is fully buffered, and
+    // a crash or a killed process loses its last lines.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     rg::debug::installCrashReport();
     try
     {
