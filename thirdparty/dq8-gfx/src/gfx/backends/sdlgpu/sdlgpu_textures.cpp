@@ -203,6 +203,8 @@ GsTextureCache::~GsTextureCache() {
 }
 
 void GsTextureCache::reset() {
+    if (!m_entries.empty())
+        beforeRewrite(nullptr);
     if (m_device.valid()) {
         for (auto &[key, entry] : m_entries) {
             (void)key;
@@ -748,11 +750,15 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
             error = std::string("SDL_CreateGPUTexture(indexed from target): ") + SDL_GetError();
             return false;
         }
-        if (entry.texture)
+        if (entry.texture) {
+            beforeRewrite(entry.texture);
             SDL_ReleaseGPUTexture(m_device.handle(), entry.texture);
+        }
         entry.texture = texture;
         entry.renderable = true;
         region = {0u, 0u, key.width, key.height};
+    } else {
+        beforeRewrite(entry.texture);
     }
 
     const SDL_Rect rect{int(region.x0), int(region.y0), int(region.width()), int(region.height())};
@@ -824,6 +830,7 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     const bool unchanged = wholeTexture && !entry.clutUploadPending &&
                            texelHash == entry.identity.texels;
     if (!unchanged) {
+        beforeRewrite(entry.texture);
         if (!uploadRegion(entry.texture, region, error))
             return false;
     }

@@ -17,6 +17,7 @@
 #include <SDL3/SDL_gpu.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -116,6 +117,12 @@ public:
     // pointers -- a queued draw does -- must retire them before that happens.
     bool evictionImminent() const;
 
+    // Called before a cached texture is rewritten in place or released (null:
+    // every texture, before the cache is cleared). Host writes no longer
+    // flush the queued draws, so a draw queued with the old texels may still
+    // be waiting; the backend lands it first. (Rogue Galaxy: added.)
+    void setBeforeRewrite(std::function<void(SDL_GPUTexture *)> hook) { m_beforeRewrite = std::move(hook); }
+
     // Pages a draw state's texture would be built from, so a caller can tell
     // whether queued work still owes it content.
     GsPageSet sourcePagesFor(const GSDrawState &state) const;
@@ -150,6 +157,12 @@ private:
         // Created as a colour target too, so it can be built on the GPU.
         bool renderable = false;
     };
+
+    std::function<void(SDL_GPUTexture *)> m_beforeRewrite;
+    void beforeRewrite(SDL_GPUTexture *texture) {
+        if (m_beforeRewrite)
+            m_beforeRewrite(texture);
+    }
 
     bool build(const GsTextureKey &key, Entry &entry, std::string &error);
     bool resolveSource(const GsTextureKey &key, const GsRegion &region, std::string &error);

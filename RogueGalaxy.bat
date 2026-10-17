@@ -20,6 +20,8 @@ if not exist "disc\SCUS_974.90" (
 rem Options (see "Running" in README.md), for example:
 rem   set RG_SHOW_FPS=1
 rem   set RG_MUTE=1
+rem 60 fps mode (experimental, see RG_FPS in README.md): remove the line for 30.
+set RG_FPS=60
 
 echo Rogue Galaxy is running. Close the game window to quit.
 "%GAME%" "disc\SCUS_974.90" %* > "build\last-run.log" 2>&1

@@ -372,7 +372,17 @@ and does its work after calling the original was wrong whenever a safe
 point inside the original unwound to the run loop: the original finished
 later, after the hook's work. `src/return_hook.cpp` runs that work when
 the call really returns, by taking over the return address's table entry
-until then; flip pacing, the scene timing and the movie audio use it.
+until then; flip pacing, the scene timing and the movie audio use it. A
+hook that returns without calling the original has to leave `pc = ra`
+itself, as `jr $ra` does: a call through dispatchGuestBranch forgives a pc
+left at the entry, but a thread that a safe point unwound at that call is
+resumed by the run loop at the entry, and a hook that leaves pc there is
+dispatched again forever. The VIF1 hooks for sceDmaSend and sceDmaSync
+did that, and the 60 fps mode's event cadence made the loading thread's
+`Vif1DmaHandlerShutdown` hit it every time at 1x scale: the game froze at
+the Story text with the executor spinning (`RG_PROFILE` with
+`RG_PROFILE_STACKS=1` showed the game thread cycling through the hook,
+`PS2X_KERNEL_TRACE_MS` the thread stuck at the hook's entry).
 
 **Movie audio.** The opening movie's sound turned, part way through, into
 full-scale noise or a garbled version of itself. Movie files (.MVI) are
@@ -436,6 +446,40 @@ which go on while the game is paused. Widescreen and 60 fps are separate
 work: the game has no 16:9 option of its own; nemesis2000's PCSX2 patch (five
 words in the ELF, verified) would give it, and no speed-correct 60 fps code
 exists for the NTSC-U release.
+
+**60 fps (`RG_FPS=60`, experimental).** The game paces itself with a vsync
+interval the flip waits for (2 at boot, `DrawEnvSetVsyncInterval`; its own
+menus switch to 1 with the scene's time scale locked) and scales the
+scene's logic by the measured frame time: `GfxEndFrame` clamps the frame's
+CPU/GS time to between one and two intervals, and `GameSceneTimeScaleUpdate`
+divides it by two, never below 1.0, so at interval 1 the game would run
+twice as fast (the PAL 60 fps patch rewrites those constants).
+`src/scene_timing.cpp` writes interval 1 before each flip (2 while a movie
+plays, between `MoviePlayerStart` and `MoviePlayerShutdown`; the game's own
+`MovieIsStarted` flag stays set after a movie) and, after the update, a
+scale of frame time over two with 0.5 as the floor, so the logic advances
+at the same rate over however many frames the host manages
+(`RG_TIME_SCALE=fixed` holds 0.5). The game's locked overlays are left to
+themselves. It runs, at the right speed, and this machine then shows about
+33 frames a second in Salgin's streets at 1x as at 2x: the GS worker is
+the limit, not the GPU's resolution. Its first profile (`RG_PROFILE`) was
+a quarter CPU-side texture writes (`GsVram::writeRunT4` 23%, the 4-bit
+textures the game re-uploads every frame, plus 6% in 32-bit writes), a
+quarter the NVIDIA driver, and the rest texture-cache and render-target
+bookkeeping, including fence waits for render targets read back to the CPU
+(`downloadScaled`); the game thread was idle 40% of the time, the VIF1
+thread about 15%. Two changes in `thirdparty/dq8-gfx` since: the run
+writers go span by span instead of recomputing the page address per texel
+(writeRunT4 23% to 11%), and a host-to-local transfer no longer flushes
+the queued draws unless they touch its pages (about 350 command buffer
+submissions a frame fewer). Salgin went from 33 to 35 frames a second.
+What remains in the worker is the render-target cache around the pages
+the game reuses (the character target at page 0x150 shares pages with the
+bloom targets and with every object's texture upload): GPU page copies
+between aliased surfaces, CPU patches of host writes into them, and
+readbacks with fence waits, together about a quarter; 935 draw calls and
+236 render passes a frame; and the texture writes. Reaching 60 means
+halving the worker again, most of it in that ownership model.
 
 ## Open questions
 

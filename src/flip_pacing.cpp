@@ -10,6 +10,7 @@
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "runtime/gs/gs_backend.h"
+#include "scene_timing.h"
 
 namespace rg::graphics
 {
@@ -164,6 +165,8 @@ void afterFlip(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 
 void flipHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    // The vsync interval this flip waits for (RG_FPS=60).
+    rg::timing::beforeFlip(rdram, ctx);
     // Its vsync wait blocks on a fiber and keeps this native frame, but a
     // safe point inside the flip unwinds it: the frame is presented when the
     // flip has really returned (return_hook.h).

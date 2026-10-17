@@ -4,6 +4,7 @@
 #include "runtime/gs/ps2_gs_memory.h"
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 
 namespace dq8::gfx {
@@ -22,6 +23,34 @@ void ensureLookupTables() {
 // layouts (copied from ps2_gs_memory.cpp), so every address is identical.
 using P8Traits = GSMem::PixelStorageTraits<GSMem::P8>;
 using P4Traits = GSMem::PixelStorageTraits<GSMem::P4>;
+using C32Traits = GSMem::PixelStorageTraits<GSMem::C32>;
+using Z32Traits = GSMem::PixelStorageTraits<GSMem::Z32>;
+
+constexpr C32Traits::BlockLookupTableT kBlockTableC32{{
+    {0, 1, 4, 5, 16, 17, 20, 21},
+    {2, 3, 6, 7, 18, 19, 22, 23},
+    {8, 9, 12, 13, 24, 25, 28, 29},
+    {10, 11, 14, 15, 26, 27, 30, 31},
+}};
+
+constexpr Z32Traits::BlockLookupTableT kBlockTableZ32{{
+    {24, 25, 28, 29, 8, 9, 12, 13},
+    {26, 27, 30, 31, 10, 11, 14, 15},
+    {16, 17, 20, 21, 0, 1, 4, 5},
+    {18, 19, 22, 23, 2, 3, 6, 7},
+}};
+
+// Shared by C32 and Z32.
+constexpr C32Traits::ColumnLookupTableT kColumnTable32{{
+    {0, 1, 4, 5, 8, 9, 12, 13},
+    {2, 3, 6, 7, 10, 11, 14, 15},
+    {16, 17, 20, 21, 24, 25, 28, 29},
+    {18, 19, 22, 23, 26, 27, 30, 31},
+    {32, 33, 36, 37, 40, 41, 44, 45},
+    {34, 35, 38, 39, 42, 43, 46, 47},
+    {48, 49, 52, 53, 56, 57, 60, 61},
+    {50, 51, 54, 55, 58, 59, 62, 63},
+}};
 
 constexpr P8Traits::BlockLookupTableT kBlockTableP8{{
     {0, 1, 4, 5, 16, 17, 20, 21},
@@ -97,20 +126,96 @@ const P4Traits::PageLookupTableT &pageTableP4() {
     return *table;
 }
 
+const C32Traits::PageLookupTableT &pageTableC32() {
+    static const auto *table = [] {
+        auto *t = new C32Traits::PageLookupTableT{};
+        C32Traits::InitPageLookupTable(*t, kBlockTableC32, kColumnTable32);
+        return t;
+    }();
+    return *table;
+}
+
+const Z32Traits::PageLookupTableT &pageTableZ32() {
+    static const auto *table = [] {
+        auto *t = new Z32Traits::PageLookupTableT{};
+        Z32Traits::InitPageLookupTable(*t, kBlockTableZ32, kColumnTable32);
+        return t;
+    }();
+    return *table;
+}
+
+} // namespace
+
+namespace {
+
+// The run writers below are Traits::Write unrolled over spans: the address
+// of a texel is page * PixelsPerPage + table[block][y % pageH][x % pageW],
+// and along a row only x changes until the row or the page ends. Traits::Write
+// redid the page arithmetic and a lookup in a megabyte-sized table for every
+// texel; with a thousand uploads a frame that was a quarter of the GS worker.
+// Same addresses (the selftest checks them against GSMem).
+template <typename Traits, typename Table, typename Texel>
+void writeRunSpans(const Table &table, uint8_t *data, uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd,
+                   uint32_t x, uint32_t y, uint32_t count, Texel texel) {
+    constexpr uint32_t pageW = Traits::PageExtent().x;
+    constexpr uint32_t pageH = Traits::PageExtent().y;
+    constexpr uint32_t pixelsPerPage = static_cast<uint32_t>(Traits::PixelsPerPage());
+    constexpr uint32_t blocksPerPage = static_cast<uint32_t>(Traits::BlocksPerPage());
+    const uint32_t block = base % blocksPerPage;
+    const uint32_t basePage = base / blocksPerPage;
+    const uint32_t pagesPerRow = (bw * 64u) / pageW;
+    uint32_t i = 0;
+    while (i < count) {
+        if (x >= rowEnd) {
+            x = dsax;
+            ++y;
+            if (dsax >= rowEnd)
+                return; // an empty row never advances
+            continue;
+        }
+        const uint32_t pageCol = x / pageW;
+        const uint32_t page = basePage + (y / pageH) * pagesPerRow + pageCol;
+        const uint32_t pageBase = page * pixelsPerPage;
+        const auto &row = table[block][y % pageH];
+        const uint32_t spanEnd = std::min(rowEnd, (pageCol + 1u) * pageW);
+        const uint32_t n = std::min(count - i, spanEnd - x);
+        uint32_t px = x % pageW;
+        for (uint32_t k = 0; k < n; ++k, ++i, ++px)
+            texel(data, pageBase + row[px], i);
+        x += n;
+    }
+}
+
 } // namespace
 
 void GsVram::writeRunT8(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
                         const uint8_t *src, uint32_t count) {
     if (!attached())
         return;
-    const auto &table = pageTableP8();
-    for (uint32_t i = 0; i < count; ++i) {
-        P8Traits::Write(table, m_data, base, bw, x, y, src[i]);
-        if (++x >= rowEnd) {
-            x = dsax;
-            ++y;
-        }
-    }
+    writeRunSpans<P8Traits>(pageTableP8(), m_data, base, bw, dsax, rowEnd, x, y, count,
+                            [src](uint8_t *data, uint32_t pixel, uint32_t i) {
+                                data[pixel & (GSMem::MEMORY_SIZE - 1u)] = src[i];
+                            });
+}
+
+void GsVram::writeRunCT32(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                          const uint8_t *src, uint32_t count) {
+    if (!attached())
+        return;
+    writeRunSpans<C32Traits>(pageTableC32(), m_data, base, bw, dsax, rowEnd, x, y, count,
+                             [src](uint8_t *data, uint32_t pixel, uint32_t i) {
+                                 std::memcpy(data + ((pixel * 4u) & (GSMem::MEMORY_SIZE - 4u)), src + i * 4u, 4u);
+                             });
+}
+
+void GsVram::writeRunZ32(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                         const uint8_t *src, uint32_t count) {
+    if (!attached())
+        return;
+    writeRunSpans<Z32Traits>(pageTableZ32(), m_data, base, bw, dsax, rowEnd, x, y, count,
+                             [src](uint8_t *data, uint32_t pixel, uint32_t i) {
+                                 std::memcpy(data + ((pixel * 4u) & (GSMem::MEMORY_SIZE - 4u)), src + i * 4u, 4u);
+                             });
 }
 
 void GsVram::readRowT4(uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t count, uint8_t *out) const {
@@ -126,15 +231,17 @@ void GsVram::writeRunT4(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowE
                         const uint8_t *src, uint32_t count) {
     if (!attached())
         return;
-    const auto &table = pageTableP4();
-    for (uint32_t i = 0; i < count; ++i) {
-        const uint8_t packed = src[i >> 1u];
-        P4Traits::Write(table, m_data, base, bw, x, y, (i & 1u) ? (packed >> 4u) : (packed & 0x0fu));
-        if (++x >= rowEnd) {
-            x = dsax;
-            ++y;
-        }
-    }
+    writeRunSpans<P4Traits>(pageTableP4(), m_data, base, bw, dsax, rowEnd, x, y, count,
+                            [src](uint8_t *data, uint32_t pixel, uint32_t i) {
+                                // Two texels a byte on both sides; the source's low
+                                // nibble comes first, the destination's shift is the
+                                // address's own bit.
+                                const uint8_t packed = src[i >> 1u];
+                                const uint32_t value = (i & 1u) ? (packed >> 4u) : (packed & 0x0fu);
+                                uint8_t &byte = data[(pixel >> 1u) & (GSMem::MEMORY_SIZE - 1u)];
+                                const uint32_t shift = (pixel & 1u) * 4u;
+                                byte = static_cast<uint8_t>((byte & ~(0x0fu << shift)) | (value << shift));
+                            });
 }
 
 GsPageExtent gsPageExtent(uint32_t psm) {

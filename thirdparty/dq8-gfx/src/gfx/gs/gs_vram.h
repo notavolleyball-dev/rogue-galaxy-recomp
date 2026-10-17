@@ -91,6 +91,12 @@ public:
                     const uint8_t *src, uint32_t count);
     void writeRunT4(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
                     const uint8_t *src, uint32_t count);
+    // The same for PSMCT32 and PSMZ32, four bytes a pixel (Rogue Galaxy:
+    // added; GSMem's own run writers redo the page arithmetic per pixel).
+    void writeRunCT32(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                      const uint8_t *src, uint32_t count);
+    void writeRunZ32(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
+                     const uint8_t *src, uint32_t count);
     // `count` PSMT4 indices of one row from (x, y), one per byte, as read()
     // returns them (Rogue Galaxy: added, for texture expansion).
     void readRowT4(uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t count, uint8_t *out) const;

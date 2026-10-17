@@ -323,6 +323,16 @@ uint32_t channelOf(R5900Context *ctx)
     return getRegU32(ctx, 4) & 0x1FFFFF00u;
 }
 
+// What `jr $ra` leaves. A hook that returns without the original must do
+// this itself: a call through dispatchGuestBranch forgives a pc left at the
+// entry, but a thread the run loop resumes at the entry (a safe point
+// unwound it at that call) would be dispatched here again, forever.
+void returnToCaller(R5900Context *ctx, int32_t value)
+{
+    setReturnS32(ctx, value);
+    ctx->pc = getRegU32(ctx, 31);
+}
+
 // What the stub does right after a transfer, for the lists that have
 // finished since, on the game's thread: VU1's D/T stop bits into VPU_STAT,
 // and the DMAC completion handlers.
@@ -379,7 +389,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
-    setReturnS32(ctx, 0);
+    returnToCaller(ctx, 0);
 }
 
 void dmaSend(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { send(rdram, ctx, runtime, g_dmaSend, false); }
@@ -398,12 +408,12 @@ void dmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     if (getRegU32(ctx, 5) != 0u && g_thread->busy())
     {
-        setReturnS32(ctx, 1);
+        returnToCaller(ctx, 1);
         return;
     }
     g_thread->drain();
     reportFinished(rdram, ctx, runtime);
-    setReturnS32(ctx, 0);
+    returnToCaller(ctx, 0);
 }
 
 // The libgraph stubs: the lists in flight first, then the stub.

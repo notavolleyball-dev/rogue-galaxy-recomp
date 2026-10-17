@@ -482,11 +482,48 @@ struct SdlGpuBackend::Impl {
         }
         pendingTargets.push_back({color, pages});
     }
+    // Pages the queued batches sample from live targets: a sampled target, or
+    // a feedback batch's own colour target, through a snapshot the flush
+    // takes. A host write into them has to wait for that flush.
+    GsPageSet pendingSourcePages{};
+    void noteSampled(const DrawBatch &draw) {
+        if (draw.source)
+            pendingSourcePages |= draw.source->pages;
+        if (draw.feedback && draw.color)
+            pendingSourcePages |= draw.color->pages;
+    }
     void clearBatches() {
         batches.clear();
         pendingPages.reset();
         pendingTargets.clear();
+        pendingSourcePages.reset();
     }
+
+    // Whether a host write into these pages has to land the queued draws
+    // first: they draw into the pages, or into a surface the pages belong to
+    // (its resolve or refresh would miss them otherwise), or they sample
+    // from them. Any other write goes ahead of the flush: the textures the
+    // queued draws hold were expanded when they were queued, and a cached
+    // texture is never rewritten under a queued draw (the texture cache's
+    // before-rewrite hook lands the draws first). Rogue Galaxy uploads
+    // about 350 textures a frame between its draws; flushing at each one
+    // submitted that many command buffers a frame.
+    bool transferConflicts(const GsPageSet &pages) const {
+        if (flushOnTransfer || (pendingPages & pages).any() || (pendingSourcePages & pages).any())
+            return true;
+        for (const auto &target : pendingTargets)
+            if ((target.color->pages & pages).any())
+                return true;
+        return false;
+    }
+    bool batchesUse(const SDL_GPUTexture *texture) const {
+        for (const DrawBatch &batch : batches)
+            if (batch.texture == texture)
+                return true;
+        return false;
+    }
+    // DQ8_GFX_FLUSH_ON_TRANSFER: the old behaviour, a flush at every transfer.
+    const bool flushOnTransfer = std::getenv("DQ8_GFX_FLUSH_ON_TRANSFER") != nullptr;
 
     SDL_GPUBuffer *vertexBuffer = nullptr;
     uint32_t vertexBufferCapacity = 0u;
@@ -639,8 +676,9 @@ struct SdlGpuBackend::Impl {
     // Draws are deferred, so anything that touches local memory has to land
     // them first: otherwise a transfer would overwrite a region whose pending
     // draws had not happened yet, and the draws would then be applied on top.
-    bool settleFor(const GsPageSet &pages, bool hostWrite = false, const GsPageSet &covered = {}) {
-        if (!flushDraws())
+    bool settleFor(const GsPageSet &pages, bool hostWrite = false, const GsPageSet &covered = {},
+                   bool flush = true) {
+        if (flush && !flushDraws())
             return false;
         std::string error;
         if (!(hostWrite ? targets->resolveForHostWrite(pages, error, covered) : targets->resolve(pages, error)))
@@ -1507,6 +1545,7 @@ struct SdlGpuBackend::Impl {
             notePending(draw.color, draw.writtenPages);
         } else {
             notePending(draw.color, draw.writtenPages);
+            noteSampled(draw);
             draw.firstVertex = firstVertex;
             draw.vertexCount = addedVertices;
             batches.push_back(draw);
@@ -3016,9 +3055,15 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     });
     if (!m_impl->targets)
         m_impl->targets = std::make_unique<GsTargetCache>(m_impl->device, m_impl->vram);
-    if (!m_impl->textures)
+    if (!m_impl->textures) {
         m_impl->textures = std::make_unique<GsTextureCache>(m_impl->device, m_impl->vram,
                                                             *m_impl->targets);
+        m_impl->textures->setBeforeRewrite([impl = m_impl.get()](SDL_GPUTexture *texture) {
+            // Queued draws still sample it: they go first.
+            if (!impl->batches.empty() && (!texture || impl->batchesUse(texture)))
+                impl->flushDraws();
+        });
+    }
     m_impl->targets->setScale(m_impl->scale);
     m_impl->targets->reset();
     m_impl->textures->reset();
@@ -3072,9 +3117,15 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
                     command.bitbltbuf.dpsm,
                     command.trxreg.rrw, command.trxreg.rrh,
                     command.trxpos.dsax, command.trxpos.dsay);
-        if (!m_impl->batches.empty())
-            ++m_impl->stats.transferFlushes;
-        if (!m_impl->flushDraws()) return;
+        // A host write lands ahead of the queued draws unless it conflicts
+        // with them (transferConflicts); a local copy always waits for them.
+        if (command.direction != 0u || m_impl->transferConflicts(pages)) {
+            if (!m_impl->batches.empty())
+                ++m_impl->stats.transferFlushes;
+            if (!m_impl->flushDraws()) return;
+        } else if (!m_impl->batches.empty()) {
+            ++m_impl->stats.transferFlushesSkipped;
+        }
         if (command.direction != 0u || command.bitbltbuf.dpsm != GS_PSM_CT32 ||
             !m_impl->targets->canPatchHostWrite(pages)) {
             GsPageSet covered;
@@ -3082,7 +3133,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
                                std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
                                command.bitbltbuf.dpsm, command.trxreg.rrw, command.trxreg.rrh,
                                command.trxpos.dsax, command.trxpos.dsay);
-            if (!m_impl->settleFor(pages, true, covered)) return;
+            if (!m_impl->settleFor(pages, true, covered, false)) return;
             m_impl->coveredTransferOpen = command.direction == 0u && covered.any();
         }
     }
@@ -3105,8 +3156,13 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
                     command.trxreg.rrw, command.trxreg.rrh,
                     command.trxpos.dsax, command.trxpos.dsay);
         // Draws can occur between IMAGE fragments, so recheck ownership at
-        // each payload before any CPU bytes change.
-        if (!m_impl->flushDraws()) return;
+        // each payload before any CPU bytes change; the queued draws go
+        // first only when they touch these pages (transferConflicts).
+        if (m_impl->transferConflicts(pages)) {
+            if (!m_impl->batches.empty())
+                ++m_impl->stats.transferFlushes;
+            if (!m_impl->flushDraws()) return;
+        }
         m_impl->patchingHostWrite = m_impl->targets->canPatchHostWrite(pages);
         GsPageSet covered;
         gsMarkCoveredPages(covered, command.bitbltbuf.dbp,
@@ -3114,7 +3170,7 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
                            command.trxreg.rrw, command.trxreg.rrh,
                            command.trxpos.dsax, command.trxpos.dsay);
         if (!m_impl->patchingHostWrite) {
-            if (!m_impl->settleFor(pages, true, covered)) return;
+            if (!m_impl->settleFor(pages, true, covered, false)) return;
             m_impl->coveredTransferOpen = m_impl->coveredTransferOpen || covered.any();
         }
     }
@@ -3519,6 +3575,10 @@ std::unique_ptr<SdlGpuBackend> createSdlGpuBackend(std::string &error) {
         backend->m_impl->device, backend->m_impl->vram);
     backend->m_impl->textures = std::make_unique<GsTextureCache>(
         backend->m_impl->device, backend->m_impl->vram, *backend->m_impl->targets);
+    backend->m_impl->textures->setBeforeRewrite([impl = backend->m_impl.get()](SDL_GPUTexture *texture) {
+        if (!impl->batches.empty() && (!texture || impl->batchesUse(texture)))
+            impl->flushDraws();
+    });
     return backend;
 }
 

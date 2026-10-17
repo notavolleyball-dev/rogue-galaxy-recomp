@@ -30,6 +30,9 @@ struct SdlGpuStats {
     uint64_t transfersBegun = 0u;
     uint64_t transferBytes = 0u;
     uint64_t transferFlushes = 0u;
+    // Host writes that went ahead of the queued draws, which did not touch
+    // their pages (Rogue Galaxy: added).
+    uint64_t transferFlushesSkipped = 0u;
 
     uint64_t primitivesSubmitted = 0u;
     uint64_t primitivesDrawn = 0u;

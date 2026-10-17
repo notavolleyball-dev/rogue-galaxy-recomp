@@ -228,11 +228,9 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
         if (available != 0u) {
             const uint32_t rowEnd = dsax + rrw;
             if (dpsm == GS_PSM_CT32) {
-                GSMem::WriteRunCT32(m_vram.data(), dbp, dbw, dsax, rowEnd, m_state.x, m_state.y,
-                                    data + offset, available);
+                m_vram.writeRunCT32(dbp, dbw, dsax, rowEnd, m_state.x, m_state.y, data + offset, available);
             } else {
-                GSMem::WriteRunZ32(m_vram.data(), dbp, dbw, dsax, rowEnd, m_state.x, m_state.y,
-                                   data + offset, available);
+                m_vram.writeRunZ32(dbp, dbw, dsax, rowEnd, m_state.x, m_state.y, data + offset, available);
             }
             offset += available * 4u;
             wrote = true;

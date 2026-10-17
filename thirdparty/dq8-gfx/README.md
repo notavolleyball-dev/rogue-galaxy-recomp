@@ -37,11 +37,14 @@ render targets about ten times a frame, both far more than DQ8; these
 changes speed those paths up without changing their results. The first
 commit of this folder is upstream as is, so `git log -p` on it shows them.
 
-- `gs/gs_vram`: `writeRunT8`, `writeRunT4` and `readRowT4`, built on the
-  same `PixelStorageTraits` and layout tables as GSMem, so addresses match
-  (the game's `RG_SELFTEST=gs` checks them against GSMem).
-- `gs/gs_transfer.cpp`: host-to-local PSMT8 and PSMT4 transfers write runs
-  instead of one dispatched `write()` per pixel.
+- `gs/gs_vram`: `writeRunT8`, `writeRunT4`, `writeRunCT32`, `writeRunZ32`
+  and `readRowT4`, built on the same `PixelStorageTraits` and layout tables
+  as GSMem, so addresses match (the game's `RG_SELFTEST=gs` checks them
+  against GSMem). The writers go span by span: along a row only x changes
+  until the row or the page ends, so the page arithmetic and the lookup in
+  the megabyte-sized page table happen once per span, not per texel.
+- `gs/gs_transfer.cpp`: host-to-local PSMT8, PSMT4, PSMCT32 and PSMZ32
+  transfers write runs instead of one dispatched `write()` per pixel.
 - `sdlgpu_textures.cpp`: PSMT4 textures expand through the palette
   `buildPalette` already resolved; the general path re-read every texel's
   CLUT entry from local memory.
@@ -51,6 +54,14 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
 - `sdlgpu_backend.cpp`: the feedback snapshot's tail upload reuses one
   transfer buffer mapped with cycling; the FPS readout keeps the window's
   own title in front instead of "DQ8Recomp".
+- `sdlgpu_backend.cpp`, `sdlgpu_textures`: a host-to-local transfer no
+  longer flushes the queued draws unless they touch its pages (draw into
+  them or into a surface they belong to, or sample from them). Rogue Galaxy
+  uploads about 350 textures a frame between its draws, and each flush is a
+  command buffer submission. The textures queued draws hold were expanded
+  when they were queued, and the texture cache now tells the backend before
+  it rewrites or releases a texture, so a draw still holding it is flushed
+  first. `DQ8_GFX_FLUSH_ON_TRANSFER=1` restores the flush at every transfer.
 
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's

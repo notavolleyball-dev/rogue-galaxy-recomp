@@ -30,7 +30,10 @@ bool vramRunWriters()
     std::mt19937 rng(1234);
     for (int round = 0; round < 400; ++round)
     {
-        const bool t4 = (round & 1) != 0;
+        const int mode = round % 4; // T8, T4, CT32, Z32
+        const bool t4 = mode == 1;
+        const bool wide = mode >= 2;
+        const bool z = mode == 3;
         for (size_t i = 0; i < kSize; ++i)
         {
             expected[i] = actual[i] = static_cast<uint8_t>(rng());
@@ -49,7 +52,7 @@ bool vramRunWriters()
             start &= ~1u;
         }
         const uint32_t count = total - start;
-        std::vector<uint8_t> src(t4 ? (count + 1u) / 2u : count);
+        std::vector<uint8_t> src(t4 ? (count + 1u) / 2u : wide ? count * 4u : count);
         for (auto &b : src)
         {
             b = static_cast<uint8_t>(rng());
@@ -64,6 +67,19 @@ bool vramRunWriters()
                 const uint8_t packed = src[i / 2u];
                 GSMem::WriteP4(expected.data(), base, bw, x, y, (i & 1u) ? packed >> 4u : packed & 0x0fu);
             }
+            else if (wide)
+            {
+                uint32_t value = 0u;
+                std::memcpy(&value, src.data() + i * 4u, sizeof(value));
+                if (z)
+                {
+                    GSMem::WriteZ32(expected.data(), base, bw, x, y, value);
+                }
+                else
+                {
+                    GSMem::WriteCT32(expected.data(), base, bw, x, y, value);
+                }
+            }
             else
             {
                 GSMem::WriteP8(expected.data(), base, bw, x, y, src[i]);
@@ -75,6 +91,14 @@ bool vramRunWriters()
         {
             vram.writeRunT4(base, bw, dsax, dsax + rrw, x0, y0, src.data(), count);
         }
+        else if (z)
+        {
+            vram.writeRunZ32(base, bw, dsax, dsax + rrw, x0, y0, src.data(), count);
+        }
+        else if (wide)
+        {
+            vram.writeRunCT32(base, bw, dsax, dsax + rrw, x0, y0, src.data(), count);
+        }
         else
         {
             vram.writeRunT8(base, bw, dsax, dsax + rrw, x0, y0, src.data(), count);
@@ -82,11 +106,11 @@ bool vramRunWriters()
         if (std::memcmp(expected.data(), actual.data(), kSize) != 0)
         {
             std::fprintf(stderr, "[selftest] %s run differs: base=0x%x bw=%u pos=(%u,%u) %ux%u start=%u\n",
-                         t4 ? "T4" : "T8", base, bw, dsax, dsay, rrw, rrh, start);
+                         t4 ? "T4" : z ? "Z32" : wide ? "CT32" : "T8", base, bw, dsax, dsay, rrw, rrh, start);
             return false;
         }
     }
-    std::printf("[selftest] GsVram T4/T8 run writers match GSMem over 400 rectangles\n");
+    std::printf("[selftest] GsVram T4/T8/CT32/Z32 run writers match GSMem over 400 rectangles\n");
 
     // The T4 row reader against GSMem::ReadP4 over the random memory left above.
     std::vector<uint8_t> row(512);
