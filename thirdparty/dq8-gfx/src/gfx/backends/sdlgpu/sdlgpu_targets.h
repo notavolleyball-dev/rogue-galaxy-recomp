@@ -108,6 +108,9 @@ struct GsTargetCacheStats {
     uint64_t depthDiscards = 0u;
     uint64_t resolvedPixels = 0u;
     uint64_t refreshedPixels = 0u;
+    // Surfaces a whole-surface sprite took over without an import
+    // (Rogue Galaxy: added).
+    uint64_t wholeClaims = 0u;
 };
 
 class GsTargetCache {
@@ -169,6 +172,11 @@ public:
     // Copy native CT32 pages across pitches, reinterpret matching CT32/CT16
     // views, or resolve unsupported aliases before this view uses them.
     bool prepareColorView(GsSurface &surface, std::string &error);
+    // In place of prepareColorView when the next draw replaces every pixel
+    // of the surface: aliased views lose these pages without a copy, and
+    // local memory's pending content for them is dropped (Rogue Galaxy:
+    // added).
+    void claimWhole(GsSurface &surface);
 
     // Records that a draw wrote this region of a surface.
     void markDrawn(GsSurface &surface, const GsRegion &region);
@@ -180,6 +188,12 @@ public:
     // presentation composite from the scaled texture instead of forcing a
     // resolve down to native resolution.
     GsSurface *findColorSurface(uint32_t base, uint32_t psm) const;
+    // An existing depth surface at least this big, or null; never creates or
+    // grows one. For a draw that ignores depth but could keep the attachment
+    // of the draws around it and share their render pass (Rogue Galaxy:
+    // added).
+    GsSurface *findDepthSurface(uint32_t base, uint32_t bufferWidth, uint32_t psm, uint32_t minWidth,
+                                uint32_t minHeight) const;
 
     // A colour surface that can stand in for a texture read of this region --
     // same base, format and buffer width, and already holding drawn content.

@@ -40,9 +40,15 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
 - `gs/gs_vram`: `writeRunT8`, `writeRunT4`, `writeRunCT32`, `writeRunZ32`
   and `readRowT4`, built on the same `PixelStorageTraits` and layout tables
   as GSMem, so addresses match (the game's `RG_SELFTEST=gs` checks them
-  against GSMem). The writers go span by span: along a row only x changes
-  until the row or the page ends, so the page arithmetic and the lookup in
-  the megabyte-sized page table happen once per span, not per texel.
+  against GSMem). The writers use the layout in closed form (a texel's
+  piece, byte and nibble inside its 256-byte block are a fixed shuffle of
+  x with a per-row flip; a `static_assert` checks the formulas against the
+  column tables) and write whole 64-byte columns at a time with SSE where a
+  run covers them: four rows of a PSMT4 texture at once, no read-modify-
+  write. Whole-texture uploads went from about 1.8 to 0.05 ns a texel for
+  PSMT4 and from 0.53 to 0.05 for PSMT8; CT32 and Z32 2.5x. Only rows
+  narrower than one group fall back to texel-by-texel writes.
+  `-DDQ8_GS_VRAM_SCALAR` builds the portable kernels, same bytes.
 - `gs/gs_transfer.cpp`: host-to-local PSMT8, PSMT4, PSMCT32 and PSMZ32
   transfers write runs instead of one dispatched `write()` per pixel.
 - `sdlgpu_textures.cpp`: PSMT4 textures expand through the palette
@@ -62,6 +68,23 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
   when they were queued, and the texture cache now tells the backend before
   it rewrites or releases a texture, so a draw still holding it is flushed
   first. `DQ8_GFX_FLUSH_ON_TRANSFER=1` restores the flush at every transfer.
+- `sdlgpu_backend.cpp`, `sdlgpu_targets`: a sprite that replaces every
+  pixel of its colour surface (a clear) takes the surface over
+  (`GsTargetCache::claimWhole`) instead of importing the pages aliased views
+  own and the pending content of local memory, which it would overwrite
+  anyway. Rogue Galaxy clears its per-object offscreen buffer before each
+  object, and those buffers alias each other and the pages its textures go
+  to. `DQ8_GFX_NO_CLAIM=1` imports as before.
+- `sdlgpu_backend.cpp`: a textured primitive counts only the texture pages
+  it can sample (its UV rectangle, when the coordinates are plain) against
+  the queued draws, not the texture's whole 2^TW x 2^TH footprint, which is
+  512 lines over the game's 448-line buffers and made every strip of its
+  frame copies flush the other targets' queued draws. And a draw that
+  ignores depth keeps the depth attachment of the draws around it when
+  their depth surface already exists at the size it needs (tested ALWAYS,
+  not written), so the clear of an object's offscreen buffer and the object
+  share one render pass (`DQ8_GFX_NO_PASSIVE_DEPTH=1` for the old
+  behaviour).
 
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's

@@ -205,10 +205,12 @@ GsRegion primitiveBounds(const GSPrimitiveBatch &batch) {
 }
 
 GsRegion opaqueSpriteBounds(const GSPrimitiveBatch &batch, const GsSurface &surface,
-                            const GsTestState &test) {
+                            const GsTestState &test, bool anyScale = false) {
     const auto &state = batch.state;
     const auto &context = state.context;
-    if (surface.scale != 1u || surface.psm != GS_PSM_CT32 ||
+    // `anyScale`: for a sprite that covers the whole surface, where the scale
+    // cannot matter; the per-region use keeps to scale 1.
+    if ((surface.scale != 1u && !anyScale) || surface.psm != GS_PSM_CT32 ||
         state.prim.type != GS_PRIM_SPRITE || batch.vertexCount != 2u ||
         state.prim.tme || state.prim.abe ||
         context.frame.fbmsk != 0u || test.destinationAlphaTestEnabled ||
@@ -376,6 +378,51 @@ GsRegion sampledTexels(const GSPrimitiveBatch &batch, const GsSurface &surface) 
     return surface.wholeRegion();
 }
 
+// The texture pages a primitive can sample, for the queued-draw checks. The
+// texture's whole footprint (`whole`, from sourcePagesFor) spans 2^TW x 2^TH
+// texels: 512 lines over Rogue Galaxy's 448-line buffers, and that false
+// overlap with other targets' queued draws flushed at every strip of its
+// frame copies. Bounded from the UVs where they are plain (FST, clamp or an
+// in-range repeat); `whole` otherwise. The palette's pages stay in.
+GsPageSet sampledSourcePages(const GSPrimitiveBatch &batch, const GsPageSet &whole) {
+    const auto &state = batch.state;
+    const auto &context = state.context;
+    if (!state.prim.fst || batch.vertexCount == 0u)
+        return whole;
+    const auto clamp = gsDecodeClamp(context.clamp);
+    if (clamp.wrapU >= kWrapRegionClamp || clamp.wrapV >= kWrapRegionClamp)
+        return whole;
+    double minU = batch.vertices[0].u / 16.0, maxU = minU;
+    double minV = batch.vertices[0].v / 16.0, maxV = minV;
+    for (uint8_t i = 1u; i < batch.vertexCount; ++i) {
+        minU = std::min(minU, batch.vertices[i].u / 16.0);
+        maxU = std::max(maxU, batch.vertices[i].u / 16.0);
+        minV = std::min(minV, batch.vertices[i].v / 16.0);
+        maxV = std::max(maxV, batch.vertices[i].v / 16.0);
+    }
+    for (double value : {minU, maxU, minV, maxV})
+        if (!std::isfinite(value))
+            return whole;
+    const double width = state.textureWidth, height = state.textureHeight;
+    // Bilinear reaches half a texel further out.
+    minU -= 0.5; maxU += 0.5; minV -= 0.5; maxV += 0.5;
+    if ((clamp.wrapU == kWrapRepeat && (minU < 0.0 || maxU > width)) ||
+        (clamp.wrapV == kWrapRepeat && (minV < 0.0 || maxV > height)))
+        return whole;
+    const auto bound = [](double value, double limit) {
+        return static_cast<uint32_t>(std::clamp(value, 0.0, limit));
+    };
+    const uint32_t x0 = bound(std::floor(minU), width - 1.0), y0 = bound(std::floor(minV), height - 1.0);
+    const uint32_t x1 = std::max(bound(std::ceil(maxU), width), x0 + 1u);
+    const uint32_t y1 = std::max(bound(std::ceil(maxV), height), y0 + 1u);
+    const uint32_t tbw = std::max<uint32_t>(context.tex0.tbw, 1u);
+    GsPageSet sampled, footprint;
+    gsMarkPages(sampled, context.tex0.tbp0, tbw, context.tex0.psm, x1 - x0, y1 - y0, x0, y0);
+    gsMarkPages(footprint, context.tex0.tbp0, tbw, context.tex0.psm, static_cast<uint32_t>(width),
+                static_cast<uint32_t>(height), 0u, 0u);
+    return sampled | (whole & ~footprint);
+}
+
 struct FeedbackPadding {
     // The column tail and bottom row are separate: their bounding rectangle
     // would include source pixels still owned by the GPU.
@@ -524,6 +571,11 @@ struct SdlGpuBackend::Impl {
     }
     // DQ8_GFX_FLUSH_ON_TRANSFER: the old behaviour, a flush at every transfer.
     const bool flushOnTransfer = std::getenv("DQ8_GFX_FLUSH_ON_TRANSFER") != nullptr;
+    // DQ8_GFX_NO_CLAIM: a whole-surface sprite imports like any other draw.
+    const bool noWholeClaim = std::getenv("DQ8_GFX_NO_CLAIM") != nullptr;
+    // DQ8_GFX_NO_PASSIVE_DEPTH: a draw that ignores depth has no depth
+    // attachment, as before.
+    const bool noPassiveDepth = std::getenv("DQ8_GFX_NO_PASSIVE_DEPTH") != nullptr;
 
     SDL_GPUBuffer *vertexBuffer = nullptr;
     uint32_t vertexBufferCapacity = 0u;
@@ -1186,7 +1238,18 @@ struct SdlGpuBackend::Impl {
         const bool pendingAlias = pendingDrawsTouchOthers(color->pages, color);
         if (pendingAlias && !flushDraws())
             return;
-        if (!targets->prepareColorView(*color, error)) {
+        const GsTestState test = gsDecodeTest(context.test);
+        // A sprite that replaces every pixel of the surface (a clear) makes
+        // whatever it held moot: nothing to import from aliased views or from
+        // local memory. Rogue Galaxy clears its per-object offscreen buffer
+        // before each object, and those buffers alias each other and the
+        // pages its textures are uploaded to.
+        const GsRegion overwritten = opaqueSpriteBounds(batch, *color, test);
+        const bool clearsWhole =
+            !noWholeClaim && opaqueSpriteBounds(batch, *color, test, true).contains(color->wholeRegion());
+        if (clearsWhole) {
+            targets->claimWhole(*color);
+        } else if (!targets->prepareColorView(*color, error)) {
             setError(std::move(error));
             return;
         }
@@ -1196,11 +1259,16 @@ struct SdlGpuBackend::Impl {
         if (written.empty())
             return;
 
-        const GsTestState test = gsDecodeTest(context.test);
         // Inactive depth must not grow/discard a live surface during colour-only passes.
         const bool wantsDepth = gsIsDepthPsm(context.zbuf.psm) && test.depthTestEnabled &&
             (!context.zbuf.zmask || test.depthTest != kDepthAlways);
         GsSurface *depth = nullptr;
+        // A draw that ignores depth keeps the attachment of the draws around
+        // it when their depth surface already exists at the size it needs:
+        // tested ALWAYS and not written, it changes nothing, and the render
+        // pass need not end for it. Rogue Galaxy clears each object's
+        // offscreen buffer without depth, then draws the object with it.
+        bool passiveDepth = false;
         if (wantsDepth) {
             depth = targets->acquire(context.zbuf.zbp << 5u, context.frame.fbw,
                                      context.zbuf.psm, true, neededWidth,
@@ -1209,13 +1277,17 @@ struct SdlGpuBackend::Impl {
                 setError(std::move(error));
                 return;
             }
+        } else if (!noPassiveDepth && gsIsDepthPsm(context.zbuf.psm)) {
+            depth = targets->findDepthSurface(context.zbuf.zbp << 5u, context.frame.fbw, context.zbuf.psm,
+                                              neededWidth, neededHeight);
+            passiveDepth = depth != nullptr;
         }
 
         DrawBatch draw{};
         draw.color = color;
         draw.depth = depth;
         draw.written = written;
-        draw.overwritten = opaqueSpriteBounds(batch, *color, test);
+        draw.overwritten = overwritten;
         gsMarkPages(draw.writtenPages, color->base, color->bufferWidth, color->psm,
                     written.width(), written.height(), written.x0, written.y0);
 
@@ -1275,9 +1347,10 @@ struct SdlGpuBackend::Impl {
         draw.pipeline.colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
         draw.pipeline.depthFormat = device.depthFormat();
         draw.pipeline.hasDepth = depth != nullptr ? 1u : 0u;
-        draw.pipeline.depthCompare =
-            static_cast<uint8_t>(gsTranslateDepthCompare(test.depthTest, test.depthTestEnabled));
-        draw.pipeline.depthWrite = (depth != nullptr && !context.zbuf.zmask) ? 1u : 0u;
+        draw.pipeline.depthCompare = passiveDepth
+            ? static_cast<uint8_t>(SDL_GPU_COMPAREOP_ALWAYS)
+            : static_cast<uint8_t>(gsTranslateDepthCompare(test.depthTest, test.depthTestEnabled));
+        draw.pipeline.depthWrite = (depth != nullptr && !passiveDepth && !context.zbuf.zmask) ? 1u : 0u;
         draw.pipeline.colorWriteMask = writeMask;
         draw.pipeline.blendEnabled = !framebufferFetch && blend.enabled ? 1u : 0u;
         draw.pipeline.sourceFactor = static_cast<uint8_t>(blend.sourceFactor);
@@ -1334,20 +1407,23 @@ struct SdlGpuBackend::Impl {
             GsSurface *sampled = nullptr;
             FeedbackPadding feedbackPadding;
             const GsPageSet sourcePages = textures->sourcePagesFor(state);
+            // Only the pages this primitive can sample count against queued
+            // draws (sampledSourcePages).
+            const GsPageSet sampledPages = sampledSourcePages(batch, sourcePages);
             // A live target that owes nothing to local memory needs no flush:
             // draws queued into it stay ahead of this one within the flush. The
             // target being drawn into is read through a snapshot taken there.
             GsSurface *const candidate = gsIsIndexedPsm(context.tex0.psm) ? nullptr
                 : targets->sampleCandidate(context.tex0.tbp0, context.tex0.psm, context.tex0.tbw);
             const bool inOrder = candidate && candidate->cpuPatches.empty() && candidate->needsUpload.empty() &&
-                                 !pendingDrawsTouchOthers(sourcePages, candidate);
+                                 !pendingDrawsTouchOthers(sampledPages, candidate);
             const bool readsItself = inOrder && candidate == color &&
                 canSnapshotFeedback(batch, *color, feedbackPadding) &&
                 feedbackPadding.uploads[0].empty() && feedbackPadding.uploads[1].empty();
             if (inOrder && candidate != color && samplesFitSurface(batch, *candidate)) {
                 sampled = candidate;
             } else if (!readsItself) {
-                if (pendingDrawsTouch(sourcePages) && !flushDraws())
+                if (pendingDrawsTouch(sampledPages) && !flushDraws())
                     return;
                 if (!gsIsIndexedPsm(context.tex0.psm)) {
                     sampled = targets->findSampleSource(context.tex0.tbp0, context.tex0.psm,
@@ -1411,8 +1487,7 @@ struct SdlGpuBackend::Impl {
                 // And a full cache clears itself on the next miss, which would
                 // leave every queued batch holding a released texture.
                 if (!batches.empty() &&
-                    (textures->evictionImminent() ||
-                     pendingDrawsTouch(textures->sourcePagesFor(state)))) {
+                    (textures->evictionImminent() || pendingDrawsTouch(sampledPages))) {
                     if (!flushDraws())
                         return;
                 }

@@ -31,4 +31,10 @@ void install(PS2Runtime &runtime);
 // still queued and ends the thread.
 void shutdown();
 
+// Waits for the lists in flight, from the game's thread. For tools that
+// cut the GS stream at a frame boundary (RG_GS_FRAMELOG): the list GfxEndFrame
+// started is otherwise still running at the flip, and where it is cut would
+// depend on thread timing. A no-op on the VIF1 thread or without it.
+void drainForSnapshot();
+
 } // namespace rg::vif1

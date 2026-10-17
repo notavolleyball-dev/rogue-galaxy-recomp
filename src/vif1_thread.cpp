@@ -312,6 +312,8 @@ private:
 };
 
 Vif1Thread *g_thread = nullptr;
+// The thread that runs guest code, as the first hooked DMA call sees it.
+std::thread::id g_gameThread;
 PS2Runtime::RecompiledFunction g_dmaSend = nullptr;
 PS2Runtime::RecompiledFunction g_dmaSendN = nullptr;
 PS2Runtime::RecompiledFunction g_dmaSendI = nullptr;
@@ -355,6 +357,10 @@ void reportFinished(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::RecompiledFunction original,
           bool normal)
 {
+    if (g_gameThread == std::thread::id())
+    {
+        g_gameThread = std::this_thread::get_id();
+    }
     const uint32_t channel = channelOf(ctx);
     if (channel != kVif1Channel)
     {
@@ -504,6 +510,19 @@ void shutdown()
     if (g_thread)
     {
         g_thread->stop();
+    }
+}
+
+void drainForSnapshot()
+{
+    // Only from the game's thread. The presenter reaches a frame boundary
+    // too, through flip pacing's fallback while the game shows no flips (a
+    // loading screen), and it does so holding the GS state lock, which the
+    // VIF1 thread needs to finish its list: waiting for it there is a
+    // deadlock (it was one, at the Story loading screen).
+    if (g_thread && std::this_thread::get_id() == g_gameThread)
+    {
+        g_thread->drain();
     }
 }
 

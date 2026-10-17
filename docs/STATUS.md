@@ -468,18 +468,35 @@ textures the game re-uploads every frame, plus 6% in 32-bit writes), a
 quarter the NVIDIA driver, and the rest texture-cache and render-target
 bookkeeping, including fence waits for render targets read back to the CPU
 (`downloadScaled`); the game thread was idle 40% of the time, the VIF1
-thread about 15%. Two changes in `thirdparty/dq8-gfx` since: the run
-writers go span by span instead of recomputing the page address per texel
-(writeRunT4 23% to 11%), and a host-to-local transfer no longer flushes
-the queued draws unless they touch its pages (about 350 command buffer
-submissions a frame fewer). Salgin went from 33 to 35 frames a second.
-What remains in the worker is the render-target cache around the pages
-the game reuses (the character target at page 0x150 shares pages with the
-bloom targets and with every object's texture upload): GPU page copies
-between aliased surfaces, CPU patches of host writes into them, and
-readbacks with fence waits, together about a quarter; 935 draw calls and
-236 render passes a frame; and the texture writes. Reaching 60 means
-halving the worker again, most of it in that ownership model.
+thread about 15%. Six changes since, all in `thirdparty/dq8-gfx` and the
+framework (see the dq8-gfx README's list and `patches/README.md`): texture
+writes in closed form with SSE kernels (PSMT4 uploads 40x faster; the
+upload path went from 30% of the worker to 6%), host-to-local transfers
+that flush the queued draws only on a real conflict, a whole-surface sprite
+taking its surface over instead of importing aliased pages, texture reads
+counting only the pages they sample, a passive depth attachment so a
+clear and the object after it share a pass, the rounding mode read from
+MXCSR instead of the CRT per command, and a 16 MiB worker queue. Every one
+left the regression frame byte-identical. Salgin went from 33 to about 35
+frames a second, at 2x as at 3x, and the worker is still saturated, now
+almost entirely in draw submission (SubmitMany 65%): 900 draw calls, 220
+render passes and 14 render-target readbacks a frame, each readback a
+fence wait that drains the GPU. The CPU savings bought little because the
+frame is bound by that serialisation of the GPU, not by CPU work beside
+it. Reaching 60 means changing how the backend schedules the GPU: ending
+the readbacks the game's VRAM reuse provokes (the character target at
+page 0x150 shares pages with the bloom targets and with every object's
+texture upload), and far fewer passes and command buffers per frame. The
+VIF1 thread (85% busy, a sixth of it waiting on the worker before the
+queue grew) and the game thread (75%) come next. For the VIF1 thread the
+profile says, in order of gain per effort: batch primitives into one
+SubmitMany per run instead of one queue command (with its lock, copies and
+variant) per primitive (about 6%); finish an XGKICK in bulk once the
+program has ended instead of one quadword per two interpreted cycles
+(4-5%); UNPACK fast paths for the plain modes and one copy fewer per IMAGE
+chunk (4%); and, bigger, having the VU1 compiler emit flag bookkeeping
+only where a flag is read (5%). About 45% of its time is the compiled VU1
+programs themselves.
 
 ## Open questions
 

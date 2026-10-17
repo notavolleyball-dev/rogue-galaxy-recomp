@@ -809,6 +809,44 @@ void GsTargetCache::writeResolved(GsSurface &surface, GsRegion region,
     m_stats.resolvedPixels += static_cast<uint64_t>(regionWidth) * region.height();
 }
 
+GsSurface *GsTargetCache::findDepthSurface(uint32_t base, uint32_t bufferWidth, uint32_t psm,
+                                           uint32_t minWidth, uint32_t minHeight) const {
+    bufferWidth = std::max<uint32_t>(bufferWidth, 1u);
+    for (const auto &candidate : m_surfaces) {
+        GsSurface &surface = *candidate;
+        if (surface.depth && surface.base == base && surface.psm == psm &&
+            surface.bufferWidth == bufferWidth && surface.width >= std::max(minWidth, bufferWidth * 64u) &&
+            surface.height >= minHeight)
+            return &surface;
+    }
+    return nullptr;
+}
+
+void GsTargetCache::claimWhole(GsSurface &surface) {
+    for (auto &candidate : m_surfaces) {
+        GsSurface &other = *candidate;
+        if (&other == &surface || other.depth || other.gpuDirty.empty() ||
+            (other.ownedPages & surface.pages).none())
+            continue;
+        // As a page import leaves the source, minus the copy.
+        other.ownedPages &= ~surface.pages;
+        if (other.ownedPages.none()) {
+            other.gpuDirty.clear();
+        } else {
+            const auto remaining = regionForPages(other, other.ownedPages);
+            other.gpuDirty.x0 = std::max(other.gpuDirty.x0, remaining.x0);
+            other.gpuDirty.y0 = std::max(other.gpuDirty.y0, remaining.y0);
+            other.gpuDirty.x1 = std::min(other.gpuDirty.x1, remaining.x1);
+            other.gpuDirty.y1 = std::min(other.gpuDirty.y1, remaining.y1);
+        }
+        traceSurface("page-claim", other, (surface.pages & other.pages).count());
+    }
+    surface.needsUpload.clear();
+    surface.cpuPatches.clear();
+    surface.undefined = false;
+    ++m_stats.wholeClaims;
+}
+
 bool GsTargetCache::refresh(GsSurface &surface, std::string &error) {
     if (!applyCpuPatches(surface, error))
         return false;

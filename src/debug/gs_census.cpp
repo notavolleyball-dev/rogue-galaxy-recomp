@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "Stubs/Pad.h"
+#include "vif1_thread.h"
 
 namespace rg::debug
 {
@@ -240,6 +241,12 @@ private:
         {
             return;
         }
+        // The list GfxEndFrame started is still running on the VIF1 thread at
+        // the flip; its batches reach this decorator from that thread. Cut
+        // the frame after it, so the same game state gives the same log and
+        // the same memory, whatever the threads' timing. Before the lock: the
+        // VIF1 thread takes it for each batch.
+        rg::vif1::drainForSnapshot();
         std::lock_guard lock(m_logMutex);
         if (m_log)
         {

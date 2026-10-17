@@ -138,30 +138,32 @@ Setup::Setup(PS2Runtime &runtime)
                          error.c_str());
             return;
         }
-        // The menu's settings, then the variables on top for this run: the
-        // file keeps what it had unless the menu changes a setting.
+        // The menu's settings, then the variables on top for this run only:
+        // they go to the backend, not into the settings the menu saves, so a
+        // test run's scale does not become the player's.
         dq8::ui::Settings settings;
         const std::string settingsPath = dq8::ui::defaultSettingsPath();
         if (!dq8::ui::loadSettings(settingsPath, settings))
         {
             std::fprintf(stderr, "[rg] could not read %s; using default settings\n", settingsPath.c_str());
         }
+        uint32_t runScale = settings.resolutionScale;
         if (const std::string scale = env("RG_GS_SCALE", ""); !scale.empty())
         {
-            settings.resolutionScale =
-                std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
+            runScale = std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
         }
+        dq8::gfx::SdlGpuDisplayOptions runDisplay = settings.display;
         if (const std::string mode = env("RG_PRESENT_MODE", ""); !mode.empty())
         {
-            settings.display.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
-                                           : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
-                                                                 : SDL_GPU_PRESENTMODE_MAILBOX;
+            runDisplay.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
+                                     : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
+                                                           : SDL_GPU_PRESENTMODE_MAILBOX;
         }
         if (showFps)
         {
             settings.showFps = true;
         }
-        sdl->setResolutionScale(settings.resolutionScale);
+        sdl->setResolutionScale(runScale);
         if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");
@@ -177,13 +179,14 @@ Setup::Setup(PS2Runtime &runtime)
                 {
                     settings.display.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
                 }
+                if (!sdl->supportsPresentMode(runDisplay.presentMode))
+                {
+                    runDisplay.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
+                }
                 m_menu = createMenu(runtime, *sdl, settings, settingsPath);
                 g_hasMenu = m_menu != nullptr;
-                if (!m_menu)
-                {
-                    // What the menu would have applied.
-                    sdl->setDisplayOptions(settings.display);
-                }
+                // After the menu applied the saved options: this run's.
+                sdl->setDisplayOptions(runDisplay);
                 m_window = sdl.get();
             }
             else
@@ -226,7 +229,12 @@ void Setup::install(PS2Runtime &runtime)
     // thread's time; behind the queue it runs beside the game instead.
     if (env("RG_GS_WORKER", "1") != "0")
     {
-        backend = std::make_unique<GSThreadedBackend>(debug::timeGsBackend(std::move(backend), "worker"));
+        // The queue counts an upload's bytes in full, and the game uploads
+        // about 4 MB of textures a frame: at the framework's 4 MiB the VIF1
+        // thread spent a sixth of its time waiting for the worker to drain.
+        constexpr size_t kQueueBytes = 16u * 1024u * 1024u;
+        backend = std::make_unique<GSThreadedBackend>(debug::timeGsBackend(std::move(backend), "worker"),
+                                                      kQueueBytes);
     }
     backend = paceOnFlips(serveDepthReadsLocally(
         debug::censusGsBackend(debug::timeGsBackend(std::move(backend), "frontend"))));

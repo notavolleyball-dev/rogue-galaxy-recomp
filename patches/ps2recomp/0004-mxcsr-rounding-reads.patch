@@ -1,0 +1,99 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 4511666..29e7a49 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -5,6 +5,9 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cfenv>
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++#include <xmmintrin.h>
++#endif
+ #include <condition_variable>
+ #include <exception>
+ #include <mutex>
+@@ -14,6 +17,26 @@
+ 
+ #include "ThreadNaming.h"
+ 
++namespace ps2_gs_detail
++{
++    // std::fegetround without the CRT: MXCSR bits 13-14 are the SSE rounding
++    // control, in the order nearest, down, up, toward zero.
++    inline int currentRoundingMode()
++    {
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++        switch (_mm_getcsr() & 0x6000u)
++        {
++        case 0x2000u: return FE_DOWNWARD;
++        case 0x4000u: return FE_UPWARD;
++        case 0x6000u: return FE_TOWARDZERO;
++        default: return FE_TONEAREST;
++        }
++#else
++        return std::fegetround();
++#endif
++    }
++} // namespace ps2_gs_detail
++
+ struct GSThreadedBackend::Impl
+ {
+     struct PresentationResult
+@@ -51,7 +74,10 @@ struct GSThreadedBackend::Impl
+         Op op;
+         std::variant<std::monostate, GSPrimitiveBatch, GSTransferCommand,
+                      std::vector<uint8_t>, Pixel, Prepare> data;
+-        int rounding = std::fegetround();
++        // The VIF1 thread queues one command per primitive; std::fegetround
++        // goes through the CRT (x87 and SSE control words both) and was 3%
++        // of that thread. The VU math is SSE, so MXCSR alone names the mode.
++        int rounding = ps2_gs_detail::currentRoundingMode();
+         size_t bytes() const
+         {
+             return sizeof(Command) + (op == Op::Upload ? std::get<std::vector<uint8_t>>(data).size() : 0u);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index ec51d13..855884c 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -10,6 +10,9 @@
+ #include <algorithm>
+ #include <bit>
+ #include <cfenv>
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++#include <xmmintrin.h>
++#endif
+ #include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -395,8 +398,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     m_activeGs = &gs;
+     m_activeMemory = memory;
+ 
++    // Per MSCAL, so not through the CRT: fesetround sets the x87 control word
++    // too and was 4% of the VIF1 thread. The VU math is SSE; MXCSR is enough.
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++    const unsigned int previousCsr = _mm_getcsr();
++    _mm_setcsr((previousCsr & ~0x6000u) | 0x6000u);
++    const int previousRoundingMode = 0;
++    const bool useVuRounding = true;
++#else
+     const int previousRoundingMode = std::fegetround();
+     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
++#endif
+     const uint64_t budgetEnd = m_cycle + maxCycles;
+     bool programEnded = false;
+     const bool trackedCode = memory != nullptr && codeSize <= kMaxDecodedPairs * 8u &&
+@@ -462,8 +474,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         m_pendingHaltT = false;
+     }
+     m_state.cycles = m_cycle;
++#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++    _mm_setcsr(previousCsr);
++    (void)previousRoundingMode;
++#else
+     if (useVuRounding && previousRoundingMode != -1)
+         std::fesetround(previousRoundingMode);
++#endif
+     const uint64_t pairsAfter = m_compiledPairsExecuted + m_interpretedPairsExecuted;
+     if (ps2_vu_detail::profileRegions)
+         ps2_vu_detail::regionCounters.total[m_unit == Unit::VU1 ? 1u : 0u] += pairsAfter - pairsBefore;
