@@ -83,9 +83,17 @@ The game window takes a keyboard or a gamepad (PlayStation layout).
 | Start / Select | Enter / Tab |
 | Right stick | I J K L |
 
-F11 toggles fullscreen. The game runs at 30 frames per second; on a 144 Hz
-monitor each frame lasts 4 or 5 refreshes, which reads as judder, so 120 Hz
-or variable refresh looks smoother.
+**F1** (or the Guide button, or Back+Start) opens the in-game menu, from
+DQ8-Recompiled: window and fullscreen, vertical sync, internal resolution,
+aspect and scaling filter, volume, controller and keyboard remapping with
+dead zones, pause (F2), fast-forward (F4), a frame-rate counter (F3),
+screenshots (F12) and renderer statistics. F11 or Alt+Enter toggles
+fullscreen. The settings live in `%APPDATA%\RogueGalaxy\Recompiled\settings.ini`
+(`RG_SETTINGS_FILE` names another file).
+
+The game runs at 30 frames per second; on a 144 Hz monitor each frame lasts
+4 or 5 refreshes, which reads as judder, so 120 Hz or variable refresh looks
+smoother.
 
 ## Running
 
@@ -99,11 +107,13 @@ them in the terminal before running it.
 | Variable | Effect |
 |---|---|
 | `RG_GS=sw` | Software GS rasterizer instead of the SDL3 GPU backend |
-| `RG_GS_SCALE=N` | GPU internal resolution multiplier (default 2) |
+| `RG_GS_SCALE=N` | GPU internal resolution multiplier for this run (the menu's saved setting otherwise, default 2) |
 | `RG_GS_NO_WINDOW=1` | Present through the runtime's window instead of SDL's |
 | `RG_GS_WORKER=0` | Run the GS backend on the game's thread instead of its own worker thread |
-| `RG_SHOW_FPS=1` | Frames per second in the window title |
-| `RG_PRESENT_MODE=vsync\|immediate` | Present mode (default mailbox) |
+| `RG_SHOW_FPS=1` | The menu's frame-rate counter on from the start (in the window title when the runtime presents) |
+| `RG_PRESENT_MODE=vsync\|immediate` | Present mode for this run (the menu's setting otherwise, default mailbox) |
+| `RG_SETTINGS_FILE=path` | The menu's settings file (default `settings.ini` in `%APPDATA%\RogueGalaxy\Recompiled`) |
+| `RG_UI_SCRIPT=file\|text` | Drive the menu for tests and screenshots: `<guest frame> <command> [args]` entries, `;`-separated (see `thirdparty/dq8-gfx/src/ui/ui_script.cpp`) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
@@ -136,7 +146,8 @@ them in the terminal before running it.
 | `tools/mwo3/mwo3.py` | MWo3 overlay header parser, ELF cross-check, overlay-to-ELF wrapper |
 | `tools/funcmap/` | Function-map builder and the checks behind `setup.py check` |
 | `thirdparty/PS2Recomp` | Framework submodule; `patches/ps2recomp/` holds our changes to it, applied on configure ([`patches/README.md`](patches/README.md)) |
-| `thirdparty/dq8-gfx` | SDL3 GPU GS backend from DQ8-Recompiled (GPL-3.0), see its README |
+| `thirdparty/dq8-gfx` | SDL3 GPU GS backend and in-game menu from DQ8-Recompiled (GPL-3.0), see its README |
+| `thirdparty/imgui` | Dear ImGui submodule (MIT), which the menu draws with |
 | `docs/` | [`STATUS.md`](docs/STATUS.md) (state, plan, what the game needs), [`DISC.md`](docs/DISC.md), [`MAPS.md`](docs/MAPS.md) (function maps, SDK bindings) |
 | `disc/` | Your extracted disc (gitignored) |
 
@@ -152,7 +163,9 @@ committed.
   [fork](https://github.com/Sinan-Karakaya/PS2Recomp) by Sinan Karakaya.
 - [DQ8-Recompiled](https://github.com/Sinan-Karakaya/DQ8-Recompiled) by Sinan
   Karakaya, the reference for MWo3 overlays on PS2Recomp, and the source of
-  the SDL3 GPU GS backend in `thirdparty/dq8-gfx`.
+  the SDL3 GPU GS backend and the in-game menu in `thirdparty/dq8-gfx`.
+- [Dear ImGui](https://github.com/ocornut/imgui) by Omar Cornut (MIT), which
+  the menu is drawn with, and its Roboto Medium font (Apache 2.0).
 - [RGDecomp](https://github.com/Dorgengoa/RGDecomp) (CC0), the function maps
   and names for this build (`config/SCUS_974.90/functions_*.csv` derive from
   it).

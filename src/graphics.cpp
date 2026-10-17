@@ -1,8 +1,10 @@
 #include "graphics.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 #include "debug/gs_census.h"
 #include "debug/gs_timing.h"
@@ -17,7 +19,10 @@
 #include <SDL3/SDL.h>
 
 #include "gfx/backends/sdlgpu/sdlgpu_backend.h"
+#include "runtime/ee_scheduler.h"
+#include "runtime/ps2_native_iop.h"
 #include "runtime/ps2_pad_host.h"
+#include "ui/ui_overlay.h"
 #endif
 
 namespace rg::graphics
@@ -32,9 +37,11 @@ std::string env(const char *name, const char *fallback)
 }
 
 #if defined(RG_HAS_SDLGPU)
+bool g_hasMenu = false;
+
 // Called once per frame by the runtime when the backend owns the window:
-// services SDL events, toggles fullscreen on F11 and hands the host pad to
-// the runtime.
+// services SDL events (the menu takes its own first) and hands the host pad
+// to the runtime.
 bool pump(void *userData)
 {
     auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
@@ -43,8 +50,9 @@ bool pump(void *userData)
     {
         return false;
     }
+    // The menu has F11 and Alt+Enter; without it, F11 still toggles.
     static bool f11WasDown = false;
-    const bool f11Down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F11];
+    const bool f11Down = !g_hasMenu && SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F11];
     if (f11Down && !f11WasDown)
     {
         SDL_Window *window = backend->window();
@@ -56,6 +64,54 @@ bool pump(void *userData)
     ps2PadPublishHostState(held, pressed, sticks);
     return true;
 }
+
+// The saved window size, or 80% of the display's height at 4:3, the shape
+// the game is shown at, so the picture fills it.
+std::pair<uint32_t, uint32_t> initialWindowSize(const dq8::ui::Settings &settings)
+{
+    if (settings.windowWidth >= 320 && settings.windowHeight >= 240)
+    {
+        return {static_cast<uint32_t>(settings.windowWidth), static_cast<uint32_t>(settings.windowHeight)};
+    }
+    SDL_Rect usable{0, 0, 1280, 960};
+    SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable);
+    const uint32_t height = static_cast<uint32_t>(std::max(448.0f, static_cast<float>(usable.h) * 0.8f));
+    return {height * 4u / 3u, height};
+}
+
+// DQ8-Recompiled's in-game menu over the window: display, sound, controls
+// and the frame-rate counter (thirdparty/dq8-gfx/src/ui). What it asks of
+// the game goes through HostServices.
+std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlGpuBackend &backend,
+                                             dq8::ui::Settings settings, const std::string &settingsPath)
+{
+    dq8::ui::HostServices host;
+    host.version = RG_REVISION;
+    // RG_MUTE=1 keeps the game silent whatever the menu's volume says.
+    const bool mute = env("RG_MUTE", "0") != "0";
+    host.setVolume = [mute](float volume) { ps2_native_iop::setVolume(mute ? 0.0f : volume); };
+    // The sound driver runs in step with the audio device, so stopping the
+    // device stops the IOP along with the EE's clock.
+    host.setPaused = [&runtime](bool paused) {
+        runtime.eeScheduler().setHostPaused(paused);
+        ps2_native_iop::setPaused(paused);
+    };
+    host.setSpeed = [&runtime](double speed) { runtime.eeScheduler().setHostSpeed(speed); };
+    // The game's flips: frames it finished, not presents, which go on while
+    // it is paused.
+    host.completedRenders = [] { return guestFlips(); };
+    host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
+    auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
+    std::string error;
+    if (!menu->initialize(backend.window(), backend.windowTextureFormat(), error))
+    {
+        std::fprintf(stderr, "[rg] in-game menu unavailable: %s\n", error.c_str());
+        return nullptr;
+    }
+    menu->applySettings();
+    backend.setOverlay(menu.get());
+    return menu;
+}
 #endif
 
 } // namespace
@@ -65,9 +121,12 @@ Setup::Setup(PS2Runtime &runtime)
 #if defined(RG_HAS_SDLGPU)
     if (env("RG_GS", "sdlgpu") == "sdlgpu")
     {
-        // RG_SHOW_FPS=1: the backend's frame rate readout in the window
-        // title, which it reads under its DQ8-Recompiled name.
-        if (env("RG_SHOW_FPS", "0") != "0")
+        const bool noWindow = env("RG_GS_NO_WINDOW", "0") != "0";
+        // RG_SHOW_FPS=1 turns the menu's counter on; without a window of
+        // ours the backend's readout in the title stands in, which it reads
+        // under its DQ8-Recompiled name.
+        const bool showFps = env("RG_SHOW_FPS", "0") != "0";
+        if (showFps && noWindow)
         {
             _putenv("DQ8_GFX_SHOW_FPS=1");
         }
@@ -79,37 +138,62 @@ Setup::Setup(PS2Runtime &runtime)
                          error.c_str());
             return;
         }
-        const uint32_t scale = static_cast<uint32_t>(std::strtoul(env("RG_GS_SCALE", "2").c_str(), nullptr, 10));
-        sdl->setResolutionScale(scale ? scale : 1u);
-        if (env("RG_GS_NO_WINDOW", "0") != "0")
+        // The menu's settings, then the variables on top for this run: the
+        // file keeps what it had unless the menu changes a setting.
+        dq8::ui::Settings settings;
+        const std::string settingsPath = dq8::ui::defaultSettingsPath();
+        if (!dq8::ui::loadSettings(settingsPath, settings))
+        {
+            std::fprintf(stderr, "[rg] could not read %s; using default settings\n", settingsPath.c_str());
+        }
+        if (const std::string scale = env("RG_GS_SCALE", ""); !scale.empty())
+        {
+            settings.resolutionScale =
+                std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
+        }
+        if (const std::string mode = env("RG_PRESENT_MODE", ""); !mode.empty())
+        {
+            settings.display.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
+                                           : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
+                                                                 : SDL_GPU_PRESENTMODE_MAILBOX;
+        }
+        if (showFps)
+        {
+            settings.showFps = true;
+        }
+        sdl->setResolutionScale(settings.resolutionScale);
+        if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");
         }
-        // 4:3, the shape the game is shown at, so the picture fills it.
-        else if (std::string windowError; sdl->openWindow("Rogue Galaxy Recompiled", 1280, 960, windowError))
-        {
-            runtime.setExternalPresenter(&pump, sdl.get());
-            // VSync makes each present wait for the monitor's refresh while
-            // holding SDL's submission lock, which the GS worker then waits
-            // on. Mailbox shows the newest frame at the next refresh without
-            // tearing and without the wait; RG_PRESENT_MODE=vsync restores it.
-            const std::string mode = env("RG_PRESENT_MODE", "mailbox");
-            dq8::gfx::SdlGpuDisplayOptions options = sdl->displayOptions();
-            options.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
-                                  : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
-                                                        : SDL_GPU_PRESENTMODE_MAILBOX;
-            if (sdl->supportsPresentMode(options.presentMode))
-            {
-                sdl->setDisplayOptions(options);
-            }
-        }
         else
         {
-            std::fprintf(stderr, "[rg] could not open the SDL window (%s); presenting through the runtime\n",
-                         windowError.c_str());
+            const auto [width, height] = initialWindowSize(settings);
+            std::string windowError;
+            if (sdl->openWindow("Rogue Galaxy Recompiled", width, height, windowError))
+            {
+                runtime.setExternalPresenter(&pump, sdl.get());
+                if (!sdl->supportsPresentMode(settings.display.presentMode))
+                {
+                    settings.display.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
+                }
+                m_menu = createMenu(runtime, *sdl, settings, settingsPath);
+                g_hasMenu = m_menu != nullptr;
+                if (!m_menu)
+                {
+                    // What the menu would have applied.
+                    sdl->setDisplayOptions(settings.display);
+                }
+                m_window = sdl.get();
+            }
+            else
+            {
+                std::fprintf(stderr, "[rg] could not open the SDL window (%s); presenting through the runtime\n",
+                             windowError.c_str());
+            }
         }
-        std::printf("[rg] GS: sdlgpu (%s), internal scale %ux\n", sdl->driverName().c_str(),
-                    sdl->resolutionScale());
+        std::printf("[rg] GS: sdlgpu (%s), internal scale %ux%s\n", sdl->driverName().c_str(),
+                    sdl->resolutionScale(), m_menu ? ", menu on F1" : "");
         m_backend = std::move(sdl);
         m_name = "sdlgpu";
     }
@@ -118,7 +202,18 @@ Setup::Setup(PS2Runtime &runtime)
 #endif
 }
 
-Setup::~Setup() = default;
+Setup::~Setup()
+{
+#if defined(RG_HAS_SDLGPU)
+    // The runtime still holds the backend (it is destroyed after this), but
+    // the presenter has stopped: take the menu off it before the menu goes.
+    if (m_window && m_menu)
+    {
+        m_window->setOverlay(nullptr);
+    }
+    m_menu.reset();
+#endif
+}
 
 void Setup::install(PS2Runtime &runtime)
 {

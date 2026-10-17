@@ -88,8 +88,18 @@ add_executable(roguegalaxy
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
 target_compile_definitions(roguegalaxy PRIVATE RG_VERSION="${RG_VERSION}")
+# The commit this build is from, for the menu's About window (as of the last
+# configure).
+execute_process(COMMAND git describe --always --dirty
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                OUTPUT_VARIABLE RG_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET RESULT_VARIABLE RG_REVISION_RESULT)
+if(NOT RG_REVISION_RESULT EQUAL 0 OR RG_REVISION STREQUAL "")
+    set(RG_REVISION "unknown")
+endif()
+target_compile_definitions(roguegalaxy PRIVATE RG_REVISION="${RG_REVISION}")
 if(RG_GS_SDLGPU)
-    target_link_libraries(roguegalaxy PRIVATE dq8_gfx_sdlgpu)
+    target_link_libraries(roguegalaxy PRIVATE dq8_gfx_sdlgpu dq8_ui)
     target_compile_definitions(roguegalaxy PRIVATE RG_HAS_SDLGPU=1)
 endif()
 # On Windows the runtime's FFmpeg is DLLs; put them beside the executable.

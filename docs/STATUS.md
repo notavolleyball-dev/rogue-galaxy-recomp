@@ -18,7 +18,7 @@ packaging).
 | 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
 | 3 | Boot to the title screen | done |
 | 4 | Field, battle, movies, sound | done |
-| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere, launcher; rest next |
+| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere, launcher, in-game menu; rest next |
 
 ## Phase 1 in short
 
@@ -420,6 +420,22 @@ surface (`thirdparty/dq8-gfx`, see its README). Found with a frame log
 rasterizing it offline with the right depth, skipping batch ranges of that
 frame (`RG_GS_FRAMESKIP`) and `DQ8_GFX_TRACE_TARGETS`; scripted runs
 replay alike with `RG_INPUT_CLOCK=pad`.
+
+**In-game menu.** DQ8-Recompiled's menu (`thirdparty/dq8-gfx/src/ui`, Dear
+ImGui over the SDL GPU window) is in, on F1, the Guide button or Back+Start:
+window and fullscreen, vsync, internal resolution changed live, aspect and
+scaling filter, volume, controller and keyboard remapping, pause,
+fast-forward, a frame-rate counter and screenshots, saved to `settings.ini`
+under `%APPDATA%\RogueGalaxy\Recompiled`. Every hook it needs was already in
+the vendored backend (identical headers), and the runtime had host pause and
+speed, so the port is the copy with the name taken off, defaults for this
+game (2x, mailbox, no line-blend change) and about sixty lines of host glue
+in `src/graphics.cpp`. The counter counts the game's flips (the hook in
+`src/flip_pacing.cpp` now installs even without flip pacing), not presents,
+which go on while the game is paused. Widescreen and 60 fps are separate
+work: the game has no 16:9 option of its own; nemesis2000's PCSX2 patch (five
+words in the ELF, verified) would give it, and no speed-correct 60 fps code
+exists for the NTSC-U release.
 
 ## Open questions
 

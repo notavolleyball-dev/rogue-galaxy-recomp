@@ -59,3 +59,48 @@ foreach(shader IN ITEMS
         SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/${file}"
         STAGE ${stage} SYMBOL ${symbol})
 endforeach()
+
+# The in-game menu (src/ui), drawn with Dear ImGui over the backend's window.
+# Dear ImGui is the submodule at thirdparty/imgui, the commit DQ8 pins.
+set(DQ8_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../imgui")
+if(NOT EXISTS "${DQ8_IMGUI_DIR}/imgui.cpp")
+    message(FATAL_ERROR
+        "Dear ImGui not found under ${DQ8_IMGUI_DIR}. "
+        "Run: git submodule update --init thirdparty/imgui")
+endif()
+
+add_library(dq8_imgui STATIC
+    "${DQ8_IMGUI_DIR}/imgui.cpp"
+    "${DQ8_IMGUI_DIR}/imgui_draw.cpp"
+    "${DQ8_IMGUI_DIR}/imgui_tables.cpp"
+    "${DQ8_IMGUI_DIR}/imgui_widgets.cpp"
+    "${DQ8_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp"
+    "${DQ8_IMGUI_DIR}/backends/imgui_impl_sdlgpu3.cpp"
+)
+target_include_directories(dq8_imgui SYSTEM PUBLIC "${DQ8_IMGUI_DIR}" "${DQ8_IMGUI_DIR}/backends")
+target_compile_definitions(dq8_imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+target_link_libraries(dq8_imgui PUBLIC SDL3::SDL3-static)
+
+# Roboto Medium from Dear ImGui's own fonts (Apache 2.0), compiled in so the
+# menu needs no files beside the executable.
+set(DQ8_UI_FONT "${DQ8_IMGUI_DIR}/misc/fonts/Roboto-Medium.ttf")
+set(DQ8_UI_FONT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/ui_font_data.cpp")
+add_custom_command(
+    OUTPUT "${DQ8_UI_FONT_SOURCE}"
+    COMMAND "${CMAKE_COMMAND}" "-DINPUT=${DQ8_UI_FONT}" "-DOUTPUT=${DQ8_UI_FONT_SOURCE}"
+            -DSYMBOL=kUiFontData -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dq8EmbedBinary.cmake"
+    DEPENDS "${DQ8_UI_FONT}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dq8EmbedBinary.cmake"
+    COMMENT "Embedding the menu font"
+    VERBATIM)
+
+add_library(dq8_ui STATIC
+    src/ui/ui_glyphs.cpp
+    src/ui/ui_overlay.cpp
+    src/ui/ui_pages.cpp
+    src/ui/ui_script.cpp
+    src/ui/ui_settings.cpp
+    src/ui/ui_style.cpp
+    src/ui/ui_widgets.cpp
+    "${DQ8_UI_FONT_SOURCE}"
+)
+target_link_libraries(dq8_ui PUBLIC dq8_gfx_sdlgpu dq8_imgui)

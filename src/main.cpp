@@ -129,6 +129,7 @@ int run(int argc, char **argv)
     std::fflush(stdout);
 
     runtime.run();
+    rg::vif1::shutdown();
 
     std::printf("[rg] runtime stopped after %u overlay load(s), resident: %s\n",
                 rg::overlay::loadCount(), rg::overlay::residentName());

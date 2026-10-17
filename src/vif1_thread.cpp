@@ -175,7 +175,21 @@ public:
     {
         m_thread = std::thread([this] { run(); });
         m_workerId = m_thread.get_id();
-        m_thread.detach();
+    }
+
+    // Runs what is queued, then ends the thread. Before the runtime goes: a
+    // list finishing after it posted its interrupt to a freed scheduler.
+    void stop()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_stop = true;
+        }
+        m_work.notify_all();
+        if (m_thread.joinable())
+        {
+            m_thread.join();
+        }
     }
 
     void submit(List list)
@@ -252,7 +266,11 @@ private:
         {
             {
                 std::unique_lock lock(m_mutex);
-                m_work.wait(lock, [&] { return !m_lists.empty(); });
+                m_work.wait(lock, [&] { return !m_lists.empty() || m_stop; });
+                if (m_lists.empty())
+                {
+                    return;
+                }
                 m_current = std::move(m_lists.front());
                 m_lists.pop_front();
             }
@@ -290,6 +308,7 @@ private:
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
     uint64_t m_reported = 0u;
+    bool m_stop = false;
 };
 
 Vif1Thread *g_thread = nullptr;
@@ -468,6 +487,14 @@ void install(PS2Runtime &runtime)
         hook(runtime, kGsWaiters[i], hooks[i], g_gsWaiters[i].second);
     }
     std::printf("[rg] VIF1 lists run on their own thread\n");
+}
+
+void shutdown()
+{
+    if (g_thread)
+    {
+        g_thread->stop();
+    }
 }
 
 } // namespace rg::vif1

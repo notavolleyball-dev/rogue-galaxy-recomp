@@ -1,5 +1,6 @@
 #include "flip_pacing.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -150,9 +151,11 @@ private:
 
 FlipPacedBackend *g_paced = nullptr;
 PS2Runtime::RecompiledFunction g_originalFlip = nullptr;
+std::atomic<uint64_t> g_flips{0u};
 
 void afterFlip(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
+    g_flips.fetch_add(1u, std::memory_order_relaxed);
     if (g_paced)
     {
         g_paced->onGuestFlip();
@@ -183,19 +186,25 @@ std::unique_ptr<GSRasterBackend> paceOnFlips(std::unique_ptr<GSRasterBackend> ba
 
 void installFlipHook(PS2Runtime &runtime)
 {
-    if (!g_paced)
-    {
-        return;
-    }
+    // Also without pacing: the hook counts the flips for the menu's frame
+    // rate.
     g_originalFlip = runtime.lookupFunction(kGfxFlipBuffers);
     if (!g_originalFlip || !runtime.replaceFunction(kGfxFlipBuffers, &flipHook))
     {
-        std::fprintf(stderr, "[rg] flip pacing: 0x%08X is not in the function table; presenting at vblanks\n",
+        std::fprintf(stderr, "[rg] flip hook: 0x%08X is not in the function table; presenting at vblanks\n",
                      kGfxFlipBuffers);
         g_paced = nullptr;
         return;
     }
-    std::printf("[rg] presenting on the game's flips\n");
+    if (g_paced)
+    {
+        std::printf("[rg] presenting on the game's flips\n");
+    }
+}
+
+uint64_t guestFlips()
+{
+    return g_flips.load(std::memory_order_relaxed);
 }
 
 } // namespace rg::graphics

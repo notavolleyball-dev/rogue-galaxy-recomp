@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 class GSRasterBackend;
@@ -26,5 +27,9 @@ std::unique_ptr<GSRasterBackend> paceOnFlips(std::unique_ptr<GSRasterBackend> ba
 
 // After loadELF(): hooks the game's flip function.
 void installFlipHook(PS2Runtime &runtime);
+
+// Flips the game has done so far, the frames it finished drawing: the menu's
+// frame-rate counter. From any thread.
+uint64_t guestFlips();
 
 } // namespace rg::graphics

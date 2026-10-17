@@ -27,4 +27,8 @@ namespace rg::vif1
 // After loadELF(): hooks the game's libdma and libgraph entry points.
 void install(PS2Runtime &runtime);
 
+// After PS2Runtime::run() returns, before the runtime goes: runs the lists
+// still queued and ends the thread.
+void shutdown();
+
 } // namespace rg::vif1

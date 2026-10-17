@@ -10,12 +10,25 @@ builds on the same PS2Recomp fork this project pins.
 | Path | Origin |
 |---|---|
 | `src/gfx/gs/`, `src/gfx/backends/sdlgpu/` | `src/gfx/gs/`, `src/gfx/backends/sdlgpu/`, with the changes below |
-| `cmake/Dq8Shaders.cmake`, `Dq8EmbedSpirv.cmake`, `Dq8EmbedText.cmake`, `Dq8HostSimd.cmake` | `cmake/`, unchanged |
+| `src/ui/` | `src/ui/`, the in-game menu (Dear ImGui), with the changes below |
+| `cmake/Dq8Shaders.cmake`, `Dq8EmbedSpirv.cmake`, `Dq8EmbedText.cmake`, `Dq8EmbedBinary.cmake`, `Dq8HostSimd.cmake` | `cmake/`, unchanged |
 | `CMakeLists.txt` | written for this project (DQ8's builds the same targets inside its own tree) |
 | `window_icon.cpp` | replaces `sdlgpu_window_icon.cpp`, which embeds DQ8's icon; sets none |
 
-Not taken: DQ8's in-game menu (`src/ui`), GS dump tools (`src/gfx/gsdump`)
-and anything game-specific.
+Not taken: DQ8's GS dump tools (`src/gfx/gsdump`) and anything
+game-specific. Dear ImGui is the submodule at `../imgui`, the commit DQ8 pins.
+
+## Changes to the menu
+
+The menu is DQ8's with its name taken off: the project name, About text,
+links and screenshot prefix are this project's, the crown icon is a disc,
+`RG_SETTINGS_FILE` and `RG_UI_SCRIPT` replace `DQ8_SETTINGS_FILE` and
+`DQ8_UI_SCRIPT`, and the settings file is `settings.ini` under SDL's
+preferences folder for `RogueGalaxy/Recompiled`. Its defaults differ where
+this game does: internal resolution 2x, mailbox presentation (vsync holds
+SDL's submission lock while the GS worker waits on it) and the line blend
+left as the game draws it. The host side (pause, speed, volume, the frame
+count the counter uses) is in `src/graphics.cpp`.
 
 ## Changes for Rogue Galaxy
 
