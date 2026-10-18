@@ -384,14 +384,17 @@ GsRegion sampledTexels(const GSPrimitiveBatch &batch, const GsSurface &surface) 
 // overlap with other targets' queued draws flushed at every strip of its
 // frame copies. Bounded from the UVs where they are plain (FST, clamp or an
 // in-range repeat); `whole` otherwise. The palette's pages stay in.
-GsPageSet sampledSourcePages(const GSPrimitiveBatch &batch, const GsPageSet &whole) {
+// The texels a primitive can sample, in its texture, when its coordinates
+// are plain (FST, clamp or an in-range repeat; bilinear's half texel
+// included); false otherwise.
+bool sampledTexelRect(const GSPrimitiveBatch &batch, GsRegion &rect) {
     const auto &state = batch.state;
     const auto &context = state.context;
     if (!state.prim.fst || batch.vertexCount == 0u)
-        return whole;
+        return false;
     const auto clamp = gsDecodeClamp(context.clamp);
     if (clamp.wrapU >= kWrapRegionClamp || clamp.wrapV >= kWrapRegionClamp)
-        return whole;
+        return false;
     double minU = batch.vertices[0].u / 16.0, maxU = minU;
     double minV = batch.vertices[0].v / 16.0, maxV = minV;
     for (uint8_t i = 1u; i < batch.vertexCount; ++i) {
@@ -402,24 +405,34 @@ GsPageSet sampledSourcePages(const GSPrimitiveBatch &batch, const GsPageSet &who
     }
     for (double value : {minU, maxU, minV, maxV})
         if (!std::isfinite(value))
-            return whole;
+            return false;
     const double width = state.textureWidth, height = state.textureHeight;
     // Bilinear reaches half a texel further out.
     minU -= 0.5; maxU += 0.5; minV -= 0.5; maxV += 0.5;
     if ((clamp.wrapU == kWrapRepeat && (minU < 0.0 || maxU > width)) ||
         (clamp.wrapV == kWrapRepeat && (minV < 0.0 || maxV > height)))
-        return whole;
+        return false;
     const auto bound = [](double value, double limit) {
         return static_cast<uint32_t>(std::clamp(value, 0.0, limit));
     };
-    const uint32_t x0 = bound(std::floor(minU), width - 1.0), y0 = bound(std::floor(minV), height - 1.0);
-    const uint32_t x1 = std::max(bound(std::ceil(maxU), width), x0 + 1u);
-    const uint32_t y1 = std::max(bound(std::ceil(maxV), height), y0 + 1u);
+    rect.x0 = bound(std::floor(minU), width - 1.0);
+    rect.y0 = bound(std::floor(minV), height - 1.0);
+    rect.x1 = std::max(bound(std::ceil(maxU), width), rect.x0 + 1u);
+    rect.y1 = std::max(bound(std::ceil(maxV), height), rect.y0 + 1u);
+    return true;
+}
+
+GsPageSet sampledSourcePages(const GSPrimitiveBatch &batch, const GsPageSet &whole) {
+    const auto &state = batch.state;
+    const auto &context = state.context;
+    GsRegion rect;
+    if (!sampledTexelRect(batch, rect))
+        return whole;
     const uint32_t tbw = std::max<uint32_t>(context.tex0.tbw, 1u);
     GsPageSet sampled, footprint;
-    gsMarkPages(sampled, context.tex0.tbp0, tbw, context.tex0.psm, x1 - x0, y1 - y0, x0, y0);
-    gsMarkPages(footprint, context.tex0.tbp0, tbw, context.tex0.psm, static_cast<uint32_t>(width),
-                static_cast<uint32_t>(height), 0u, 0u);
+    gsMarkPages(sampled, context.tex0.tbp0, tbw, context.tex0.psm, rect.width(), rect.height(), rect.x0, rect.y0);
+    gsMarkPages(footprint, context.tex0.tbp0, tbw, context.tex0.psm, static_cast<uint32_t>(state.textureWidth),
+                static_cast<uint32_t>(state.textureHeight), 0u, 0u);
     return sampled | (whole & ~footprint);
 }
 
@@ -576,6 +589,22 @@ struct SdlGpuBackend::Impl {
     // DQ8_GFX_NO_PASSIVE_DEPTH: a draw that ignores depth has no depth
     // attachment, as before.
     const bool noPassiveDepth = std::getenv("DQ8_GFX_NO_PASSIVE_DEPTH") != nullptr;
+    // DQ8_GFX_PATCH_CT32_ONLY: only CT32 host writes patch a live target; the
+    // others read it back first, as before.
+    const bool patchCt32Only = std::getenv("DQ8_GFX_PATCH_CT32_ONLY") != nullptr;
+    // DQ8_GFX_NO_GPU_PADDING: a feedback snapshot's padding rows come from
+    // local memory, resolving the target that owns them, as before.
+    const bool noGpuPadding = std::getenv("DQ8_GFX_NO_GPU_PADDING") != nullptr;
+    // The pages of the host write being patched (patchingHostWrite), which a
+    // local copy's source resolve must leave alone; and the pages of a local
+    // copy's source whose words local memory already holds, which need no
+    // readback either.
+    GsPageSet patchPages;
+    GsPageSet copySourceCurrent;
+    bool patchableHostWrite(uint32_t psm, const GsPageSet &pages) const {
+        return (patchCt32Only ? (psm & 0x3fu) == GS_PSM_CT32 : GsTargetCache::gsPatchableHostWrite(psm)) &&
+               targets->canPatchHostWrite(pages);
+    }
 
     SDL_GPUBuffer *vertexBuffer = nullptr;
     uint32_t vertexBufferCapacity = 0u;
@@ -725,14 +754,27 @@ struct SdlGpuBackend::Impl {
     // Local-memory synchronisation
     // -----------------------------------------------------------------
 
+    // Attributes the resolves a call provokes to a reason, for the stats and
+    // the target trace (Rogue Galaxy: added).
+    struct ResolveReasonScope {
+        GsTargetCache &cache;
+        GsResolveReason previous;
+        ResolveReasonScope(GsTargetCache &cache, GsResolveReason reason)
+            : cache(cache), previous(cache.resolveReason()) {
+            cache.setResolveReason(reason);
+        }
+        ~ResolveReasonScope() { cache.setResolveReason(previous); }
+    };
+
     // Draws are deferred, so anything that touches local memory has to land
     // them first: otherwise a transfer would overwrite a region whose pending
     // draws had not happened yet, and the draws would then be applied on top.
-    bool settleFor(const GsPageSet &pages, bool hostWrite = false, const GsPageSet &covered = {},
-                   bool flush = true) {
+    bool settleFor(const GsPageSet &pages, GsResolveReason reason, bool hostWrite = false,
+                   const GsPageSet &covered = {}, bool flush = true) {
         if (flush && !flushDraws())
             return false;
         std::string error;
+        ResolveReasonScope scope(*targets, reason);
         if (!(hostWrite ? targets->resolveForHostWrite(pages, error, covered) : targets->resolve(pages, error)))
             return setError(std::move(error));
         return true;
@@ -742,6 +784,7 @@ struct SdlGpuBackend::Impl {
         if (!flushDraws())
             return false;
         std::string error;
+        ResolveReasonScope scope(*targets, GsResolveReason::Sync);
         if (!targets->resolveAll(error))
             return setError(std::move(error));
         return true;
@@ -1029,7 +1072,9 @@ struct SdlGpuBackend::Impl {
         info.layer_count_or_depth = 1u;
         info.num_levels = 1u;
         info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        // A colour target too: a CT16 view's padding row is rendered into it
+        // (snapshotFeedback).
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
         SDL_GPUTexture *texture = SDL_CreateGPUTexture(device.handle(), &info);
         if (!texture) {
             error = std::string("SDL_CreateGPUTexture(feedback): ") + SDL_GetError();
@@ -1081,9 +1126,59 @@ struct SdlGpuBackend::Impl {
             gsMarkPages(tailPages, surface.base, surface.bufferWidth, surface.psm,
                         region.width(), region.height(), region.x0, region.y0);
         }
+        // The padding's pages may be a live target's (Rogue Galaxy: the row
+        // under the bloom buffer is the character buffer's last page row).
+        // Then its texels come from that target's texture on the GPU, in
+        // the copy pass below, instead of reading the target back to copy
+        // them from local memory.
+        // A CT16 view's padding row holds halfwords of that target's words:
+        // the reinterpret shader makes it, from the page row copied into a
+        // scratch laid out as this view's CT32 pages.
+        const bool view16 = surface.psm == GS_PSM_CT16 || surface.psm == GS_PSM_CT16S;
+        GsSurface *paddingSource = nullptr;
+        // The tail pages a target owns come from its texture; the others (the
+        // pixel past the last page, say) from local memory, uploaded first so
+        // the copies land over it.
+        GsPageSet gpuTail;
+        if (uploadBytes != 0u && !noGpuPadding && (surface.psm == GS_PSM_CT32 || view16) &&
+            (surface.base & 31u) == 0u && surface.width == surface.bufferWidth * 64u &&
+            (!view16 || (!padding.rightColumn && padding.uploads[0].empty() && surface.height % 64u == 0u))) {
+            for (uint32_t page = 0u; page < kGsPageCount; ++page) {
+                if (!tailPages.test(page))
+                    continue;
+                GsPageSet one;
+                one.set(page);
+                if (targets->ownsAny(one))
+                    gpuTail.set(page);
+            }
+            paddingSource = gpuTail.any() ? targets->nativeOwner(gpuTail, true) : nullptr;
+            if (gsTargetTraceEnabled())
+                std::fprintf(stderr, "[target] padding base=%05x psm=%02x %ux%u owner=%05x scale=%u/%u gpu=%zu/%zu\n",
+                             surface.base, surface.psm, surface.width, surface.height,
+                             paddingSource ? paddingSource->base : 0u, paddingSource ? paddingSource->scale : 0u, scale,
+                             gpuTail.count(), tailPages.count());
+            if (paddingSource && (paddingSource == &surface || paddingSource->scale != scale ||
+                                  paddingSource->psm != GS_PSM_CT32 || (view16 && gpuTail != tailPages)))
+                paddingSource = nullptr;
+            if (paddingSource && view16 &&
+                !ensurePaddingScratch(surface.width * scale, (surface.height / 2u + 32u) * scale, error))
+                return nullptr;
+            // Only the owner's cells the padding reads: its queued patches
+            // elsewhere (texture uploads into its pages) can wait.
+            if (paddingSource &&
+                !targets->refreshRegion(*paddingSource, targets->regionForPages(*paddingSource, gpuTail), error))
+                return nullptr;
+        }
+        const GsPageSet cpuTail = paddingSource ? tailPages & ~gpuTail : tailPages;
         SDL_GPUTransferBuffer *upload = nullptr;
-        if (uploadBytes != 0u) {
-            if (!targets->resolve(tailPages, error)) return nullptr;
+        if (uploadBytes != 0u && cpuTail.any()) {
+            if (gsTargetTraceEnabled() && !paddingSource)
+                std::fprintf(stderr, "[target] padding-cpu base=%05x psm=%02x %ux%u fbw=%u right=%d up0=%ux%u up1=%ux%u\n",
+                             surface.base, surface.psm, surface.width, surface.height, surface.bufferWidth,
+                             padding.rightColumn, padding.uploads[0].width(), padding.uploads[0].height(),
+                             padding.uploads[1].width(), padding.uploads[1].height());
+            ResolveReasonScope scope(*targets, GsResolveReason::Feedback);
+            if (!targets->resolve(cpuTail, error)) return nullptr;
             // One buffer, cycled on each map, instead of one created and
             // released per snapshot (Rogue Galaxy: added; SDL hands back a
             // free internal buffer while the last is still in flight).
@@ -1161,6 +1256,8 @@ struct SdlGpuBackend::Impl {
             SDL_CopyGPUTextureToTexture(copy, &source, &destination, scale, sourceHeight - 32u * scale, 1u, false);
         }
         if (upload) {
+            // Local memory's padding first; the copies below land over it
+            // where a target owns the page.
             uint32_t offset = 0u;
             for (const auto &region : padding.uploads) {
                 if (region.empty()) continue;
@@ -1181,9 +1278,88 @@ struct SdlGpuBackend::Impl {
                 offset += (region.width() * region.height() * scale * scale * 4u + 255u) & ~255u;
             }
         }
+        if (paddingSource && view16) {
+            // The CT32 page row under the view, into the scratch at its own
+            // rows: the shader reads the padding row's halfwords from there.
+            const uint32_t pageRow = surface.height / 64u;
+            for (uint32_t column = 0u; column < surface.bufferWidth; ++column) {
+                const uint32_t page = ((surface.base >> 5u) + pageRow * surface.bufferWidth + column) % kGsPageCount;
+                const uint32_t relative = (page + kGsPageCount - (paddingSource->base >> 5u)) % kGsPageCount;
+                SDL_GPUTextureLocation from{}, to{};
+                from.texture = paddingSource->texture;
+                from.x = (relative % paddingSource->bufferWidth) * 64u * scale;
+                from.y = (relative / paddingSource->bufferWidth) * 32u * scale;
+                to.texture = paddingScratch;
+                to.x = column * 64u * scale;
+                to.y = pageRow * 32u * scale;
+                SDL_CopyGPUTextureToTexture(copy, &from, &to, 64u * scale, 32u * scale, 1u, false);
+            }
+        } else if (paddingSource) {
+            // Each padding texel's page, through this surface's whole-page
+            // CT32 layout, is a 64x32 cell of the source: a row segment
+            // within one page is one row segment there.
+            for (const auto &region : padding.uploads) {
+                for (uint32_t y = region.y0; y < region.y1; ++y) {
+                    for (uint32_t x = region.x0; x < region.x1;) {
+                        const uint32_t segment = std::min(region.x1 - x, 64u - x % 64u);
+                        const uint32_t page =
+                            ((surface.base >> 5u) + (y / 32u) * surface.bufferWidth + x / 64u) % kGsPageCount;
+                        if (!gpuTail.test(page)) {
+                            x += segment;
+                            continue;
+                        }
+                        const uint32_t relative = (page + kGsPageCount - (paddingSource->base >> 5u)) % kGsPageCount;
+                        SDL_GPUTextureLocation from{}, to{};
+                        from.texture = paddingSource->texture;
+                        from.x = ((relative % paddingSource->bufferWidth) * 64u + x % 64u) * scale;
+                        from.y = ((relative / paddingSource->bufferWidth) * 32u + y % 32u) * scale;
+                        to.texture = feedbackTexture;
+                        to.x = x * scale;
+                        to.y = y * scale;
+                        SDL_CopyGPUTextureToTexture(copy, &from, &to, segment * scale, scale, 1u, false);
+                        x += segment;
+                    }
+                }
+            }
+        }
         SDL_EndGPUCopyPass(copy);
+        if (paddingSource && view16) {
+            const SDL_Rect row{0, int(surface.height * scale), int(surface.width * scale), int(scale)};
+            if (!device.recordReinterpret(commands, paddingScratch, feedbackTexture, surface.width, height / scale,
+                                          true, scale, &row, error))
+                return nullptr;
+        }
         ++stats.feedbackCopies;
         return feedbackTexture;
+    }
+
+    // The scratch a CT16 view's padding row is reinterpreted from (Rogue
+    // Galaxy: added): at least this big, RGBA8, sampled by the shader.
+    SDL_GPUTexture *paddingScratch = nullptr;
+    uint32_t paddingScratchWidth = 0u, paddingScratchHeight = 0u;
+    bool ensurePaddingScratch(uint32_t width, uint32_t height, std::string &error) {
+        if (paddingScratch && paddingScratchWidth >= width && paddingScratchHeight >= height)
+            return true;
+        if (paddingScratch)
+            SDL_ReleaseGPUTexture(device.handle(), paddingScratch);
+        paddingScratchWidth = std::max(width, paddingScratchWidth);
+        paddingScratchHeight = std::max(height, paddingScratchHeight);
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.width = paddingScratchWidth;
+        info.height = paddingScratchHeight;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        paddingScratch = SDL_CreateGPUTexture(device.handle(), &info);
+        if (!paddingScratch) {
+            paddingScratchWidth = paddingScratchHeight = 0u;
+            error = std::string("SDL_CreateGPUTexture(padding scratch): ") + SDL_GetError();
+            return false;
+        }
+        return true;
     }
 
     void submit(const GSPrimitiveBatch &batch) {
@@ -1249,9 +1425,12 @@ struct SdlGpuBackend::Impl {
             !noWholeClaim && opaqueSpriteBounds(batch, *color, test, true).contains(color->wholeRegion());
         if (clearsWhole) {
             targets->claimWhole(*color);
-        } else if (!targets->prepareColorView(*color, error)) {
-            setError(std::move(error));
-            return;
+        } else {
+            ResolveReasonScope scope(*targets, GsResolveReason::View);
+            if (!targets->prepareColorView(*color, error)) {
+                setError(std::move(error));
+                return;
+            }
         }
         // What lands outside the surface is not drawn (see neededWidth).
         written.x1 = std::min(written.x1, color->width);
@@ -1426,6 +1605,12 @@ struct SdlGpuBackend::Impl {
                 if (pendingDrawsTouch(sampledPages) && !flushDraws())
                     return;
                 if (!gsIsIndexedPsm(context.tex0.psm)) {
+                    if (gsTargetTraceEnabled())
+                        std::fprintf(stderr, "[target] texread tbp=%05x tbw=%u psm=%02x %ux%u -> fbp=%05x psm=%02x"
+                                             " candidate=%d\n",
+                                     context.tex0.tbp0, context.tex0.tbw, context.tex0.psm, 1u << context.tex0.tw,
+                                     1u << context.tex0.th, color->base, color->psm, candidate != nullptr);
+                    ResolveReasonScope scope(*targets, GsResolveReason::Sample);
                     sampled = targets->findSampleSource(context.tex0.tbp0, context.tex0.psm,
                                                         context.tex0.tbw);
                 }
@@ -1492,8 +1677,15 @@ struct SdlGpuBackend::Impl {
                         return;
                 }
 
+                if (gsTargetTraceEnabled())
+                    std::fprintf(stderr, "[target] texbuild tbp=%05x tbw=%u psm=%02x %ux%u cbp=%05x -> fbp=%05x psm=%02x\n",
+                                 context.tex0.tbp0, context.tex0.tbw, context.tex0.psm, 1u << context.tex0.tw,
+                                 1u << context.tex0.th, context.tex0.cbp, color->base, color->psm);
                 std::string textureError;
-                texture = textures->acquire(state, textureError);
+                ResolveReasonScope scope(*targets, GsResolveReason::Texture);
+                GsRegion reach;
+                const bool bounded = sampledTexelRect(batch, reach);
+                texture = textures->acquire(state, textureError, bounded ? &reach : nullptr);
                 if (!texture && !textureError.empty())
                     setError(std::move(textureError));
             }
@@ -1991,6 +2183,7 @@ struct SdlGpuBackend::Impl {
         gsMarkPages(pages, sourceBase, sourceWidth, sourcePsm,
                     originX + setup.width, originY + setup.height);
         std::string error;
+        ResolveReasonScope scope(*targets, GsResolveReason::Present);
         if (!targets->resolve(pages, error))
             setError(std::move(error));
 
@@ -2211,6 +2404,34 @@ struct SdlGpuBackend::Impl {
                      static_cast<unsigned long long>(stats.secondaryDisplayCircuits),
                      static_cast<unsigned long long>(stats.widenedAlphaReplays),
                      static_cast<unsigned long long>(stats.interruptedCoveredTransfers));
+
+        // Where the resolves came from and what their readbacks cost (Rogue
+        // Galaxy: added).
+        {
+            static std::array<uint64_t, static_cast<size_t>(GsResolveReason::Count)> previousByReason{};
+            static uint64_t previousResolveNanos = 0u;
+            std::string line = "  resolves by reason:";
+            for (size_t i = 0u; i < previousByReason.size(); ++i) {
+                const uint64_t count = targetStats().resolvesByReason[i] - previousByReason[i];
+                previousByReason[i] = targetStats().resolvesByReason[i];
+                if (count == 0u)
+                    continue;
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), " %s=%llu", gsResolveReasonName(static_cast<GsResolveReason>(i)),
+                              static_cast<unsigned long long>(count));
+                line += buf;
+            }
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), " | readback wait %.2f ms/frame, %.0f%% of wall",
+                          static_cast<double>(targetStats().resolveNanos - previousResolveNanos) / 1e6 /
+                              std::max<uint32_t>(1u, interval),
+                          seconds > 0.0 ? static_cast<double>(targetStats().resolveNanos - previousResolveNanos) / 1e9 /
+                                              seconds * 100.0
+                                        : 0.0);
+            previousResolveNanos = targetStats().resolveNanos;
+            line += buf;
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
 
         previous = stats;
         previous.textureInvalidationsFromDraw = textureStats().invalidationsFromDraw;
@@ -2601,6 +2822,7 @@ struct SdlGpuBackend::Impl {
         if (!flushDraws())
             return;
         std::string error;
+        ResolveReasonScope scope(*targets, GsResolveReason::Scale);
         if (!targets->resolveAll(error)) {
             std::fprintf(stderr, "[gfx] internal resolution stays %ux: %s\n", scale, error.c_str());
             return;
@@ -2771,6 +2993,8 @@ struct SdlGpuBackend::Impl {
     void acquirePresentation(const GSPresentationRequest &request, PresentStage &stage) {
         PresentationFrame &frame = stage.frame;
         ++stats.presents;
+        if (gsTargetTraceEnabled())
+            std::fprintf(stderr, "[target] present #%llu\n", static_cast<unsigned long long>(stats.presents));
         if (!flushDraws() || !device.valid())
             return;
         stage.gsActive = stats.drawCalls != previousPresentDraws ||
@@ -3101,6 +3325,8 @@ SdlGpuBackend::~SdlGpuBackend() {
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->dummyTexture);
         for (const auto &feedback : m_impl->feedbackTextures)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), feedback.texture);
+        if (m_impl->paddingScratch)
+            SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->paddingScratch);
         if (m_impl->feedbackUpload)
             SDL_ReleaseGPUTransferBuffer(m_impl->device.handle(), m_impl->feedbackUpload);
         if (m_impl->presentUpload)
@@ -3123,7 +3349,11 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     m_impl->patchingHostWrite = false;
     m_impl->transfer = std::make_unique<GsTransferEngine>(m_impl->vram);
     m_impl->transfer->setResolveHook([impl = m_impl.get()](const GsPageSet &pages) {
-        impl->settleFor(pages);
+        // A local copy reads its destination too (overlaps follow the scan
+        // order); when that destination is being patched instead of read
+        // back, its pages stay the GPU's.
+        impl->settleFor((impl->patchingHostWrite ? pages & ~impl->patchPages : pages) & ~impl->copySourceCurrent,
+                        GsResolveReason::LocalRead);
     });
     m_impl->transfer->setInvalidateHook([impl = m_impl.get()](const GsPageSet &pages) {
         impl->invalidatePages(pages);
@@ -3185,8 +3415,14 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
             return;
         }
     }
+    if (gsTargetTraceEnabled())
+        std::fprintf(stderr, "[target] transfer dir=%u dbp=%05x dbw=%u dpsm=%02x %ux%u@%u,%u sbp=%05x sbw=%u spsm=%02x\n",
+                     command.direction, command.bitbltbuf.dbp, command.bitbltbuf.dbw, command.bitbltbuf.dpsm,
+                     command.trxreg.rrw, command.trxreg.rrh, command.trxpos.dsax, command.trxpos.dsay,
+                     command.bitbltbuf.sbp, command.bitbltbuf.sbw, command.bitbltbuf.spsm);
+    GsPageSet pages;
+    bool patchLocalCopy = false;
     if (command.direction == 0u || command.direction == 2u) {
-        GsPageSet pages;
         gsMarkPages(pages, command.bitbltbuf.dbp,
                     std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
                     command.bitbltbuf.dpsm,
@@ -3201,19 +3437,48 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
         } else if (!m_impl->batches.empty()) {
             ++m_impl->stats.transferFlushesSkipped;
         }
-        if (command.direction != 0u || command.bitbltbuf.dpsm != GS_PSM_CT32 ||
-            !m_impl->targets->canPatchHostWrite(pages)) {
+        // A write the targets owning its pages can take as a patch leaves
+        // them theirs: a host write patches per payload (UploadImage); a
+        // local copy, done whole in begin(), patches here after it.
+        if (!m_impl->patchableHostWrite(command.bitbltbuf.dpsm, pages)) {
             GsPageSet covered;
             gsMarkCoveredPages(covered, command.bitbltbuf.dbp,
                                std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
                                command.bitbltbuf.dpsm, command.trxreg.rrw, command.trxreg.rrh,
                                command.trxpos.dsax, command.trxpos.dsay);
-            if (!m_impl->settleFor(pages, true, covered, false)) return;
+            if (!m_impl->settleFor(pages, command.direction == 0u ? GsResolveReason::HostWrite
+                                                                   : GsResolveReason::LocalCopy,
+                                   true, covered, false))
+                return;
             m_impl->coveredTransferOpen = command.direction == 0u && covered.any();
+        } else if (command.direction == 2u) {
+            patchLocalCopy = true;
+            m_impl->patchPages = pages;
+            m_impl->patchingHostWrite = true;
         }
+    }
+    if (command.direction == 2u) {
+        // Source pages whose words local memory holds (host-written, or
+        // read back before) need no readback for the copy to read them.
+        const GSBitBltBuf &blt = command.bitbltbuf;
+        const uint32_t sbw = std::max<uint32_t>(blt.sbw, 1u);
+        GsPageSet sourcePages, needed;
+        gsMarkPages(sourcePages, blt.sbp, sbw, blt.spsm, command.trxreg.rrw, command.trxreg.rrh,
+                    command.trxpos.ssax, command.trxpos.ssay);
+        const uint32_t ssax = command.trxpos.ssax, ssay = command.trxpos.ssay;
+        m_impl->targets->markReadPages(needed, blt.sbp, sbw, blt.spsm,
+                                       {ssax, ssay, ssax + command.trxreg.rrw, ssay + command.trxreg.rrh});
+        m_impl->copySourceCurrent = sourcePages & ~needed;
     }
     m_impl->transferCommand = command;
     m_impl->transfer->begin(command);
+    m_impl->copySourceCurrent.reset();
+    if (patchLocalCopy) {
+        m_impl->targets->patchHostWrite(pages, command.bitbltbuf.dbp, std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
+                                        command.bitbltbuf.dpsm, command.trxpos.dsax, command.trxpos.dsay,
+                                        command.trxreg.rrw, 0u, command.trxreg.rrw * command.trxreg.rrh);
+        m_impl->patchingHostWrite = false;
+    }
 }
 
 void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
@@ -3223,11 +3488,13 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     if (!m_impl->transfer) return;
     const auto before = m_impl->transfer->snapshot();
     const auto &command = m_impl->transferCommand;
+    const uint32_t dpsm = command.bitbltbuf.dpsm;
+    const bool patchable = m_impl->patchCt32Only ? (dpsm & 0x3fu) == GS_PSM_CT32
+                                                 : GsTargetCache::gsPatchableHostWrite(dpsm);
     GsPageSet pages;
-    if (before.direction == 0u && before.totalPixels != 0u &&
-        command.bitbltbuf.dpsm == GS_PSM_CT32 && data && sizeBytes != 0u) {
+    if (before.direction == 0u && before.totalPixels != 0u && patchable && data && sizeBytes != 0u) {
         gsMarkPages(pages, command.bitbltbuf.dbp,
-                    std::max<uint32_t>(command.bitbltbuf.dbw, 1u), GS_PSM_CT32,
+                    std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
                     command.trxreg.rrw, command.trxreg.rrh,
                     command.trxpos.dsax, command.trxpos.dsay);
         // Draws can occur between IMAGE fragments, so recheck ownership at
@@ -3241,11 +3508,11 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
         m_impl->patchingHostWrite = m_impl->targets->canPatchHostWrite(pages);
         GsPageSet covered;
         gsMarkCoveredPages(covered, command.bitbltbuf.dbp,
-                           std::max<uint32_t>(command.bitbltbuf.dbw, 1u), GS_PSM_CT32,
+                           std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
                            command.trxreg.rrw, command.trxreg.rrh,
                            command.trxpos.dsax, command.trxpos.dsay);
         if (!m_impl->patchingHostWrite) {
-            if (!m_impl->settleFor(pages, true, covered, false)) return;
+            if (!m_impl->settleFor(pages, GsResolveReason::HostWrite, true, covered, false)) return;
             m_impl->coveredTransferOpen = m_impl->coveredTransferOpen || covered.any();
         }
     }
@@ -3258,7 +3525,7 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
         const auto after = m_impl->transfer->snapshot();
         if (after.copiedPixels > before.copiedPixels)
             m_impl->targets->patchHostWrite(pages, command.bitbltbuf.dbp,
-                std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
+                std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
                 command.trxpos.dsax, command.trxpos.dsay, command.trxreg.rrw,
                 before.copiedPixels, after.copiedPixels);
         m_impl->patchingHostWrite = false;
@@ -3382,6 +3649,7 @@ bool SdlGpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba) {
     GsSurface *surface = m_impl->targets->acquire(
         context.frame.fbp << 5u, context.frame.fbw, context.frame.psm, false,
         width, static_cast<uint32_t>(context.scissor.y1) + 1u, error);
+    Impl::ResolveReasonScope scope(*m_impl->targets, GsResolveReason::View);
     if (!surface || !m_impl->targets->prepareColorView(*surface, error)) {
         m_impl->setError(std::move(error));
         return false;
@@ -3405,7 +3673,7 @@ uint32_t SdlGpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw,
     std::lock_guard lock(m_impl->mutex);
     GsPageSet pages;
     gsMarkPages(pages, base, bw, psm, x + 1u, y + 1u);
-    m_impl->settleFor(pages);
+    m_impl->settleFor(pages, GsResolveReason::LocalRead);
     return m_impl->vram.read(psm, base, bw, x, y);
 }
 
@@ -3414,7 +3682,7 @@ void SdlGpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw,
     std::lock_guard lock(m_impl->mutex);
     GsPageSet pages;
     gsMarkPages(pages, base, bw, psm, x + 1u, y + 1u);
-    m_impl->settleFor(pages, true);
+    m_impl->settleFor(pages, GsResolveReason::HostWrite, true);
     m_impl->vram.write(psm, base, bw, x, y, value);
     m_impl->invalidatePages(pages);
 }

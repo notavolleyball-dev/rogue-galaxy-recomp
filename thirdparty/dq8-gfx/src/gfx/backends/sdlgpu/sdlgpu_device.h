@@ -143,6 +143,13 @@ public:
     bool reinterpretColor(SDL_GPUTexture *source, SDL_GPUTexture *destination,
                           uint32_t width, uint32_t height, bool destination16, uint32_t scale,
                           std::string &error);
+    // The same recorded into a command buffer the caller owns and submits,
+    // writing only `scissor` (physical pixels) when given and keeping the
+    // rest of the destination: a feedback snapshot's padding row of a CT16
+    // view, from the CT32 target holding its bytes (Rogue Galaxy: added).
+    bool recordReinterpret(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *source, SDL_GPUTexture *destination,
+                           uint32_t width, uint32_t height, bool destination16, uint32_t scale,
+                           const SDL_Rect *scissor, std::string &error);
 
     // Builds an 8-bit indexed texture from the CT32 target holding its bytes,
     // through `palette` (256 RGBA8). `pages`: the texture's base page and pages

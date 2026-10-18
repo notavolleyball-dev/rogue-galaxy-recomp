@@ -98,7 +98,12 @@ public:
 
     // Returns the GPU texture for this draw state's TEX0/TEXA/TEXCLUT, building
     // it from local memory on a miss. Null on failure, with `error` filled.
-    SDL_GPUTexture *acquire(const GSDrawState &state, std::string &error);
+    // `sampled`: the texels this draw can reach, when the caller can bound
+    // them (Rogue Galaxy: added). A texture over pages a render target still
+    // owns is then read back only there; the rest waits for a draw that
+    // reaches it. Rogue Galaxy declares a 512x512 texture over the 512x416 it
+    // uploads, and the lines below lie in a live target.
+    SDL_GPUTexture *acquire(const GSDrawState &state, std::string &error, const GsRegion *sampled = nullptr);
 
     // Why a range of local memory stopped being trustworthy. Kept apart
     // because the two have very different fixes: a host write really did
@@ -145,6 +150,10 @@ private:
         // re-expanded yet. Empty means the texture is current.
         GsRegion dirty;
         GsPageSet dirtyPages;
+        // Texels over pages a target owned that no draw has reached yet, so
+        // they were expanded from local memory without a readback; they join
+        // `dirty` when one does (Rogue Galaxy: added).
+        GsRegion unresolved;
         // A palette page was written. On next use the palette window is
         // re-hashed; when it is unchanged -- the common case, a game
         // re-uploading the same CLUT every frame -- nothing else happens.
@@ -164,8 +173,10 @@ private:
             m_beforeRewrite(texture);
     }
 
-    bool build(const GsTextureKey &key, Entry &entry, std::string &error);
-    bool resolveSource(const GsTextureKey &key, const GsRegion &region, std::string &error);
+    bool build(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled);
+    // `exclude`: texel pages left to the target (restrictToSampled).
+    bool resolveSource(const GsTextureKey &key, const GsRegion &region, std::string &error,
+                       const GsPageSet *exclude = nullptr);
     // Pages a palette read needs current in local memory.
     void markClutReads(const GsTextureKey &key, GsPageSet &pages) const;
     // An 8-bit indexed texture whose texels a native CT32 target holds is
@@ -177,7 +188,16 @@ private:
     void buildPalette(const GsTextureKey &key);
     void checkAgainstCpu(const GsTextureKey &key, Entry &entry, const GsRegion &region);
     // Re-expands and re-uploads only `entry.dirty`.
-    bool update(const GsTextureKey &key, Entry &entry, std::string &error);
+    bool update(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled);
+    // The texel pages of a region whose words a target holds and local
+    // memory does not (Rogue Galaxy: added).
+    GsPageSet staleTexelPages(const GsTextureKey &key, const GsRegion &region) const;
+    // When the draw reaches none of the texels those pages hold, `exclude`
+    // names them so resolveSource leaves them, and their texels (a bounding
+    // box) join `unresolved` for a draw that does reach them (Rogue Galaxy:
+    // added).
+    void restrictToSampled(const GsTextureKey &key, const GsRegion &region, const GsRegion *sampled,
+                           GsPageSet &exclude, GsRegion &unresolved) const;
     // Re-hashes the palette window after a write to a palette page, and
     // schedules a whole-texture re-expand when it really changed.
     void refreshClut(const GsTextureKey &key, Entry &entry);

@@ -32,6 +32,20 @@ struct GsPageExtent {
 
 GsPageExtent gsPageExtent(uint32_t psm);
 
+// Pixel dimensions of one 256-byte block in a given PSM, for the formats
+// with a block table here; zero otherwise (Rogue Galaxy: added).
+struct GsBlockExtent {
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+
+    bool valid() const { return width != 0u && height != 0u; }
+};
+
+GsBlockExtent gsBlockExtent(uint32_t psm);
+// The block number within its page of the block at (column, row) of a page's
+// block grid, from the format's block table.
+uint32_t gsBlockInPage(uint32_t psm, uint32_t column, uint32_t row);
+
 bool gsIsIndexedPsm(uint32_t psm);
 bool gsIsDepthPsm(uint32_t psm);
 // True for the PSMs a FRAME register may legally name.
@@ -40,10 +54,11 @@ uint32_t gsBitsPerPixel(uint32_t psm);
 
 // Marks every page a (base, bufferWidth, psm) rectangle can touch.
 //
-// Deliberately conservative in two directions: a block base that is not page
-// aligned can carry into the next physical page, and an unknown PSM marks
-// everything. Over-marking costs a spurious cache invalidation; under-marking
-// silently renders stale data.
+// Conservative where it has to be: an unknown PSM marks everything, and a
+// block base that is not page aligned marks the next physical page for
+// formats without a block table here (with one, the carry is exact).
+// Over-marking costs a spurious cache invalidation; under-marking silently
+// renders stale data.
 void gsMarkPages(GsPageSet &pages,
                  uint32_t baseBlock,
                  uint32_t bufferWidth,

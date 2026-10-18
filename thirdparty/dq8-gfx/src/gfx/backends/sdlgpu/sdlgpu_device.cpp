@@ -303,6 +303,26 @@ std::string SdlGpuDevice::driverName() const {
 bool SdlGpuDevice::reinterpretColor(SDL_GPUTexture *source, SDL_GPUTexture *destination,
                                     uint32_t width, uint32_t height, bool destination16, uint32_t scale,
                                     std::string &error) {
+    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
+    if (!commands) {
+        error = std::string("SDL_AcquireGPUCommandBuffer(reinterpret): ") + SDL_GetError();
+        return false;
+    }
+    if (!recordReinterpret(commands, source, destination, width, height, destination16, scale, nullptr, error)) {
+        SDL_CancelGPUCommandBuffer(commands);
+        return false;
+    }
+    if (!SDL_SubmitGPUCommandBuffer(commands)) {
+        error = std::string("SDL_SubmitGPUCommandBuffer(reinterpret): ") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+bool SdlGpuDevice::recordReinterpret(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *source,
+                                     SDL_GPUTexture *destination, uint32_t width, uint32_t height,
+                                     bool destination16, uint32_t scale, const SDL_Rect *scissor,
+                                     std::string &error) {
     if (!m_reinterpretPipeline) {
         SDL_GPUShaderCreateInfo vertexInfo{};
         vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsReinterpretVertSpirv);
@@ -361,35 +381,27 @@ bool SdlGpuDevice::reinterpretColor(SDL_GPUTexture *source, SDL_GPUTexture *dest
         }
     }
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
-    if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(reinterpret): ") + SDL_GetError();
-        return false;
-    }
     SDL_GPUColorTargetInfo target{};
     target.texture = destination;
-    target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    target.load_op = scissor ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_DONT_CARE;
     target.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1u, nullptr);
     if (!pass) {
         error = std::string("SDL_BeginGPURenderPass(reinterpret): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
         return false;
     }
     SDL_BindGPUGraphicsPipeline(pass, m_reinterpretPipeline);
     scale = std::max(scale, 1u);
     SDL_GPUViewport viewport{0.0f, 0.0f, float(width * scale), float(height * scale), 0.0f, 1.0f};
     SDL_SetGPUViewport(pass, &viewport);
+    if (scissor)
+        SDL_SetGPUScissor(pass, scissor);
     SDL_GPUTextureSamplerBinding binding{source, m_sampler};
     SDL_BindGPUFragmentSamplers(pass, 0u, &binding, 1u);
     const uint32_t control[4] = {uint32_t(destination16), scale, 0u, 0u};
     SDL_PushGPUFragmentUniformData(commands, 0u, control, sizeof(control));
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);
-    if (!SDL_SubmitGPUCommandBuffer(commands)) {
-        error = std::string("SDL_SubmitGPUCommandBuffer(reinterpret): ") + SDL_GetError();
-        return false;
-    }
     return true;
 }
 

@@ -101,6 +101,30 @@ struct GsSurface {
     GsRegion wholeRegion() const { return {0u, 0u, width, height}; }
 };
 
+// Why a resolve (a render target read back into local memory) happened: the
+// backend sets the reason around each call that can provoke one, and the
+// stats and DQ8_GFX_TRACE_TARGETS report it (Rogue Galaxy: added).
+enum class GsResolveReason : uint8_t {
+    Unknown,
+    HostWrite,   // a host-to-local transfer into pages the GPU owns
+    LocalCopy,   // a local-to-local transfer through local memory
+    LocalRead,   // a local-to-host read, or a transfer's source pages
+    View,        // an aliased FRAME view importing another's pixels
+    Sample,      // a texture read brought a live target up to date
+    Texture,     // a texture built from pages a target owns
+    Present,     // presentation reading a buffer from local memory
+    Sync,        // an explicit sync or snapshot of local memory
+    Feedback,    // a feedback snapshot's padding rows
+    Scale,       // a change of internal resolution
+    Count
+};
+const char *gsResolveReasonName(GsResolveReason reason);
+// DQ8_GFX_TRACE_TARGETS is set, or gsSetTargetTrace turned the trace on: a
+// tool can limit it to a window of frames, since it prints a line per
+// transfer and slows the game to a crawl (Rogue Galaxy: added).
+bool gsTargetTraceEnabled();
+void gsSetTargetTrace(bool enabled);
+
 struct GsTargetCacheStats {
     uint64_t surfacesCreated = 0u;
     uint64_t colorResolves = 0u;
@@ -111,6 +135,10 @@ struct GsTargetCacheStats {
     // Surfaces a whole-surface sprite took over without an import
     // (Rogue Galaxy: added).
     uint64_t wholeClaims = 0u;
+    // Resolves by reason, and the wall time spent in their readbacks
+    // (Rogue Galaxy: added).
+    std::array<uint64_t, static_cast<size_t>(GsResolveReason::Count)> resolvesByReason{};
+    uint64_t resolveNanos = 0u;
 };
 
 class GsTargetCache {
@@ -147,7 +175,13 @@ public:
     // Records that local memory changed under `pages`.
     void invalidate(const GsPageSet &pages, bool preserveOwned = false);
 
-    // CT32 uploads can patch resident native targets across pitch changes.
+    // Host writes can patch resident native CT32 targets across pitch
+    // changes, word by word: CT32 ones, and (Rogue Galaxy: added) the formats
+    // that fill whole bytes, CT16, T8 and T4, whose texels land in the
+    // target's words through the block layout. gsPatchableHostWrite names
+    // them; canPatchHostWrite says whether every target holding GPU pixels
+    // in `pages` can take a patch.
+    static bool gsPatchableHostWrite(uint32_t psm);
     bool canPatchHostWrite(const GsPageSet &pages) const;
     // The one surface holding GPU-drawn content in these pages, when it is
     // native CT32 and covers all of them; null otherwise. After refresh() its
@@ -155,12 +189,20 @@ public:
     // `allowScaled`: also an upscaled owner, for readers that sample it at
     // each GS pixel's sample point.
     GsSurface *nativeOwner(const GsPageSet &pages, bool allowScaled = false);
-    void patchHostWrite(const GsPageSet &pages, uint32_t base, uint32_t bw,
+    // Records the completed pixels [firstPixel, endPixel) of a host write of
+    // `width`-pixel rows at (x, y) in `psm` as CPU-current words, and queues
+    // them as patches on the targets owning their pages.
+    void patchHostWrite(const GsPageSet &pages, uint32_t base, uint32_t bw, uint32_t psm,
                         uint32_t x, uint32_t y, uint32_t width,
                         uint32_t firstPixel, uint32_t endPixel);
     // Add only pages whose requested CT32 words are not already CPU-current.
     void markReadPagesCt32(GsPageSet &pages, uint32_t base, uint32_t bw,
                            const GsRegion &region) const;
+    // The same for a region of texels in any patchable format: the words
+    // they occupy through the block layout (Rogue Galaxy: added). Other
+    // formats mark every page of the region.
+    void markReadPages(GsPageSet &pages, uint32_t base, uint32_t bw, uint32_t psm,
+                       const GsRegion &region) const;
 
     // True when a colour surface holds pixels for `pages` that local memory
     // does not, i.e. reading those pages would need a resolve first.
@@ -168,6 +210,12 @@ public:
 
     // Brings a surface's texture up to date with local memory if needed.
     bool refresh(GsSurface &surface, std::string &error);
+    // Only `region` of it: the CPU patches that touch the region (the rest
+    // stay queued), and the whole surface when pixels local memory holds
+    // and the texture does not lie there (Rogue Galaxy: added, for a
+    // feedback snapshot's padding from a live target, whose queued patches
+    // can be megabytes at a scale above 1).
+    bool refreshRegion(GsSurface &surface, const GsRegion &region, std::string &error);
 
     // Copy native CT32 pages across pitches, reinterpret matching CT32/CT16
     // views, or resolve unsupported aliases before this view uses them.
@@ -217,6 +265,10 @@ public:
     const GsTargetCacheStats &stats() const { return m_stats; }
     void resetStats() { m_stats = {}; }
 
+    // The reason the next resolves are attributed to (Rogue Galaxy: added).
+    void setResolveReason(GsResolveReason reason) { m_reason = reason; }
+    GsResolveReason resolveReason() const { return m_reason; }
+
 private:
     bool resolveSurfaces(const std::vector<GsSurface *> &surfaces, std::string &error);
     bool applyCpuPatches(GsSurface &surface, std::string &error);
@@ -243,7 +295,15 @@ private:
     uint32_t m_scale = 1u;
     std::vector<std::unique_ptr<GsSurface>> m_surfaces;
     std::vector<uint8_t> m_staging;
-    struct CpuWords { uint64_t generation = 0u; uint64_t mask = 0u; };
+    // Per 256-byte block: the words local memory holds current since the
+    // page's generation, and (Rogue Galaxy: added) the bytes, or nibbles,
+    // host writes in other formats have filled of words still incomplete,
+    // since one write's payloads can split a word between calls.
+    struct CpuWords {
+        uint64_t generation = 0u;
+        uint64_t mask = 0u;
+        uint64_t units[8] = {};
+    };
     std::array<uint64_t, kGsPageCount> m_pageGeneration{};
     std::array<CpuWords, kGsVramBytes / 256u> m_cpuWords{};
     SDL_GPUTransferBuffer *m_upload = nullptr;
@@ -260,6 +320,7 @@ private:
     uint32_t m_resolveStagingWidth = 0u;
     uint32_t m_resolveStagingHeight = 0u;
     GsTargetCacheStats m_stats{};
+    GsResolveReason m_reason = GsResolveReason::Unknown;
 };
 
 } // namespace dq8::gfx

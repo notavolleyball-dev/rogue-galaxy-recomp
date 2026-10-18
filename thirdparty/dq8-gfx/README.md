@@ -85,6 +85,44 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
   not written), so the clear of an object's offscreen buffer and the object
   share one render pass (`DQ8_GFX_NO_PASSIVE_DEPTH=1` for the old
   behaviour).
+- Render-target readbacks (a resolve: the target downloaded into local
+  memory, with a fence wait that drains the GPU) are counted by reason in
+  the `DQ8_GFX_STATS_EVERY` report and named in `DQ8_GFX_TRACE_TARGETS`,
+  which `gsSetTargetTrace` can now switch on for a window of frames (the
+  game's `RG_GS_TRACE_BEFORE`). Rogue Galaxy provoked about eight a frame
+  in the field, a quarter of the worker's time; these take them away:
+  - `gs/gs_vram.cpp`: `gsMarkPages` is exact for a block base inside a
+    page, through the format's block table, instead of marking the next
+    page for every cell. The game writes its palettes at block offsets
+    0x1c..0x1f, and the page after each held a render target.
+  - `sdlgpu_targets`, `sdlgpu_backend.cpp`: host writes in CT16, T8 and T4
+    patch a live native CT32 target word by word, as CT32 ones did
+    (`patchHostWrite` with the format's block layout; a word is counted
+    when every one of its bytes, or nibbles, has arrived, across payloads;
+    whole blocks of a page go out as runs of 8x8 cells along each cell
+    row, since the formats' block order scatters them; the owners of each
+    page are found once per write, not once per cell), instead of reading
+    back the pages they cover in part. Local copies into such a target
+    patch it too, and read back only the source pages whose words local
+    memory does not hold. `DQ8_GFX_PATCH_CT32_ONLY=1` keeps the patching to
+    CT32. With ownership kept, a target's queued patches grow (every
+    texture uploaded into its pages), so what needs only part of it
+    current brings up only that part (`refreshRegion`): the GPU expansion
+    of an 8-bit texture from a target, and the snapshot padding below.
+  - `sdlgpu_textures.cpp`, `sdlgpu_targets`: a T8, T4 or CT16 texture read
+    asks for the words it occupies (`markReadPages`), so a texture uploaded
+    into pages a target still owns needs no readback; and the pages of a
+    target that a draw reaches no texel of (the UV rectangle the backend
+    already bounds) are left to it, their texels marked unresolved until a
+    draw reaches them. The game declares a 512x512 texture over the 512x416
+    it uploads, and the lines below lie in a live target.
+  - `sdlgpu_backend.cpp`: a feedback snapshot's padding row (the texel row
+    under the surface a bilinear tap at its edge reaches) comes from the
+    texture of the target owning that row: copied for a CT32 surface, and
+    for a CT16 view made by the reinterpret shader
+    (`SdlGpuDevice::recordReinterpret`) from the owner's page row copied
+    into a scratch. `DQ8_GFX_NO_GPU_PADDING=1` reads it from local memory
+    as before.
 
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's

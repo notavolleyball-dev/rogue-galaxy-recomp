@@ -2,6 +2,10 @@
 
 #include "runtime/gs/gs_types.h"
 #include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/ps2_gs_psmct16.h"
+#include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 
 #include <algorithm>
 #include <array>
@@ -808,15 +812,73 @@ void gsMarkPages(GsPageSet &pages,
     const uint32_t lastRow = (y + height - 1u) / extent.height;
     const uint32_t basePage = baseBlock >> 5u;
 
+    // A block base inside a page pushes part of the rectangle into the next
+    // page: the blocks whose table entry plus the base offset passes 31. With
+    // the format's block table that is exact; marking the next page for
+    // every cell took in the page after a 16-colour palette at the end of
+    // one, and with it the render target living there (Rogue Galaxy:
+    // added; the game writes its palettes at block offsets 0x1c..0x1f).
+    const uint32_t baseOffset = baseBlock & 31u;
+    const GsBlockExtent block = gsBlockExtent(psm);
+    if (baseOffset != 0u && block.valid()) {
+        const uint32_t lastBlockColumn = (x + width - 1u) / block.width;
+        const uint32_t lastBlockRow = (y + height - 1u) / block.height;
+        const uint32_t blocksPerPageRow = extent.width / block.width;
+        const uint32_t blocksPerPageColumn = extent.height / block.height;
+        for (uint32_t row = y / block.height; row <= lastBlockRow; ++row) {
+            for (uint32_t column = x / block.width; column <= lastBlockColumn; ++column) {
+                const uint32_t page = basePage + (row / blocksPerPageColumn) * pagesPerRow + column / blocksPerPageRow;
+                const uint32_t id = baseOffset + gsBlockInPage(psm, column % blocksPerPageRow, row % blocksPerPageColumn);
+                pages.set((page + (id >> 5u)) % kGsPageCount);
+            }
+        }
+        return;
+    }
+
     for (uint32_t row = y / extent.height; row <= lastRow; ++row) {
         for (uint32_t column = x / extent.width; column <= lastColumn; ++column) {
             const uint32_t page = basePage + row * pagesPerRow + column;
             pages.set(page % kGsPageCount);
-            // A block base inside a page pushes the tail of the rectangle into
-            // the next one.
-            if ((baseBlock & 31u) != 0u)
+            if (baseOffset != 0u)
                 pages.set((page + 1u) % kGsPageCount);
         }
+    }
+}
+
+GsBlockExtent gsBlockExtent(uint32_t psm) {
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT32:
+    case GS_PSM_CT24:
+    case GS_PSM_T8H:
+    case GS_PSM_T4HL:
+    case GS_PSM_T4HH:
+        return {8u, 8u};
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S:
+        return {16u, 8u};
+    case GS_PSM_T8:
+        return {16u, 16u};
+    case GS_PSM_T4:
+        return {32u, 16u};
+    default:
+        // The depth formats' block tables are the colour ones mirrored; not
+        // needed yet, so they keep the conservative marking.
+        return {};
+    }
+}
+
+uint32_t gsBlockInPage(uint32_t psm, uint32_t column, uint32_t row) {
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT16:
+        return GSPSMCT16::blockTable16[row & 7u][column & 3u];
+    case GS_PSM_CT16S:
+        return GSPSMCT16::blockTable16S[row & 7u][column & 3u];
+    case GS_PSM_T8:
+        return GSPSMT8::blockTable8[row & 3u][column & 7u];
+    case GS_PSM_T4:
+        return GSPSMT4::blockTable4[row & 7u][column & 3u];
+    default:
+        return GSPSMCT32::blockTable32[row & 3u][column & 7u];
     }
 }
 

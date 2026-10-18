@@ -288,23 +288,31 @@ GsTextureKey GsTextureCache::keyFor(const GSDrawState &state) {
     return key;
 }
 
-SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &error) {
+SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &error, const GsRegion *sampled) {
     const GsTextureKey key = keyFor(state);
 
     ++m_stats.lookups;
     if (auto found = m_entries.find(key); found != m_entries.end()) {
         ++m_stats.hits;
-        if (found->second.dirtyPages.any()) {
-            found->second.dirty.merge(regionForPages(key, found->second.dirtyPages));
-            found->second.dirtyPages.reset();
+        Entry &entry = found->second;
+        if (entry.dirtyPages.any()) {
+            entry.dirty.merge(regionForPages(key, entry.dirtyPages));
+            entry.dirtyPages.reset();
         }
-        if (found->second.clutDirty) {
+        if (entry.clutDirty) {
             if (!resolveSource(key, {}, error)) return nullptr;
-            refreshClut(key, found->second);
+            refreshClut(key, entry);
         }
-        if (!found->second.dirty.empty() && !update(key, found->second, error))
+        // Texels never read back join the stale ones once a draw reaches
+        // them, and stale texels wait while no draw does.
+        if (!entry.unresolved.empty() && (!sampled || sampled->intersects(entry.unresolved))) {
+            entry.dirty.merge(entry.unresolved);
+            entry.unresolved.clear();
+        }
+        if (!entry.dirty.empty() && (!sampled || entry.dirty.intersects(*sampled)) &&
+            !update(key, entry, error, sampled))
             return nullptr;
-        return found->second.texture;
+        return entry.texture;
     }
 
     if (m_entries.size() >= kMaxEntries) {
@@ -313,7 +321,7 @@ SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &e
     }
 
     Entry entry{};
-    if (!build(key, entry, error))
+    if (!build(key, entry, error, sampled))
         return nullptr;
     markSourcePages(key, entry.pages);
     markTexelPages(key, entry.texelPages);
@@ -680,20 +688,31 @@ void GsTextureCache::refreshClut(const GsTextureKey &key, Entry &entry) {
 // Patches the texels a host write touched, instead of discarding a texture and
 // re-expanding all of it. On the DQ8 movie path the written region is a small
 // fraction of a 512x512 texture, and rebuilding it was the dominant cost.
+GsPageSet GsTextureCache::staleTexelPages(const GsTextureKey &key, const GsRegion &region) const {
+    GsPageSet pages;
+    if (region.empty())
+        return pages;
+    if (key.psm == GS_PSM_CT32 || key.psm == GS_PSM_CT24 ||
+        key.psm == GS_PSM_T8H || key.psm == GS_PSM_T4HL || key.psm == GS_PSM_T4HH) {
+        m_targets.markReadPagesCt32(pages, key.tbp0, key.tbw, region);
+    } else {
+        // Through the words the CPU wrote where it can tell (T8, T4, CT16):
+        // a texture uploaded into pages a target still owns needs no
+        // readback (Rogue Galaxy: markReadPages).
+        m_targets.markReadPages(pages, key.tbp0, key.tbw, key.psm, region);
+    }
+    return pages;
+}
+
 bool GsTextureCache::resolveSource(const GsTextureKey &key, const GsRegion &region,
-                                  std::string &error) {
+                                  std::string &error, const GsPageSet *exclude) {
     GsPageSet conservative;
     markSourcePages(key, conservative);
     if (!m_targets.ownsAny(conservative)) return true;
 
-    GsPageSet pages;
-    if (key.psm == GS_PSM_CT32 || key.psm == GS_PSM_CT24 ||
-        key.psm == GS_PSM_T8H || key.psm == GS_PSM_T4HL || key.psm == GS_PSM_T4HH) {
-        m_targets.markReadPagesCt32(pages, key.tbp0, key.tbw, region);
-    } else if (!region.empty()) {
-        gsMarkPages(pages, key.tbp0, key.tbw, key.psm,
-                    region.width(), region.height(), region.x0, region.y0);
-    }
+    GsPageSet pages = staleTexelPages(key, region);
+    if (exclude)
+        pages &= ~*exclude;
     markClutReads(key, pages);
     return m_targets.resolve(pages, error);
 }
@@ -728,10 +747,14 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     if (!target)
         return true;
 
-    // The palette is still read on the CPU; only the texels come from the target.
+    // The palette is still read on the CPU; only the texels come from the
+    // target, so only their cells of it need be current (its other queued
+    // patches, the textures uploaded into its other pages, can wait: Rogue
+    // Galaxy, refreshRegion).
     GsPageSet clutPages;
     markClutReads(key, clutPages);
-    if (!m_targets.resolve(clutPages, error) || !m_targets.refresh(*target, error))
+    if (!m_targets.resolve(clutPages, error) ||
+        !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error))
         return false;
     buildPalette(key);
 
@@ -800,7 +823,36 @@ void GsTextureCache::checkAgainstCpu(const GsTextureKey &key, Entry &entry, cons
                  static_cast<unsigned long long>(region.width()) * region.height());
 }
 
-bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &error) {
+void GsTextureCache::restrictToSampled(const GsTextureKey &key, const GsRegion &region, const GsRegion *sampled,
+                                       GsPageSet &exclude, GsRegion &unresolved) const {
+    exclude.reset();
+    if (!sampled || region.empty() || sampled->contains(region))
+        return;
+    // Only pages a target holds matter: stale words nobody owns resolve to
+    // nothing anyway.
+    GsPageSet stale = staleTexelPages(key, region);
+    for (uint32_t page = 0u; page < kGsPageCount; ++page) {
+        if (!stale.test(page))
+            continue;
+        GsPageSet one;
+        one.set(page);
+        if (!m_targets.ownsAny(one))
+            stale.reset(page);
+    }
+    if (stale.none())
+        return;
+    GsRegion staleRegion = regionForPages(key, stale);
+    staleRegion.x0 = std::max(staleRegion.x0, region.x0);
+    staleRegion.y0 = std::max(staleRegion.y0, region.y0);
+    staleRegion.x1 = std::min(staleRegion.x1, region.x1);
+    staleRegion.y1 = std::min(staleRegion.y1, region.y1);
+    if (staleRegion.empty() || sampled->intersects(staleRegion))
+        return;
+    exclude = stale;
+    unresolved.merge(staleRegion);
+}
+
+bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
     const GsRegion region = entry.dirty;
     if (region.empty() || !entry.texture)
         return true;
@@ -817,7 +869,12 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
         return true;
     }
 
-    if (!resolveSource(key, region, error)) {
+    // Pages of the target the draw reaches no texel of stay there; their
+    // texels are re-expanded from local memory as it stands and stay
+    // unresolved.
+    GsPageSet exclude;
+    restrictToSampled(key, region, sampled, exclude, entry.unresolved);
+    if (!resolveSource(key, region, error, &exclude)) {
         return false;
     }
 
@@ -852,7 +909,7 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     return true;
 }
 
-bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &error) {
+bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
     if (!m_device.valid()) {
         error = "SDL GPU device is not available";
         return false;
@@ -864,7 +921,8 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     // done yet.
     GsPageSet sourcePages;
     markSourcePages(key, sourcePages);
-    if (m_targets.ownsAny(sourcePages))
+    const bool owned = m_targets.ownsAny(sourcePages);
+    if (owned)
         ++m_stats.renderTargetSources;
 
     bool expanded = false;
@@ -877,7 +935,14 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
         return true;
     }
 
-    if (!resolveSource(key, {0u, 0u, key.width, key.height}, error)) {
+    // Pages of a target the draw reaches no texel of stay there; their
+    // texels are expanded from whatever local memory holds and marked
+    // unresolved (restrictToSampled).
+    const GsRegion whole{0u, 0u, key.width, key.height};
+    GsPageSet exclude;
+    if (owned)
+        restrictToSampled(key, whole, sampled, exclude, entry.unresolved);
+    if (!resolveSource(key, whole, error, &exclude)) {
         return false;
     }
 

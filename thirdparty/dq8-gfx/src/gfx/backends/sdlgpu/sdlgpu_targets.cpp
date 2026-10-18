@@ -3,17 +3,70 @@
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
 #include "runtime/gs/gs_types.h"
 #include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 namespace dq8::gfx {
 
+// Ownership moves between local memory and the GPU on every transfer, draw and
+// present, and getting that order wrong shows up as a buffer that is correct
+// but blank. DQ8_GFX_TRACE_TARGETS prints the moves.
 namespace {
+std::atomic<bool> &traceFlag() {
+    static std::atomic<bool> flag{[] {
+        const char *value = std::getenv("DQ8_GFX_TRACE_TARGETS");
+        return value != nullptr && *value != '\0';
+    }()};
+    return flag;
+}
+} // namespace
+
+bool gsTargetTraceEnabled() {
+    return traceFlag().load(std::memory_order_relaxed);
+}
+
+void gsSetTargetTrace(bool enabled) {
+    traceFlag().store(enabled, std::memory_order_relaxed);
+}
+
+const char *gsResolveReasonName(GsResolveReason reason) {
+    switch (reason) {
+    case GsResolveReason::HostWrite: return "host-write";
+    case GsResolveReason::LocalCopy: return "local-copy";
+    case GsResolveReason::LocalRead: return "local-read";
+    case GsResolveReason::View: return "view";
+    case GsResolveReason::Sample: return "sample";
+    case GsResolveReason::Texture: return "texture";
+    case GsResolveReason::Present: return "present";
+    case GsResolveReason::Sync: return "sync";
+    case GsResolveReason::Feedback: return "feedback";
+    case GsResolveReason::Scale: return "scale";
+    default: return "unknown";
+    }
+}
+
+namespace {
+
+// Wall time of the readbacks, for the stats (Rogue Galaxy: added).
+struct ResolveTimer {
+    uint64_t &sink;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit ResolveTimer(uint64_t &sink) : sink(sink) {}
+    ~ResolveTimer() {
+        sink += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+    }
+};
 
 // A GS buffer has no height register, so surfaces grow to fit what is drawn
 // into them. The cap is generous next to the 1024-line maximum the CRTC can
@@ -37,6 +90,85 @@ uint64_t ct32Words(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
         for (uint32_t x = x0; x < x1; ++x)
             mask |= uint64_t(1u) << GSPSMCT32::columnTable32[y][x];
     return mask;
+}
+
+// Block geometry of the formats a host write fills whole bytes of, so its
+// texels can be accounted as CT32 words of the target holding the block
+// (Rogue Galaxy: added). Units are bytes, or nibbles for PSMT4, whose
+// address function counts them; a word is four bytes or eight nibbles.
+struct BlockGeometry {
+    uint32_t width = 0u, height = 0u;
+    uint32_t unitsPerWord = 0u;
+    uint32_t unitsPerTexel = 0u;
+    bool valid() const { return width != 0u; }
+};
+
+BlockGeometry blockGeometry(uint32_t psm) {
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT32: return {8u, 8u, 4u, 4u};
+    case GS_PSM_CT16:
+    case GS_PSM_CT16S: return {16u, 8u, 4u, 2u};
+    case GS_PSM_T8: return {16u, 16u, 4u, 1u};
+    case GS_PSM_T4: return {32u, 16u, 8u, 1u};
+    default: return {};
+    }
+}
+
+uint32_t unitAddress(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) {
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT16: return GSPSMCT16::addrPSMCT16(base, bw, x, y);
+    case GS_PSM_CT16S: return GSPSMCT16::addrPSMCT16S(base, bw, x, y);
+    case GS_PSM_T8: return GSPSMT8::addrPSMT8(base, bw, x, y);
+    case GS_PSM_T4: return GSPSMT4::addrPSMT4(base, bw, x, y);
+    default: return GSPSMCT32::addrPSMCT32(base, bw, x, y);
+    }
+}
+
+// The words of a block whose units (bytes, or nibbles for PSMT4) are all set
+// in `units`, and the words with any of them set.
+void wordsOfUnits(const uint64_t (&units)[8], uint32_t unitsPerWord, uint64_t &full, uint64_t &touched) {
+    const uint64_t wordUnits = (uint64_t(1) << unitsPerWord) - 1u;
+    full = touched = 0u;
+    for (uint32_t word = 0u; word < 64u; ++word) {
+        const uint32_t first = word * unitsPerWord;
+        const uint64_t have = (units[first >> 6u] >> (first & 63u)) & wordUnits;
+        if (have != 0u)
+            touched |= uint64_t(1) << word;
+        if (have == wordUnits)
+            full |= uint64_t(1) << word;
+    }
+}
+
+// Visits every 256-byte block a rectangle of texels touches, as
+// visit(block, units): null for a block the rectangle covers whole, which
+// costs one address computation; the blocks at its edges go texel by texel
+// and pass the units (bytes, or nibbles for PSMT4) the rectangle fills.
+template <class Visit>
+void forEachBlock(uint32_t psm, uint32_t base, uint32_t bw, const GsRegion &rect, Visit &&visit) {
+    const BlockGeometry geometry = blockGeometry(psm);
+    if (!geometry.valid() || rect.empty())
+        return;
+    const uint32_t unitShift = geometry.unitsPerWord == 8u ? 9u : 8u;
+    const uint32_t unitMask = (1u << unitShift) - 1u;
+    for (uint32_t by = rect.y0 - rect.y0 % geometry.height; by < rect.y1; by += geometry.height) {
+        for (uint32_t bx = rect.x0 - rect.x0 % geometry.width; bx < rect.x1; bx += geometry.width) {
+            const uint32_t block = (unitAddress(psm, base, bw, bx, by) >> unitShift) & 0x3fffu;
+            if (bx >= rect.x0 && by >= rect.y0 && bx + geometry.width <= rect.x1 && by + geometry.height <= rect.y1) {
+                visit(block, static_cast<const uint64_t (*)[8]>(nullptr));
+                continue;
+            }
+            uint64_t units[8]{};
+            const uint32_t y1 = std::min(by + geometry.height, rect.y1), x1 = std::min(bx + geometry.width, rect.x1);
+            for (uint32_t y = std::max(by, rect.y0); y < y1; ++y) {
+                for (uint32_t x = std::max(bx, rect.x0); x < x1; ++x) {
+                    const uint32_t unit = unitAddress(psm, base, bw, x, y) & unitMask;
+                    for (uint32_t i = 0u; i < geometry.unitsPerTexel; ++i)
+                        units[(unit + i) >> 6u] |= uint64_t(1) << ((unit + i) & 63u);
+                }
+            }
+            visit(block, &units);
+        }
+    }
 }
 
 void addCpuPatch(GsSurface &surface, GsRegion region) {
@@ -107,15 +239,8 @@ void unpackPsmToColor(uint32_t psm, uint32_t value, uint8_t *rgba) {
     }
 }
 
-// Ownership moves between local memory and the GPU on every transfer, draw and
-// present, and getting that order wrong shows up as a buffer that is correct
-// but blank. DQ8_GFX_TRACE_TARGETS prints the moves.
 bool traceEnabled() {
-    static const bool enabled = [] {
-        const char *value = std::getenv("DQ8_GFX_TRACE_TARGETS");
-        return value != nullptr && *value != '\0';
-    }();
-    return enabled;
+    return gsTargetTraceEnabled();
 }
 
 void traceSurface(const char *what, const GsSurface &surface, uint64_t extra = 0u) {
@@ -509,10 +634,147 @@ bool GsTargetCache::canPatchHostWrite(const GsPageSet &pages) const {
     return owned;
 }
 
-void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32_t bw,
+bool GsTargetCache::gsPatchableHostWrite(uint32_t psm) {
+    return blockGeometry(psm).valid();
+}
+
+void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32_t bw, uint32_t psm,
                                   uint32_t x, uint32_t y, uint32_t width,
                                   uint32_t firstPixel, uint32_t endPixel) {
+    // The targets holding GPU pixels in each page the write touches, found
+    // once: a texture's write visits hundreds of cells, and looking through
+    // every surface at each was a tenth of the worker (Rogue Galaxy: added).
+    struct PageOwners {
+        uint32_t page;
+        GsSurface *owners[4];
+        uint32_t count;
+    };
+    std::vector<PageOwners> ownersByPage;
+    ownersByPage.reserve(pages.count());
+    for (uint32_t page = 0u; page < kGsPageCount; ++page) {
+        if (!pages.test(page))
+            continue;
+        PageOwners entry{page, {}, 0u};
+        for (auto &candidate : m_surfaces) {
+            GsSurface &surface = *candidate;
+            if (surface.depth || surface.gpuDirty.empty() || !surface.ownedPages.test(page))
+                continue;
+            if (entry.count < 4u)
+                entry.owners[entry.count] = &surface;
+            ++entry.count;
+        }
+        ownersByPage.push_back(entry);
+    }
+    // Each owner of a page; every surface is looked through only for a page
+    // outside `pages` or with more owners than the table keeps.
+    auto forOwners = [&](uint32_t page, auto &&visit) {
+        for (const PageOwners &entry : ownersByPage) {
+            if (entry.page != page)
+                continue;
+            if (entry.count > 4u)
+                break;
+            for (uint32_t i = 0u; i < entry.count; ++i)
+                visit(*entry.owners[i]);
+            return;
+        }
+        for (auto &candidate : m_surfaces) {
+            GsSurface &surface = *candidate;
+            if (!surface.depth && !surface.gpuDirty.empty() && surface.ownedPages.test(page))
+                visit(surface);
+        }
+    };
+    // The words a block's patch covers, as regions of the CT32 surface:
+    // the whole 8x8 cell, or runs of its pixels (Rogue Galaxy: added).
+    auto addBlockPatch = [&](GsSurface &surface, uint32_t page, uint32_t localBlock, uint64_t words) {
+        const uint32_t relativePage = (page + kGsPageCount - (surface.base >> 5u)) % kGsPageCount;
+        const auto position = kBlockPositions[localBlock];
+        const uint32_t dx = (relativePage % surface.bufferWidth) * 64u + position[0];
+        const uint32_t dy = (relativePage / surface.bufferWidth) * 32u + position[1];
+        if (words == ~uint64_t(0)) {
+            addCpuPatch(surface, {dx, dy, std::min(dx + 8u, surface.width), std::min(dy + 8u, surface.height)});
+            return;
+        }
+        for (uint32_t row = 0u; row < 8u; ++row) {
+            for (uint32_t column = 0u; column < 8u;) {
+                if (!((words >> GSPSMCT32::columnTable32[row][column]) & 1u)) {
+                    ++column;
+                    continue;
+                }
+                uint32_t end = column + 1u;
+                while (end < 8u && ((words >> GSPSMCT32::columnTable32[row][end]) & 1u))
+                    ++end;
+                addCpuPatch(surface, {dx + column, dy + row, std::min(dx + end, surface.width),
+                                      std::min(dy + row + 1u, surface.height)});
+                column = end;
+            }
+        }
+    };
+    // Any patchable format other than CT32: its texels' bytes, through the
+    // format's block layout, as the CT32 words they fill.
+    const uint32_t unitsPerWord = blockGeometry(psm).unitsPerWord;
+    auto patchRectBlocks = [&](const GsRegion &rect) {
+        // Whole blocks gather per page and go out as runs of 8x8 cells
+        // along each cell row: the format's block order scatters consecutive
+        // blocks over the page, and one patch per block made hundreds of
+        // uploads of a page.
+        std::vector<std::pair<uint32_t, uint32_t>> wholeByPage;
+        forEachBlock(psm, base, bw, rect, [&](uint32_t block, const uint64_t (*units)[8]) {
+            const uint32_t page = block >> 5u;
+            auto &words = m_cpuWords[block];
+            if (words.generation != m_pageGeneration[page])
+                words = {m_pageGeneration[page], 0u, {}};
+            uint64_t full = ~uint64_t(0);
+            if (units) {
+                // Completed across this write's payloads, so a word split
+                // between two of them still counts once the second lands.
+                for (uint32_t i = 0u; i < 8u; ++i)
+                    words.units[i] |= (*units)[i];
+                uint64_t touched = 0u;
+                wordsOfUnits(words.units, unitsPerWord, full, touched);
+                full &= ~words.mask;
+            }
+            words.mask |= full;
+            if (traceEnabled())
+                std::fprintf(stderr, "[target] patch-block block=%04x page=%03x gen=%llu full=%016llx mask=%016llx\n",
+                             block, page, static_cast<unsigned long long>(words.generation),
+                             static_cast<unsigned long long>(full), static_cast<unsigned long long>(words.mask));
+            if (full == 0u)
+                return;
+            if (!units) {
+                if (wholeByPage.empty() || wholeByPage.back().first != page)
+                    wholeByPage.emplace_back(page, 0u);
+                wholeByPage.back().second |= 1u << (block & 31u);
+                return;
+            }
+            forOwners(page, [&](GsSurface &surface) { addBlockPatch(surface, page, block & 31u, full); });
+        });
+        for (const auto &[page, blocks] : wholeByPage) {
+            forOwners(page, [&, page = page, blocks = blocks](GsSurface &surface) {
+                const uint32_t relativePage = (page + kGsPageCount - (surface.base >> 5u)) % kGsPageCount;
+                const uint32_t px = (relativePage % surface.bufferWidth) * 64u;
+                const uint32_t py = (relativePage / surface.bufferWidth) * 32u;
+                for (uint32_t row = 0u; row < 4u; ++row) {
+                    for (uint32_t column = 0u; column < 8u;) {
+                        if (!((blocks >> GSPSMCT32::blockTable32[row][column]) & 1u)) {
+                            ++column;
+                            continue;
+                        }
+                        uint32_t end = column + 1u;
+                        while (end < 8u && ((blocks >> GSPSMCT32::blockTable32[row][end]) & 1u))
+                            ++end;
+                        addCpuPatch(surface, {px + column * 8u, py + row * 8u, std::min(px + end * 8u, surface.width),
+                                              std::min(py + row * 8u + 8u, surface.height)});
+                        column = end;
+                    }
+                }
+            });
+        }
+    };
     auto patchRect = [&](const GsRegion &rect) {
+        if ((psm & 0x3fu) != GS_PSM_CT32) {
+            patchRectBlocks(rect);
+            return;
+        }
         for (uint32_t ty = rect.y0; ty < rect.y1;) {
             const uint32_t ey = std::min(rect.y1, (ty | 7u) + 1u);
             for (uint32_t tx = rect.x0; tx < rect.x1;) {
@@ -523,17 +785,14 @@ void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32
                 if (words.generation != m_pageGeneration[page])
                     words = {m_pageGeneration[page], 0u};
                 words.mask |= ct32Words(tx & 7u, ty & 7u, ((ex - 1u) & 7u) + 1u, ((ey - 1u) & 7u) + 1u);
-                for (auto &candidate : m_surfaces) {
-                    GsSurface &surface = *candidate;
-                    if (surface.depth || surface.gpuDirty.empty() || !surface.ownedPages.test(page))
-                        continue;
+                forOwners(page, [&](GsSurface &surface) {
                     const uint32_t relativePage = (page + kGsPageCount - (surface.base >> 5u)) % kGsPageCount;
                     const auto position = kBlockPositions[block & 31u];
                     const uint32_t dx = (relativePage % surface.bufferWidth) * 64u + position[0] + (tx & 7u);
                     const uint32_t dy = (relativePage / surface.bufferWidth) * 32u + position[1] + (ty & 7u);
                     addCpuPatch(surface, {dx, dy, std::min(dx + ex - tx, surface.width),
                                           std::min(dy + ey - ty, surface.height)});
-                }
+                });
                 tx = ex;
             }
             ty = ey;
@@ -573,6 +832,37 @@ void GsTargetCache::markReadPagesCt32(GsPageSet &pages, uint32_t base, uint32_t 
         }
         y = ey;
     }
+}
+
+void GsTargetCache::markReadPages(GsPageSet &pages, uint32_t base, uint32_t bw, uint32_t psm,
+                                 const GsRegion &region) const {
+    if ((psm & 0x3fu) == GS_PSM_CT32) {
+        markReadPagesCt32(pages, base, bw, region);
+        return;
+    }
+    if (!gsPatchableHostWrite(psm)) {
+        if (!region.empty())
+            gsMarkPages(pages, base, bw, psm, region.width(), region.height(), region.x0, region.y0);
+        return;
+    }
+    const uint32_t unitsPerWord = blockGeometry(psm).unitsPerWord;
+    forEachBlock(psm, base, bw, region, [&](uint32_t block, const uint64_t (*units)[8]) {
+        const uint32_t page = block >> 5u;
+        const auto &words = m_cpuWords[block];
+        uint64_t touched = ~uint64_t(0);
+        if (units) {
+            uint64_t full = 0u;
+            wordsOfUnits(*units, unitsPerWord, full, touched);
+        }
+        const bool stale = words.generation != m_pageGeneration[page] || (words.mask & touched) != touched;
+        if (traceEnabled() && stale)
+            std::fprintf(stderr, "[target] read-stale block=%04x page=%03x gen=%llu/%llu touched=%016llx mask=%016llx\n",
+                         block, page, static_cast<unsigned long long>(words.generation),
+                         static_cast<unsigned long long>(m_pageGeneration[page]),
+                         static_cast<unsigned long long>(touched), static_cast<unsigned long long>(words.mask));
+        if (stale)
+            pages.set(page);
+    });
 }
 
 bool GsTargetCache::ownsAny(const GsPageSet &pages) const {
@@ -677,6 +967,7 @@ bool GsTargetCache::resolveSurfaces(const std::vector<GsSurface *> &surfaces,
         std::fprintf(stderr, "[target] resolve-batch surfaces=%zu bytes=%llu\n",
                      surfaces.size(), static_cast<unsigned long long>(bytes));
 
+    ResolveTimer timer(m_stats.resolveNanos);
     SDL_GPUDevice *device = m_device.handle();
     SDL_GPUTransferBuffer *download = acquireDownload(static_cast<uint32_t>(bytes), error);
     if (!download)
@@ -759,8 +1050,11 @@ bool GsTargetCache::resolveRegion(GsSurface &surface, GsRegion region,
         return true;
     if (!applyCpuPatches(surface, error))
         return false;
-    if (!downloadScaled(surface, region, m_staging, error))
-        return false;
+    {
+        ResolveTimer timer(m_stats.resolveNanos);
+        if (!downloadScaled(surface, region, m_staging, error))
+            return false;
+    }
     writeResolved(surface, region, m_staging.data());
     return true;
 }
@@ -774,8 +1068,13 @@ void GsTargetCache::writeResolved(GsSurface &surface, GsRegion region,
             if (pixels[i] != 0u || pixels[i + 1u] != 0u || pixels[i + 2u] != 0u)
                 ++nonBlack;
         }
-        traceSurface("resolve", surface, nonBlack);
+        char what[32];
+        std::snprintf(what, sizeof(what), "resolve/%s", gsResolveReasonName(m_reason));
+        std::fprintf(stderr, "[target] resolve region=%ux%u@%u,%u\n", region.width(), region.height(),
+                     region.x0, region.y0);
+        traceSurface(what, surface, nonBlack);
     }
+    ++m_stats.resolvesByReason[static_cast<size_t>(m_reason)];
 
     const uint32_t regionWidth = region.width();
     GsPageSet resolvedPages;
@@ -911,6 +1210,37 @@ bool GsTargetCache::refresh(GsSurface &surface, std::string &error) {
     return true;
 }
 
+bool GsTargetCache::refreshRegion(GsSurface &surface, const GsRegion &region, std::string &error) {
+    if (region.empty())
+        return true;
+    // Whole-page CT32 targets refresh non-owned pages as patches, so a region
+    // of owned pages owes nothing to needsUpload; anything else does.
+    bool owned = nativeCt32(surface, true);
+    if (owned) {
+        for (uint32_t row = region.y0 / 32u; row <= (region.y1 - 1u) / 32u && owned; ++row)
+            for (uint32_t column = region.x0 / 64u; column <= (region.x1 - 1u) / 64u; ++column) {
+                const uint32_t page = ((surface.base >> 5u) + row * surface.bufferWidth + column) % kGsPageCount;
+                if (!surface.ownedPages.test(page)) {
+                    owned = false;
+                    break;
+                }
+            }
+    }
+    if (!owned && !surface.needsUpload.empty() && surface.needsUpload.intersects(region))
+        return refresh(surface, error);
+    if (surface.cpuPatches.empty())
+        return true;
+    std::vector<GsRegion> keep, apply;
+    for (const auto &patch : surface.cpuPatches)
+        (patch.intersects(region) ? apply : keep).push_back(patch);
+    if (apply.empty())
+        return true;
+    surface.cpuPatches.swap(apply);
+    const bool applied = applyCpuPatches(surface, error);
+    surface.cpuPatches = std::move(keep);
+    return applied;
+}
+
 bool GsTargetCache::prepareColorView(GsSurface &surface, std::string &error) {
     std::vector<GsSurface *> surfaces;
     for (auto &candidate : m_surfaces) {
@@ -963,6 +1293,8 @@ bool GsTargetCache::prepareColorView(GsSurface &surface, std::string &error) {
         })) {
         return importColorPages(surface, surfaces, error);
     }
+    if (traceEnabled() && !surfaces.empty())
+        traceSurface("view-resolve", surface, surfaces.size());
     if (!resolveSurfaces(surfaces, error))
         return false;
     for (auto *other : surfaces) {

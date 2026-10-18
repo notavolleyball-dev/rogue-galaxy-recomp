@@ -16,6 +16,9 @@
 
 #include "Stubs/Pad.h"
 #include "vif1_thread.h"
+#if RG_HAS_SDLGPU
+#include "gfx/backends/sdlgpu/sdlgpu_targets.h"
+#endif
 
 namespace rg::debug
 {
@@ -256,9 +259,21 @@ private:
             dumpVram(".vram");
             m_logPath.clear();
             std::fprintf(stderr, "[gs-census] frame logged (%u batches)\n", m_logIndex);
+            setTargetTrace(false);
             return;
         }
-        if (!m_logPath.empty() && ps2_stubs::getPadDebugSnapshot().ports[0][0].readCount >= m_logAt)
+        const uint32_t padReads = ps2_stubs::getPadDebugSnapshot().ports[0][0].readCount;
+        // RG_GS_TRACE_BEFORE=N: the backend's target trace
+        // (DQ8_GFX_TRACE_TARGETS) from N pad reads before the logged frame
+        // to its end. Left on for a whole run it prints a line per transfer
+        // and slows the game to a crawl.
+        if (!m_logPath.empty() && !m_tracing && m_traceBefore != 0 && padReads + m_traceBefore >= m_logAt)
+        {
+            m_tracing = true;
+            std::fprintf(stderr, "[gs-census] target trace on at pad read %u\n", padReads);
+            setTargetTrace(true);
+        }
+        if (!m_logPath.empty() && padReads >= m_logAt)
         {
             m_log = std::fopen(m_logPath.c_str(), "w");
             m_logIndex = 0;
@@ -269,6 +284,21 @@ private:
                 m_logPath.clear();
             }
         }
+    }
+
+    static void setTargetTrace(bool on)
+    {
+#if RG_HAS_SDLGPU
+        dq8::gfx::gsSetTargetTrace(on);
+#else
+        (void)on;
+#endif
+    }
+
+    static uint32_t traceBeforeFromEnv()
+    {
+        const char *value = std::getenv("RG_GS_TRACE_BEFORE");
+        return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
     }
 
     void dumpVram(const std::string &suffix)
@@ -388,6 +418,8 @@ private:
     const uint32_t m_logAt;
     const uint32_t m_snapAt;
     const bool m_logging; // a log path was given; m_logPath empties once it is written
+    const uint32_t m_traceBefore = traceBeforeFromEnv();
+    bool m_tracing = false;
     std::mutex m_logMutex;
     FILE *m_log = nullptr;
     uint32_t m_logIndex = 0;

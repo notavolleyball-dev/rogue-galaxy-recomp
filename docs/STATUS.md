@@ -498,6 +498,38 @@ chunk (4%); and, bigger, having the VU1 compiler emit flag bookkeeping
 only where a flag is read (5%). About 45% of its time is the compiled VU1
 programs themselves.
 
+**Readbacks (the first of those fronts).** The backend's stats now count
+resolves by reason (`DQ8_GFX_STATS_EVERY`) and its target trace can be
+switched on for a window of frames (`RG_GS_TRACE_BEFORE`). In Salgin's
+streets the game provoked 7.8 readbacks a frame, 9 to 13 ms of fence
+waits: three quarters of them host writes of 4-bit textures into pages a
+live target owned in part (the uploads land in the character buffer's and
+the bloom buffers' pages, which only CT32 writes could patch), the rest
+T8 textures read from pages the bloom target still held, the padding row
+of the bloom blur's feedback snapshot, and page marking that took the
+page after each 16-colour palette. All in `thirdparty/dq8-gfx` (its
+README lists them): exact page marking for a block base inside a page;
+host writes in CT16, T8 and T4 patching a native CT32 target word by word
+like CT32 ones, across payloads; texture reads consulting those words, and
+leaving a target's pages that the draw reaches no texel of; the snapshot
+padding copied from the owning target's texture (through the reinterpret
+shader for a CT16 view). The readbacks are gone (0.01 ms a frame) and the
+walk stays byte-identical to its references at 1x and at 3x. Under the
+test harness (stats and census on) at the game's 30 fps the walk at 3x
+went from 22.8 frames a second with the worker at 98% to a steady 29.9 at
+75%, and at 1x the worker went from 74% to 70%. In the 60 fps mode at 3x
+it changed nothing: 32 to 36 frames a second in the streets with the new
+paths as without them (there the waits were only 2 ms a frame, and the
+CPU patches the uploads now become cost about as much). What the worker
+does now, from its profile: about 45% in the driver and the kernel, where
+every patch application, page import, reinterpret and clear is a command
+buffer submission of its own on top of the ten flushes a frame; the rest
+in draw submission, the texture cache and the patches (every patch is
+expanded scale-squared on the CPU and uploaded, 40,000 Kpx a minute at
+3x). Next: patch uploads and page imports recorded into the flush's
+command buffer instead of their own, patches uploaded at native size and
+scaled on the GPU, then the pass count.
+
 ## Open questions
 
 - What leaves the data table's VM pointer stale before the Story hang.
