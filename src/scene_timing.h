@@ -29,6 +29,13 @@
 // Only the scene: music still advances by the measured frame time, so it
 // keeps its tempo. RG_TIME_SCALE=game at 30 fps leaves the game's own
 // compensation on.
+//
+// Not everything in the game takes the step (docs/sixty-fps-logic.md). The
+// play clock and the field minimap take the vsync interval for the vblanks
+// a frame spans: for them it reads 2 while the scale is ours. A movie's
+// modal loop never runs the update, so its frames get scale 1 on entry.
+// NPCs, projectiles and gravity count frames: step_fixes.cpp. RG_STEP_FIXES=0
+// leaves all of these as the game has them.
 namespace rg::timing
 {
 
@@ -38,5 +45,21 @@ void install(PS2Runtime &runtime);
 // From the flip hook, before the flip runs: sets the vsync interval the flip
 // waits for this frame (RG_FPS=60).
 void beforeFlip(uint8_t *rdram, R5900Context *ctx);
+
+// RG_FPS=60 is on, with its hooks in place.
+bool sixtyFps();
+// RG_STEP_FIXES is not 0.
+bool stepFixes();
+// RG_TIME_TRACE is set.
+bool traceEnabled();
+
+// GameSceneGetTimeStep of the current scene (its per-frame scale times its
+// base scale); 1 before the scene exists.
+float sceneStep(const uint8_t *rdram, const R5900Context *ctx);
+
+// Puts `replacement` in the function table at `address` and the entry it
+// replaced in `original`; false, with a message, when there is no entry.
+bool hookFunction(PS2Runtime &runtime, uint32_t address, PS2Runtime::RecompiledFunction replacement,
+                  PS2Runtime::RecompiledFunction &original);
 
 } // namespace rg::timing

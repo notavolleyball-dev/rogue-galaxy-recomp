@@ -25,6 +25,7 @@
 #include "graphics.h"
 #include "movie_audio.h"
 #include "scene_timing.h"
+#include "step_fixes.h"
 #include "vif1_thread.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_native_iop.h"
@@ -120,6 +121,7 @@ int run(int argc, char **argv)
     rg::graphics::installFlipHook(runtime);
     rg::vif1::install(runtime);
     rg::timing::install(runtime);
+    rg::steps::install(runtime);
     rg::movie::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);

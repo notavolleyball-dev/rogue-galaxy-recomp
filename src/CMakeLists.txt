@@ -74,6 +74,7 @@ add_executable(roguegalaxy
     movie_audio.cpp
     return_hook.cpp
     scene_timing.cpp
+    step_fixes.cpp
     vif1_thread.cpp
     overlay/overlay_manager.cpp
     debug/call_trace.cpp

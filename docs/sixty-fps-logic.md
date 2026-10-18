@@ -226,6 +226,25 @@ loop at 0x20B390..0x20B4B4 (`for (i = 0; i < dt; i += 1)`) is dead code
 
 ## 4. Assessment against our mode (RG_FPS=60: env+0x24 = 1 before each flip, scale 0.5 / step 1 after each update, interval 2 during movies)
 
+*Done since (2026-10-18, `src/scene_timing.cpp` and `src/step_fixes.cpp`,
+off with `RG_STEP_FIXES=0`): neither strategy below as such. The interval
+field stays 1 and `DrawEnvGetVsyncInterval` returns 2 to the three readers
+that take it for a logic frame's vblanks (`PlayTimeStep` ra 0x2F75BC,
+`MinimapUpdate` ra 0x32963C, `TextEntrySetupState` ra 0x435A28;
+`MinimapDrawEntry` overwrites the result before using it, `lui v0,0x3f80`
+at 0x3257A0); `MoviePlayModal` is hooked for scale 1.0 on entry;
+NPCs: 0x47D278 scaled by the step around `TaskStepNpc` (the recompiler
+turns its `j NpcObjTableStepMaybe` into a direct host call, so a hook on
+the jumped-to function is never reached from there; any function reached
+only by `j` has to be hooked at the jumper) and the `AngleStepToward` rates
+scaled at ra 0x2FC8A4/0x2FC8BC (smooth at 60, waits halved, the 1.0 chase
+speed at 0x2FC83C not covered); judge objects:
+`HandleRegistryRefStepAll` f12 = step; gravity: `GetTimeStep` step² at ra
+0x234FD8, `GetThrowGravity` step² at ra 0x234FC0, `GetScaledGravity` ÷ step
+for everyone, and a post-return clamp of vel.y to 10 x step after
+`CharaMoveCollideMaybe` (its own clamp at 0x235064 is on the scaled velocity
+and zeroes s3+0x18 on both paths, so nothing else depends on it).*
+
 | Red-tv item | our mode | status | native equivalent |
 |---|---|---|---|
 | base speed (his vsync byte + two 0x3f00) | scale 0.5 written after every update; RG_TIME_SCALE=game reproduces his threshold change | covered | done (`scene_timing.cpp`) |

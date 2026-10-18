@@ -116,7 +116,7 @@ them in the terminal before running it.
 | `RG_UI_SCRIPT=file\|text` | Drive the menu for tests and screenshots: `<guest frame> <command> [args]` entries, `;`-separated (see `thirdparty/dq8-gfx/src/ui/ui_script.cpp`) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
-| `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times |
+| `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity, movie fades) as the game has them |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
 | `RG_MOVIE_AUDIO=game` | The game's own movie PCM callback, which drops packets the runtime's demux delivers too early (noise) |

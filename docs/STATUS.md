@@ -572,12 +572,41 @@ bosses' jumps too, which his per-boss code cave patched); and the scale
 stays 0.5 inside movies (their modal loop never runs the update), so
 audio fades there run at half speed. Covered already: base speed, the
 title screen (its own overlay mode), FMV pacing and subtitles
-(frame-counted), menu timers (overlay mode, scale locked). Next: restore
-the interval field after the flip so the logic sees 2 (play clock and
-minimap at once), write scale 1.0 when a movie starts, and hooks for the
-NPC step (every other frame), the judge-object step (the scene's step
-instead of 1.0) and the gravity term (step squared); then play-test
-jumps, throws and the clock.
+(frame-counted), menu timers (overlay mode, scale locked).
+
+**60 fps logic: the frame-counted systems hooked.** All of the above now
+take the step (`RG_STEP_FIXES=0` for the previous behaviour). The
+interval field itself stays 1 (the flip's wait, `GfxEndFrame`'s clamp,
+the quit-to-title prompt and the insect cage want the wait's value); the
+three readers that take it for the vblanks a logic frame spans
+(`PlayTimeStep`, `MinimapUpdate`, `TextEntrySetupState`, told apart by
+the return address of their `DrawEnvGetVsyncInterval` call) get 2 while
+the scale is ours, so the clock ticks 2 x 0.5 a frame. `MinimapDrawEntry`
+also calls it but overwrites the result before using it. `MoviePlayModal`
+is hooked (it reads the step once on entry for its sound fades): scale
+1.0 on entry, the movie flag for its whole duration, cleared when it
+returns. `src/step_fixes.cpp`, hooks told apart by return address where
+a function serves several callers: NPCs run every frame as before, with
+the walk factor they all share (0x47D278) scaled by the step for the
+duration of `TaskStepNpc` (hooked there, not at the `NpcObjTableStepMaybe`
+it jumps to: the recompiler makes a `j` to a known function a direct host
+call, past the table) and the two `AngleStepToward` rates
+of `NpcObjUpdate` scaled at the call (so they move smoothly at 60
+instead of stepping every other frame; the waits they count in frames
+are now half as long, which nobody will notice; the 1.0 chase speed
+inside 70 units of the player stays per frame); `HandleRegistryRefStepAll`
+gets the step in f12 instead of 1.0; `GameSceneGetTimeStep` returns step
+squared to the gravity site in `CharaMoveCollideMaybe` (0x234FD8) and
+`GetThrowGravity` the same to the held-character site (0x234FC0), while
+`GetScaledGravity` returns a whole frame's gravity to everyone (the
+launch computations of throws, gun shots, cartridges and script attack
+objects, whose integrators now take the step); and after
+`CharaMoveCollideMaybe` returns the scaled vertical velocity is clamped
+to 10 x step, the terminal velocity's share of the frame, which the
+game's own clamp at 10 let reach twice (long falls). Verified in a
+scripted run only (the hooks fire, the play clock advances 60 vblanks a
+second of game time, no regression in the frame); jumps, throws, bosses'
+leaps, NPC walks and the clock want a play-test.
 
 ## Open questions
 
