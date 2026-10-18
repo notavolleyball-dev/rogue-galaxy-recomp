@@ -14,6 +14,7 @@
 //   refresh()      -> local memory back into the texture
 #pragma once
 
+#include "gfx/backends/sdlgpu/sdlgpu_device.h"
 #include "gfx/gs/gs_vram.h"
 
 #include <SDL3/SDL_gpu.h>
@@ -306,8 +307,9 @@ private:
     };
     std::array<uint64_t, kGsPageCount> m_pageGeneration{};
     std::array<CpuWords, kGsVramBytes / 256u> m_cpuWords{};
-    SDL_GPUTransferBuffer *m_upload = nullptr;
-    uint32_t m_uploadCapacity = 0u;
+    // Patch and refresh uploads, recorded into the device's pending command
+    // buffer (Rogue Galaxy: added).
+    SdlGpuUploadPool m_uploadPool;
     // Resolves wait for their own fence before returning, so the download
     // buffer and the downscale staging texture are idle again by the next
     // one and can be reused rather than created and released every time

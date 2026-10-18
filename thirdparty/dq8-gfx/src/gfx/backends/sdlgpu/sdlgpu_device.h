@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -173,6 +174,36 @@ public:
     bool downloadTexture(SDL_GPUTexture *texture, uint32_t width, uint32_t height,
                          std::vector<uint8_t> &pixels, std::string &error) const;
 
+    // Work recorded ahead of the next submission (Rogue Galaxy: added). A
+    // texture upload, a target's patches, a page import, an 8-bit expansion,
+    // a reinterpretation or a clear was each a command buffer submission of
+    // its own, about 150 a frame in the field against ten flushes of queued
+    // draws, and the driver's share of the GS worker was near half. They go
+    // into one command buffer: the next flush of queued draws records those
+    // draws into it and submits it, so what was recorded first runs first,
+    // as with immediate submissions; a readback or a present submits it
+    // first. Only the GS worker thread records into it.
+    SDL_GPUCommandBuffer *pendingCommands(std::string &error);
+    bool hasPending() const { return m_pending != nullptr; }
+    // Submits what is pending, if anything, with a fence `completedSerial`
+    // reports on.
+    bool submitPending(std::string &error);
+    // Submits and waits: before reading back what it wrote.
+    bool submitPendingAndWait(std::string &error);
+    // Drops what is pending, after a failure while recording into it.
+    void cancelPending();
+    // The serial of the submission the pending work will go out in; each
+    // submission's is one more than the last's.
+    uint64_t pendingSerial() const { return m_nextSerial; }
+    // The last serial whose submission the GPU has finished.
+    uint64_t completedSerial();
+    // Resources SDL cycles (a local copy's snapshot) stay allocated per use
+    // until their command buffer completes: a caller about to cycle `bytes`
+    // of them asks first, and the pending work goes out once the budget is
+    // spent.
+    bool reservePending(uint64_t bytes, std::string &error);
+    uint64_t submissions() const { return m_submissions; }
+
     // One point-sampled clamp sampler. Filtering and GS wrap modes are done in
     // the fragment shader, which needs raw texel fetches, so the sampler's own
     // parameters never vary.
@@ -211,7 +242,38 @@ private:
     uint32_t m_localCopySnapshotHeight = 0u;
     uint32_t m_localCopyMappingWidth = 0u;
     uint32_t m_localCopyMappingHeight = 0u;
+    SDL_GPUCommandBuffer *m_pending = nullptr;
+    uint64_t m_pendingBytes = 0u;
+    uint64_t m_nextSerial = 1u;
+    uint64_t m_submissions = 0u;
+    struct Submission {
+        uint64_t serial;
+        SDL_GPUFence *fence;
+    };
+    std::deque<Submission> m_inFlight;
     std::unordered_map<GsPipelineKey, SDL_GPUGraphicsPipeline *, GsPipelineKeyHash> m_pipelines;
+};
+
+// Upload transfer buffers for the pending command buffer (Rogue Galaxy:
+// added). A buffer is taken, filled, recorded into the pending command
+// buffer and marked used with that submission's serial; it is free again
+// once the device reports the serial complete. Sizes are rounded up to a
+// power of two from 64 KiB, so a few sizes serve every upload. One buffer
+// cycled by SDL would instead keep a copy of its whole capacity for every
+// upload recorded ahead of a submission.
+class SdlGpuUploadPool {
+public:
+    SDL_GPUTransferBuffer *take(SdlGpuDevice &device, size_t bytes, std::string &error);
+    void used(SDL_GPUTransferBuffer *buffer, uint64_t serial);
+    void release(SdlGpuDevice &device);
+
+private:
+    struct Slot {
+        SDL_GPUTransferBuffer *buffer = nullptr;
+        uint64_t serial = 0u; // 0: free
+        size_t bytes = 0u;
+    };
+    std::vector<Slot> m_slots;
 };
 
 } // namespace dq8::gfx

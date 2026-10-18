@@ -208,11 +208,13 @@ private:
     // the region is the whole texture.
     uint64_t expand(const GsTextureKey &key, const GsRegion &region);
     bool uploadRegion(SDL_GPUTexture *texture, const GsRegion &region, std::string &error);
-    // Transfer buffers come from a fence-guarded pool: the movie path uploads
-    // dozens of regions a frame, and creating a fresh buffer per region spent
-    // a quarter of the EE thread inside the driver's allocator.
+    // Transfer buffers come from a pool guarded by the device's submission
+    // serials: the movie path uploads dozens of regions a frame, and creating
+    // a fresh buffer per region spent a quarter of the EE thread inside the
+    // driver's allocator.
     SDL_GPUTransferBuffer *takeUploadBuffer(size_t bytes);
-    void recycleUploadBuffer(SDL_GPUTransferBuffer *buffer, SDL_GPUFence *fence);
+    // The buffer was recorded into the device's pending command buffer.
+    void recycleUploadBuffer(SDL_GPUTransferBuffer *buffer);
     void releaseUploadPool();
     void markSourcePages(const GsTextureKey &key, GsPageSet &pages) const;
     void markTexelPages(const GsTextureKey &key, GsPageSet &pages) const;
@@ -238,13 +240,7 @@ private:
     std::vector<uint8_t> m_idxRow;
     std::vector<uint32_t> m_clutRgba;
 
-    struct UploadBuffer {
-        SDL_GPUTransferBuffer *buffer = nullptr;
-        // Non-null while a submitted command buffer may still read the buffer.
-        SDL_GPUFence *fence = nullptr;
-        size_t bytes = 0u;
-    };
-    std::vector<UploadBuffer> m_uploadPool;
+    SdlGpuUploadPool m_uploadPool;
     GsTextureCacheStats m_stats{};
 };
 

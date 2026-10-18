@@ -493,12 +493,6 @@ bool batchTraceEnabled() {
 } // namespace
 
 struct SdlGpuBackend::Impl {
-    struct CancelCommands {
-        void operator()(SDL_GPUCommandBuffer *commands) const {
-            SDL_CancelGPUCommandBuffer(commands);
-        }
-    };
-    using CommandBuffer = std::unique_ptr<SDL_GPUCommandBuffer, CancelCommands>;
     mutable std::mutex mutex;
     SdlGpuDevice device;
     GsVram vram;
@@ -595,6 +589,16 @@ struct SdlGpuBackend::Impl {
     // DQ8_GFX_NO_GPU_PADDING: a feedback snapshot's padding rows come from
     // local memory, resolving the target that owns them, as before.
     const bool noGpuPadding = std::getenv("DQ8_GFX_NO_GPU_PADDING") != nullptr;
+    // DQ8_GFX_SUBMIT_DRAWS: a flush of the queued draws records them into the
+    // device's pending command buffer and submits it only once this many
+    // draws are in it (a readback, a present or the cycled-resource budget
+    // sends it sooner); 0 submits at every flush, as before (Rogue Galaxy:
+    // added). The game's frames flush about 70 times: feedback snapshots,
+    // transfers into pages the queued draws touch, aliased views.
+    const uint32_t submitAfterDraws = [] {
+        const char *value = std::getenv("DQ8_GFX_SUBMIT_DRAWS");
+        return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 96u;
+    }();
     // The pages of the host write being patched (patchingHostWrite), which a
     // local copy's source resolve must leave alone; and the pages of a local
     // copy's source whose words local memory already holds, which need no
@@ -608,8 +612,15 @@ struct SdlGpuBackend::Impl {
 
     SDL_GPUBuffer *vertexBuffer = nullptr;
     uint32_t vertexBufferCapacity = 0u;
-    SDL_GPUTransferBuffer *vertexUpload = nullptr;
-    uint32_t vertexUploadCapacity = 0u;
+    // A flush appends its vertices after the ones earlier flushes recorded
+    // into the same submission (vertexBase) and cycles the buffer only at
+    // the first flush of a submission (Rogue Galaxy: added). The transfer
+    // buffers come from a pool guarded by the device's submission serials.
+    SdlGpuUploadPool vertexUploads;
+    uint32_t vertexBase = 0u;
+    uint64_t vertexSerial = 0u;
+    // Draws recorded into the pending command buffer since it last went out.
+    uint32_t recordedDraws = 0u;
     SDL_GPUTexture *dummyTexture = nullptr;
     // Snapshot textures, one per size. Copies into them cycle, so each draw
     // keeps the snapshot it sampled while later ones are taken.
@@ -1086,11 +1097,23 @@ struct SdlGpuBackend::Impl {
 
     // Copies a surface into its snapshot texture as part of a flush, after
     // the batches recorded before it.
-    SDL_GPUTexture *recordSnapshot(SDL_GPUCommandBuffer *commands, const GsSurface &surface) {
+    SDL_GPUTexture *recordSnapshot(SDL_GPUCommandBuffer *&commands, const GsSurface &surface) {
         const uint32_t width = surface.width * surface.scale, height = surface.height * surface.scale;
         std::string error;
         SDL_GPUTexture *snapshot = feedbackTextureFor(width, height, error);
         if (!snapshot) {
+            setError(std::move(error));
+            return nullptr;
+        }
+        // The copy cycles the snapshot, so each one recorded ahead of a
+        // submission keeps its own storage: it counts against the budget, and
+        // the pending work may go out here (the caller is between passes).
+        if (!device.reservePending(uint64_t(width) * height * 4u, error)) {
+            setError(std::move(error));
+            return nullptr;
+        }
+        commands = device.pendingCommands(error);
+        if (!commands) {
             setError(std::move(error));
             return nullptr;
         }
@@ -1108,8 +1131,11 @@ struct SdlGpuBackend::Impl {
         return snapshot;
     }
 
+    // Records the snapshot into the device's pending command buffer; the
+    // caller flushes the draw that samples it right after, before another
+    // snapshot into the same texture can get ahead of that draw.
     SDL_GPUTexture *snapshotFeedback(GsSurface &surface, std::string &error,
-                                     const FeedbackPadding &padding, CommandBuffer &ownedCommands) {
+                                     const FeedbackPadding &padding) {
         if (!flushDraws() || !targets->refresh(surface, error))
             return nullptr;
         // Padding regions are in GS pixels; an upscaled snapshot holds each
@@ -1234,15 +1260,16 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTexture *feedbackTexture = feedbackTextureFor(width, height, error);
         if (!feedbackTexture)
             return nullptr;
-        ownedCommands.reset(SDL_AcquireGPUCommandBuffer(device.handle()));
-        SDL_GPUCommandBuffer *commands = ownedCommands.get();
-        if (!commands) {
-            error = std::string("SDL_AcquireGPUCommandBuffer(feedback): ") + SDL_GetError();
+        // The copy below cycles the snapshot (see recordSnapshot).
+        if (!device.reservePending(uint64_t(width) * height * 4u, error))
             return nullptr;
-        }
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
+        if (!commands)
+            return nullptr;
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
         if (!copy) {
             error = std::string("SDL_BeginGPUCopyPass(feedback): ") + SDL_GetError();
+            device.cancelPending();
             return nullptr;
         }
         SDL_GPUTextureLocation source{}, destination{};
@@ -1326,8 +1353,10 @@ struct SdlGpuBackend::Impl {
         if (paddingSource && view16) {
             const SDL_Rect row{0, int(surface.height * scale), int(surface.width * scale), int(scale)};
             if (!device.recordReinterpret(commands, paddingScratch, feedbackTexture, surface.width, height / scale,
-                                          true, scale, &row, error))
+                                          true, scale, &row, error)) {
+                device.cancelPending();
                 return nullptr;
+            }
         }
         ++stats.feedbackCopies;
         return feedbackTexture;
@@ -1567,7 +1596,7 @@ struct SdlGpuBackend::Impl {
 
         float textureWidth = 1.0f;
         float textureHeight = 1.0f;
-        CommandBuffer feedbackCommands;
+        bool feedbackRecorded = false;
         GsClampState clampState{};
         draw.texture = dummyTexture;
         float textureScale = 1.0f;
@@ -1654,7 +1683,8 @@ struct SdlGpuBackend::Impl {
                     ++stats.textureFeedbackHazards;
                 else
                     ++stats.texturesFromLiveTargets;
-                texture = snapshotFeedback(*sampled, error, feedbackPadding, feedbackCommands);
+                texture = snapshotFeedback(*sampled, error, feedbackPadding);
+                feedbackRecorded = texture != nullptr;
                 if (!texture) {
                     if (!error.empty())
                         setError(std::move(error));
@@ -1828,9 +1858,10 @@ struct SdlGpuBackend::Impl {
             feedbackWritten.clear();
         if (draw.feedback)
             feedbackWritten.merge(drawnPixels(batch, *color));
-        // Copy and consume the snapshot before another submission can change its source.
-        if (feedbackCommands)
-            flushDraws(std::move(feedbackCommands));
+        // Copy and consume the snapshot before another snapshot into the same
+        // texture can get ahead of the draw.
+        if (feedbackRecorded)
+            flushDraws();
     }
 
     // -----------------------------------------------------------------
@@ -1862,44 +1893,53 @@ struct SdlGpuBackend::Impl {
             static_cast<uint32_t>(vertices.size() * sizeof(GsGpuVertex));
         if (bytes == 0u)
             return true;
-        if (!ensureVertexBuffer(bytes))
-            return false;
-
-        if (!vertexUpload || vertexUploadCapacity < bytes) {
-            if (vertexUpload)
-                SDL_ReleaseGPUTransferBuffer(device.handle(), vertexUpload);
-            SDL_GPUTransferBufferCreateInfo info{};
-            info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-            info.size = vertexBufferCapacity;
-            vertexUpload = SDL_CreateGPUTransferBuffer(device.handle(), &info);
-            if (!vertexUpload)
-                return setError(std::string("SDL_CreateGPUTransferBuffer(vertices): ") + SDL_GetError());
-            vertexUploadCapacity = info.size;
+        uint32_t offset = vertexBase * static_cast<uint32_t>(sizeof(GsGpuVertex));
+        if (!vertexBuffer || vertexBufferCapacity < offset + bytes) {
+            // Start over at the front of a fresh backing (cycled below): the
+            // draws recorded so far keep the one they bound.
+            if (!ensureVertexBuffer(bytes))
+                return false;
+            offset = 0u;
+            vertexBase = 0u;
         }
-        // Cycle storage still referenced by queued GPU work instead of replacing it.
-        void *mapped = SDL_MapGPUTransferBuffer(device.handle(), vertexUpload, true);
+
+        std::string error;
+        SDL_GPUTransferBuffer *upload = vertexUploads.take(device, bytes, error);
+        if (!upload)
+            return setError(std::move(error));
+        void *mapped = SDL_MapGPUTransferBuffer(device.handle(), upload, false);
         if (!mapped)
             return setError(std::string("SDL_MapGPUTransferBuffer(vertices): ") + SDL_GetError());
         std::memcpy(mapped, vertices.data(), bytes);
-        SDL_UnmapGPUTransferBuffer(device.handle(), vertexUpload);
+        SDL_UnmapGPUTransferBuffer(device.handle(), upload);
 
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
         if (!copy)
             return setError(std::string("SDL_BeginGPUCopyPass(vertices): ") + SDL_GetError());
-        const SDL_GPUTransferBufferLocation source{vertexUpload, 0u};
-        const SDL_GPUBufferRegion destination{vertexBuffer, 0u, bytes};
-        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        const SDL_GPUTransferBufferLocation source{upload, 0u};
+        const SDL_GPUBufferRegion destination{vertexBuffer, offset, bytes};
+        // The first flush of a submission cycles storage the last
+        // submission's draws may still read; the later ones append to it.
+        SDL_UploadToGPUBuffer(copy, &source, &destination, vertexBase == 0u);
         SDL_EndGPUCopyPass(copy);
+        vertexUploads.used(upload, device.pendingSerial());
         return true;
     }
 
-    bool flushDraws(CommandBuffer ownedCommands = {}) {
+    bool flushDraws() {
         if (batches.empty()) {
             vertices.clear();
             return true;
         }
         if (!device.valid())
             return setError("SDL GPU device is not available");
+        // What was recorded under another serial has gone out: its vertices
+        // are the GPU's, and this submission starts at the buffer's front.
+        if (vertexSerial != device.pendingSerial()) {
+            vertexSerial = device.pendingSerial();
+            vertexBase = 0u;
+            recordedDraws = 0u;
+        }
 
         // Every target must agree with local memory before it is drawn into.
         std::string error;
@@ -1914,11 +1954,12 @@ struct SdlGpuBackend::Impl {
                 return setError(std::move(error));
         }
 
-        if (!ownedCommands)
-            ownedCommands.reset(SDL_AcquireGPUCommandBuffer(device.handle()));
-        SDL_GPUCommandBuffer *commands = ownedCommands.get();
+        // The device's pending command buffer: the uploads, patches, imports
+        // and expansions recorded since the last submission go out ahead of
+        // these draws, in the one submission.
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
         if (!commands)
-            return setError(std::string("SDL_AcquireGPUCommandBuffer(draw): ") + SDL_GetError());
+            return setError(std::move(error));
         // Keep the upload ordered with its consumers without another submission.
         if (!uploadVertices(commands)) {
             return false;
@@ -2009,7 +2050,7 @@ struct SdlGpuBackend::Impl {
                                          sizeof(batch.vertexUniforms));
             SDL_PushGPUFragmentUniformData(commands, 0u, &batch.fragmentUniforms,
                                            sizeof(batch.fragmentUniforms));
-            SDL_DrawGPUPrimitives(pass, batch.vertexCount, 1u, batch.firstVertex, 0u);
+            SDL_DrawGPUPrimitives(pass, batch.vertexCount, 1u, vertexBase + batch.firstVertex, 0u);
             ++stats.drawCalls;
 
             if (batchTraceEnabled()) {
@@ -2036,10 +2077,19 @@ struct SdlGpuBackend::Impl {
         }
 
         endPass();
-        if (!SDL_SubmitGPUCommandBuffer(ownedCommands.release()))
-            return setError(std::string("SDL_SubmitGPUCommandBuffer(draw): ") + SDL_GetError());
+        ++stats.drawFlushes;
+        recordedDraws += static_cast<uint32_t>(batches.size());
+        vertexBase += static_cast<uint32_t>(vertices.size());
         clearBatches();
         vertices.clear();
+        // Enough recorded: out it goes, so the GPU works while the worker
+        // queues the next batches. Otherwise a later flush, a readback or the
+        // present sends it.
+        if (submitAfterDraws == 0u || recordedDraws >= submitAfterDraws) {
+            if (!device.submitPending(error))
+                return setError(std::move(error));
+            recordedDraws = 0u;
+        }
 
         // Drawing into a render target changes what a texture built from that
         // region should contain. Without this the cache keeps serving the copy
@@ -2051,9 +2101,10 @@ struct SdlGpuBackend::Impl {
     }
 
     bool clearSurface(GsSurface &surface, float r, float g, float b, float a) {
-        SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device.handle());
+        std::string error;
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
         if (!commands)
-            return setError(std::string("SDL_AcquireGPUCommandBuffer(clear): ") + SDL_GetError());
+            return setError(std::move(error));
         SDL_GPUColorTargetInfo info{};
         info.texture = surface.texture;
         info.load_op = SDL_GPU_LOADOP_CLEAR;
@@ -2061,11 +2112,10 @@ struct SdlGpuBackend::Impl {
         info.clear_color = SDL_FColor{r, g, b, a};
         SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, nullptr);
         if (!pass) {
-            SDL_CancelGPUCommandBuffer(commands);
+            device.cancelPending();
             return setError(std::string("SDL_BeginGPURenderPass(clear): ") + SDL_GetError());
         }
         SDL_EndGPURenderPass(pass);
-        SDL_SubmitGPUCommandBuffer(commands);
         // A clear covers the whole surface and supersedes any pending upload.
         surface.needsUpload.clear();
         surface.cpuPatches.clear();
@@ -2339,10 +2389,12 @@ struct SdlGpuBackend::Impl {
         const uint64_t pumpCount = g_eeProcessPendingEventsCount.load(std::memory_order_relaxed);
         static uint64_t previousEnterGuestCount = 0u;
         const uint64_t enterGuestCount = g_eeEnterGuestCount.load(std::memory_order_relaxed);
+        static uint64_t previousSubmissions = 0u;
+        const uint64_t submissions = device.submissions();
 
         std::fprintf(stderr,
                      "[gfx] %.1f fps (backend %.0f%% of wall) over %u frames | transfers=%llu (%llu KiB, "
-                     "%llu forced flushes) draws=%llu passes=%llu | resolves=%llu "
+                     "%llu forced flushes) draws=%llu passes=%llu flushes=%llu submits=%llu | resolves=%llu "
                      "(%llu Kpx) refreshes=%llu (%llu Kpx) | tex builds=%llu "
                      "(%llu Ktexels) bound-live=%llu feedback-copies=%llu | tex-inval draw=%llu write=%llu | "
                      "partial-updates=%llu (%llu Ktexels) | gif packets=%llu frontend=%.0f%% | "
@@ -2361,6 +2413,8 @@ struct SdlGpuBackend::Impl {
                      static_cast<unsigned long long>(delta(stats.transferFlushes, previous.transferFlushes)),
                      static_cast<unsigned long long>(delta(stats.drawCalls, previous.drawCalls)),
                      static_cast<unsigned long long>(delta(stats.renderPasses, previous.renderPasses)),
+                     static_cast<unsigned long long>(delta(stats.drawFlushes, previous.drawFlushes)),
+                     static_cast<unsigned long long>(submissions - previousSubmissions),
                      static_cast<unsigned long long>(delta(targetStats().colorResolves, previous.colorResolves)),
                      static_cast<unsigned long long>(delta(targetStats().resolvedPixels, previous.resolvedPixels) / 1024u),
                      static_cast<unsigned long long>(delta(targetStats().colorRefreshes, previous.colorRefreshes)),
@@ -2404,6 +2458,7 @@ struct SdlGpuBackend::Impl {
                      static_cast<unsigned long long>(stats.secondaryDisplayCircuits),
                      static_cast<unsigned long long>(stats.widenedAlphaReplays),
                      static_cast<unsigned long long>(stats.interruptedCoveredTransfers));
+        previousSubmissions = submissions;
 
         // Where the resolves came from and what their readbacks cost (Rogue
         // Galaxy: added).
@@ -2538,6 +2593,10 @@ struct SdlGpuBackend::Impl {
     bool copyToPresentSource(SDL_GPUTexture *source, uint32_t width, uint32_t height) {
         if (!ensurePresentSource(width, height))
             return false;
+        // Whatever is recorded for the source (its patches, say) goes first.
+        std::string error;
+        if (!device.submitPending(error))
+            return setError(std::move(error));
         SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device.handle());
         if (!commands)
             return setError(std::string("SDL_AcquireGPUCommandBuffer(present copy): ") + SDL_GetError());
@@ -2964,7 +3023,8 @@ struct SdlGpuBackend::Impl {
         uniforms.format[2] = pmode.fixedAlpha;
         uniforms.format[3] = static_cast<uint32_t>(request.bgcolor);
         std::string error;
-        if (!device.composeDisplay(surface1->texture, surface2->texture, presentSource,
+        if (!device.submitPending(error) ||
+            !device.composeDisplay(surface1->texture, surface2->texture, presentSource,
                                    width, height, uniforms, preparingSlot->prepared, error)) {
             setError(std::move(error));
             return false;
@@ -3315,12 +3375,13 @@ SdlGpuBackend::~SdlGpuBackend() {
             slot.texture = nullptr;
             slot.prepared = slot.displayed = nullptr;
         }
+        std::string ignored;
+        m_impl->device.submitPendingAndWait(ignored);
         m_impl->textures.reset();
         m_impl->targets.reset();
         if (m_impl->vertexBuffer)
             SDL_ReleaseGPUBuffer(m_impl->device.handle(), m_impl->vertexBuffer);
-        if (m_impl->vertexUpload)
-            SDL_ReleaseGPUTransferBuffer(m_impl->device.handle(), m_impl->vertexUpload);
+        m_impl->vertexUploads.release(m_impl->device);
         if (m_impl->dummyTexture)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->dummyTexture);
         for (const auto &feedback : m_impl->feedbackTextures)

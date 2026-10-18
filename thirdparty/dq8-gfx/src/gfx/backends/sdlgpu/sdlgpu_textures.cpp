@@ -546,50 +546,20 @@ GsRegion GsTextureCache::regionForPages(const GsTextureKey &key,
     return region;
 }
 
-// Transfer buffers come back once their fence completes. Reaping happens on
-// take; the common case never waits because by the time a buffer is wanted
-// again the previous upload has long finished.
+// Transfer buffers come back once the submission that read them completes.
+// Reaping happens on take; the common case never waits because by the time
+// a buffer is wanted again the previous upload has long finished.
 SDL_GPUTransferBuffer *GsTextureCache::takeUploadBuffer(size_t bytes) {
-    SDL_GPUDevice *device = m_device.handle();
-    for (UploadBuffer &slot : m_uploadPool) {
-        if (slot.fence != nullptr && SDL_QueryGPUFence(device, slot.fence)) {
-            SDL_ReleaseGPUFence(device, slot.fence);
-            slot.fence = nullptr;
-        }
-    }
-    for (UploadBuffer &slot : m_uploadPool) {
-        if (slot.fence == nullptr && slot.bytes >= bytes)
-            return slot.buffer;
-    }
-
-    SDL_GPUTransferBufferCreateInfo transferInfo{};
-    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transferInfo.size = static_cast<uint32_t>(bytes);
-    SDL_GPUTransferBuffer *buffer = SDL_CreateGPUTransferBuffer(device, &transferInfo);
-    if (buffer)
-        m_uploadPool.push_back(UploadBuffer{buffer, nullptr, bytes});
-    return buffer;
+    std::string error;
+    return m_uploadPool.take(m_device, bytes, error);
 }
 
-void GsTextureCache::recycleUploadBuffer(SDL_GPUTransferBuffer *buffer, SDL_GPUFence *fence) {
-    for (UploadBuffer &slot : m_uploadPool) {
-        if (slot.buffer == buffer) {
-            slot.fence = fence;
-            return;
-        }
-    }
+void GsTextureCache::recycleUploadBuffer(SDL_GPUTransferBuffer *buffer) {
+    m_uploadPool.used(buffer, m_device.pendingSerial());
 }
 
 void GsTextureCache::releaseUploadPool() {
-    if (!m_device.valid())
-        return;
-    SDL_GPUDevice *device = m_device.handle();
-    for (UploadBuffer &slot : m_uploadPool) {
-        if (slot.fence != nullptr)
-            SDL_ReleaseGPUFence(device, slot.fence);
-        SDL_ReleaseGPUTransferBuffer(device, slot.buffer);
-    }
-    m_uploadPool.clear();
+    m_uploadPool.release(m_device);
 }
 
 bool GsTextureCache::uploadRegion(SDL_GPUTexture *texture, const GsRegion &region,
@@ -612,15 +582,13 @@ bool GsTextureCache::uploadRegion(SDL_GPUTexture *texture, const GsRegion &regio
     std::memcpy(mapped, m_staging.data(), bytes);
     SDL_UnmapGPUTransferBuffer(device, upload);
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
-    if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(texture cache): ") + SDL_GetError();
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    if (!commands)
         return false;
-    }
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(texture cache): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         return false;
     }
     SDL_GPUTextureTransferInfo source{};
@@ -639,10 +607,7 @@ bool GsTextureCache::uploadRegion(SDL_GPUTexture *texture, const GsRegion &regio
     // buffer side is guarded by the pool fence instead.
     SDL_UploadToGPUTexture(copy, &source, &destination, false);
     SDL_EndGPUCopyPass(copy);
-    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
-    if (fence != nullptr) {
-        recycleUploadBuffer(upload, fence);
-    }
+    recycleUploadBuffer(upload);
     return true;
 }
 
@@ -806,7 +771,8 @@ void GsTextureCache::checkAgainstCpu(const GsTextureKey &key, Entry &entry, cons
         return;
     std::vector<uint8_t> gpu;
     std::string error;
-    if (!m_device.downloadTexture(entry.texture, key.width, key.height, gpu, error) ||
+    if (!m_device.submitPending(error) ||
+        !m_device.downloadTexture(entry.texture, key.width, key.height, gpu, error) ||
         !resolveSource(key, region, error)) {
         std::fprintf(stderr, "[texture-check] %s\n", error.c_str());
         return;
@@ -999,9 +965,8 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     std::memcpy(mapped, m_staging.data(), m_staging.size());
     SDL_UnmapGPUTransferBuffer(device, upload);
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
     if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(texture cache): ") + SDL_GetError();
         SDL_ReleaseGPUTexture(device, entry.texture);
         entry.texture = nullptr;
         return false;
@@ -1009,7 +974,7 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(texture cache): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         SDL_ReleaseGPUTexture(device, entry.texture);
         entry.texture = nullptr;
         return false;
@@ -1025,10 +990,7 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     region.d = 1u;
     SDL_UploadToGPUTexture(copy, &source, &region, false);
     SDL_EndGPUCopyPass(copy);
-    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
-    if (fence != nullptr) {
-        recycleUploadBuffer(upload, fence);
-    }
+    recycleUploadBuffer(upload);
 
     ++m_stats.builds;
     m_stats.texelsExpanded += static_cast<uint64_t>(width) * height;

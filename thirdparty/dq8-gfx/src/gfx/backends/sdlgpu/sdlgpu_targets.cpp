@@ -280,10 +280,7 @@ void GsTargetCache::reset() {
     m_surfaces.clear();
     m_pageGeneration.fill(0u);
     m_cpuWords.fill({});
-    if (m_upload && m_device.valid())
-        SDL_ReleaseGPUTransferBuffer(m_device.handle(), m_upload);
-    m_upload = nullptr;
-    m_uploadCapacity = 0u;
+    m_uploadPool.release(m_device);
     if (m_download && m_device.valid())
         SDL_ReleaseGPUTransferBuffer(m_device.handle(), m_download);
     m_download = nullptr;
@@ -974,16 +971,15 @@ bool GsTargetCache::resolveSurfaces(const std::vector<GsSurface *> &surfaces,
         return false;
     // Kept for the next resolve: this one waits for its fence before returning.
     auto release = []() {};
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
     if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(resolve batch): ") + SDL_GetError();
         release();
         return false;
     }
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(resolve batch): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         release();
         return false;
     }
@@ -1006,17 +1002,8 @@ bool GsTargetCache::resolveSurfaces(const std::vector<GsSurface *> &surfaces,
         offset += (source.w * source.h * 4u + 255u) & ~255u;
     }
     SDL_EndGPUCopyPass(copy);
-    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
-    if (!fence) {
-        error = std::string("SDL_SubmitGPUCommandBufferAndAcquireFence(resolve batch): ") + SDL_GetError();
-        release();
-        return false;
-    }
-    SDL_GPUFence *fences[] = {fence};
-    const bool waited = SDL_WaitForGPUFences(device, true, fences, 1u);
-    SDL_ReleaseGPUFence(device, fence);
-    if (!waited) {
-        error = std::string("SDL_WaitForGPUFences(resolve batch): ") + SDL_GetError();
+    // The patches recorded ahead of the download go out with it.
+    if (!m_device.submitPendingAndWait(error)) {
         release();
         return false;
     }
@@ -1331,11 +1318,11 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         error = std::string(operation) + "(target page import): " + SDL_GetError();
         return false;
     };
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device.handle());
-    if (!commands) return fail("SDL_AcquireGPUCommandBuffer");
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    if (!commands) return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         return fail("SDL_BeginGPUCopyPass");
     }
     for (auto *source : sources) {
@@ -1357,7 +1344,6 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         }
     }
     SDL_EndGPUCopyPass(copy);
-    if (!SDL_SubmitGPUCommandBuffer(commands)) return fail("SDL_SubmitGPUCommandBuffer");
     for (auto *source : sources) {
         const GsPageSet shared = source->ownedPages & surface.pages;
         surface.ownedPages |= shared;
@@ -1382,7 +1368,7 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
 bool GsTargetCache::download(GsSurface &surface,
                              std::vector<uint8_t> &out,
                              std::string &error) {
-    if (!applyCpuPatches(surface, error))
+    if (!applyCpuPatches(surface, error) || !m_device.submitPending(error))
         return false;
     return m_device.downloadTexture(surface.texture, surface.width * surface.scale,
                                     surface.height * surface.scale, out, error);
@@ -1430,9 +1416,8 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
     // Both are kept for the next resolve.
     auto release = []() {};
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
     if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(resolve): ") + SDL_GetError();
         release();
         return false;
     }
@@ -1455,7 +1440,7 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(resolve): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         release();
         return false;
     }
@@ -1473,17 +1458,7 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
     SDL_DownloadFromGPUTexture(copy, &source, &destination);
     SDL_EndGPUCopyPass(copy);
 
-    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
-    if (!fence) {
-        error = std::string("SDL_SubmitGPUCommandBufferAndAcquireFence(resolve): ") + SDL_GetError();
-        release();
-        return false;
-    }
-    SDL_GPUFence *fences[] = {fence};
-    const bool waited = SDL_WaitForGPUFences(device, true, fences, 1u);
-    SDL_ReleaseGPUFence(device, fence);
-    if (!waited) {
-        error = std::string("SDL_WaitForGPUFences(resolve): ") + SDL_GetError();
+    if (!m_device.submitPendingAndWait(error)) {
         release();
         return false;
     }
@@ -1514,20 +1489,13 @@ bool GsTargetCache::applyCpuPatches(GsSurface &surface, std::string &error) {
     for (const auto &region : surface.cpuPatches)
         bytes += patchBytes(region);
     SDL_GPUDevice *device = m_device.handle();
-    if (!m_upload || m_uploadCapacity < bytes) {
-        if (m_upload) SDL_ReleaseGPUTransferBuffer(device, m_upload);
-        SDL_GPUTransferBufferCreateInfo info{};
-        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        info.size = bytes;
-        m_upload = SDL_CreateGPUTransferBuffer(device, &info);
-        m_uploadCapacity = m_upload ? bytes : 0u;
-    }
     auto fail = [&](const char *operation) {
         error = std::string(operation) + "(target CPU patches): " + SDL_GetError();
         return false;
     };
-    if (!m_upload) return fail("SDL_CreateGPUTransferBuffer");
-    auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device, m_upload, true));
+    SDL_GPUTransferBuffer *upload = m_uploadPool.take(m_device, bytes, error);
+    if (!upload) return false;
+    auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device, upload, false));
     if (!mapped) return fail("SDL_MapGPUTransferBuffer");
     uint32_t offset = 0u;
     std::vector<uint32_t> row, wide;
@@ -1554,19 +1522,19 @@ bool GsTargetCache::applyCpuPatches(GsSurface &surface, std::string &error) {
         }
         offset += patchBytes(region);
     }
-    SDL_UnmapGPUTransferBuffer(device, m_upload);
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
-    if (!commands) return fail("SDL_AcquireGPUCommandBuffer");
+    SDL_UnmapGPUTransferBuffer(device, upload);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    if (!commands) return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         return fail("SDL_BeginGPUCopyPass");
     }
     offset = 0u;
     uint64_t pixels = 0u;
     for (const auto &region : surface.cpuPatches) {
         SDL_GPUTextureTransferInfo source{};
-        source.transfer_buffer = m_upload;
+        source.transfer_buffer = upload;
         source.offset = offset;
         source.pixels_per_row = region.width() * scale;
         source.rows_per_layer = region.height() * scale;
@@ -1582,7 +1550,7 @@ bool GsTargetCache::applyCpuPatches(GsSurface &surface, std::string &error) {
         offset += patchBytes(region);
     }
     SDL_EndGPUCopyPass(copy);
-    if (!SDL_SubmitGPUCommandBuffer(commands)) return fail("SDL_SubmitGPUCommandBuffer");
+    m_uploadPool.used(upload, m_device.pendingSerial());
     traceSurface("cpu-patch", surface, pixels);
     surface.cpuPatches.clear();
     ++m_stats.colorRefreshes;
@@ -1629,45 +1597,34 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
             SDL_ReleaseGPUTexture(device, native);
     };
 
-    if (!m_upload || m_uploadCapacity < bytes) {
-        if (m_upload)
-            SDL_ReleaseGPUTransferBuffer(device, m_upload);
-        SDL_GPUTransferBufferCreateInfo transferInfo{};
-        transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transferInfo.size = static_cast<uint32_t>(bytes);
-        m_upload = SDL_CreateGPUTransferBuffer(device, &transferInfo);
-        m_uploadCapacity = m_upload ? transferInfo.size : 0u;
-        if (!m_upload) {
-            error = std::string("SDL_CreateGPUTransferBuffer(refresh): ") + SDL_GetError();
-            release();
-            return false;
-        }
+    SDL_GPUTransferBuffer *upload = m_uploadPool.take(m_device, bytes, error);
+    if (!upload) {
+        release();
+        return false;
     }
-    // Submitted copies retain their storage while a later refresh maps a new cycle.
-    void *mapped = SDL_MapGPUTransferBuffer(device, m_upload, true);
+    void *mapped = SDL_MapGPUTransferBuffer(device, upload, false);
     if (!mapped) {
         error = std::string("SDL_MapGPUTransferBuffer(refresh): ") + SDL_GetError();
         release();
         return false;
     }
     std::memcpy(mapped, pixels.data(), bytes);
-    SDL_UnmapGPUTransferBuffer(device, m_upload);
+    SDL_UnmapGPUTransferBuffer(device, upload);
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
     if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(refresh): ") + SDL_GetError();
         release();
         return false;
     }
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(refresh): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        m_device.cancelPending();
         release();
         return false;
     }
     SDL_GPUTextureTransferInfo source{};
-    source.transfer_buffer = m_upload;
+    source.transfer_buffer = upload;
     source.pixels_per_row = width;
     source.rows_per_layer = height;
     SDL_GPUTextureRegion destination{};
@@ -1696,11 +1653,10 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
         SDL_BlitGPUTexture(commands, &blit);
     }
 
-    const bool submitted = SDL_SubmitGPUCommandBuffer(commands);
+    m_uploadPool.used(upload, m_device.pendingSerial());
+    // Released now; SDL destroys it once the recorded blit has read it.
     release();
-    if (!submitted)
-        error = std::string("SDL_SubmitGPUCommandBuffer(refresh): ") + SDL_GetError();
-    return submitted;
+    return true;
 }
 
 } // namespace dq8::gfx

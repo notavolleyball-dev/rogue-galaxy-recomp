@@ -123,6 +123,28 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
     (`SdlGpuDevice::recordReinterpret`) from the owner's page row copied
     into a scratch. `DQ8_GFX_NO_GPU_PADDING=1` reads it from local memory
     as before.
+- `sdlgpu_device`, and every place that acquired a command buffer: a
+  texture upload, a target's patches, a page import, an 8-bit expansion
+  from a target, a reinterpretation, a local copy and a clear were each a
+  command buffer submission of their own, and each flush of the queued
+  draws another. Rogue Galaxy made about 150 submissions a frame in the
+  field (it flushes about 70 times a frame: feedback snapshots, transfers
+  into pages the queued draws touch, aliased views), and the driver and
+  kernel were near half of the GS worker. They are recorded into one
+  pending command buffer instead (`SdlGpuDevice::pendingCommands`), in
+  the order they happen, which is the order the GPU runs them, as with
+  immediate submissions. A flush records the queued draws after them and
+  submits once `DQ8_GFX_SUBMIT_DRAWS` draws (96) are in it; a readback, a
+  present or the budget for resources SDL cycles per use (feedback
+  snapshots and local copies, 96 MiB) sends it sooner. The vertices of
+  one submission's flushes append to one buffer instead of cycling it
+  every flush, and the upload transfer buffers (textures, patches,
+  vertices) come from pools guarded by submission serials
+  (`SdlGpuUploadPool`), not per-submission fences or SDL cycling, which
+  keeps a copy of a buffer's whole capacity per upload in flight. The
+  field's frames go out in 4 to 5 submissions; the stats line shows
+  `flushes=` and `submits=`. `DQ8_GFX_SUBMIT_DRAWS=0` submits at every
+  flush, as before.
 
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's

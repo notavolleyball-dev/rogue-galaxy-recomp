@@ -40,6 +40,9 @@ struct SdlGpuStats {
     uint64_t batches = 0u;
     uint64_t renderPasses = 0u;
     uint64_t drawCalls = 0u;
+    // Flushes of the queued draws into the device's pending command buffer
+    // (Rogue Galaxy: added); the device counts the submissions.
+    uint64_t drawFlushes = 0u;
 
     // Places where GS semantics are approximated rather than reproduced. Each
     // one is a known gap; a nonzero count says how much a scene depends on it.

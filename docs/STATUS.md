@@ -530,6 +530,55 @@ expanded scale-squared on the CPU and uploaded, 40,000 Kpx a minute at
 command buffer instead of their own, patches uploaded at native size and
 scaled on the GPU, then the pass count.
 
+**Submissions (the second front).** Every texture upload, target patch,
+page import, 8-bit expansion, reinterpret, local copy and clear was a
+command buffer submission of its own, and so was each flush of the queued
+draws, of which the game makes about 70 a frame (feedback snapshots,
+transfers into pages the queued draws touch, aliased views), not the ten
+the transfer counter showed: about 150 submissions a frame. The backend
+now records all of it into one pending command buffer, in order, and
+submits it once 96 draws are in it, or when a readback, the present or
+the budget for resources SDL cycles per use asks (`thirdparty/dq8-gfx`,
+its README: `SdlGpuDevice::pendingCommands`, `DQ8_GFX_SUBMIT_DRAWS`). The
+field's frames go out in 4 to 5 submissions. Under the harness at the
+game's 30 fps the worker went from 70% to 51% at 1x and from 75% to 59%
+at 3x, with the logged frame byte-identical to its references at both
+scales; in the 60 fps mode at 3x the streets went from 32-36 to 40-43
+frames a second (38.4 to 46.4 over the six intervals before the logged
+frame), the worker from 97% to 92%. Next on this front: the render pass
+count (about 200 a frame, half of them the breaks around feedback
+snapshots, which copy the whole 512x448 surface for draws that sample a
+strip of it) and the patch uploads expanded scale-squared on the CPU.
+
+**60 fps logic: what the PAL patch maps to.** Red-tv's PCSX2 patch for
+the PAL release (SCES-54552, February 2026; the only 60 fps patch there
+is, NTSC-U has none) was mapped onto our ELF by code shape
+(`docs/sixty-fps-logic.md`, with the game's time-scale anatomy). Its
+vsync byte and two `lui 0x3f00` are what our hook does
+(`src/scene_timing.cpp`: the interval field is 0x491B54, the scale is
+read only through `GameSceneGetTimeStep`, and the step count at
+scene+0x5E04 we also write has no reader). The rest of his patch
+compensates, through PAL-only globals, for systems that count frames
+rather than the step, and those are wrong in our mode too: the play clock
+and the per-second event triggers run at half speed (`PlayTimeStep`
+multiplies by the vsync interval); the field minimap halves its step
+itself when the interval is 1; NPCs walk and turn at twice the speed
+(`NpcObjUpdate` takes no step); thrown objects and projectiles fly at
+twice the speed with half the gravity (`TaskStepJudgeObject` passes a
+constant 1.0); character gravity, players' and enemies' alike,
+accelerates twice as fast (the velocity is scaled by the step, gravity
+added per frame, the velocity unscaled: jumps reach half their height,
+bosses' jumps too, which his per-boss code cave patched); and the scale
+stays 0.5 inside movies (their modal loop never runs the update), so
+audio fades there run at half speed. Covered already: base speed, the
+title screen (its own overlay mode), FMV pacing and subtitles
+(frame-counted), menu timers (overlay mode, scale locked). Next: restore
+the interval field after the flip so the logic sees 2 (play clock and
+minimap at once), write scale 1.0 when a movie starts, and hooks for the
+NPC step (every other frame), the judge-object step (the scene's step
+instead of 1.0) and the gravity term (step squared); then play-test
+jumps, throws and the clock.
+
 ## Open questions
 
 - What leaves the data table's VM pointer stale before the Story hang.

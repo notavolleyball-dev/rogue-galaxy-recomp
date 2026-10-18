@@ -263,6 +263,11 @@ void SdlGpuDevice::destroy() {
     m_framebufferFetch = false;
     if (!m_device)
         return;
+    cancelPending();
+    SDL_WaitForGPUIdle(m_device);
+    for (const Submission &submission : m_inFlight)
+        SDL_ReleaseGPUFence(m_device, submission.fence);
+    m_inFlight.clear();
     for (auto &[key, pipeline] : m_pipelines) {
         (void)key;
         if (pipeline)
@@ -303,17 +308,11 @@ std::string SdlGpuDevice::driverName() const {
 bool SdlGpuDevice::reinterpretColor(SDL_GPUTexture *source, SDL_GPUTexture *destination,
                                     uint32_t width, uint32_t height, bool destination16, uint32_t scale,
                                     std::string &error) {
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
-    if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(reinterpret): ") + SDL_GetError();
+    SDL_GPUCommandBuffer *commands = pendingCommands(error);
+    if (!commands)
         return false;
-    }
     if (!recordReinterpret(commands, source, destination, width, height, destination16, scale, nullptr, error)) {
-        SDL_CancelGPUCommandBuffer(commands);
-        return false;
-    }
-    if (!SDL_SubmitGPUCommandBuffer(commands)) {
-        error = std::string("SDL_SubmitGPUCommandBuffer(reinterpret): ") + SDL_GetError();
+        cancelPending();
         return false;
     }
     return true;
@@ -478,19 +477,24 @@ bool SdlGpuDevice::localCopy(SDL_GPUTexture *source, SDL_GPUTexture *destination
         error = std::string(what) + ": " + SDL_GetError();
         return false;
     };
-    // Cycled: a copy the GPU has not finished keeps the old contents.
+    // Cycled: a copy the GPU has not finished keeps the old contents. Each
+    // copy recorded ahead of a submission holds its own snapshot and
+    // mapping, so their size is reserved against the pending budget.
+    if (!reservePending(uint64_t(width) * scale * height * scale * 4u + mapping.size() * sizeof(uint32_t) * 2u,
+                        error))
+        return false;
     void *mapped = SDL_MapGPUTransferBuffer(m_device, m_localCopyUpload, true);
     if (!mapped)
         return fail("SDL_MapGPUTransferBuffer(local copy)");
     std::memcpy(mapped, mapping.data(), mapping.size() * sizeof(uint32_t));
     SDL_UnmapGPUTransferBuffer(m_device, m_localCopyUpload);
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
+    SDL_GPUCommandBuffer *commands = pendingCommands(error);
     if (!commands)
-        return fail("SDL_AcquireGPUCommandBuffer(local copy)");
+        return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
-        SDL_CancelGPUCommandBuffer(commands);
+        cancelPending();
         return fail("SDL_BeginGPUCopyPass(local copy)");
     }
     SDL_GPUTextureLocation from{};
@@ -514,7 +518,7 @@ bool SdlGpuDevice::localCopy(SDL_GPUTexture *source, SDL_GPUTexture *destination
     target.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1u, nullptr);
     if (!pass) {
-        SDL_CancelGPUCommandBuffer(commands);
+        cancelPending();
         return fail("SDL_BeginGPURenderPass(local copy)");
     }
     SDL_BindGPUGraphicsPipeline(pass, m_localCopyPipeline);
@@ -533,8 +537,6 @@ bool SdlGpuDevice::localCopy(SDL_GPUTexture *source, SDL_GPUTexture *destination
     SDL_PushGPUFragmentUniformData(commands, 0u, control, sizeof(control));
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);
-    if (!SDL_SubmitGPUCommandBuffer(commands))
-        return fail("SDL_SubmitGPUCommandBuffer(local copy)");
     return true;
 }
 
@@ -710,12 +712,12 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
         }
     }
     SDL_UnmapGPUTransferBuffer(m_device, m_index8Upload);
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
+    SDL_GPUCommandBuffer *commands = pendingCommands(error);
     if (!commands)
-        return fail("SDL_AcquireGPUCommandBuffer(index8 placement)");
+        return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
-        SDL_CancelGPUCommandBuffer(commands);
+        cancelPending();
         return fail("SDL_BeginGPUCopyPass(index8 placement)");
     }
     const SDL_GPUTextureTransferInfo from{m_index8Upload, 0u, 128u, 64u};
@@ -726,8 +728,6 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
     to.d = 1u;
     SDL_UploadToGPUTexture(copy, &from, &to, false);
     SDL_EndGPUCopyPass(copy);
-    if (!SDL_SubmitGPUCommandBuffer(commands))
-        return fail("SDL_SubmitGPUCommandBuffer(index8 placement)");
     return true;
 }
 
@@ -761,15 +761,13 @@ bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palett
     std::memcpy(mapped, palette, 256u * 4u);
     SDL_UnmapGPUTransferBuffer(m_device, m_index8Upload);
 
-    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(m_device);
-    if (!commands) {
-        error = std::string("SDL_AcquireGPUCommandBuffer(index8): ") + SDL_GetError();
+    SDL_GPUCommandBuffer *commands = pendingCommands(error);
+    if (!commands)
         return false;
-    }
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(index8 palette): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        cancelPending();
         return false;
     }
     const SDL_GPUTextureTransferInfo from{m_index8Upload, 0u, 256u, 1u};
@@ -789,7 +787,7 @@ bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palett
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1u, nullptr);
     if (!pass) {
         error = std::string("SDL_BeginGPURenderPass(index8): ") + SDL_GetError();
-        SDL_CancelGPUCommandBuffer(commands);
+        cancelPending();
         return false;
     }
     SDL_BindGPUGraphicsPipeline(pass, m_index8Pipeline);
@@ -802,10 +800,6 @@ bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palett
     SDL_PushGPUFragmentUniformData(commands, 0u, pages.data(), sizeof(uint32_t) * pages.size());
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);
-    if (!SDL_SubmitGPUCommandBuffer(commands)) {
-        error = std::string("SDL_SubmitGPUCommandBuffer(index8): ") + SDL_GetError();
-        return false;
-    }
     return true;
 }
 
@@ -940,6 +934,121 @@ bool SdlGpuDevice::downloadTexture(SDL_GPUTexture *texture, uint32_t width, uint
     SDL_UnmapGPUTransferBuffer(device, download);
     SDL_ReleaseGPUTransferBuffer(device, download);
     return true;
+}
+
+SDL_GPUCommandBuffer *SdlGpuDevice::pendingCommands(std::string &error) {
+    if (!m_pending) {
+        m_pending = SDL_AcquireGPUCommandBuffer(m_device);
+        if (!m_pending)
+            error = std::string("SDL_AcquireGPUCommandBuffer(pending): ") + SDL_GetError();
+    }
+    return m_pending;
+}
+
+bool SdlGpuDevice::submitPending(std::string &error) {
+    if (!m_pending)
+        return true;
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(m_pending);
+    m_pending = nullptr;
+    m_pendingBytes = 0u;
+    const uint64_t serial = m_nextSerial++;
+    ++m_submissions;
+    if (!fence) {
+        error = std::string("SDL_SubmitGPUCommandBufferAndAcquireFence(pending): ") + SDL_GetError();
+        return false;
+    }
+    m_inFlight.push_back(Submission{serial, fence});
+    completedSerial();
+    return true;
+}
+
+bool SdlGpuDevice::submitPendingAndWait(std::string &error) {
+    if (!m_pending)
+        return true;
+    const uint64_t serial = m_nextSerial;
+    if (!submitPending(error))
+        return false;
+    for (auto it = m_inFlight.begin(); it != m_inFlight.end(); ++it) {
+        if (it->serial != serial)
+            continue;
+        SDL_GPUFence *fences[] = {it->fence};
+        const bool waited = SDL_WaitForGPUFences(m_device, true, fences, 1u);
+        if (!waited)
+            error = std::string("SDL_WaitForGPUFences(pending): ") + SDL_GetError();
+        SDL_ReleaseGPUFence(m_device, it->fence);
+        m_inFlight.erase(it);
+        return waited;
+    }
+    return true;
+}
+
+void SdlGpuDevice::cancelPending() {
+    if (!m_pending)
+        return;
+    SDL_CancelGPUCommandBuffer(m_pending);
+    m_pending = nullptr;
+    m_pendingBytes = 0u;
+    // Its serial is spent: whatever was marked used in it is free again.
+    ++m_nextSerial;
+}
+
+uint64_t SdlGpuDevice::completedSerial() {
+    while (!m_inFlight.empty() && SDL_QueryGPUFence(m_device, m_inFlight.front().fence)) {
+        SDL_ReleaseGPUFence(m_device, m_inFlight.front().fence);
+        m_inFlight.pop_front();
+    }
+    return m_inFlight.empty() ? m_nextSerial - 1u : m_inFlight.front().serial - 1u;
+}
+
+bool SdlGpuDevice::reservePending(uint64_t bytes, std::string &error) {
+    constexpr uint64_t kBudget = 96u * 1024u * 1024u;
+    if (m_pending && m_pendingBytes + bytes > kBudget && !submitPending(error))
+        return false;
+    m_pendingBytes += bytes;
+    return true;
+}
+
+SDL_GPUTransferBuffer *SdlGpuUploadPool::take(SdlGpuDevice &device, size_t bytes, std::string &error) {
+    const uint64_t completed = device.completedSerial();
+    Slot *best = nullptr;
+    for (Slot &slot : m_slots) {
+        if (slot.serial != 0u && slot.serial <= completed)
+            slot.serial = 0u;
+        if (slot.serial == 0u && slot.bytes >= bytes && (!best || slot.bytes < best->bytes))
+            best = &slot;
+    }
+    if (best)
+        return best->buffer;
+    size_t capacity = 64u * 1024u;
+    while (capacity < bytes)
+        capacity *= 2u;
+    SDL_GPUTransferBufferCreateInfo info{};
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    info.size = static_cast<uint32_t>(capacity);
+    SDL_GPUTransferBuffer *buffer = SDL_CreateGPUTransferBuffer(device.handle(), &info);
+    if (!buffer) {
+        error = std::string("SDL_CreateGPUTransferBuffer(upload pool): ") + SDL_GetError();
+        return nullptr;
+    }
+    m_slots.push_back(Slot{buffer, 0u, capacity});
+    return buffer;
+}
+
+void SdlGpuUploadPool::used(SDL_GPUTransferBuffer *buffer, uint64_t serial) {
+    for (Slot &slot : m_slots) {
+        if (slot.buffer == buffer) {
+            slot.serial = serial;
+            return;
+        }
+    }
+}
+
+void SdlGpuUploadPool::release(SdlGpuDevice &device) {
+    if (device.valid()) {
+        for (Slot &slot : m_slots)
+            SDL_ReleaseGPUTransferBuffer(device.handle(), slot.buffer);
+    }
+    m_slots.clear();
 }
 
 } // namespace dq8::gfx
