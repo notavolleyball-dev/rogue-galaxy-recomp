@@ -67,7 +67,7 @@ bool g_moviePlaying = false;
 bool g_inMovieModal = false;
 bool g_sixty = false;     // RG_FPS=60
 bool g_adaptive = false;  // RG_TIME_SCALE=game
-bool g_stepFixes = true;  // RG_STEP_FIXES=0 turns the frame-counted systems' hooks off
+unsigned g_stepFixes = ~0u; // RG_STEP_FIXES: which frame-counted systems take the step
 bool g_trace = false;     // RG_TIME_TRACE=1
 // What beforeFlip set this frame's flip to wait for, in vblanks.
 uint32_t g_interval = 2u;
@@ -205,7 +205,7 @@ void writeScale(uint8_t *rdram, uint32_t gp, float scale)
 void movieStart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_moviePlaying = true;
-    if (g_sixty && g_stepFixes)
+    if (g_sixty && stepFix(StepFix::Movie))
     {
         // Nothing runs the update while a movie plays, and its frames flip
         // every two vblanks: whole steps, or the sound fades crawl.
@@ -278,9 +278,59 @@ bool sixtyFps()
     return g_sixty;
 }
 
+bool stepFix(StepFix which)
+{
+    return (g_stepFixes & static_cast<unsigned>(which)) != 0u;
+}
+
 bool stepFixes()
 {
-    return g_stepFixes;
+    return g_stepFixes != 0u;
+}
+
+unsigned parseStepFixes(const char *value)
+{
+    if (!value || !*value || std::strcmp(value, "1") == 0 || std::strcmp(value, "all") == 0)
+    {
+        return ~0u;
+    }
+    if (std::strcmp(value, "0") == 0 || std::strcmp(value, "none") == 0)
+    {
+        return 0u;
+    }
+    struct Name
+    {
+        const char *text;
+        StepFix fix;
+    };
+    static const Name names[] = {{"clock", StepFix::Clock},
+                                 {"movie", StepFix::Movie},
+                                 {"npc", StepFix::Npc},
+                                 {"judge", StepFix::Judge},
+                                 {"gravity", StepFix::Gravity}};
+    unsigned fixes = 0u;
+    const char *p = value;
+    while (*p)
+    {
+        const char *end = std::strchr(p, ',');
+        const size_t length = end ? static_cast<size_t>(end - p) : std::strlen(p);
+        bool known = false;
+        for (const Name &name : names)
+        {
+            if (length == std::strlen(name.text) && std::strncmp(p, name.text, length) == 0)
+            {
+                fixes |= static_cast<unsigned>(name.fix);
+                known = true;
+            }
+        }
+        if (!known && length > 0u)
+        {
+            std::fprintf(stderr, "[rg] RG_STEP_FIXES: unknown name \"%.*s\" (clock, movie, npc, judge, gravity)\n",
+                         static_cast<int>(length), p);
+        }
+        p = end ? end + 1 : p + length;
+    }
+    return fixes;
 }
 
 bool traceEnabled()
@@ -341,8 +391,7 @@ void install(PS2Runtime &runtime)
     // a host that only reaches 35 frames a second would otherwise play at
     // 60% speed.
     g_adaptive = g_sixty ? !(mode && std::strcmp(mode, "fixed") == 0) : (mode && std::strcmp(mode, "game") == 0);
-    const char *fixes = std::getenv("RG_STEP_FIXES");
-    g_stepFixes = !(fixes && std::strcmp(fixes, "0") == 0);
+    g_stepFixes = parseStepFixes(std::getenv("RG_STEP_FIXES"));
     const char *traceMode = std::getenv("RG_TIME_TRACE");
     g_trace = traceMode && *traceMode && *traceMode != '0';
     if (!g_sixty && g_adaptive)
@@ -362,20 +411,21 @@ void install(PS2Runtime &runtime)
         {
             std::fprintf(stderr, "[rg] 60 fps: movies will flip every vblank too\n");
         }
-        if (g_stepFixes)
+        if (stepFix(StepFix::Movie) &&
+            !hookFunction(runtime, kMoviePlayModal, &movieModal, g_movieModalOriginal))
         {
-            if (!hookFunction(runtime, kMoviePlayModal, &movieModal, g_movieModalOriginal))
-            {
-                std::fprintf(stderr, "[rg] 60 fps: movies will fade their sound at half speed\n");
-            }
-            if (!hookFunction(runtime, kDrawEnvGetVsyncInterval, &vsyncInterval, g_intervalOriginal))
-            {
-                std::fprintf(stderr, "[rg] 60 fps: the play clock will run at half speed\n");
-            }
+            std::fprintf(stderr, "[rg] 60 fps: movies will fade their sound at half speed\n");
         }
-        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s%s\n",
+        if (stepFix(StepFix::Clock) &&
+            !hookFunction(runtime, kDrawEnvGetVsyncInterval, &vsyncInterval, g_intervalOriginal))
+        {
+            std::fprintf(stderr, "[rg] 60 fps: the play clock will run at half speed\n");
+        }
+        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s\n",
                     g_adaptive ? "steps sized by the frame time, half at full rate" : "half steps",
-                    g_stepFixes ? "" : "; the frame-counted systems are left as they are (RG_STEP_FIXES=0)");
+                    g_stepFixes == 0u ? " none" : "", stepFix(StepFix::Clock) ? " clock" : "",
+                    stepFix(StepFix::Movie) ? " movie" : "", stepFix(StepFix::Npc) ? " npc" : "",
+                    stepFix(StepFix::Judge) ? " judge" : "", stepFix(StepFix::Gravity) ? " gravity" : "");
     }
 }
 

@@ -20,10 +20,12 @@
 #include "debug/input_script.h"
 #include "debug/sampler.h"
 #include "debug/selftest.h"
+#include "debug/stall_watch.h"
 #include "overlay/overlay_manager.h"
 #include "flip_pacing.h"
 #include "graphics.h"
 #include "movie_audio.h"
+#include "libc_rand.h"
 #include "scene_timing.h"
 #include "step_fixes.h"
 #include "vif1_thread.h"
@@ -122,15 +124,18 @@ int run(int argc, char **argv)
     rg::vif1::install(runtime);
     rg::timing::install(runtime);
     rg::steps::install(runtime);
+    rg::libc::install(runtime);
     rg::movie::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
+    rg::debug::startStallWatch(runtime);
     std::printf("[rg] booting %s\n", elf.string().c_str());
     std::fflush(stdout);
 
     runtime.run();
+    rg::debug::stopStallWatch();
     rg::vif1::shutdown();
 
     std::printf("[rg] runtime stopped after %u overlay load(s), resident: %s\n",

@@ -102,7 +102,10 @@ starts the built game on `disc/SCUS_974.90` and writes the game's log to
 `build/last-run.log`. The build copies the FFmpeg and clang runtime DLLs
 next to `roguegalaxy.exe`, so it needs nothing on PATH. To set any of the
 variables below, add a `set` line to the batch file (it has examples) or set
-them in the terminal before running it.
+them in the terminal before running it. The batch file also sets
+`VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
+layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
+of the game's process; set it yourself when running from a terminal.
 
 | Variable | Effect |
 |---|---|
@@ -116,7 +119,7 @@ them in the terminal before running it.
 | `RG_UI_SCRIPT=file\|text` | Drive the menu for tests and screenshots: `<guest frame> <command> [args]` entries, `;`-separated (see `thirdparty/dq8-gfx/src/ui/ui_script.cpp`) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
-| `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity, movie fades) as the game has them |
+| `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity` picks which take the step |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
 | `RG_MOVIE_AUDIO=game` | The game's own movie PCM callback, which drops packets the runtime's demux delivers too early (noise) |
@@ -129,6 +132,7 @@ them in the terminal before running it.
 | `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` (default 1000) |
 | `RG_HWWATCH=0xADDR` | x86 debug register on a guest word: writes leaving a value in `RG_HWWATCH_RANGE=lo-hi` (default the main stack) print the writer's stack (`RG_HWWATCH_READS=1`, `RG_HWWATCH_READER=0xFUNC`, `RG_HWWATCH_DELAY=s`); Windows only |
 | `RG_PROFILE=out.txt` | Sample all threads for `RG_PROFILE_SECONDS` (default 20) from `RG_PROFILE_START` seconds in (default 0); report with `tools/profile/report.py` (`RG_PROFILE_STACKS=1` also records the callers of samples inside the executable, which the report skips) |
+| `RG_STALL_SECONDS=15` | When no frame has been flipped for that long while the window is active, the log gets every guest thread's state (what it waits on; the running one's registers and the addresses it passes over the next second), again every minute; `RG_STALL_WATCH=0` turns the watchdog off |
 | `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |
 | `RG_GS_CENSUS=1` | Every 2 s, the draw states the GPU backend only approximates (destination alpha test and the like), and draws whose scissor is wider than their buffer; `RG_GS_SKIP=MASK:VALUE` drops draws by TEST register |
 | `RG_GS_FRAMELOG=file@N` | Every batch, transfer and clear of one frame, once the game's pad read count reaches N, with GS memory as `file.vram` (`@N#K` also before batch K); `RG_GS_FRAMESKIP=A-B,...` leaves batches of that frame out (`A-` to the end); `RG_GS_TRACE_BEFORE=M` turns the backend's target trace (`DQ8_GFX_TRACE_TARGETS`, a line per transfer and ownership move) on from M pad reads before that frame to its end |

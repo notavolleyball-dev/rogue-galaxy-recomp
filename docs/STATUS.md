@@ -608,6 +608,40 @@ scripted run only (the hooks fire, the play clock advances 60 vblanks a
 second of game time, no regression in the frame); jumps, throws, bosses'
 leaps, NPC walks and the clock want a play-test.
 
+**The freezes: the libc `rand` stub.** Three times in the first hour of
+play in the 60 fps mode the picture froze with the music going on. A
+watchdog (`src/debug/stall_watch.cpp`: no flip for `RG_STALL_SECONDS`,
+15, while the window is active) logs every guest thread's state, the
+running one's registers and the addresses it passes over a second: the
+game thread was running, inside `ScriptVmExec` (0x173B00, the script
+interpreter: 12-byte commands, a slot stack, opcode 21 calls a command
+table, 23 yields the frame, 16-18 jump) and the AI commands it calls
+(`AiCmdIsInBattleRadius`, `AiCmdRandInt`), the other threads waiting
+normally. Reading the frozen process's memory (`tools/hang/dumpmem.ps1`
+finds the guest RAM and the thread contexts; `tools/hang/aiscript.py`
+decodes a VM's bytecode with the command names from the table at
+0x4511E0) gave the loop: a party member's main AI routine, whose top is
+reached again without a yield from a branch taken when `RandInt(100) <
+10`, expecting the next pass to yield; the state it was in (linked to
+itself, nothing to do) made every other branch skip to that one. It was
+taken every time because the game's `rand` (0x133710) is bound to the
+runtime's libc stub (`main.toml`), `std::rand() & 0x7FFF`, while the
+game's own is newlib's 64-bit generator returning 31 bits, and every
+caller divides by 2^31 (`RandFloat`, `RandRangeFloat`, `RandInt`): every
+random number in the game had been 0 since the start of the port (damage
+variance, particles, AI choices, loco selection). `src/libc_rand.cpp`
+puts the game's generator back, on the seed in its reentrancy struct
+(1, as on the console: the game only calls `srand` in a debug mode).
+Nothing to do with the 60 fps hooks; the `RG_STEP_FIXES` toggles stay for
+the play-test. The scripted canal walk boots and runs with the fix, but
+its logged frame could not be compared: another game was running on the
+machine at the time (GPU at 53%, 8 GB of its memory), the GS worker took
+83% of wall instead of 40%, and the logged frames came out partial (HUD
+and parts of the player missing, fewer draws per frame) with the fix on
+or off and with the committed build too. To redo on an idle machine; the
+references in `build/run` were also made with every random number 0, so
+scenes with random effects may differ legitimately.
+
 ## Open questions
 
 - What leaves the data table's VM pointer stale before the Story hang.

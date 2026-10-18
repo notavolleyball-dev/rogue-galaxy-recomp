@@ -37,4 +37,7 @@ void shutdown();
 // depend on thread timing. A no-op on the VIF1 thread or without it.
 void drainForSnapshot();
 
+// Lists handed over and not yet finished (the stall watch).
+bool busy();
+
 } // namespace rg::vif1

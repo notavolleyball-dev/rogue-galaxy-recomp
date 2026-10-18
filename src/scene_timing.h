@@ -48,7 +48,20 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx);
 
 // RG_FPS=60 is on, with its hooks in place.
 bool sixtyFps();
-// RG_STEP_FIXES is not 0.
+
+// The systems made to take the step (RG_STEP_FIXES: unset, 1 or "all" for
+// every one, 0 or "none" for none, or a comma list of the names below, e.g.
+// RG_STEP_FIXES=clock,gravity).
+enum class StepFix : unsigned
+{
+    Clock = 1u << 0,   // "clock": play clock, minimap, name entry (the interval readers)
+    Movie = 1u << 1,   // "movie": scale 1.0 inside movies
+    Npc = 1u << 2,     // "npc": NPC walk and turn rates
+    Judge = 1u << 3,   // "judge": projectiles and thrown objects
+    Gravity = 1u << 4, // "gravity": character gravity and terminal velocity
+};
+bool stepFix(StepFix which);
+// Any of them.
 bool stepFixes();
 // RG_TIME_TRACE is set.
 bool traceEnabled();

@@ -73,6 +73,7 @@ add_executable(roguegalaxy
     flip_pacing.cpp
     movie_audio.cpp
     return_hook.cpp
+    libc_rand.cpp
     scene_timing.cpp
     step_fixes.cpp
     vif1_thread.cpp
@@ -84,6 +85,7 @@ add_executable(roguegalaxy
     debug/hw_watch.cpp
     debug/input_script.cpp
     debug/sampler.cpp
+    debug/stall_watch.cpp
     debug/selftest.cpp
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

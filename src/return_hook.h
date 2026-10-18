@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 
 #include "ps2_runtime.h"
 
@@ -22,5 +23,9 @@ using After = void (*)(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, u
 // From a hook, on the game's thread, in place of original(rdram, ctx, runtime).
 void callThen(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
               After after, uint32_t data);
+
+// The calls unwound and not yet resumed, one line each (the stall watch;
+// read from its thread without a lock, for the log only).
+void describePending(std::FILE *out);
 
 } // namespace rg::hooks

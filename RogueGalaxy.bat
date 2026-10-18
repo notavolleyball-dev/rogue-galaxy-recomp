@@ -22,6 +22,10 @@ rem   set RG_SHOW_FPS=1
 rem   set RG_MUTE=1
 rem 60 fps mode (experimental, see RG_FPS in README.md): remove the line for 30.
 set RG_FPS=60
+rem Keeps other programs' Vulkan layers (OBS's capture hook, ReShade, the
+rem Steam, GOG and Epic overlays) out of the game: they load into every
+rem Vulkan process and sit on its presents. Remove the line to allow them.
+set VK_LOADER_LAYERS_DISABLE=~implicit~
 
 echo Rogue Galaxy is running. Close the game window to quit.
 "%GAME%" "disc\SCUS_974.90" %* > "build\last-run.log" 2>&1

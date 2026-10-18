@@ -261,16 +261,29 @@ void install(PS2Runtime &runtime)
     }
     g_trace = rg::timing::traceEnabled();
     using rg::timing::hookFunction;
+    using rg::timing::stepFix;
+    using rg::timing::StepFix;
     bool complete = true;
-    complete &= hookFunction(runtime, kTaskStepNpc, &taskStepNpc, g_taskStepNpc);
-    complete &= hookFunction(runtime, kAngleStepToward, &angleStepToward, g_angleStepToward);
-    complete &= hookFunction(runtime, kJudgeObjectsStep, &judgeObjectsStep, g_judgeObjectsStep);
-    complete &= hookFunction(runtime, kGetTimeStep, &getTimeStep, g_getTimeStep);
-    complete &= hookFunction(runtime, kGetScaledGravity, &getScaledGravity, g_getScaledGravity);
-    complete &= hookFunction(runtime, kGetThrowGravity, &getThrowGravity, g_getThrowGravity);
-    complete &= hookFunction(runtime, kCharaMoveCollide, &charaMoveCollide, g_charaMoveCollide);
-    std::printf("[rg] 60 fps: NPCs, projectiles and gravity take the scene's step%s\n",
-                complete ? "" : " (some hooks are missing, see above)");
+    if (stepFix(StepFix::Npc))
+    {
+        complete &= hookFunction(runtime, kTaskStepNpc, &taskStepNpc, g_taskStepNpc);
+        complete &= hookFunction(runtime, kAngleStepToward, &angleStepToward, g_angleStepToward);
+    }
+    if (stepFix(StepFix::Judge))
+    {
+        complete &= hookFunction(runtime, kJudgeObjectsStep, &judgeObjectsStep, g_judgeObjectsStep);
+    }
+    if (stepFix(StepFix::Gravity))
+    {
+        complete &= hookFunction(runtime, kGetTimeStep, &getTimeStep, g_getTimeStep);
+        complete &= hookFunction(runtime, kGetScaledGravity, &getScaledGravity, g_getScaledGravity);
+        complete &= hookFunction(runtime, kGetThrowGravity, &getThrowGravity, g_getThrowGravity);
+        complete &= hookFunction(runtime, kCharaMoveCollide, &charaMoveCollide, g_charaMoveCollide);
+    }
+    if (!complete)
+    {
+        std::fprintf(stderr, "[rg] 60 fps: some step hooks are missing, see above\n");
+    }
 }
 
 } // namespace rg::steps

@@ -154,4 +154,16 @@ void callThen(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Cont
     }
 }
 
+void describePending(std::FILE *out)
+{
+    const size_t count = g_pending.size();
+    std::fprintf(out, "[stall] return hooks pending: %zu\n", count);
+    for (size_t i = 0; i < count && i < g_pending.size(); ++i)
+    {
+        const Pending &call = g_pending[i];
+        std::fprintf(out, "[stall]   return to 0x%08X, sp 0x%08X, thread %d, data 0x%08X\n", call.returnPc, call.sp,
+                     call.thread, call.data);
+    }
+}
+
 } // namespace rg::hooks

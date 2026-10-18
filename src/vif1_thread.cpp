@@ -526,4 +526,9 @@ void drainForSnapshot()
     }
 }
 
+bool busy()
+{
+    return g_thread && g_thread->busy();
+}
+
 } // namespace rg::vif1
