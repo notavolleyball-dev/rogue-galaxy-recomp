@@ -8,8 +8,10 @@
 // Nothing here knows about SDL or any graphics API.
 #pragma once
 
+#include <bit>
 #include <bitset>
 #include <cstdint>
+#include <cstring>
 
 namespace dq8::gfx {
 
@@ -20,6 +22,27 @@ inline constexpr uint32_t kGsPageBytes = 8192u;
 inline constexpr uint32_t kGsPageCount = kGsVramBytes / kGsPageBytes;
 
 using GsPageSet = std::bitset<kGsPageCount>;
+
+// The set as 64-bit words, page p at bit p % 64 of word p / 64. Every
+// standard library lays a 512-bit bitset out so (libc++, MSVC and libstdc++
+// alike); the bitset's own shift and mask go through bit iterators and cost
+// as much as a test per page (Rogue Galaxy: added).
+inline constexpr uint32_t kGsPageWords = kGsPageCount / 64u;
+inline void gsPageWords(const GsPageSet &pages, uint64_t (&words)[kGsPageWords]) {
+    static_assert(sizeof(GsPageSet) == sizeof(uint64_t) * kGsPageWords, "GsPageSet is not packed as 64-bit words");
+    std::memcpy(words, &pages, sizeof(words));
+}
+
+// Calls visit(page) for each set page, lowest first (Rogue Galaxy: added).
+template <typename Visit>
+inline void gsForEachPage(const GsPageSet &pages, Visit &&visit) {
+    uint64_t words[kGsPageWords];
+    gsPageWords(pages, words);
+    for (uint32_t index = 0u; index < kGsPageWords; ++index) {
+        for (uint64_t word = words[index]; word != 0u; word &= word - 1u)
+            visit(index * 64u + static_cast<uint32_t>(std::countr_zero(word)));
+    }
+}
 
 // Pixel dimensions of one 8 KiB page in a given PSM. Zero for PSMs with no
 // defined page geometry, which callers must treat as "assume everything".

@@ -214,6 +214,8 @@ void GsTextureCache::reset() {
     }
     m_entries.clear();
     m_sourcePagesAll.reset();
+    for (auto &entries : m_entriesByPage)
+        entries.clear();
     releaseUploadPool();
 }
 
@@ -221,15 +223,24 @@ void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource sourc
     (void)source;
     // Draws mostly land in pages no texture reads; the walk below, over up
     // to 2048 entries, ran for every flush and every host write.
-    if ((m_sourcePagesAll & pages).none())
+    const GsPageSet hit = m_sourcePagesAll & pages;
+    if (hit.none())
         return;
     // Mapping pages to texels belongs at consumption, not at each of the
     // movie's 896 tiny writes. Bitsets merge those writes without a page walk.
-    for (auto &[key, entry] : m_entries) {
-        (void)key;
-        entry.dirtyPages |= entry.texelPages & pages;
-        entry.clutDirty = entry.clutDirty || (entry.clutPages & pages).any();
-    }
+    // Only the entries over the written pages, each once (Rogue Galaxy:
+    // added; the walk over every entry is kept in the comment above the
+    // index).
+    const uint64_t generation = ++m_invalidateGeneration;
+    gsForEachPage(hit, [&](uint32_t page) {
+        for (Entry *entry : m_entriesByPage[page]) {
+            if (entry->invalidated == generation)
+                continue;
+            entry->invalidated = generation;
+            entry->dirtyPages |= entry->texelPages & pages;
+            entry->clutDirty = entry->clutDirty || (entry->clutPages & pages).any();
+        }
+    });
 }
 
 void GsTextureCache::markTexelPages(const GsTextureKey &key, GsPageSet &pages) const {
@@ -333,7 +344,8 @@ SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &e
     markClutPages(key, entry.clutPages);
     SDL_GPUTexture *texture = entry.texture;
     m_sourcePagesAll |= entry.pages;
-    m_entries.emplace(key, std::move(entry));
+    Entry &stored = m_entries.emplace(key, std::move(entry)).first->second;
+    gsForEachPage(stored.pages, [&](uint32_t page) { m_entriesByPage[page].push_back(&stored); });
     return texture;
 }
 

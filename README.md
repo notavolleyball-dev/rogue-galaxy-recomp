@@ -106,6 +106,13 @@ them in the terminal before running it. The batch file also sets
 `VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
 layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
+`RogueGalaxy-perfil.bat` runs the same game with the profiler on
+(`RG_PROFILE`, fifteen minutes from one minute after boot, into
+`build/run/play-perfil.prof`) for a session of real play; report it with
+`tools/profile/report.py` against `build/run/exe-perfil.exe`, the copy of
+the build it was recorded with. It also prints a `[gfx]` line a second
+into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`), so a drop during
+the session can be put to its minute.
 
 | Variable | Effect |
 |---|---|
@@ -135,6 +142,7 @@ of the game's process; set it yourself when running from a terminal.
 | `RG_STALL_SECONDS=15` | When no frame has been flipped for that long while the window is active, the log gets every guest thread's state (what it waits on; the running one's registers and the addresses it passes over the next second) and every host thread's stack (`exe!0x...` frames resolve with `llvm-symbolizer --obj=build/game/src/roguegalaxy.exe`, from the toolchain's `bin`), again every minute; `RG_STALL_WATCH=0` turns the watchdog off |
 | `RG_VU0_FLAGS=0` | Keep the generated code for the game's three VU0 macro-mode bounding-box tests (`AabbOverlap`, `AabbContains`, `AabbContainsPoint`), which always answer yes because the recompiler does not model the VU0 status flags; by default `src/vu0_flags.cpp` replaces them with host versions, which is what keeps the collision list from overflowing and the floor under the player |
 | `RG_POS_TRACE=1` | Log every call that puts a character somewhere it did not walk to (`CharaSetPos`, `CharaSetPosXYZ`, `CharaPlaceAt`: character, id, old and new position, caller), and any character still falling after 90 movement updates, with where it fell from |
+| `RG_MC0_DIR=path` | Memory card folder instead of `disc/mc0` (`mc1` is its sibling). The benchmarks point it at `build/run/mc0-bench`, a copy holding only the save they load, since a second save changes what the scripted load menu picks |
 | `RG_JUMP_TRACE=1` | Log the party leader's movement updates while off the ground (host time, position, step-scaled velocity, the motion's displacement, the action mode and the gravity flags, one line per `CharaMoveCollideMaybe`; `=2` logs the moves on the ground too, for the speed ramps): compares a jump's arc and timing between the 30 and 60 fps modes |
 | `RG_STICK_SQUARE=0` | Hand the game the host's round analog stick range as it is. By default `src/stick_response.cpp` reshapes both sticks onto the DualShock 2's square range (the direction and the pushed distance stay, the distance counts as the longer axis, so a full diagonal reads full on both), which the game's run threshold was tuned for: with a round stick the party only runs within about 20 degrees of each of the four directions and walks in between |
 | `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |

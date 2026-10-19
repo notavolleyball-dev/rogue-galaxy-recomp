@@ -117,6 +117,16 @@ int run(int argc, char **argv)
         std::fprintf(stderr, "[rg] PS2Runtime::loadELF(%s) failed\n", elf.string().c_str());
         return 1;
     }
+    // RG_MC0_DIR=path puts the memory card in another folder (mc1 is its
+    // sibling, as with disc/mc0). The benchmarks run on a copy holding only
+    // the save they load: a second save of the player's changes what the
+    // scripted load menu picks, and with it every reference frame.
+    if (const char *mc0 = std::getenv("RG_MC0_DIR"); mc0 && *mc0)
+    {
+        PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();
+        paths.mcRoot = std::filesystem::absolute(mc0).lexically_normal();
+        PS2Runtime::setIoPaths(paths);
+    }
     // After loadELF(): it sets the defaults these override, and fills the
     // function table the hooks replace entries of.
     if (!configureMemory(runtime) || !rg::overlay::install(runtime))

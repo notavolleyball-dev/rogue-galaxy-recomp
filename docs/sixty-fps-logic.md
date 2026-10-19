@@ -262,7 +262,8 @@ and zeroes s3+0x18 on both paths, so nothing else depends on it). Since
 2026-10-19: the frame counters of the event system (`SystemVmUpdate`,
 `MesMgrUpdateAll`) and of the field's menu and HUD tasks (`TaskStepMenuWin`,
 the battle results, and the other `TaskStepMenu*` thunks into NORMAL.BIN,
-`TaskStepCaption`, `TaskStepLiveTalk`; `TaskTableRun` ignores a step's
+`TaskStepCaption`; not `TaskStepLiveTalk`, which sequences the skill
+actions and froze a skill on logic frames; `TaskTableRun` ignores a step's
 return) run on the frames that complete a whole step (`logicFrame`, a
 button press runs them at once), and the field modes that lock the scale
 (chests, talks, warps) take the half steps.*

@@ -1,0 +1,548 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index b754133..1f54906 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -107,6 +107,10 @@ public:
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+ 
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
++    // Image data continuing the open transfer, as an IMAGE GIFtag's payload
++    // would: the VIF1 thread hands over a DIRECT's bytes in place instead of
++    // copying them behind a synthesized tag (Rogue Galaxy: added).
++    void processImageContinuation(const uint8_t *data, uint32_t sizeBytes);
+     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     void uploadImageNative(uint64_t bitbltbuf,
+                            uint64_t trxpos,
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index bab7517..c5ef217 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -310,6 +310,10 @@ public:
+     // EE timers advance from the scheduler's emulated EE-cycle clock. The
+     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
++    // Applies the cycles advanceEeTimers has batched, so a register read or
++    // write sees the exact count. Interrupts it finds come back from the
++    // next advanceEeTimers.
++    void settleEeTimers() noexcept;
+     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+     void resetEeTimers() noexcept;
+ 
+@@ -319,6 +323,9 @@ public:
+ 
+     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
+     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
++    // Image bytes continuing an open PATH2 transfer, handed over in place
++    // (used only without a GIF arbiter; see processVIF1Data's DIRECT).
++    void setGifImageCallback(GifPacketCallback cb) { m_gifImageCallback = std::move(cb); }
+     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+ 
+     // Called with the channel's register base whenever a CHCR write starts a
+@@ -409,6 +416,7 @@ public:
+     std::vector<TLBEntry> m_tlbEntries;
+ 
+     GifPacketCallback m_gifPacketCallback;
++    GifPacketCallback m_gifImageCallback;
+     DmaStartObserver m_dmaStartObserver;
+     GifArbiter *m_gifArbiter = nullptr;
+     Vu1MscalCallback m_vu1MscalCallback;
+@@ -466,6 +474,12 @@ public:
+     // the game never armed one.
+     bool m_anyEeTimerCued = false;
+     void refreshEeTimersCued() noexcept;
++    // Cycles not yet applied to the timers, and the interrupts a settle
++    // raised meanwhile (see advanceEeTimers).
++    uint64_t m_eeTimerPendingCycles = 0;
++    uint32_t m_eeTimerLateInterrupts = 0;
++    static constexpr uint64_t kEeTimerBatchCycles = 2048u;
++    uint32_t advanceEeTimersNow(uint64_t eeCycles) noexcept;
+     void queueCompletedDmacCause(uint32_t cause);
+ };
+ 
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index dc5ca5c..f53cb03 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -226,6 +226,11 @@ private:
+     uint32_t m_cachedCodeSize = 0;
+     uint64_t m_cachedCodeGeneration = 0;
+     bool m_decodedCodeCacheValid = false;
++    // Whether the image reads the MAC or status flags anywhere (see
++    // fmacFlagsWanted); by code pointer and generation.
++    const uint8_t *m_flagScanCode = nullptr;
++    uint64_t m_flagScanGeneration = ~0ull;
++    bool m_fmacFlagsWanted = true;
+ 
+     std::array<FlagPipelineEntry, kMaxFlagEntries> m_flagPipeline{};
+     ScalarPipelineEntry m_fdiv{};
+@@ -276,6 +281,7 @@ private:
+     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
+     DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
++    bool fmacFlagsWanted(const uint8_t *vuCode, uint32_t codeSize, uint64_t generation);
+     static CompiledBlock findCompiledBlock(const uint8_t *code, uint32_t size, Unit unit);
+     template <Unit unit, uint64_t... words>
+     static bool runCompiledBlock(VU1Interpreter &vu, uint64_t budgetEnd);
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index d65b32b..a0d2120 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -883,6 +883,14 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+     }
+ }
+ 
++void GS::processImageContinuation(const uint8_t *data, uint32_t sizeBytes)
++{
++    if (!data || sizeBytes == 0u)
++        return;
++    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    processImageData(data, sizeBytes);
++}
++
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 5e474f7..0f4f499 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -404,6 +404,8 @@ void PS2Memory::resetEeTimers() noexcept
+ {
+     m_eeTimers = {};
+     m_anyEeTimerCued = false;
++    m_eeTimerPendingCycles = 0u;
++    m_eeTimerLateInterrupts = 0u;
+ }
+ 
+ void PS2Memory::refreshEeTimersCued() noexcept
+@@ -433,6 +435,39 @@ uint32_t PS2Memory::takePendingVifInterrupts() noexcept
+ }
+ 
+ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
++{
++    // Called at every guest safe point with a handful of cycles. The walk
++    // below is cheap but it was 5% of the game's thread by sheer count, so
++    // the cycles are batched: a compare or overflow interrupt arrives up to
++    // kEeTimerBatchCycles (7 us) late, and readIORegister/writeIORegister
++    // settle the batch first, so the count a register access sees is exact.
++    if (!m_anyEeTimerCued)
++    {
++        return 0u;
++    }
++    const uint32_t late = m_eeTimerLateInterrupts;
++    m_eeTimerLateInterrupts = 0u;
++    m_eeTimerPendingCycles += eeCycles;
++    if (m_eeTimerPendingCycles < kEeTimerBatchCycles)
++    {
++        return late;
++    }
++    const uint64_t cycles = m_eeTimerPendingCycles;
++    m_eeTimerPendingCycles = 0u;
++    return late | advanceEeTimersNow(cycles);
++}
++
++void PS2Memory::settleEeTimers() noexcept
++{
++    if (m_eeTimerPendingCycles != 0u)
++    {
++        const uint64_t cycles = m_eeTimerPendingCycles;
++        m_eeTimerPendingCycles = 0u;
++        m_eeTimerLateInterrupts |= advanceEeTimersNow(cycles);
++    }
++}
++
++uint32_t PS2Memory::advanceEeTimersNow(uint64_t eeCycles) noexcept
+ {
+     if (eeCycles == 0u || !m_anyEeTimerCued)
+     {
+@@ -1158,6 +1193,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        settleEeTimers();
+         EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {
+@@ -2231,6 +2267,7 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+     uint32_t timerOffset = 0u;
+     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
+     {
++        settleEeTimers();
+         const EeTimer &timer = m_eeTimers[timerIndex];
+         switch (timerOffset)
+         {
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 984dfad..ce87c15 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -505,14 +505,24 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                 {
+                     // GIF image continuation consumes DIRECT payload, never VIFcodes.
+                     consumedQw = std::min(m_vif1PendingPath2ImageQwc, qwCount);
+-                    std::vector<uint8_t> imagePacket(16u + consumedQw * 16u, 0u);
+-                    const uint64_t imageTag = static_cast<uint64_t>(consumedQw) |
+-                        ((consumedQw == m_vif1PendingPath2ImageQwc) ? (1ull << 15) : 0ull) |
+-                        (static_cast<uint64_t>(kGifFmtImage) << 58);
+-                    std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
+-                    std::memcpy(imagePacket.data() + 16u, data + pos, consumedQw * 16u);
+-                    submitGifPacket(GifPathId::Path2, imagePacket.data(),
+-                                    static_cast<uint32_t>(imagePacket.size()), true, directHl);
++                    if (m_gifImageCallback && !m_gifArbiter)
++                    {
++                        // In place: a texture split over DIRECTs was copied
++                        // whole behind a synthesized tag, 5% of the VIF1
++                        // thread in Rogue Galaxy's streets.
++                        m_gifImageCallback(data + pos, consumedQw * 16u);
++                    }
++                    else
++                    {
++                        std::vector<uint8_t> imagePacket(16u + consumedQw * 16u, 0u);
++                        const uint64_t imageTag = static_cast<uint64_t>(consumedQw) |
++                            ((consumedQw == m_vif1PendingPath2ImageQwc) ? (1ull << 15) : 0ull) |
++                            (static_cast<uint64_t>(kGifFmtImage) << 58);
++                        std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
++                        std::memcpy(imagePacket.data() + 16u, data + pos, consumedQw * 16u);
++                        submitGifPacket(GifPathId::Path2, imagePacket.data(),
++                                        static_cast<uint32_t>(imagePacket.size()), true, directHl);
++                    }
+                     m_vif1PendingPath2ImageQwc -= consumedQw;
+                 }
+ 
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
+index 9bf9b72..4e3c720 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_vu1.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <cstring>
+ 
+ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
+@@ -30,3 +31,36 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+     m_cachedCodeGeneration = generation;
+     m_decodedCodeCacheValid = true;
+ }
++
++// Whether any instruction of the image reads the status flags (FSEQ, FSAND,
++// FSOR), which every FMAC result adds to (sticky bits). Nothing else can
++// observe them: the EE reads only VU0's. A compiled run of such an image
++// queues every FMAC result; otherwise only the pairs whose MAC result a
++// reader can still see queue, which compile_vu_programs.py decides pair by
++// pair (the CLIP results always queue). Rogue Galaxy's images read status
++// flags nowhere and MAC flags in a few places.
++bool VU1Interpreter::fmacFlagsWanted(const uint8_t *vuCode, uint32_t codeSize, uint64_t generation)
++{
++    if (m_flagScanCode == vuCode && m_flagScanGeneration == generation)
++        return m_fmacFlagsWanted;
++    // PS2X_VU_FMAC_FLAGS=1 keeps every result queued, for comparisons.
++    static const bool forced = [] {
++        const char *value = std::getenv("PS2X_VU_FMAC_FLAGS");
++        return value && *value == '1';
++    }();
++    bool wanted = forced;
++    const uint32_t pairCount = codeSize / 8u;
++    for (uint32_t i = 0u; i < pairCount && !wanted; ++i)
++    {
++        uint32_t words[2];
++        std::memcpy(words, vuCode + i * 8u, sizeof(words));
++        if ((words[1] & 0x80000000u) != 0u)
++            continue; // the I bit: the lower word is a float immediate
++        const uint32_t op = words[0] >> 25u;
++        wanted = op == 0x14u || op == 0x16u || op == 0x17u;
++    }
++    m_flagScanCode = vuCode;
++    m_flagScanGeneration = generation;
++    m_fmacFlagsWanted = wanted;
++    return wanted;
++}
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+index c37afaa..10c1823 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+@@ -466,6 +466,7 @@ uint32_t Run::end(uint32_t pc)
+ bool run(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize, uint64_t budgetEnd, Routine routine)
+ {
+     Run program(vu);
++    program.setFmacFlags(Access::fmacFlagsWanted(vu, code, codeSize));
+     for (;;)
+     {
+         const uint32_t pc = routine(program, budgetEnd);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+index 1f28a83..2c1fd21 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+@@ -118,6 +118,10 @@ struct Access
+         return vu.m_activeMemory ? vu.m_activeMemory->getVU1CodeGeneration() : 0u;
+     }
+     static uint32_t workingClip(const VU1Interpreter &vu) { return vu.m_workingClip; }
++    static bool fmacFlagsWanted(VU1Interpreter &vu, const uint8_t *code, uint32_t codeSize)
++    {
++        return vu.fmacFlagsWanted(code, codeSize, codeGeneration(vu));
++    }
+ 
+     // Nothing issued earlier can still change state or stall a pair.
+     static bool drained(const VU1Interpreter &vu)
+@@ -152,6 +156,9 @@ struct Block
+ {
+     uint32_t pc;
+     uint64_t words[N]; // lower | upper << 32
++    // 1 where a MAC flag reader can still see the pair's FMAC result, so it
++    // has to queue (compile_vu_programs.py, flag_liveness); 0 elsewhere.
++    uint8_t flags[N];
+ };
+ 
+ // No compiled pair writes a VF or VI register with a longer latency.
+@@ -404,6 +411,11 @@ public:
+     bool finished() const { return m_finished; }
+     bool ended() const { return m_ended; }
+     uint64_t generation() const { return m_generation; }
++    // Whether every FMAC result has to queue as flags: an image that reads the
++    // status flags, which every result adds to, or PS2X_VU_FMAC_FLAGS=1.
++    // Otherwise only the pairs whose MAC result a reader can see queue
++    // (Block::flags, decided by compile_vu_programs.py); CLIP results always do.
++    void setFmacFlags(bool wanted) { m_fmacFlags = wanted; }
+ 
+     // Stop before the pair at pc and let the interpreter continue.
+     uint32_t leave(uint32_t pc);
+@@ -477,6 +489,7 @@ private:
+     int32_t m_backupValue = 0;
+     uint32_t m_backupReg = 0u;
+     bool m_kickActive = false;
++    bool m_fmacFlags = true;
+     bool m_stale = false;
+     bool m_finished = false;
+     bool m_ended = false;
+@@ -495,7 +508,7 @@ public:
+           m_limit(budgetEnd > run.m_base ? budgetEnd - run.m_base : 0u), m_pairs(run.m_pairs),
+           m_cycle(run.m_cycle), m_flagHead(run.m_flagHead), m_flagTail(run.m_flagTail),
+           m_workingClip(run.m_workingClip), m_backupValue(run.m_backupValue), m_backupReg(run.m_backupReg),
+-          m_kickActive(run.m_kickActive)
++          m_kickActive(run.m_kickActive), m_fmacFlags(run.m_fmacFlags)
+     {
+     }
+ 
+@@ -530,7 +543,7 @@ public:
+     {
+         constexpr uint64_t word = Code.words[Index];
+         return issue<(Code.pc + Index * 8u) & 0x3FFFu, static_cast<uint32_t>(word), static_cast<uint32_t>(word >> 32u),
+-                     settledReads<Code, Index>()>(nextPc);
++                     settledReads<Code, Index>(), Code.flags[Index] != 0u>(nextPc);
+     }
+ 
+     // Return to the driver, which continues with the routine at pc.
+@@ -618,7 +631,7 @@ private:
+         return absolute > m_base ? static_cast<uint32_t>(absolute - m_base) : 0u;
+     }
+ 
+-    template <uint32_t Pc, uint32_t Lower, uint32_t Upper, uint32_t Settled>
++    template <uint32_t Pc, uint32_t Lower, uint32_t Upper, uint32_t Settled, bool Needed>
+     PS2_VU_FORCE_INLINE bool issue(uint32_t nextPc);
+ 
+     // The latest cycle an operand of the pair becomes ready, ignoring the
+@@ -629,11 +642,12 @@ private:
+     template <uint32_t Pc, uint32_t Lower, uint32_t Upper>
+     PS2_VU_FORCE_INLINE bool stale(uint32_t nextPc);
+ 
+-    template <uint32_t Upper>
++    // Needed: a MAC flag reader can see this pair's FMAC result (Block::flags).
++    template <uint32_t Upper, bool Needed>
+     PS2_VU_FORCE_INLINE void upper(float *value);
+ 
+ #if PS2_VU_PROGRAM_NEON || PS2_VU_PROGRAM_SSE
+-    template <uint32_t Upper>
++    template <uint32_t Upper, bool Needed>
+     PS2_VU_FORCE_INLINE bool fastUpper(float *value);
+ #endif
+ 
+@@ -692,6 +706,7 @@ private:
+     uint32_t m_backupReg;
+     bool m_taken = false;
+     bool m_kickActive;
++    bool m_fmacFlags;
+ };
+ 
+ template <uint32_t Lower, uint32_t Upper, uint32_t Settled>
+@@ -732,7 +747,7 @@ PS2_VU_FORCE_INLINE uint32_t Frame::pairReady() const
+     return ready;
+ }
+ 
+-template <uint32_t Pc, uint32_t Lower, uint32_t Upper, uint32_t Settled>
++template <uint32_t Pc, uint32_t Lower, uint32_t Upper, uint32_t Settled, bool Needed>
+ PS2_VU_FORCE_INLINE bool Frame::issue(uint32_t nextPc)
+ {
+     static constexpr Access::Decoded decoded = Access::decode(Lower, Upper);
+@@ -768,7 +783,7 @@ PS2_VU_FORCE_INLINE bool Frame::issue(uint32_t nextPc)
+         if constexpr (upperReadsQ(Upper))
+             if (qDue())
+                 commitQ();
+-        upper<Upper>(upperValue);
++        upper<Upper, Needed>(upperValue);
+     }
+ 
+     float lowerValue[4];
+@@ -850,7 +865,7 @@ PS2_VU_FORCE_INLINE bool Frame::stale(uint32_t nextPc)
+     return false;
+ }
+ 
+-template <uint32_t Upper>
++template <uint32_t Upper, bool Needed>
+ PS2_VU_FORCE_INLINE void Frame::upper(float *value)
+ {
+     if constexpr (!upperPublishesFlags(Upper))
+@@ -865,13 +880,13 @@ PS2_VU_FORCE_INLINE void Frame::upper(float *value)
+     else
+     {
+ #if PS2_VU_PROGRAM_NEON || PS2_VU_PROGRAM_SSE
+-        if (fastUpper<Upper>(value))
++        if (fastUpper<Upper, Needed>(value))
+             return;
+ #endif
+         m_run.exactUpper(Upper);
+         const UpperSink &exact = m_run.m_upper;
+         std::memcpy(value, exact.value, sizeof(exact.value));
+-        if (exact.hasFmac)
++        if (exact.hasFmac && (Needed || m_fmacFlags))
+             pushFlags(3u, exact.mac, spreadStatus(exact.sticky));
+     }
+ }
+@@ -1017,7 +1032,7 @@ PS2_VU_FORCE_INLINE uint32_t Frame::plainUpper(float *value)
+ // computeUpper's vector cases with the same range checks, but with the flags
+ // built straight into the MAC layout. Results the checks do not clear take
+ // the exact path.
+-template <uint32_t Upper>
++template <uint32_t Upper, bool Needed>
+ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
+ {
+     constexpr uint32_t code = upperCode(Upper);
+@@ -1092,7 +1107,7 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
+                 return false;
+             vst1q_f32(value, result);
+             if constexpr (dest != 0u)
+-                pushFlags(3u, fast::layout<dest>(zero, fast::negative(bits), vdupq_n_u32(0u)), 0u);
++                if (Needed || m_fmacFlags) pushFlags(3u, fast::layout<dest>(zero, fast::negative(bits), vdupq_n_u32(0u)), 0u);
+             return true;
+         }
+         else
+@@ -1125,7 +1140,7 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
+                 const uint32x4_t tiny = vcltq_u32(product, vdupq_n_u32(0x00800000u));
+                 const uint32_t conditions = fast::layout<dest>(tiny, fast::negative(veorq_u32(leftBits, rightBits)),
+                                                                vbicq_u32(tiny, zeroProduct));
+-                pushFlags(3u, fast::layout<dest>(zero, fast::negative(bits), vdupq_n_u32(0u)), conditions);
++                if (Needed || m_fmacFlags) pushFlags(3u, fast::layout<dest>(zero, fast::negative(bits), vdupq_n_u32(0u)), conditions);
+             }
+             return true;
+         }
+@@ -1186,7 +1201,7 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
+                 return false;
+             _mm_storeu_ps(value, result);
+             if constexpr (dest != 0u)
+-                pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), 0u);
++                if (Needed || m_fmacFlags) pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), 0u);
+             return true;
+         }
+         else
+@@ -1217,7 +1232,7 @@ PS2_VU_FORCE_INLINE bool Frame::fastUpper(float *value)
+                 const __m128i tiny = _mm_cmplt_epi32(product, _mm_set1_epi32(0x00800000));
+                 const uint32_t conditions = fast::layout<dest>(fast::mask(tiny), _mm_movemask_ps(_mm_xor_ps(left, right)),
+                                                                fast::mask(_mm_andnot_si128(zeroProduct, tiny)));
+-                pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), conditions);
++                if (Needed || m_fmacFlags) pushFlags(3u, fast::layout<dest>(fast::mask(zero), _mm_movemask_ps(result), 0), conditions);
+             }
+             return true;
+         }
+diff --git a/tools/compile_vu_programs.py b/tools/compile_vu_programs.py
+index cf4ec3c..6e5ce98 100644
+--- a/tools/compile_vu_programs.py
++++ b/tools/compile_vu_programs.py
+@@ -312,6 +312,72 @@ def successors(terminator):
+     return []
+ 
+ 
++MAC_READERS = {0x18, 0x1A, 0x1B}  # FMEQ, FMAND, FMOR
++
++
++def upper_code(upper):
++    op = upper & 0x3F
++    return op if op < 0x3C else ((upper & 3) | ((upper >> 4) & 0x7C))
++
++
++def publishes_flags(pair):
++    """Whether the upper instruction queues an FMAC result (upperPublishesFlags)."""
++    code = upper_code(pair.upper)
++    if 0x10 <= code <= 0x17 or code in (0x1D, 0x1F):
++        return False
++    if (pair.upper & 0x3F) < 0x3C:
++        return code not in (0x2B, 0x2F)
++    return code not in (0x2F, 0x30)
++
++
++def reads_mac(pair):
++    return pair.op in MAC_READERS
++
++
++def flag_liveness(routine):
++    """The pairs whose FMAC result a MAC flag reader can still see.
++
++    MAC flags hold the last FMAC result that landed (four cycles after issue),
++    so a result is dead once a later FMAC lands before any reader. Backwards
++    over the routine's blocks: a reader makes everything before it live, an
++    FMAC makes everything before it dead unless a reader within the next
++    three pairs may still see the older result. Every exit counts as live: a
++    call, a register jump or a pair left to the interpreter may read, and so
++    may the next program, since the MAC register survives the E bit. Status flags are sticky and are the
++    interpreter's business (VU1Interpreter::fmacFlagsWanted). Returns the
++    pair indices that publish flags, mapped to whether they must queue them.
++    """
++    pairs, blocks = routine.pairs, routine.blocks
++    live_in = {start: False for start in blocks}
++    needed = {}
++    changed = True
++    while changed:
++        changed = False
++        for start, (body, terminator) in blocks.items():
++            kind = terminator[0]
++            if kind in ("fall", "goto", "cond"):
++                live = any(live_in[target] for target in successors(terminator))
++            else:
++                # A call, a register jump, a pair left to the interpreter, and
++                # the program's end too: the MAC register keeps its value into
++                # the next program, which may read it before its first FMAC.
++                live = True
++            for position in range(len(body) - 1, -1, -1):
++                index = body[position]
++                pair = pairs[index]
++                if publishes_flags(pair):
++                    needed[index] = needed.get(index, False) or live
++                    window = body[position + 1:position + 4]
++                    if len(window) == 3 and not any(reads_mac(pairs[i]) for i in window):
++                        live = False
++                if reads_mac(pair):
++                    live = True
++            if live != live_in[start]:
++                live_in[start] = live
++                changed = True
++    return needed
++
++
+ def loops(routine):
+     """Each block's strongly connected component, as a frozenset of block starts."""
+     # Tarjan's algorithm without recursion: a routine can chain over a
+@@ -418,13 +484,15 @@ def emit_routine(routine, name, max_pairs):
+     # issued before it in the block.
+     tables = []
+     lines = []
++    needed = flag_liveness(routine)
+ 
+     def emit_block(start):
+         body, terminator = routine.blocks[start]
+         table = f"{name}_{start:04x}"
+         if body:
+             words = ", ".join(f"0x{pairs[i].word:016x}ull" for i in body)
+-            tables.append(f"constexpr Block<{len(body)}> {table}{{{pc(start)}, {{{words}}}}};")
++            flags = ", ".join("1u" if needed.get(i, False) else "0u" for i in body)
++            tables.append(f"constexpr Block<{len(body)}> {table}{{{pc(start)}, {{{words}}}, {{{flags}}}}};")
+ 
+         def emit_pair(index, next_pc, checked=True):
+             call = f"p.pair<{table}, {index - start}>({next_pc})"

@@ -16,6 +16,7 @@
 
 #include <SDL3/SDL_gpu.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -165,6 +166,10 @@ private:
         bool clutUploadPending = false;
         // Created as a colour target too, so it can be built on the GPU.
         bool renderable = false;
+        // The invalidate() call that last visited this entry, so an entry
+        // over several of a write's pages is visited once (Rogue Galaxy:
+        // added).
+        uint64_t invalidated = 0u;
     };
 
     std::function<void(SDL_GPUTexture *)> m_beforeRewrite;
@@ -235,6 +240,14 @@ private:
     // The source pages of every entry, so an invalidation of pages no
     // texture uses skips the walk over the entries (Rogue Galaxy: added).
     GsPageSet m_sourcePagesAll{};
+    // The entries by each page they read, so an invalidation visits the
+    // entries over the written pages alone: a texture upload touches a
+    // handful of pages, and walking the whole map for each of the hundreds
+    // a frame was a tenth of the worker in Rogue Galaxy's battles. The map
+    // keeps its nodes in place, and entries only ever leave it through
+    // reset() (Rogue Galaxy: added).
+    std::array<std::vector<Entry *>, kGsPageCount> m_entriesByPage{};
+    uint64_t m_invalidateGeneration = 0u;
     std::vector<uint8_t> m_staging;
     // Expand scratch: raw texels for one row (indices for indexed PSMs, whole
     // words when the indices ride inside a 32-bit layout), and the palette

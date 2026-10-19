@@ -80,13 +80,13 @@ void appendBytes(PS2Memory &memory, std::vector<uint8_t> &out, uint32_t address,
     }
 }
 
-// The bytes a VIF1 source-chain transfer hands the VIF, gathered the way
-// PS2Memory::writeIORegister gathers them: the tag's upper half first when
-// TTE is set, then its payload, following refe/cnt/next/ref/refs/call/ret/end
-// and stopping at end, at an empty return stack or at a TIE interrupt.
-std::vector<uint8_t> gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie)
+// The tags of a VIF1 source chain, the way PS2Memory::writeIORegister
+// follows them: refe/cnt/next/ref/refs/call/ret/end, stopping at end, at an
+// empty return stack or at a TIE interrupt. The visitor gets each tag's
+// address and its payload's address and size, and ends the walk with false.
+template <typename Visitor>
+void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 {
-    std::vector<uint8_t> out;
     uint32_t asr0 = 0u, asr1 = 0u, asp = 0u;
     for (uint32_t tags = 0u; tags < (1u << 20); ++tags)
     {
@@ -135,6 +135,32 @@ std::vector<uint8_t> gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, boo
             break;
         default: data = tadr + 16u; end = true; break;
         }
+        if (!visit(tagAddress, data, qwc))
+        {
+            break;
+        }
+        if (end || (irq && tie))
+        {
+            break;
+        }
+    }
+}
+
+// The bytes the chain hands the VIF, into `out`: the tag's upper half first
+// when TTE is set, then its payload. The tags are walked twice, once for the
+// size (16 bytes read per tag) so that the copy happens once into a buffer
+// reserved for it; the game's lists run to several megabytes a frame, and
+// growing a vector through them copied most of that twice.
+void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out)
+{
+    out.clear();
+    size_t total = 0u;
+    walkChain(memory, tadr, tie, [&](uint32_t, uint32_t, uint32_t qwc) {
+        total += (tte ? 8u : 0u) + static_cast<size_t>(qwc) * 16u;
+        return true;
+    });
+    out.reserve(total);
+    walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc) {
         try
         {
             if (tte)
@@ -149,14 +175,10 @@ std::vector<uint8_t> gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, boo
         }
         catch (const std::exception &)
         {
-            break;
+            return false;
         }
-        if (end || (irq && tie))
-        {
-            break;
-        }
-    }
-    return out;
+        return true;
+    });
 }
 
 // One handed-over list, with the VU1 D/T-bit enables (VU0 FBRST bits 10 and
@@ -200,6 +222,21 @@ public:
             ++m_submitted;
         }
         m_work.notify_one();
+    }
+
+    // A buffer for the next list, with the capacity of one that has run:
+    // allocating a list's megabytes afresh every time, and freeing them on
+    // the other thread, was a measurable part of the game thread's send.
+    std::vector<uint8_t> takeBuffer()
+    {
+        std::lock_guard lock(m_mutex);
+        if (m_pool.empty())
+        {
+            return {};
+        }
+        std::vector<uint8_t> buffer = std::move(m_pool.back());
+        m_pool.pop_back();
+        return buffer;
     }
 
     // MSCAL/MSCNT from the list being run. The runtime's own callbacks read
@@ -288,6 +325,11 @@ private:
             {
                 std::lock_guard lock(m_mutex);
                 ++m_completed;
+                if (m_pool.size() < kPoolSize)
+                {
+                    m_current.data.clear();
+                    m_pool.push_back(std::move(m_current.data));
+                }
             }
             m_idle.notify_all();
             // Wakes the EE so it delivers the list's VIFcode interrupt now,
@@ -304,6 +346,8 @@ private:
     std::condition_variable m_idle;
     std::deque<List> m_lists;
     List m_current; // the VIF1 thread's
+    static constexpr size_t kPoolSize = 8u;
+    std::vector<std::vector<uint8_t>> m_pool; // guarded by m_mutex
     std::atomic<uint32_t> m_vpuStat{0u};
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
@@ -375,6 +419,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     const uint32_t chcr = memory.readIORegister(kVif1Channel);
     const uint32_t address = toDmaPhys(getRegU32(ctx, 5));
     List list;
+    list.data = g_thread->takeBuffer();
     list.dBit = (ctx->vu0_fbrst & (1u << 10)) != 0u;
     list.tBit = (ctx->vu0_fbrst & (1u << 11)) != 0u;
     if (normal)
@@ -382,6 +427,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         const uint32_t qwc = getRegU32(ctx, 6) & 0xFFFFu;
         try
         {
+            list.data.reserve(qwc * 16u);
             appendBytes(memory, list.data, address, qwc * 16u);
         }
         catch (const std::exception &)
@@ -391,7 +437,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     }
     else
     {
-        list.data = gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u);
+        gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data);
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
@@ -475,6 +521,11 @@ void install(PS2Runtime &runtime)
     memory.setGifArbiter(nullptr);
     memory.setGifPacketCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
         gs.processGIFPacket(data, size);
+    });
+    // A texture split over DIRECT packets continues in place, without the
+    // copy behind a synthesized IMAGE tag.
+    memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+        gs.processImageContinuation(data, size);
     });
     // DMA the game starts through the registers rather than sceDmaSend.
     // VU1 started by the lists, without the guest thread context the

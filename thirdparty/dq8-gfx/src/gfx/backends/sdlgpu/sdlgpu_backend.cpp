@@ -697,6 +697,12 @@ struct SdlGpuBackend::Impl {
     // DQ8_GFX_PATCH_CT32_ONLY: only CT32 host writes patch a live target; the
     // others read it back first, as before.
     const bool patchCt32Only = std::getenv("DQ8_GFX_PATCH_CT32_ONLY") != nullptr;
+    // An upload that replaces whole pages of a live target releases them to
+    // local memory instead of patching them block by block (Rogue Galaxy:
+    // added; see GsTargetCache::releaseCoveredPages). It takes a quarter
+    // off the worker's time in the streets; DQ8_GFX_NO_COVERED_RELEASE=1
+    // patches every page, as before.
+    const bool coveredRelease = std::getenv("DQ8_GFX_NO_COVERED_RELEASE") == nullptr;
     // DQ8_GFX_NO_GPU_PADDING: a feedback snapshot's padding rows come from
     // local memory, resolving the target that owns them, as before.
     const bool noGpuPadding = std::getenv("DQ8_GFX_NO_GPU_PADDING") != nullptr;
@@ -2583,14 +2589,16 @@ struct SdlGpuBackend::Impl {
         std::fprintf(stderr,
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
-                     "rewrite=%llu of %llu\n",
+                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
                      d(stats.flushSnapshot, previousReasons.flushSnapshot), d(stats.flushAlias, previousReasons.flushAlias),
                      d(stats.flushTexRead, previousReasons.flushTexRead), d(stats.flushFeedback, previousReasons.flushFeedback),
                      d(stats.flushLocalCopy, previousReasons.flushLocalCopy), d(stats.flushPresent, previousReasons.flushPresent),
-                     d(stats.flushRewrite, previousReasons.flushRewrite), d(stats.drawFlushes, previousReasons.drawFlushes));
+                     d(stats.flushRewrite, previousReasons.flushRewrite), d(stats.drawFlushes, previousReasons.drawFlushes),
+                     d(stats.coveredReleases, previousReasons.coveredReleases),
+                     d(stats.coveredPages, previousReasons.coveredPages));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -3781,6 +3789,17 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
         if (!m_impl->patchingHostWrite) {
             if (!m_impl->settleFor(pages, GsResolveReason::HostWrite, true, covered, false)) return;
             m_impl->coveredTransferOpen = m_impl->coveredTransferOpen || covered.any();
+        } else if (m_impl->coveredRelease && covered.any()) {
+            // Whole pages of a live target leave it; only the partial ones
+            // are patched (Rogue Galaxy: added).
+            const uint32_t released = m_impl->targets->releaseCoveredPages(covered);
+            if (released != 0u) {
+                ++m_impl->stats.coveredReleases;
+                m_impl->stats.coveredPages += released;
+                pages &= ~covered;
+                if (pages.none())
+                    m_impl->patchingHostWrite = false;
+            }
         }
     }
     m_impl->transfer->upload(data, sizeBytes);

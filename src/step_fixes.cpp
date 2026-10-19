@@ -103,8 +103,11 @@ constexpr uint32_t kMenuTaskSteps[] = {
     0x00202DE0u, // TaskStepMenuInsectResultThunk
     0x001FFB90u, // TaskStepMenuWarp: the warp menu's fade
     0x001FFB30u, // TaskStepCaption: the area name
-    0x00321210u, // TaskStepLiveTalk: the party's remarks
 };
+// Not in the list: TaskStepLiveTalk (0x321210), which besides the party's
+// remarks sequences the skill actions (SkillActionFindPending,
+// SkillTimerStartMaybe, SkillActionEnd, an immediate script) in step with
+// the battle; on logic frames a skill froze the game (2026-10-19).
 
 PS2Runtime::RecompiledFunction g_taskStepNpc = nullptr;
 PS2Runtime::RecompiledFunction g_angleStepToward = nullptr;

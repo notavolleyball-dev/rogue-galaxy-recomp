@@ -214,6 +214,26 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
   went from 47 to 3 a frame, all flushes from 83 to 40, render passes from
   230 to 180, the long walk's pacing window from 56.5 to 58.3 frames a
   second at 3x; byte-identical frames at 1x and 3x in the 30 fps mode.
+- `sdlgpu_targets.cpp`, `sdlgpu_backend.cpp`: an upload that replaces
+  whole pages a live colour target owns releases those pages to local
+  memory (`GsTargetCache::releaseCoveredPages`: not GPU-owned any more,
+  imported again before the target's next use) instead of recording a
+  patch per block. Rogue Galaxy streams its textures through the pages its
+  scene buffer occupied a frame earlier, 400 uploads a frame, and clears
+  that buffer whole before drawing it again, so the patches were recorded
+  for nothing. The worker's share of the wall in the long street walk went
+  from 85% to 64% and the page refreshes halved (2800 to 1300 per 60
+  frames, 40 to 16 Mpx). The logged frame's display buffer is identical
+  with and without it; the VRAM differs by 915 bytes at 0x2A0000, where a
+  128x128 CT32 upload is read back as a 256x256 T8 texture, and those
+  bytes are the patched path's own: with `DQ8_GFX_PATCH_CT32_ONLY=1`,
+  which reads a target back before any non-CT32 write instead of patching
+  it, the VRAM is byte-identical to the released path's. So the block
+  patch of a non-CT32 write leaves byte 2 of some words of the page's
+  first block row (blocks 0, 2, 8 and 10) stale, which is still to be
+  found; it now only matters for a page a write covers in part.
+  `DQ8_GFX_NO_COVERED_RELEASE=1` patches every page, as before. The stats
+  line counts `covered-releases` and their pages.
 
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's

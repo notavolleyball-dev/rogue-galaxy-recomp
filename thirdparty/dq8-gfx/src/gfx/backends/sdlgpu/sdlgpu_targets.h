@@ -175,6 +175,11 @@ public:
 
     // Records that local memory changed under `pages`.
     void invalidate(const GsPageSet &pages, bool preserveOwned = false);
+    // A host write that replaces whole pages a colour target owns: those
+    // pages go back to local memory (uploaded again before the target's
+    // next use, if it has one) instead of being patched block by block.
+    // Returns how many pages it released (Rogue Galaxy: added).
+    uint32_t releaseCoveredPages(const GsPageSet &covered);
 
     // Host writes can patch resident native CT32 targets across pitch
     // changes, word by word: CT32 ones, and (Rogue Galaxy: added) the formats

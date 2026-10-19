@@ -503,21 +503,26 @@ GsRegion GsTargetCache::regionForPages(const GsSurface &surface,
 
     const uint32_t pixelsPerRow = std::max<uint32_t>(surface.bufferWidth, 1u) * 64u;
     const uint32_t pagesPerRow = std::max<uint32_t>(pixelsPerRow / extent.width, 1u);
-    const uint32_t basePage = surface.base >> 5u;
+    const uint32_t basePage = (surface.base >> 5u) % kGsPageCount;
     const uint32_t pageRows = (surface.height + extent.height - 1u) / extent.height;
+    const uint32_t cells = pageRows * pagesPerRow;
 
-    for (uint32_t row = 0u; row < pageRows; ++row) {
-        for (uint32_t column = 0u; column < pagesPerRow; ++column) {
-            const uint32_t page = (basePage + row * pagesPerRow + column) % kGsPageCount;
-            if (!pages.test(page))
-                continue;
+    // From the set pages to their cells, rather than a test per cell of the
+    // grid: this runs for every batch drawn and every host write (Rogue
+    // Galaxy: changed). A grid past 512 pages wraps, so a page may be more
+    // than one cell.
+    gsForEachPage(pages, [&](uint32_t page) {
+        for (uint32_t relative = (page + kGsPageCount - basePage) % kGsPageCount; relative < cells;
+             relative += kGsPageCount) {
+            const uint32_t row = relative / pagesPerRow;
+            const uint32_t column = relative % pagesPerRow;
             GsRegion cell{column * extent.width, row * extent.height,
                           (column + 1u) * extent.width, (row + 1u) * extent.height};
             cell.x1 = std::min(cell.x1, surface.width);
             cell.y1 = std::min(cell.y1, surface.height);
             region.merge(cell);
         }
-    }
+    });
     return region;
 }
 
@@ -532,11 +537,7 @@ void GsTargetCache::markDrawn(GsSurface &surface, const GsRegion &region) {
                 clipped.width(), clipped.height(), clipped.x0, clipped.y0);
     surface.ownedPages |= writtenPages;
     // A word at a time: this runs for every batch drawn.
-    const GsPageSet lowWord(~0ull);
-    for (uint32_t first = 0u; first < kGsPageCount; first += 64u) {
-        for (uint64_t word = ((writtenPages >> first) & lowWord).to_ullong(); word != 0u; word &= word - 1u)
-            ++m_pageGeneration[first + static_cast<uint32_t>(std::countr_zero(word))];
-    }
+    gsForEachPage(writtenPages, [&](uint32_t page) { ++m_pageGeneration[page]; });
     for (auto &candidate : m_surfaces) {
         GsSurface &other = *candidate;
         if (&other != &surface && !other.depth && (other.pages & writtenPages).any())
@@ -587,6 +588,35 @@ void GsTargetCache::invalidate(const GsPageSet &pages, bool preserveOwned) {
         }
         traceSurface("invalidate", surface);
     }
+}
+
+uint32_t GsTargetCache::releaseCoveredPages(const GsPageSet &covered) {
+    // The game streams its textures through the pages its scene buffer
+    // occupied a frame earlier, 400 uploads a frame; recording a patch per
+    // block for a buffer it then clears whole was a tenth of the worker.
+    // Nothing of the GPU's pixels survives a page written completely, so
+    // the page simply stops being GPU-owned: a later use of the target
+    // imports it from local memory, where the bytes already are.
+    uint32_t released = 0u;
+    for (auto &candidate : m_surfaces) {
+        GsSurface &surface = *candidate;
+        if (surface.depth || surface.gpuDirty.empty())
+            continue;
+        const GsPageSet pages = surface.ownedPages & covered;
+        if (pages.none())
+            continue;
+        const GsRegion written = regionForPages(surface, pages);
+        released += static_cast<uint32_t>(pages.count());
+        surface.needsUpload.merge(written);
+        surface.ownedPages &= ~pages;
+        if (surface.ownedPages.none() || written.contains(surface.gpuDirty)) {
+            surface.gpuDirty.clear();
+            surface.ownedPages.reset();
+            surface.cpuPatches.clear();
+        }
+        traceSurface("covered-release", surface, released);
+    }
+    return released;
 }
 
 namespace {
@@ -648,9 +678,13 @@ void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32
     };
     std::vector<PageOwners> ownersByPage;
     ownersByPage.reserve(pages.count());
-    for (uint32_t page = 0u; page < kGsPageCount; ++page) {
-        if (!pages.test(page))
-            continue;
+    // The table's slot of each page, so a cell finds its page's owners
+    // without a search: a full-screen CT32 write visits thousands of cells
+    // over a hundred pages (Rogue Galaxy: changed).
+    constexpr uint16_t kNoSlot = 0xffffu;
+    std::array<uint16_t, kGsPageCount> slotOfPage;
+    slotOfPage.fill(kNoSlot);
+    gsForEachPage(pages, [&](uint32_t page) {
         PageOwners entry{page, {}, 0u};
         for (auto &candidate : m_surfaces) {
             GsSurface &surface = *candidate;
@@ -660,16 +694,14 @@ void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32
                 entry.owners[entry.count] = &surface;
             ++entry.count;
         }
+        slotOfPage[page] = static_cast<uint16_t>(ownersByPage.size());
         ownersByPage.push_back(entry);
-    }
+    });
     // Each owner of a page; every surface is looked through only for a page
     // outside `pages` or with more owners than the table keeps.
     auto forOwners = [&](uint32_t page, auto &&visit) {
-        for (const PageOwners &entry : ownersByPage) {
-            if (entry.page != page)
-                continue;
-            if (entry.count > 4u)
-                break;
+        if (const uint16_t slot = slotOfPage[page]; slot != kNoSlot && ownersByPage[slot].count <= 4u) {
+            const PageOwners &entry = ownersByPage[slot];
             for (uint32_t i = 0u; i < entry.count; ++i)
                 visit(*entry.owners[i]);
             return;

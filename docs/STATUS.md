@@ -760,9 +760,12 @@ counts frames: a wait counter at +0x102, widgets moved 0x14 a call,
 same holds for the other menu tasks that run in the field and in battle
 (`TaskStepMenuBtlChg`, `BtlEsc`, `BattleMenuStep` with the HUD's party
 panels, `Shop`, `Think`, `Help`, `EasyChange`, `CompleteCheck`,
-`7thMystery`, the insect menus, `MenuWarp`, `Caption`, `LiveTalk`; the
-NORMAL.BIN steps call `GameSceneGetTimeStep` only in two Think and
-transporter states). `src/step_fixes.cpp` (`menu`) now runs those steps
+`7thMystery`, the insect menus, `MenuWarp`, `Caption`; the NORMAL.BIN
+steps call `GameSceneGetTimeStep` only in two Think and transporter
+states). `LiveTalk` was in the list for a day: besides the party's remarks
+it sequences the skill actions in step with the battle, and on logic
+frames using a skill froze the game (2026-10-19, the screen still drawn,
+the watchdog silent), so it runs every frame again. `src/step_fixes.cpp` (`menu`) now runs those steps
 through the same `logicFrame` gate as the event system: on the frames
 that complete a whole step, at once on a button press, with the scale at
 1.0 for the call. The main, transporter and space menus run under the
@@ -802,6 +805,125 @@ unscale divides by 1.0. With fixed half steps the running jump then lasts
 the same velocity, moves 1.80 a move against 3.60 in every phase, and
 covers 77 units against 83 (the end points of the measurement differ by a
 move and the landing is on rising ground).
+
+**Throughput, round three (2026-10-19 afternoon): the GS worker.** A
+profile of the player's own session (`RogueGalaxy-perfil.bat`, fifteen
+minutes of fighting from the File 01 save, `build/run/play-perfil.prof`)
+put the worker at 93% busy, the VIF1 thread waiting on its queue a fifth
+of the time and the game thread idle half the time. Half of the worker
+was the texture stream again: uploads into the pages the scene buffer
+held a frame earlier (recording the patches 13%, applying them 7%, the
+page imports that follow 4%), and three pieces of bookkeeping: the
+texture cache's invalidation walking all 2048 entries for every upload
+(7%), the patch finding a page's owners by a linear search per 8x8
+cell, and `regionForPages` testing every cell of a target's page grid
+for each batch drawn (4%). Done, in `thirdparty/dq8-gfx`: the texture
+cache keeps its entries by page (`m_entriesByPage`), so an invalidation
+visits only the entries over the written pages (1.3% of the worker
+now); `regionForPages` and `markDrawn` walk the set bits
+(`gsForEachPage`, reading the bitset's words directly: libc++'s bitset
+shift and mask go through bit iterators and cost as much as the tests
+they replaced, which the first profile showed as 5% in bitset
+internals); `patchHostWrite` indexes its owners table by page. Then
+the morning's experiment, releasing the pages an upload covers whole
+instead of patching them (`releaseCoveredPages`), is on by default:
+the 915 VRAM bytes it left different are the patched path's own. With
+`DQ8_GFX_PATCH_CT32_ONLY=1` (a target read back before any non-CT32
+write instead of patched) the VRAM is byte-identical to the released
+path's, so the block patch of a T4/T8 write leaves byte 2 of some words
+of a page's first block row stale (blocks 0, 2, 8 and 10 of pages
+0x150-0x151, where a 128x128 CT32 upload is read as a 256x256 T8
+texture); that is still to be found, and now only matters for a page a
+write covers in part. The display buffer is identical in every
+comparison. Numbers at 3x in the 60 fps mode: the street walk's worker
+share of the wall 86% to 57-59% at the 60 cap (two runs); the long
+walk's limited stretch from 55.0 (profiled) and 59.3 to 59.9 with the
+worker at 61% instead of 85-90%; page refreshes 2800 to 1350 per 60
+frames (40 to 16 Mpx). References remade as `build/run/ref1x30c` and
+`ref3x30c` (the b ones differ only in those 915 bytes).
+`DQ8_GFX_NO_COVERED_RELEASE=1` restores the patching. Play-tested the
+same afternoon: the battles are much better by the player's feel, with
+room left. The profile
+launcher now also prints a `[gfx]` line a second into
+`build/last-run.log`, so a drop in a session can be put to its minute.
+A street profile of this build (`build/run/wl3p.prof`) has the three
+threads within reach of each other at the 60 cap: the worker about 70%
+busy (texture decode from local memory `GsTextureCache::expand` 6%,
+`appendPrimitive` 4%, CT32 writes 3.5%, the CT32 patch 3%, the driver
+17%), the VIF1 thread about 80% (the VU1 routines 40%, the image
+continuation's copy into the worker's queue 5%, `fmacFlagsWanted`
+rescanning images 2%), the game thread 70% (VU0 micro programs through
+the interpreter 12%, `dispatchGuestBranch` plus `lookupFunction` 8%, the
+VIF1 send 6%). Next, in that order of value for cost: a few-entry cache
+for `fmacFlagsWanted`; handing the image continuation to the worker
+without the copy; compiling the VU0 micro programs the way VU1's are;
+a direct-mapped cache in front of `lookupFunction`; and the block patch's
+stale byte 2 above, which `DQ8_GFX_CHECK_GPU_TEXTURES=1` should catch.
+
+**Throughput, round two (2026-10-19 morning): the emulation threads.**
+Profiles of the street view at the player's scale (3, from the menu's
+settings.ini) with the new `INPUT=`/`PROFILE_START=` overrides of
+`tools/bench/walk.sh`: standing in the street at 3x the GS worker is the
+limiter (88-91% of wall, 58.7 fps), with the driver 24%, the CPU patches of
+uploads into pages that live targets own 14% (`patchHostWrite`,
+`ReadRowCT32`, `writeRunCT32`), draw submission 7%, the caches 5%. At 1x
+the same view ran 36-41 fps with the worker at 56%: there the VIF1 thread
+(compiled VU1 programs 35%, their flag bookkeeping 7%, the GS queue 5%,
+UNPACK 4%, 26% idle) and the game thread (85% busy: the copy of each DMA
+chain in `rg::vif1::send` 14%, VU0 microprograms through the interpreter
+12%, `advanceEeTimers` at every safe point 5.6%, the dispatch of every call
+through `checkpointDue`/`lookupFunction` 11%) set the pace. Three cuts,
+rendering byte-identical between the three builds at 1x in the 30 fps
+mode (`fl1`..`fl3`):
+- patch 0006, the VU1 flags: Rogue Galaxy's microcode images read MAC
+  flags in a few places (FMAND 29, FMEQ 13 across all images) and status
+  flags nowhere, and nothing outside VU1 can see them; a compiled run of
+  an image without such readers (`VU1Interpreter::fmacFlagsWanted`, one
+  scan per microcode generation) no longer queues its FMAC results, which
+  is most of `commitFlags`. `PS2X_VU_FMAC_FLAGS=1` keeps the old behaviour.
+- `src/vif1_thread.cpp`: the chain's tags are walked once for the size
+  and the copy happens once into a reserved buffer, which comes back from
+  the VIF1 thread with its capacity (a pool of eight) instead of being
+  allocated and freed across threads for every list.
+- patch 0006, the EE timers: `advanceEeTimers` batches its cycles to 2048
+  (7 us) before walking the timers; register reads and writes settle the
+  batch first, so the count they see is exact.
+At 3x in that street the frame rate did not move (58.7 to 58.5, the
+worker being the limiter), but the game thread's profile did: `send` 6.1
+to 3.9% with its memcpy from 13% to under 1%, `advanceEeTimers` 5.6 to
+1.3%. The view that matters is the player's own: standing in the street
+by the save point of File 01, 46 fps at 3x, and there the VIF1 thread is
+the limiter (90% busy: the compiled VU1 programs 45%, `commitFlags` still
+6.8% because the map's image reads MAC flags and keeps its results
+queued, the copy of textures split over DIRECT packets 5%, the GS
+frontend 5%; the worker waits 22% of the time, the game thread 35%). A
+texture split over DIRECTs now continues in place
+(`GS::processImageContinuation`, patch 0006) instead of being copied
+behind a synthesized IMAGE tag: that view went from 46 fps (44-47 over
+20 intervals, three runs) to 53-58 (run to run; the street at 3x varies
+by 3 fps between runs now, so a change needs three runs each way). An
+experiment on the worker's side, releasing the pages an upload covers
+whole instead of patching them (`DQ8_GFX_COVERED_RELEASE=1`, see the
+dq8-gfx README), took the worker from 79% to 63% of the wall without
+moving the frame rate and left 915 VRAM bytes different; it stays off. Then the generated VU1 code itself:
+`compile_vu_programs.py` now decides pair by pair whether a MAC flag
+reader can still see an FMAC's result (backwards over the routine's
+blocks: a later FMAC that lands first kills it, a call, register jump or
+pair left to the interpreter keeps it, the E bit ends it) and the compiled
+pair queues the result only then; 138 of the game's 1775 FMAC pairs keep
+their flags. The map's routine went from 14% to 9% of the VIF1 thread,
+`commitFlags` from 7% to 3%, and the player's street view from 53-56 to
+the 60 cap (three runs), byte-identical frames at 1x and 3x. What is left
+on that thread: the pairs' cycle bookkeeping itself (the routines are
+still 35% of it), the GS queue (one command per primitive, 3-4%), the
+UNPACK shapes outside the plain path. A trap found on the way: the scripted
+load picks a save by its position in the menu, and the player's File 02,
+saved again that morning, changed what the walk loaded (3155 batches at
+the logged frame against the reference's 5820, the scene drawn into
+frame buffer 0 instead of the 0x150 pass). `RG_MC0_DIR` (new) points the
+memory card elsewhere; walk.sh runs on `build/run/mc0-bench`, a copy
+holding only File 01, so the player's card is never read or written by a
+run, and the references are remade on it.
 
 **Throughput, round one (2026-10-18 night).** Measured with
 `tools/bench/walk.sh`, the scripted Salgin walk on the pad clock: speed

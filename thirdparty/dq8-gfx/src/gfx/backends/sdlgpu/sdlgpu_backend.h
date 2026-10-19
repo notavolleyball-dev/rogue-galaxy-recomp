@@ -53,6 +53,9 @@ struct SdlGpuStats {
     // a texture rewrite. The rest of drawFlushes is everything else.
     uint64_t flushSettle = 0u, flushSnapshot = 0u, flushAlias = 0u, flushTexRead = 0u, flushFeedback = 0u,
              flushLocalCopy = 0u, flushPresent = 0u, flushRewrite = 0u;
+    // Uploads that covered whole pages a live target owned, and those pages
+    // (released to local memory instead of patched; Rogue Galaxy: added).
+    uint64_t coveredReleases = 0u, coveredPages = 0u;
 
     // Places where GS semantics are approximated rather than reproduced. Each
     // one is a known gap; a nonzero count says how much a scene depends on it.
