@@ -750,6 +750,59 @@ through a door to the street, 60 facing a wall, 40-45 in the streets:
 both emulation threads need to lose about half their work per frame for
 a steady 60 in the heavy views, so the next cuts go to both.
 
+**Battle results at double speed, and the jump checked (60 fps mode).**
+Reported 2026-10-19 morning. The battle results window is a task:
+`TaskTableRun` (0x1F5340) calls the step of every enabled entry of the
+table at 0x44ECF4 once a frame and ignores its return, and `TaskStepMenuWin`
+(0x204350) jumps into NORMAL.BIN's `MenuBattleEndStep` (0x4EB6C0), which
+counts frames: a wait counter at +0x102, widgets moved 0x14 a call,
+`UiFadeWidgetAlpha` over 0x48 frames, and none of it reads the step. The
+same holds for the other menu tasks that run in the field and in battle
+(`TaskStepMenuBtlChg`, `BtlEsc`, `BattleMenuStep` with the HUD's party
+panels, `Shop`, `Think`, `Help`, `EasyChange`, `CompleteCheck`,
+`7thMystery`, the insect menus, `MenuWarp`, `Caption`, `LiveTalk`; the
+NORMAL.BIN steps call `GameSceneGetTimeStep` only in two Think and
+transporter states). `src/step_fixes.cpp` (`menu`) now runs those steps
+through the same `logicFrame` gate as the event system: on the frames
+that complete a whole step, at once on a button press, with the scale at
+1.0 for the call. The main, transporter and space menus run under the
+game's own overlay mode (interval 1), where `logicFrame` leaves everything
+as it is. `TaskStepStatus` (HP gauges and the screen markers that follow
+the characters) stays at every frame on purpose. The player confirmed
+the results window and the running jump the same morning.
+The jump was reported as feeling fast, with a float at the top in the
+original. Measured with the new `RG_JUMP_TRACE=1` (one line per
+`CharaMoveCollideMaybe` of the party leader while off the ground;
+`tools/bench/jumps.py` sums the arcs) on the scripted load, Circle at pad
+read 2277 (Circle jumps in the field; Cross does nothing there): the jump
+is a move motion (`CharaActMoveMotion`, 0x21B180, move ids 0xC8..0xCB
+from `CharaActLoco`): a rise of 55 units driven by the motion with the
+gravity flags set (bits 46 and 37 of chara+0x3D0), a hold at the top
+under the same flags, then the fall under gravity (move id 1) until
+`CharaHasLandedMaybe` (id 4). Its state counter at chara+0xAD0 advances by
+the step the action manager passes in its context (+0x4 =
+`GameSceneGetTimeStep`, 0x232220), so it keeps wall time. 30 fps mode:
+rise 0.268 s (8 moves), hold 0.235 s (7), fall 0.50 s (15 moves,
+-0.4356 a move), peak 55.00. 60 fps mode: rise 0.267 s (16 moves), hold
+0.220 s (13), fall 0.50 s (30 moves, -0.1089 a move), peak 55.00. The
+standing jump's arc, float and landing are the same to the frame. The
+running jump was not: 192 units of ground against 101 in the 30 fps mode
+(Circle while holding the stick; `RG_JUMP_TRACE=2` logs the moves on the
+ground too). In the air CharaUpdateMovement takes another path: a loop of
+whole frames (`for (i = 0; i < step; i += 1)`, 0x20B3A8..0x20B4A0) steers
+and clamps the velocity, then sets the step register f23 to 1.0 (0x20B4AC)
+and scales the velocity by it before the move, so the move covers one
+frame's distance whatever the step (on the console a slow frame made the
+jump go half as far a second; nobody noticed). The `CharaMoveCollideMaybe`
+hook (`gravity`) now sees f23 == 1.0 with a step below 1 (f23 is
+callee-saved and holds the step on the walking path), scales the velocity
+by the step for the move and divides it back after, since the game's own
+unscale divides by 1.0. With fixed half steps the running jump then lasts
+24.5 logic frames against 25, falls 1.80 a move against 3.60, lands with
+the same velocity, moves 1.80 a move against 3.60 in every phase, and
+covers 77 units against 83 (the end points of the measurement differ by a
+move and the landing is on rising ground).
+
 **Throughput, round one (2026-10-18 night).** Measured with
 `tools/bench/walk.sh`, the scripted Salgin walk on the pad clock: speed
 as the six `[gfx]` intervals before the logged frame at 3x in the 60 fps

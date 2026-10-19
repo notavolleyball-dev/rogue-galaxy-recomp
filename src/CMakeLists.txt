@@ -88,6 +88,7 @@ add_executable(roguegalaxy
     debug/hw_watch.cpp
     debug/input_script.cpp
     debug/pos_trace.cpp
+    debug/jump_trace.cpp
     debug/sampler.cpp
     debug/stall_watch.cpp
     debug/selftest.cpp

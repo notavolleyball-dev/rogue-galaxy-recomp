@@ -58,8 +58,9 @@ enum class StepFix : unsigned
     Movie = 1u << 1,   // "movie": scale 1.0 inside movies
     Npc = 1u << 2,     // "npc": NPC walk and turn rates
     Judge = 1u << 3,   // "judge": projectiles and thrown objects
-    Gravity = 1u << 4, // "gravity": character gravity and terminal velocity
+    Gravity = 1u << 4, // "gravity": character gravity, terminal velocity and the air move's step
     Event = 1u << 5,   // "event": scripts, the event player and message windows at the console's rate
+    Menu = 1u << 6,    // "menu": the field's menus and HUD windows (the battle results among them)
 };
 bool stepFix(StepFix which);
 // Any of them.

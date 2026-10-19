@@ -391,7 +391,8 @@ unsigned parseStepFixes(const char *value)
                                  {"npc", StepFix::Npc},
                                  {"judge", StepFix::Judge},
                                  {"gravity", StepFix::Gravity},
-                                 {"event", StepFix::Event}};
+                                 {"event", StepFix::Event},
+                                 {"menu", StepFix::Menu}};
     unsigned fixes = 0u;
     const char *p = value;
     while (*p)
@@ -568,12 +569,12 @@ void install(PS2Runtime &runtime)
         {
             std::fprintf(stderr, "[rg] 60 fps: the game's own menus may take half steps\n");
         }
-        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s%s\n",
+        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s%s%s\n",
                     g_adaptive ? "steps sized by the frame time, half at full rate" : "half steps",
                     g_stepFixes == 0u ? " none" : "", stepFix(StepFix::Clock) ? " clock" : "",
                     stepFix(StepFix::Movie) ? " movie" : "", stepFix(StepFix::Npc) ? " npc" : "",
                     stepFix(StepFix::Judge) ? " judge" : "", stepFix(StepFix::Gravity) ? " gravity" : "",
-                    stepFix(StepFix::Event) ? " event" : "");
+                    stepFix(StepFix::Event) ? " event" : "", stepFix(StepFix::Menu) ? " menu" : "");
     }
 }
 

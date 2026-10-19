@@ -19,6 +19,7 @@
 #include "debug/hw_watch.h"
 #include "debug/input_script.h"
 #include "debug/pos_trace.h"
+#include "debug/jump_trace.h"
 #include "debug/sampler.h"
 #include "debug/selftest.h"
 #include "debug/stall_watch.h"
@@ -132,6 +133,7 @@ int run(int argc, char **argv)
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);
+    rg::debug::installJumpTrace(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
     rg::debug::startStallWatch(runtime);

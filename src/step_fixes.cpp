@@ -1,7 +1,10 @@
 #include "step_fixes.h"
 
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
+#include <iterator>
+#include <utility>
 
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -49,8 +52,19 @@ constexpr uint32_t kHeldGravityReturn = 0x00234FC0u;
 // After the move, CharaMoveCollideMaybe clamps the scaled vertical velocity
 // to 0.5 x 20 units (0x235064): the terminal velocity, per frame.
 constexpr uint32_t kCharaMoveCollide = 0x00234DC0u;
+constexpr uint32_t kVelocity = 0x80u;
 constexpr uint32_t kVelocityY = 0x84u;
 constexpr float kTerminalVelocity = 10.0f;
+// In the air (a jump's flight and its fall, move ids 0 and 1 of
+// CharaActMoveMotion) CharaUpdateMovement takes another path: a loop of
+// whole frames, `for (i = 0; i < step; i += 1)` (0x20B3A8..0x20B4A0),
+// steers and clamps the velocity, then sets its step register f23 to 1.0
+// (0x20B4AC) and scales the velocity by that before the move, so the move
+// covers one frame's distance whatever the step. At half steps that is
+// twice the horizontal distance a second: a running jump measured 192
+// units against 101 in the 30 fps mode. f23 is callee-saved and still 1.0
+// at the call; on the walking path it holds the step.
+constexpr unsigned kStepRegister = 23u;
 // Scripts and events. SystemVmUpdate (0x2509F0, from TaskStepEvent and the
 // battle sub-modes) resumes the system VM and runs EventSysUpdate (0x26AC10:
 // the event camera, the event player with its cast, voices, sound fades and
@@ -62,6 +76,35 @@ constexpr float kTerminalVelocity = 10.0f;
 // them (the event camera, script commands) takes a whole one.
 constexpr uint32_t kSystemVmUpdate = 0x002509F0u;
 constexpr uint32_t kMesMgrUpdateAll = 0x00277AC0u;
+// The field's menus and HUD windows. Each is a task: TaskTableRun
+// (0x1F5340) calls the step of every enabled entry once a frame and ignores
+// what it returns, and these steps count frames. The battle results window
+// (TaskStepMenuWin -> NORMAL.BIN MenuBattleEndStep: a wait counter at
+// +0x102, widgets moved 0x14 a call, fades of 0x48 frames) is the one the
+// player sees pass at double speed; the others are the same kind of code.
+// Under the game's own overlay mode (the main, transporter and space menus,
+// interval 1) the scale is the game's and logicFrame leaves them as they
+// are. TaskStepStatus (the HP gauges and the screen markers) is left out:
+// its markers follow the characters, which move every frame.
+constexpr uint32_t kMenuTaskSteps[] = {
+    0x00204350u, // TaskStepMenuWin: the battle results
+    0x00204AF0u, // TaskStepMenuBtlChg: the battle change menu
+    0x00203D10u, // TaskStepMenuBtlEsc: the escape prompt
+    0x00203EA0u, // BattleMenuStep: the field HUD and its party panels
+    0x00203750u, // TaskStepMenuShop
+    0x00203640u, // TaskStepMenuThink
+    0x002032A0u, // TaskStepMenuHelp
+    0x002030C0u, // TaskStepMenuEasyChange: the leader switch
+    0x00203460u, // TaskStepMenuCompleteCheck
+    0x00203540u, // TaskStepMenu7thMystery
+    0x00203380u, // TaskStepMenuInsectEntry
+    0x002031A0u, // TaskStepMenuInsectCage
+    0x00202EA0u, // TaskStepMenuInsectVs
+    0x00202DE0u, // TaskStepMenuInsectResultThunk
+    0x001FFB90u, // TaskStepMenuWarp: the warp menu's fade
+    0x001FFB30u, // TaskStepCaption: the area name
+    0x00321210u, // TaskStepLiveTalk: the party's remarks
+};
 
 PS2Runtime::RecompiledFunction g_taskStepNpc = nullptr;
 PS2Runtime::RecompiledFunction g_angleStepToward = nullptr;
@@ -83,6 +126,7 @@ struct Counts
     uint32_t held = 0u;
     uint32_t launches = 0u;
     uint32_t clamps = 0u;
+    uint32_t air = 0u;
 };
 Counts g_counts;
 
@@ -244,11 +288,52 @@ void clampTerminal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t cha
     ++g_counts.clamps;
 }
 
+// The step the air path's velocity was scaled by for this move, 0 outside
+// one (the move is not reentrant).
+float g_airStep = 0.0f;
+
+bool scaleVelocity(uint8_t *rdram, uint32_t chara, float factor)
+{
+    float velocity[3] = {0.0f, 0.0f, 0.0f};
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        if (!readGuest(rdram, chara + kVelocity + 4u * i, velocity[i]))
+        {
+            return false;
+        }
+    }
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        writeGuest(rdram, chara + kVelocity + 4u * i, velocity[i] * factor);
+    }
+    return true;
+}
+
+void afterMove(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t chara)
+{
+    clampTerminal(rdram, ctx, runtime, chara);
+    if (g_airStep != 0.0f)
+    {
+        // CharaUpdateMovement divides by its f23 of 1.0 afterwards, so the
+        // velocity is unscaled here instead.
+        scaleVelocity(rdram, chara, 1.0f / g_airStep);
+        g_airStep = 0.0f;
+    }
+}
+
 void charaMoveCollide(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     // a0: the character's movement state; its velocity is at +0x80, still
     // scaled by the step when the function returns.
-    rg::hooks::callThen(g_charaMoveCollide, rdram, ctx, runtime, &clampTerminal, getRegU32(ctx, 4));
+    const uint32_t chara = getRegU32(ctx, 4);
+    const float step = rg::timing::sceneStep(rdram, ctx);
+    g_airStep = 0.0f;
+    if (step < 1.0f && ctx->f[kStepRegister] == 1.0f && scaleVelocity(rdram, chara, step))
+    {
+        g_airStep = step;
+        ++g_counts.air;
+    }
+    rg::hooks::callThen(g_charaMoveCollide, rdram, ctx, runtime, &afterMove, chara);
 }
 
 void restoreScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t bits)
@@ -293,6 +378,24 @@ void mesMgrUpdateAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     logicStep(g_mesMgrUpdateAll, rdram, ctx, runtime);
 }
 
+PS2Runtime::RecompiledFunction g_menuOriginals[std::size(kMenuTaskSteps)] = {};
+
+template <size_t Index>
+void menuTaskStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    logicStep(g_menuOriginals[Index], rdram, ctx, runtime);
+}
+
+template <size_t... Index>
+bool installMenuHooks(PS2Runtime &runtime, std::index_sequence<Index...>)
+{
+    bool complete = true;
+    ((complete &= rg::timing::hookFunction(runtime, kMenuTaskSteps[Index], &menuTaskStep<Index>,
+                                           g_menuOriginals[Index])),
+     ...);
+    return complete;
+}
+
 } // namespace
 
 void trace()
@@ -302,9 +405,9 @@ void trace()
         return;
     }
     std::printf("[steps] NPC updates %u, turns %u, judge steps %u, gravity %u (held %u), launches %u, terminal "
-                "clamps %u\n",
+                "clamps %u, air moves %u\n",
                 g_counts.npc, g_counts.turns, g_counts.judge, g_counts.gravity, g_counts.held, g_counts.launches,
-                g_counts.clamps);
+                g_counts.clamps, g_counts.air);
     g_counts = Counts{};
 }
 
@@ -339,6 +442,10 @@ void install(PS2Runtime &runtime)
     {
         complete &= hookFunction(runtime, kSystemVmUpdate, &systemVmUpdate, g_systemVmUpdate);
         complete &= hookFunction(runtime, kMesMgrUpdateAll, &mesMgrUpdateAll, g_mesMgrUpdateAll);
+    }
+    if (stepFix(StepFix::Menu))
+    {
+        complete &= installMenuHooks(runtime, std::make_index_sequence<std::size(kMenuTaskSteps)>{});
     }
     if (!complete)
     {

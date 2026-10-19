@@ -21,7 +21,7 @@ NAME=$1; SCALE=${2:-3}; FPS=${3:-60}
 if [ -z "$NAME" ]; then echo "usage: walk.sh NAME [SCALE] [FPS]"; exit 2; fi
 if tasklist | grep -qi "roguegalaxy.exe"; then echo "a game is running; not starting"; exit 2; fi
 mkdir -p build/run
-INPUT=build/run/input_pad3.txt
+INPUT=${INPUT:-build/run/input_pad3.txt}
 if [ "$LONG" = "1" ]; then
     # The same walk, then 40 s more of walking about the streets (for a
     # profile window that is all street, pad reads 3480..5470).

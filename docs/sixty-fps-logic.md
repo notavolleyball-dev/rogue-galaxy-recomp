@@ -220,9 +220,24 @@ same path: `CharaJumpToTarget_211070` / `CharaLaunchTowardTarget_2114e0`
 compute a launch velocity for a gravity that then acts twice as fast).
 The horizontal velocity: walk speed is right (velocity x dt), but friction
 (x0.98 per frame, 0x47DB34 at 0x20B7E0) and the accel/decel ramps near
-0x20B908 are per frame, so stops are snappier at 60 fps. The big sub-step
-loop at 0x20B390..0x20B4B4 (`for (i = 0; i < dt; i += 1)`) is dead code
-(`daddu v0,zero,zero; beql v0,zero` at 0x20B384 always skips it).
+0x20B908 are per frame, so stops are snappier at 60 fps.
+
+The air path (found 2026-10-19 by measuring a running jump: 192 units at
+60 fps against 101 at 30). The sub-step loop at 0x20B3A8..0x20B4A0 is not
+dead: 0x20B35C..0x20B388 enter it for move ids 0 and 1 of
+`CharaActMoveMotion` (a jump's flight and its fall). It runs
+`for (i = 0; i < dt; i += 1)` whole-frame iterations of air steering and
+speed clamping, then sets the step register f23 to 1.0 (0x20B4AC) and
+jumps to the `VecScale(vel, vel, f23)` before `CharaMoveCollideMaybe`: the
+move covers one frame's distance whatever dt is (at dt = 2 on the console
+the jump went half as far a second, unnoticed). At dt = 0.5 that is twice
+the horizontal distance a second, with the vertical right only by accident
+(the step² gravity on an unscaled velocity integrates the position
+correctly, with half the velocity). Fix (`src/step_fixes.cpp`, `gravity`):
+the `CharaMoveCollideMaybe` hook sees f23 == 1.0 with a step below 1 (f23
+is callee-saved and holds the step on the walking path), scales the
+velocity by the step before the move and divides it back after, since
+CharaUpdateMovement's own unscale divides by 1.0.
 
 ## 4. Assessment against our mode (RG_FPS=60: env+0x24 = 1 before each flip, scale 0.5 / step 1 after each update, interval 2 during movies)
 
@@ -243,7 +258,14 @@ speed at 0x2FC83C not covered); judge objects:
 0x234FD8, `GetThrowGravity` step² at ra 0x234FC0, `GetScaledGravity` ÷ step
 for everyone, and a post-return clamp of vel.y to 10 x step after
 `CharaMoveCollideMaybe` (its own clamp at 0x235064 is on the scaled velocity
-and zeroes s3+0x18 on both paths, so nothing else depends on it).*
+and zeroes s3+0x18 on both paths, so nothing else depends on it). Since
+2026-10-19: the frame counters of the event system (`SystemVmUpdate`,
+`MesMgrUpdateAll`) and of the field's menu and HUD tasks (`TaskStepMenuWin`,
+the battle results, and the other `TaskStepMenu*` thunks into NORMAL.BIN,
+`TaskStepCaption`, `TaskStepLiveTalk`; `TaskTableRun` ignores a step's
+return) run on the frames that complete a whole step (`logicFrame`, a
+button press runs them at once), and the field modes that lock the scale
+(chests, talks, warps) take the half steps.*
 
 | Red-tv item | our mode | status | native equivalent |
 |---|---|---|---|
