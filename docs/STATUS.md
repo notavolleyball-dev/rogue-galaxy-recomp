@@ -859,6 +859,53 @@ for `fmacFlagsWanted`; handing the image continuation to the worker
 without the copy; compiling the VU0 micro programs the way VU1's are;
 a direct-mapped cache in front of `lookupFunction`; and the block patch's
 stale byte 2 above, which `DQ8_GFX_CHECK_GPU_TEXTURES=1` should catch.
+The first of those is done (patch 0006): the memory keeps a bit per pair
+of VU1 code for the status readers as the VIF's MPG writes the code
+(`PS2Memory::markVU1CodeWritten`), so `fmacFlagsWanted` looks at 32
+words instead of rescanning the image after each code upload; it is
+gone from the VIF1 profile, frames byte-identical. For the player's
+sessions, F9 now writes a `[mark]` line to the log; for measuring
+battles, `walk.sh` takes `MC0=` (another card: `build/run/mc0-battle`
+holds the player's File 03 alone, two characters on a field where
+walking meets a battle) and `FRAME=` (the pad read of the logged frame),
+and `build/run/input_battle1.txt` loads and walks up and down.
+
+**The battle bench, and the VU0 micro programs compiled (2026-10-19,
+late afternoon).** With File 03's three characters the game thread is
+the limiter, not the worker: in the field 97% busy at 50-55 frames a
+second, in the battle 94% (the worker 70-85%), with the VU0 micro
+programs interpreted on it (`VU1Interpreter::execUpper` and the pair
+scheduler, 18%), `dispatchGuestBranch` plus `lookupFunction` (9%), the
+VIF1 `send` (6%). The whole-program compile covers VU1 only (16 KB data
+memory, `drained()`), but the framework's block compiler
+(`compile_vu_blocks.py`, `PS2X_VU_AOT_IMAGES`) takes either unit and was
+simply not wired in: a battle run with `PS2_VU_AOT_PROFILE` recorded 109
+VU0 blocks (and 533 VU1 blocks the interpreter still ran, left out for
+now), CMake compiles every `build/vu-blocks/*.txt` (one shard at a time:
+the first build, with 32 shards two at a time and the rest of the build
+in parallel, was killed for memory), and the interpreter is gone from
+the game thread's profile (86% busy from 94%, `execUpper` off the list).
+The link needed patch 0007: `ps2_vu_detail::regionCounters`, an inline
+thread_local with a destructor, got a TLS initialization wrapper per
+shard and lld on COFF refused the duplicates; it is `extern` now and
+defined once. Frames byte-identical at 1x and 3x; the battle at 53-57
+frames a second (62-67k draws a second) against 48-57 before, in runs
+that vary. What remains on the game thread: the indirect-branch dispatch
+(a direct-mapped cache in front of `lookupFunction`), the VIF1 send's
+gather copy, `checkpointDue` (4%), the EE timers (2%). Two of those are
+done since: the dispatcher looks the target up once (patch 0008; the
+table slot is a direct index, so there was no cache to add, only the
+second look in `lookupFunction` to drop: the dispatcher and the lookup
+went from 10% of the game thread to 8%), and the VIF1 send walks the
+chain's tags once, keeping the spans aside, instead of twice (once for
+the size). Both byte-identical at 1x. The battle bench's number to
+compare is now `tools/bench/battlefps.py`, the frame rate over the
+intervals with 55k draws a second or more, since each run meets a
+different fight: medians 57.4 before the VU0 blocks, 56.1 and 59.8 with
+them, 59.3 and 57.4 with these two, in fights of different weight (a
+profiled run of a heavy one sat at 41-47 with no thread above 77% busy:
+the three wait on each other's queues, which is the next thing to look
+at, together with the flip's wait when a frame runs late).
 
 **Throughput, round two (2026-10-19 morning): the emulation threads.**
 Profiles of the street view at the player's scale (3, from the menu's

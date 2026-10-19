@@ -147,38 +147,46 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 }
 
 // The bytes the chain hands the VIF, into `out`: the tag's upper half first
-// when TTE is set, then its payload. The tags are walked twice, once for the
-// size (16 bytes read per tag) so that the copy happens once into a buffer
-// reserved for it; the game's lists run to several megabytes a frame, and
-// growing a vector through them copied most of that twice.
+// when TTE is set, then its payload. The tags are walked once, their spans
+// kept aside, and the copy happens once into a buffer reserved for the
+// total; the game's lists run to several megabytes a frame, and growing a
+// vector through them copied most of that twice, while a second walk for
+// the size alone read every tag again (thousands a frame, 2% of the game
+// thread in a battle).
 void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out)
 {
     out.clear();
+    // (address, bytes) of each piece, in order. send() runs on the game
+    // thread alone.
+    thread_local std::vector<std::pair<uint32_t, uint32_t>> spans;
+    spans.clear();
     size_t total = 0u;
-    walkChain(memory, tadr, tie, [&](uint32_t, uint32_t, uint32_t qwc) {
-        total += (tte ? 8u : 0u) + static_cast<size_t>(qwc) * 16u;
+    walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc) {
+        if (tte)
+        {
+            // With TTE every tag supplies two VIFcodes before its payload.
+            spans.emplace_back(tagAddress + 8u, 8u);
+            total += 8u;
+        }
+        if (qwc != 0u)
+        {
+            spans.emplace_back(data, qwc * 16u);
+            total += static_cast<size_t>(qwc) * 16u;
+        }
         return true;
     });
     out.reserve(total);
-    walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc) {
-        try
+    try
+    {
+        for (const auto &[address, bytes] : spans)
         {
-            if (tte)
-            {
-                // With TTE every tag supplies two VIFcodes before its payload.
-                appendBytes(memory, out, tagAddress + 8u, 8u);
-            }
-            if (qwc != 0u)
-            {
-                appendBytes(memory, out, data, qwc * 16u);
-            }
+            appendBytes(memory, out, address, bytes);
         }
-        catch (const std::exception &)
-        {
-            return false;
-        }
-        return true;
-    });
+    }
+    catch (const std::exception &)
+    {
+        // As before: the list ends at the piece that could not be read.
+    }
 }
 
 // One handed-over list, with the VU1 D/T-bit enables (VU0 FBRST bits 10 and

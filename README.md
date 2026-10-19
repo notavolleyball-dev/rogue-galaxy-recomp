@@ -68,7 +68,12 @@ your disc into `build/vu1-manifest`, which CMake compiles into the runtime.
 Programs the manifest lacks run on the interpreter; record them with
 `PS2_VU_PROGRAM_PROFILE=build/vu1-profile` (CMake compiles that folder too),
 then configure and build again (maintainers: `python setup.py vu1-manifest`
-folds a recording into the manifest).
+folds a recording into the manifest). The VU0 micro programs, which run on
+the game thread, are compiled as blocks instead: a run with
+`PS2_VU_AOT_PROFILE=build/vu-blocks/NAME.txt` records the blocks the
+interpreter executes (both units; keep the lines starting with `0` for
+VU0 alone), and CMake compiles every `build/vu-blocks/*.txt` it finds
+(one shard at a time: each takes gigabytes to compile).
 
 ## Controls
 
@@ -111,8 +116,10 @@ of the game's process; set it yourself when running from a terminal.
 `build/run/play-perfil.prof`) for a session of real play; report it with
 `tools/profile/report.py` against `build/run/exe-perfil.exe`, the copy of
 the build it was recorded with. It also prints a `[gfx]` line a second
-into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`), so a drop during
-the session can be put to its minute.
+into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`), and F9 writes a
+`[mark]` line with the seconds since launch (any launcher), so pressing
+it when a drop is felt puts the drop next to the `[gfx]` lines of that
+moment.
 
 | Variable | Effect |
 |---|---|

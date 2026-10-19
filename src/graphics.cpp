@@ -1,6 +1,7 @@
 #include "graphics.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -60,6 +61,18 @@ bool pump(void *userData)
         SDL_SetWindowFullscreen(window, (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0);
     }
     f11WasDown = f11Down;
+    // F9 writes "[mark] N s" to the log: pressed when a drop is felt, it
+    // puts the moment next to the [gfx] lines of that second.
+    static bool f9WasDown = false;
+    static const auto markStart = std::chrono::steady_clock::now();
+    const bool f9Down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F9];
+    if (f9Down && !f9WasDown)
+    {
+        std::printf("[mark] %.1f s\n",
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
+        std::fflush(stdout);
+    }
+    f9WasDown = f9Down;
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
     backend->hostPadState(held, pressed, sticks);
     ps2PadPublishHostState(held, pressed, rg::pad::shapeSticks(sticks));

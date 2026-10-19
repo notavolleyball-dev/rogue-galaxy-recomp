@@ -20,6 +20,18 @@
 #                build/run/NAME.prof (tools/profile/report.py); with LONG=1
 #                the walk goes on 40 s more and the window is 62 s to 92 s,
 #                all of it in the streets.
+#   BATTLE=1     the battle bench: the player's File 03 (build/run/mc0-battle,
+#                three characters on a field), build/run/input_battle1.txt
+#                loads it and walks up and down; a battle runs from about
+#                80 s to 125 s, the frame is logged at pad read 5400 (in
+#                it), the profile window is 85 s to 120 s, and fpscmp
+#                prints the 25 intervals before the marker and the 50 after.
+#                The battle's length and timing vary run to run (the 60 fps
+#                walk is not deterministic): read the [gfx] draws per
+#                second, 60-70k in the battle against 25-50k on the field,
+#                or tools/bench/battlefps.py NAME..., the frame rate over
+#                the intervals with 55k draws or more (the comparable number).
+#   MC0=DIR      another memory card directory (default build/run/mc0-bench).
 #   INPUT=FILE   another input script (default build/run/input_pad3.txt);
 #                PROFILE_START=, PROFILE_SECONDS= and AFTER_OVERRIDE= (the
 #                seconds kept running after the logged frame) go with it.
@@ -31,6 +43,17 @@ if [ -z "$NAME" ]; then echo "usage: walk.sh NAME [SCALE] [FPS]"; exit 2; fi
 if tasklist | grep -qi "roguegalaxy.exe"; then echo "a game is running; not starting"; exit 2; fi
 mkdir -p build/run
 INPUT=${INPUT:-build/run/input_pad3.txt}
+if [ "$BATTLE" = "1" ]; then
+    INPUT=build/run/input_battle1.txt
+    MC0=${MC0:-build/run/mc0-battle}
+    FRAME=${FRAME:-5400}
+    AFTER_OVERRIDE=${AFTER_OVERRIDE:-70}
+    PROFILE_START=${PROFILE_START:-85}
+    PROFILE_SECONDS=${PROFILE_SECONDS:-35}
+    if [ ! -d build/run/mc0-battle/BASCUS-97490LV5RG_02 ]; then
+        mkdir -p build/run/mc0-battle && cp -r disc/mc0/BASCUS-97490LV5RG_02 build/run/mc0-battle/
+    fi
+fi
 if [ "$LONG" = "1" ]; then
     # The same walk, then 40 s more of walking about the streets (for a
     # profile window that is all street, pad reads 3480..5470).
@@ -51,9 +74,12 @@ export RG_INPUT="$(cat $INPUT)" RG_INPUT_CLOCK=pad RG_MUTE=1
 if [ ! -d build/run/mc0-bench/BASCUS-97490LV5RG_00 ]; then
     mkdir -p build/run/mc0-bench && cp -r disc/mc0/BASCUS-97490LV5RG_00 build/run/mc0-bench/
 fi
-export RG_MC0_DIR=build/run/mc0-bench
+# MC0=DIR: another card, e.g. build/run/mc0-battle holding only the
+# player's File 03 (two characters, a field where walking meets a battle).
+export RG_MC0_DIR=${MC0:-build/run/mc0-bench}
 export RG_GS_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GFX_STATS_EVERY=60
-export RG_GS_FRAMELOG="build/run/$NAME.txt@2660"
+# FRAME=N logs the frame at another pad read (the battle script: 5400).
+export RG_GS_FRAMELOG="build/run/$NAME.txt@${FRAME:-2660}"
 if [ "$FPS" = "60" ]; then export RG_FPS=60; else unset RG_FPS; fi
 unset RG_GS_FRAMESKIP RG_TIME_TRACE RG_PROFILE RG_POS_TRACE
 AFTER=8
@@ -80,4 +106,6 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='ro
 echo "--- $NAME: scale $SCALE fps-mode $FPS, $(( $(date +%s) - start )) s"
 grep -n "frame logged\|\[crash\]\|fatal\|VK_ERROR" "build/run/$NAME.log" | head -5
 grep -m1 "internal scale" "build/run/$NAME.log"
-if [ "$LONG" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 12:36; else python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6; fi
+if [ "$LONG" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 12:36
+elif [ "$BATTLE" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 25 -w 0:50
+else python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6; fi

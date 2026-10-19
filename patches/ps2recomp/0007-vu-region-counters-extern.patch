@@ -1,0 +1,33 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index e469a91..0fb12ab 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -51,6 +51,11 @@ namespace
+ 
+ }
+ 
++namespace ps2_vu_detail
++{
++thread_local RegionCounters regionCounters;
++}
++
+ VU1Interpreter::VU1Interpreter(Unit unit)
+     : m_unit(unit)
+ {
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_region.h b/ps2xRuntime/src/lib/vu/ps2_vu1_region.h
+index c27e8cc..e95215d 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_region.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_region.h
+@@ -32,7 +32,11 @@ struct RegionCounters {
+         }
+     }
+ };
+-inline thread_local RegionCounters regionCounters;
++// Defined in ps2_vu1_core.cpp: an inline thread_local with a destructor
++// gets a TLS initialization wrapper per translation unit, and lld on COFF
++// refuses the duplicates once the compiled VU blocks' shards include this
++// header too (Rogue Galaxy: changed).
++extern thread_local RegionCounters regionCounters;
+ inline const bool profileRegions = std::getenv("PS2_VU_PROFILE_REGIONS") != nullptr;
+ inline const bool disableTerminalBranches = std::getenv("PS2_VU_DISABLE_BRANCH_TAILS") != nullptr;
+ inline thread_local uint64_t terminalBranchPairs = 0u;

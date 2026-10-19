@@ -53,6 +53,19 @@ set(PS2X_VU_PROGRAM_PROFILES "${rg_vu1_found}" CACHE STRING
     "Local VU1 program profile directories to compile; never distributed" FORCE)
 message(STATUS "VU1 programs: ${rg_vu1_found}")
 
+# VU blocks: what the interpreter still ran, recorded with
+# PS2_VU_AOT_PROFILE=FILE (VU0 micro programs above all, which the whole-
+# program compile above does not cover) and kept in build/vu-blocks/*.txt,
+# compiled as blocks (PS2X_VU_AOT_IMAGES). Game code too: never committed.
+# One block compilation at a time: each shard takes gigabytes to compile.
+file(GLOB rg_vu_blocks CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-blocks/*.txt")
+list(SORT rg_vu_blocks)
+set(PS2X_VU_AOT_IMAGES "${rg_vu_blocks}" CACHE STRING
+    "Local VU code images or block profiles to compile; never distributed" FORCE)
+set(PS2X_VU_AOT_COMPILE_JOBS "1" CACHE STRING
+    "Maximum concurrent runtime compilations with VU AOT (Ninja)" FORCE)
+message(STATUS "VU blocks: ${rg_vu_blocks}")
+
 # Local changes to the pinned framework, carried as patches so the submodule
 # stays at its upstream commit: each is applied to the checkout once, on
 # configure, and skipped when it already is. See patches/README.md.

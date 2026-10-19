@@ -1,0 +1,41 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 17a5b54..db76095 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1447,9 +1447,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
++    // One look at the function table for the presence test and the call:
++    // this runs for every inter-function transfer of the generated code,
++    // and the second look in lookupFunction was a third of the dispatcher's
++    // own time in Rogue Galaxy's battles (Rogue Galaxy: changed).
++    const RecompiledFunction *slot = functionTableSlotPointer(targetPc);
++    const bool present = slot != nullptr && *slot != nullptr;
++
+     if (!isCall)
+     {
+-        if (!hasFunction(targetPc))
++        if (!present)
+         {
+             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+         }
+@@ -1458,7 +1465,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    if (!hasFunction(targetPc))
++    if (!present)
+     {
+         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+ 
+@@ -1479,7 +1486,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    RecompiledFunction targetFn = lookupFunction(targetPc);
++    pushDispatchPc(targetPc);
++    RecompiledFunction targetFn = *slot;
+     const uint32_t entryPc = ctx->pc;
+     targetFn(rdram, ctx, this);
+ 

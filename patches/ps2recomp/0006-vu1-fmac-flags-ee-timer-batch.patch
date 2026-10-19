@@ -14,7 +14,7 @@ index b754133..1f54906 100644
      void uploadImageNative(uint64_t bitbltbuf,
                             uint64_t trxpos,
 diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
-index bab7517..c5ef217 100644
+index bab7517..c1c2932 100644
 --- a/ps2xRuntime/include/runtime/ps2_memory.h
 +++ b/ps2xRuntime/include/runtime/ps2_memory.h
 @@ -310,6 +310,10 @@ public:
@@ -28,25 +28,57 @@ index bab7517..c5ef217 100644
      [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
      void resetEeTimers() noexcept;
  
-@@ -319,6 +323,9 @@ public:
- 
-     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
-     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
+@@ -331,6 +335,9 @@ public:
+     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
+     using Vu1MscntCallback = std::function<void(uint32_t top, uint32_t itop)>;
+     void setVu1MscntCallback(Vu1MscntCallback cb) { m_vu1MscntCallback = std::move(cb); }
 +    // Image bytes continuing an open PATH2 transfer, handed over in place
 +    // (used only without a GIF arbiter; see processVIF1Data's DIRECT).
 +    void setGifImageCallback(GifPacketCallback cb) { m_gifImageCallback = std::move(cb); }
-     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
  
-     // Called with the channel's register base whenever a CHCR write starts a
-@@ -409,6 +416,7 @@ public:
-     std::vector<TLBEntry> m_tlbEntries;
+     uint8_t *getVU1Code() { return m_vu1Code; }
+     const uint8_t *getVU1Code() const { return m_vu1Code; }
+@@ -387,6 +394,11 @@ public:
+     std::atomic<uint32_t> m_pendingVifInterrupts{0};
+     std::atomic<uint64_t> m_vu0CodeGeneration{0};
+     std::atomic<uint64_t> m_vu1CodeGeneration{0};
++    // Per pair of VU1 code memory, whether it reads the status flags
++    // (Rogue Galaxy: added; vu1StatusReadersPresent). Rescanning the whole
++    // image after each of the game's code uploads was 2% of the VIF1 thread.
++    std::array<uint64_t, PS2_VU1_CODE_SIZE / 8u / 64u> m_vu1ReaderBits{};
++    std::atomic<bool> m_vu1ReaderBitsStale{true};
+     // I/O registers
+     std::unordered_map<uint32_t, uint32_t> m_ioRegisters;
  
-     GifPacketCallback m_gifPacketCallback;
-+    GifPacketCallback m_gifImageCallback;
-     DmaStartObserver m_dmaStartObserver;
+@@ -413,6 +425,7 @@ public:
      GifArbiter *m_gifArbiter = nullptr;
      Vu1MscalCallback m_vu1MscalCallback;
-@@ -466,6 +474,12 @@ public:
+     Vu1MscntCallback m_vu1MscntCallback;
++    GifPacketCallback m_gifImageCallback;
+ 
+     uint8_t *m_vu0Code = nullptr;
+     uint8_t *m_vu0Data = nullptr;
+@@ -447,7 +460,18 @@ public:
+     bool isAddressInRegion(uint32_t address, const CodeRegion &region);
+     void markModified(uint32_t address, uint32_t size);
+     void markVU0CodeModified() { m_vu0CodeGeneration.fetch_add(1, std::memory_order_relaxed); }
+-    void markVU1CodeModified() { m_vu1CodeGeneration.fetch_add(1, std::memory_order_relaxed); }
++    void markVU1CodeModified()
++    {
++        m_vu1CodeGeneration.fetch_add(1, std::memory_order_relaxed);
++        m_vu1ReaderBitsStale.store(true, std::memory_order_relaxed);
++    }
++    // The VIF's MPG wrote [addr, addr + size) of VU1 code memory: the
++    // status-reader bits of those pairs follow (Rogue Galaxy: added).
++    void markVU1CodeWritten(uint32_t addr, uint32_t size);
++    // Whether any pair of VU1 code memory reads the status flags (FSEQ,
++    // FSAND, FSOR), from the bits kept per pair; a write outside the MPG
++    // path rescans the image once (Rogue Galaxy: added).
++    bool vu1StatusReadersPresent();
+     bool isScratchpad(uint32_t address) const;
+     uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit);
+     const uint8_t *mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit) const;
+@@ -466,6 +490,12 @@ public:
      // the game never armed one.
      bool m_anyEeTimerCued = false;
      void refreshEeTimersCued() noexcept;
@@ -60,22 +92,10 @@ index bab7517..c5ef217 100644
  };
  
 diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
-index dc5ca5c..f53cb03 100644
+index dc5ca5c..48fea3a 100644
 --- a/ps2xRuntime/include/runtime/ps2_vu1.h
 +++ b/ps2xRuntime/include/runtime/ps2_vu1.h
-@@ -226,6 +226,11 @@ private:
-     uint32_t m_cachedCodeSize = 0;
-     uint64_t m_cachedCodeGeneration = 0;
-     bool m_decodedCodeCacheValid = false;
-+    // Whether the image reads the MAC or status flags anywhere (see
-+    // fmacFlagsWanted); by code pointer and generation.
-+    const uint8_t *m_flagScanCode = nullptr;
-+    uint64_t m_flagScanGeneration = ~0ull;
-+    bool m_fmacFlagsWanted = true;
- 
-     std::array<FlagPipelineEntry, kMaxFlagEntries> m_flagPipeline{};
-     ScalarPipelineEntry m_fdiv{};
-@@ -276,6 +281,7 @@ private:
+@@ -276,6 +276,7 @@ private:
      DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
      DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
      void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
@@ -103,10 +123,71 @@ index d65b32b..a0d2120 100644
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
-index 5e474f7..0f4f499 100644
+index 5e474f7..7300101 100644
 --- a/ps2xRuntime/src/lib/ps2_memory.cpp
 +++ b/ps2xRuntime/src/lib/ps2_memory.cpp
-@@ -404,6 +404,8 @@ void PS2Memory::resetEeTimers() noexcept
+@@ -8,6 +8,60 @@
+ #include <limits>
+ #include <stdexcept>
+ #include <algorithm>
++
++namespace
++{
++// A lower instruction that reads the status flags: FSEQ, FSAND, FSOR
++// (ops 0x14, 0x16, 0x17), unless the upper's I bit makes the lower word
++// a float immediate.
++bool vu1PairReadsStatus(const uint8_t *code, uint32_t pair)
++{
++    uint32_t words[2];
++    std::memcpy(words, code + pair * 8u, sizeof(words));
++    if ((words[1] & 0x80000000u) != 0u)
++        return false;
++    const uint32_t op = words[0] >> 25u;
++    return op == 0x14u || op == 0x16u || op == 0x17u;
++}
++} // namespace
++
++void PS2Memory::markVU1CodeWritten(uint32_t addr, uint32_t size)
++{
++    m_vu1CodeGeneration.fetch_add(1, std::memory_order_relaxed);
++    // A pending rescan covers these pairs too.
++    if (!m_vu1Code || m_vu1ReaderBitsStale.load(std::memory_order_relaxed))
++        return;
++    const uint32_t first = addr / 8u;
++    const uint32_t end = std::min<uint32_t>((addr + size + 7u) / 8u, PS2_VU1_CODE_SIZE / 8u);
++    for (uint32_t pair = first; pair < end; ++pair)
++    {
++        const uint64_t bit = 1ull << (pair & 63u);
++        if (vu1PairReadsStatus(m_vu1Code, pair))
++            m_vu1ReaderBits[pair >> 6u] |= bit;
++        else
++            m_vu1ReaderBits[pair >> 6u] &= ~bit;
++    }
++}
++
++bool PS2Memory::vu1StatusReadersPresent()
++{
++    if (m_vu1ReaderBitsStale.exchange(false, std::memory_order_relaxed))
++    {
++        m_vu1ReaderBits.fill(0u);
++        if (m_vu1Code)
++        {
++            for (uint32_t pair = 0u; pair < PS2_VU1_CODE_SIZE / 8u; ++pair)
++            {
++                if (vu1PairReadsStatus(m_vu1Code, pair))
++                    m_vu1ReaderBits[pair >> 6u] |= 1ull << (pair & 63u);
++            }
++        }
++    }
++    uint64_t any = 0u;
++    for (uint64_t word : m_vu1ReaderBits)
++        any |= word;
++    return any != 0u;
++}
+ #include <string>
+ #include <vector>
+ 
+@@ -404,6 +458,8 @@ void PS2Memory::resetEeTimers() noexcept
  {
      m_eeTimers = {};
      m_anyEeTimerCued = false;
@@ -115,7 +196,7 @@ index 5e474f7..0f4f499 100644
  }
  
  void PS2Memory::refreshEeTimersCued() noexcept
-@@ -433,6 +435,39 @@ uint32_t PS2Memory::takePendingVifInterrupts() noexcept
+@@ -433,6 +489,39 @@ uint32_t PS2Memory::takePendingVifInterrupts() noexcept
  }
  
  uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
@@ -155,7 +236,7 @@ index 5e474f7..0f4f499 100644
  {
      if (eeCycles == 0u || !m_anyEeTimerCued)
      {
-@@ -1158,6 +1193,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
+@@ -1158,6 +1247,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
      uint32_t timerOffset = 0u;
      if (decodeEeTimerRegister(address, timerIndex, timerOffset))
      {
@@ -163,7 +244,7 @@ index 5e474f7..0f4f499 100644
          EeTimer &timer = m_eeTimers[timerIndex];
          switch (timerOffset)
          {
-@@ -2231,6 +2267,7 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
+@@ -2231,6 +2321,7 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
      uint32_t timerOffset = 0u;
      if (decodeEeTimerRegister(address, timerIndex, timerOffset))
      {
@@ -172,9 +253,18 @@ index 5e474f7..0f4f499 100644
          switch (timerOffset)
          {
 diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
-index 984dfad..ce87c15 100644
+index 984dfad..29a04e1 100644
 --- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
 +++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -479,7 +479,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+                 if (pos + copyBytes <= sizeBytes)
+                 {
+                     std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
+-                    markVU1CodeModified();
++                    markVU1CodeWritten(destAddr, copyBytes);
+                 }
+             }
+             pos += mpgBytes;
 @@ -505,14 +505,24 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                  {
                      // GIF image continuation consumes DIRECT payload, never VIFcodes.
@@ -209,18 +299,19 @@ index 984dfad..ce87c15 100644
                  }
  
 diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
-index 9bf9b72..4e3c720 100644
+index 9bf9b72..7d05dd4 100644
 --- a/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
 +++ b/ps2xRuntime/src/lib/vu/ps2_vu1_cache.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  #include "runtime/ps2_vu1.h"
++#include "runtime/ps2_memory.h"
  
  #include <algorithm>
 +#include <cstdlib>
  #include <cstring>
  
  void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize,
-@@ -30,3 +31,36 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+@@ -30,3 +32,28 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
      m_cachedCodeGeneration = generation;
      m_decodedCodeCacheValid = true;
  }
@@ -231,31 +322,23 @@ index 9bf9b72..4e3c720 100644
 +// queues every FMAC result; otherwise only the pairs whose MAC result a
 +// reader can still see queue, which compile_vu_programs.py decides pair by
 +// pair (the CLIP results always queue). Rogue Galaxy's images read status
-+// flags nowhere and MAC flags in a few places.
++// flags nowhere and MAC flags in a few places. The memory keeps a bit per
++// pair as the code is written (PS2Memory::markVU1CodeWritten), so this is
++// a look at 32 words rather than a scan of the image after each of the
++// game's code uploads, which was 2% of the VIF1 thread.
 +bool VU1Interpreter::fmacFlagsWanted(const uint8_t *vuCode, uint32_t codeSize, uint64_t generation)
 +{
-+    if (m_flagScanCode == vuCode && m_flagScanGeneration == generation)
-+        return m_fmacFlagsWanted;
++    (void)vuCode;
++    (void)codeSize;
++    (void)generation;
 +    // PS2X_VU_FMAC_FLAGS=1 keeps every result queued, for comparisons.
 +    static const bool forced = [] {
 +        const char *value = std::getenv("PS2X_VU_FMAC_FLAGS");
 +        return value && *value == '1';
 +    }();
-+    bool wanted = forced;
-+    const uint32_t pairCount = codeSize / 8u;
-+    for (uint32_t i = 0u; i < pairCount && !wanted; ++i)
-+    {
-+        uint32_t words[2];
-+        std::memcpy(words, vuCode + i * 8u, sizeof(words));
-+        if ((words[1] & 0x80000000u) != 0u)
-+            continue; // the I bit: the lower word is a float immediate
-+        const uint32_t op = words[0] >> 25u;
-+        wanted = op == 0x14u || op == 0x16u || op == 0x17u;
-+    }
-+    m_flagScanCode = vuCode;
-+    m_flagScanGeneration = generation;
-+    m_fmacFlagsWanted = wanted;
-+    return wanted;
++    if (forced || !m_activeMemory)
++        return true;
++    return m_activeMemory->vu1StatusReadersPresent();
 +}
 diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
 index c37afaa..10c1823 100644
