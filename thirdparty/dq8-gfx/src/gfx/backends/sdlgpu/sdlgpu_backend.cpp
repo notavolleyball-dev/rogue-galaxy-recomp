@@ -551,6 +551,117 @@ struct SdlGpuBackend::Impl {
         pendingPages.reset();
         pendingTargets.clear();
         pendingSourcePages.reset();
+        last.valid = false;
+    }
+
+    // The primitive before this one, when it went through the texture-cache
+    // path (or untextured), was queued, and nothing has happened since: the
+    // next primitive with byte-identical draw state draws into the same
+    // surfaces with the same pipeline, uniforms and texture, so only what
+    // depends on its vertices is redone. The frontend hands over one
+    // primitive at a time and an object is thousands of them under one
+    // state; the full path's target lookups, view preparation, page scans,
+    // register decoding and texture-cache lookups were a fifth of the
+    // worker (Rogue Galaxy: added).
+    struct LastDraw {
+        bool valid = false;
+        GSDrawState state{};
+        GsSurface *color = nullptr;
+        bool alphaPass = false;
+        bool textured = false;
+        SDL_GPUTexture *texture = nullptr;
+        GsPageSet sourcePages{};
+        // The texels acquired from the cache under this state so far: a
+        // primitive within them needs no cache call. reachAll after an
+        // unbounded acquire, which builds the whole texture.
+        GsRegion reach{};
+        bool reachAll = false;
+        // The open batch's pages cover its whole bounding box (a batch the
+        // full path started, or one this path has grown since), so a
+        // primitive inside the box adds no page.
+        bool boxPages = false;
+        float offsetX = 0.0f, offsetY = 0.0f, depthScale = 0.0f;
+    } last;
+
+    // False sends the primitive down the full path.
+    bool submitSameState(const GSPrimitiveBatch &batch) {
+        GsSurface *color = last.color;
+        GsRegion written = primitiveBounds(batch);
+        if (written.empty())
+            return true;
+        written.x1 = std::min(written.x1, color->width);
+        written.y1 = std::min(written.y1, color->height);
+        if (written.empty())
+            return true;
+        const GSDrawState &state = batch.state;
+        // A sprite that replaces the whole surface claims it: the full path.
+        if (state.prim.type == GS_PRIM_SPRITE && !noWholeClaim &&
+            opaqueSpriteBounds(batch, *color, gsDecodeTest(state.context.test), true)
+                .contains(color->wholeRegion()))
+            return false;
+        const size_t open = batches.size();
+        const size_t span = last.alphaPass ? 2u : 1u;
+        if (open < span)
+            return false;
+        if (last.textured) {
+            ++stats.texturedPrimitives;
+            // This primitive may reach texels the one before did not. Within
+            // the texels already acquired, with no queued draw into the
+            // texture's pages, there is nothing to check or build; otherwise
+            // the same checks and the same cache call as the full path, which
+            // expands the texture when it must. Anything that would flush or
+            // rebuild takes the full path.
+            GsRegion reach;
+            const bool bounded = sampledTexelRect(batch, reach);
+            const bool covered = last.reachAll || (bounded && last.reach.contains(reach));
+            const bool untouched = (last.sourcePages & pendingPages).none();
+            if (!covered || !untouched) {
+                if (!untouched && pendingDrawsTouch(sampledSourcePages(batch, last.sourcePages)))
+                    return false;
+                if (textures->evictionImminent())
+                    return false;
+                std::string textureError;
+                ResolveReasonScope scope(*targets, GsResolveReason::Texture);
+                SDL_GPUTexture *texture = textures->acquire(state, textureError, bounded ? &reach : nullptr);
+                if (texture != last.texture || !textureError.empty())
+                    return false;
+                if (bounded)
+                    last.reach.merge(reach);
+                else
+                    last.reachAll = true;
+            }
+        }
+        const uint32_t firstVertex = static_cast<uint32_t>(vertices.size());
+        appendPrimitive(batch, last.offsetX, last.offsetY, last.depthScale);
+        const uint32_t addedVertices = static_cast<uint32_t>(vertices.size()) - firstVertex;
+        if (addedVertices == 0u)
+            return true;
+        ++stats.primitivesDrawn;
+        ++stats.sameStatePrimitives;
+        stats.trianglesDrawn += addedVertices / 3u;
+        // The batch's pages are those of its bounding box, a superset of the
+        // full path's union of each primitive's, so a primitive inside the
+        // box adds nothing; one that grows it marks the grown box once.
+        DrawBatch &head = batches[open - span];
+        const bool inside = last.boxPages && head.written.contains(written);
+        GsPageSet grownPages;
+        GsRegion grown = head.written;
+        if (!inside) {
+            grown.merge(written);
+            gsMarkPages(grownPages, color->base, color->bufferWidth, color->psm,
+                        grown.width(), grown.height(), grown.x0, grown.y0);
+            last.boxPages = true;
+        }
+        for (size_t index = open - span; index < open; ++index) {
+            batches[index].vertexCount += addedVertices;
+            if (!inside) {
+                batches[index].written = grown;
+                batches[index].writtenPages |= grownPages;
+            }
+        }
+        if (!inside)
+            notePending(color, grownPages);
+        return true;
     }
 
     // Whether a host write into these pages has to land the queued draws
@@ -782,7 +893,7 @@ struct SdlGpuBackend::Impl {
     // draws had not happened yet, and the draws would then be applied on top.
     bool settleFor(const GsPageSet &pages, GsResolveReason reason, bool hostWrite = false,
                    const GsPageSet &covered = {}, bool flush = true) {
-        if (flush && !flushDraws())
+        if (flush && !flushFor(stats.flushSettle))
             return false;
         std::string error;
         ResolveReasonScope scope(*targets, reason);
@@ -1136,7 +1247,7 @@ struct SdlGpuBackend::Impl {
     // snapshot into the same texture can get ahead of that draw.
     SDL_GPUTexture *snapshotFeedback(GsSurface &surface, std::string &error,
                                      const FeedbackPadding &padding) {
-        if (!flushDraws() || !targets->refresh(surface, error))
+        if (!flushFor(stats.flushSnapshot) || !targets->refresh(surface, error))
             return nullptr;
         // Padding regions are in GS pixels; an upscaled snapshot holds each
         // of them as a scale x scale block, like the target's own pixels.
@@ -1404,6 +1515,9 @@ struct SdlGpuBackend::Impl {
             return;
         if (!gsIsColorFramePsm(context.frame.psm))
             return;
+        if (last.valid && std::memcmp(&state, &last.state, sizeof(state)) == 0 && submitSameState(batch))
+            return;
+        last.valid = false;
 
         GsRegion written = primitiveBounds(batch);
         if (written.empty())
@@ -1441,7 +1555,7 @@ struct SdlGpuBackend::Impl {
         // Distinct FRAME views can name the same GS pages. Finish the old
         // view before importing its pixels into the new one.
         const bool pendingAlias = pendingDrawsTouchOthers(color->pages, color);
-        if (pendingAlias && !flushDraws())
+        if (pendingAlias && !flushFor(stats.flushAlias))
             return;
         const GsTestState test = gsDecodeTest(context.test);
         // A sprite that replaces every pixel of the surface (a clear) makes
@@ -1600,6 +1714,12 @@ struct SdlGpuBackend::Impl {
         GsClampState clampState{};
         draw.texture = dummyTexture;
         float textureScale = 1.0f;
+        // For `last`: the texture came from the cache, and from these pages.
+        bool plainTexture = false;
+        SDL_GPUTexture *plainTextureHandle = nullptr;
+        GsPageSet plainSourcePages;
+        GsRegion plainReach;
+        bool plainBounded = false;
         if (state.prim.tme) {
             ++stats.texturedPrimitives;
 
@@ -1615,14 +1735,38 @@ struct SdlGpuBackend::Impl {
             GsSurface *sampled = nullptr;
             FeedbackPadding feedbackPadding;
             const GsPageSet sourcePages = textures->sourcePagesFor(state);
+            plainSourcePages = sourcePages;
             // Only the pages this primitive can sample count against queued
             // draws (sampledSourcePages).
-            const GsPageSet sampledPages = sampledSourcePages(batch, sourcePages);
+            GsPageSet sampledPages = sampledSourcePages(batch, sourcePages);
             // A live target that owes nothing to local memory needs no flush:
             // draws queued into it stay ahead of this one within the flush. The
             // target being drawn into is read through a snapshot taken there.
             GsSurface *const candidate = gsIsIndexedPsm(context.tex0.psm) ? nullptr
                 : targets->sampleCandidate(context.tex0.tbp0, context.tex0.psm, context.tex0.tbw);
+            // The sampled rectangle carries a texel of slack past the last
+            // row and column, which for a texture the size of a buffer lands
+            // in the next buffer's pages: queued draws there (the back buffer
+            // being drawn while the frame buffer is read in strips, the next
+            // object buffer while one is read) forced a flush per strip, 55
+            // of the streets' 63 texture-read flushes a frame. A draw that
+            // samples within the live target reads only its pages (Rogue
+            // Galaxy: added).
+            if (candidate && samplesFitSurface(batch, *candidate))
+                sampledPages &= candidate->pages;
+            // A candidate behind only on host writes patched into it is
+            // brought up to date here instead: the patches record before
+            // the queued draws, which the transfer-conflict rule kept off
+            // their pages, so the order holds, and the draw samples the live
+            // target. Otherwise this was a flush and a texture rebuilt from
+            // local memory: 41 of the streets' 46 texture-read flushes a
+            // frame (Rogue Galaxy: added).
+            if (candidate && !candidate->cpuPatches.empty() && candidate->needsUpload.empty() &&
+                !pendingDrawsTouchOthers(sampledPages, candidate)) {
+                std::string patchError;
+                if (!targets->settlePatches(*candidate, patchError))
+                    setError(std::move(patchError));
+            }
             const bool inOrder = candidate && candidate->cpuPatches.empty() && candidate->needsUpload.empty() &&
                                  !pendingDrawsTouchOthers(sampledPages, candidate);
             const bool readsItself = inOrder && candidate == color &&
@@ -1631,14 +1775,24 @@ struct SdlGpuBackend::Impl {
             if (inOrder && candidate != color && samplesFitSurface(batch, *candidate)) {
                 sampled = candidate;
             } else if (!readsItself) {
-                if (pendingDrawsTouch(sampledPages) && !flushDraws())
+                // Trace only: the state before the flush below changes it.
+                const bool othersBefore = candidate && pendingDrawsTouchOthers(sampledPages, candidate);
+                GsRegion traceReach{};
+                const bool traceBounded = gsTargetTraceEnabled() && sampledTexelRect(batch, traceReach);
+                if (pendingDrawsTouch(sampledPages) && !flushFor(stats.flushTexRead))
                     return;
                 if (!gsIsIndexedPsm(context.tex0.psm)) {
                     if (gsTargetTraceEnabled())
                         std::fprintf(stderr, "[target] texread tbp=%05x tbw=%u psm=%02x %ux%u -> fbp=%05x psm=%02x"
-                                             " candidate=%d\n",
+                                             " candidate=%d patches=%zu upload=%d others=%d/%d fits=%d reach=%d,%d-%d,%d/%d surface=%ux%u\n",
                                      context.tex0.tbp0, context.tex0.tbw, context.tex0.psm, 1u << context.tex0.tw,
-                                     1u << context.tex0.th, color->base, color->psm, candidate != nullptr);
+                                     1u << context.tex0.th, color->base, color->psm, candidate != nullptr,
+                                     candidate ? candidate->cpuPatches.size() : size_t(0),
+                                     candidate && !candidate->needsUpload.empty() ? 1 : 0,
+                                     othersBefore ? 1 : 0, candidate && pendingDrawsTouchOthers(sampledPages, candidate) ? 1 : 0,
+                                     candidate && samplesFitSurface(batch, *candidate) ? 1 : 0, traceReach.x0, traceReach.y0,
+                                     traceReach.x1, traceReach.y1, traceBounded ? 1 : 0, candidate ? candidate->width : 0u,
+                                     candidate ? candidate->height : 0u);
                     ResolveReasonScope scope(*targets, GsResolveReason::Sample);
                     sampled = targets->findSampleSource(context.tex0.tbp0, context.tex0.psm,
                                                         context.tex0.tbw);
@@ -1703,7 +1857,7 @@ struct SdlGpuBackend::Impl {
                 // leave every queued batch holding a released texture.
                 if (!batches.empty() &&
                     (textures->evictionImminent() || pendingDrawsTouch(sampledPages))) {
-                    if (!flushDraws())
+                    if (!flushFor(stats.flushTexRead))
                         return;
                 }
 
@@ -1718,6 +1872,10 @@ struct SdlGpuBackend::Impl {
                 texture = textures->acquire(state, textureError, bounded ? &reach : nullptr);
                 if (!texture && !textureError.empty())
                     setError(std::move(textureError));
+                plainTexture = true;
+                plainTextureHandle = texture;
+                plainReach = reach;
+                plainBounded = bounded;
             }
 
             if (texture) {
@@ -1827,6 +1985,7 @@ struct SdlGpuBackend::Impl {
         // triangle would be its own draw call. A colour/alpha pair grows as a
         // pair.
         const size_t open = batches.size();
+        bool pushedNew = false;
         if (alphaPass && open >= 2u && batches[open - 2u].sameStateAs(draw) &&
             batches[open - 1u].sameStateAs(alphaDraw)) {
             for (size_t index = open - 2u; index < open; ++index) {
@@ -1841,6 +2000,7 @@ struct SdlGpuBackend::Impl {
             batches.back().writtenPages |= draw.writtenPages;
             notePending(draw.color, draw.writtenPages);
         } else {
+            pushedNew = true;
             notePending(draw.color, draw.writtenPages);
             noteSampled(draw);
             draw.firstVertex = firstVertex;
@@ -1854,6 +2014,25 @@ struct SdlGpuBackend::Impl {
                 ++stats.batches;
             }
         }
+        // What the next primitive may reuse (submitSameState). A scissor
+        // past the buffer decides per vertex whether the surface widens.
+        const bool widens = static_cast<uint32_t>(context.scissor.x1) + 1u > bufferPixels && bufferPixels != 0u;
+        last.valid = !feedbackRecorded && !draw.feedback && !draw.source && !clearsWhole && !widens &&
+                     (!state.prim.tme || plainTexture);
+        if (last.valid) {
+            std::memcpy(&last.state, &state, sizeof(last.state));
+            last.color = color;
+            last.alphaPass = alphaPass;
+            last.textured = state.prim.tme;
+            last.texture = plainTextureHandle;
+            last.sourcePages = plainSourcePages;
+            last.offsetX = offsetX;
+            last.offsetY = offsetY;
+            last.depthScale = depthScale;
+            last.boxPages = pushedNew;
+            last.reach = plainBounded ? plainReach : GsRegion{};
+            last.reachAll = state.prim.tme && plainTexture && !plainBounded;
+        }
         if (draw.snapshot)
             feedbackWritten.clear();
         if (draw.feedback)
@@ -1861,7 +2040,7 @@ struct SdlGpuBackend::Impl {
         // Copy and consume the snapshot before another snapshot into the same
         // texture can get ahead of the draw.
         if (feedbackRecorded)
-            flushDraws();
+            flushFor(stats.flushFeedback);
     }
 
     // -----------------------------------------------------------------
@@ -1926,7 +2105,14 @@ struct SdlGpuBackend::Impl {
         return true;
     }
 
+    bool flushFor(uint64_t &reason) {
+        if (!batches.empty())
+            ++reason;
+        return flushDraws();
+    }
+
     bool flushDraws() {
+        last.valid = false;
         if (batches.empty()) {
             vertices.clear();
             return true;
@@ -2391,6 +2577,23 @@ struct SdlGpuBackend::Impl {
         const uint64_t enterGuestCount = g_eeEnterGuestCount.load(std::memory_order_relaxed);
         static uint64_t previousSubmissions = 0u;
         const uint64_t submissions = device.submissions();
+        static uint64_t previousSameState = 0u, previousSubmitted = 0u;
+        static SdlGpuStats previousReasons{};
+        const auto d = [](uint64_t now, uint64_t before) { return static_cast<unsigned long long>(now - before); };
+        std::fprintf(stderr,
+                     "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
+                     "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
+                     "rewrite=%llu of %llu\n",
+                     d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
+                     d(stats.flushSettle, previousReasons.flushSettle),
+                     d(stats.transferFlushes, previousReasons.transferFlushes),
+                     d(stats.flushSnapshot, previousReasons.flushSnapshot), d(stats.flushAlias, previousReasons.flushAlias),
+                     d(stats.flushTexRead, previousReasons.flushTexRead), d(stats.flushFeedback, previousReasons.flushFeedback),
+                     d(stats.flushLocalCopy, previousReasons.flushLocalCopy), d(stats.flushPresent, previousReasons.flushPresent),
+                     d(stats.flushRewrite, previousReasons.flushRewrite), d(stats.drawFlushes, previousReasons.drawFlushes));
+        previousReasons = stats;
+        previousSameState = stats.sameStatePrimitives;
+        previousSubmitted = stats.primitivesSubmitted;
 
         std::fprintf(stderr,
                      "[gfx] %.1f fps (backend %.0f%% of wall) over %u frames | transfers=%llu (%llu KiB, "
@@ -3055,7 +3258,7 @@ struct SdlGpuBackend::Impl {
         ++stats.presents;
         if (gsTargetTraceEnabled())
             std::fprintf(stderr, "[target] present #%llu\n", static_cast<unsigned long long>(stats.presents));
-        if (!flushDraws() || !device.valid())
+        if (!flushFor(stats.flushPresent) || !device.valid())
             return;
         stage.gsActive = stats.drawCalls != previousPresentDraws ||
                          stats.transferBytes != previousPresentTransfers;
@@ -3405,6 +3608,7 @@ SdlGpuBackend::~SdlGpuBackend() {
 
 void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     m_impl->vram.attach(vram, vramSize);
     m_impl->transferCommand = {};
     m_impl->patchingHostWrite = false;
@@ -3427,7 +3631,7 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
         m_impl->textures->setBeforeRewrite([impl = m_impl.get()](SDL_GPUTexture *texture) {
             // Queued draws still sample it: they go first.
             if (!impl->batches.empty() && (!texture || impl->batchesUse(texture)))
-                impl->flushDraws();
+                impl->flushFor(impl->stats.flushRewrite);
         });
     }
     m_impl->targets->setScale(m_impl->scale);
@@ -3464,13 +3668,14 @@ void SdlGpuBackend::SubmitMany(const GSPrimitiveBatch *const *batches, size_t co
 
 void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     if (!m_impl->transfer)
         return;
     Impl::ScopedTimer timer(m_impl->backendNanos);
     ++m_impl->stats.transfersBegun;
     m_impl->noteTransferInterrupted();
     if (command.direction == 2u) {
-        if (!m_impl->flushDraws()) return;
+        if (!m_impl->flushFor(m_impl->stats.flushLocalCopy)) return;
         if (m_impl->gpuLocalCopy(command)) {
             m_impl->transferCommand = command;
             return;
@@ -3544,6 +3749,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
 
 void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->stats.transferBytes += sizeBytes;
     if (!m_impl->transfer) return;
@@ -3605,6 +3811,7 @@ void SdlGpuBackend::TextureFlush() {
 
 void SdlGpuBackend::Sync(GSSyncReason reason) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     switch (reason) {
     case GSSyncReason::LocalToHost:
     case GSSyncReason::DebugReadback:
@@ -3741,6 +3948,7 @@ uint32_t SdlGpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw,
 void SdlGpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw,
                               uint32_t x, uint32_t y, uint32_t value) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     GsPageSet pages;
     gsMarkPages(pages, base, bw, psm, x + 1u, y + 1u);
     m_impl->settleFor(pages, GsResolveReason::HostWrite, true);
@@ -3769,6 +3977,7 @@ void SdlGpuBackend::setCompletedRenderCounter(CompletedRenderCounter counter) {
 
 void SdlGpuBackend::setResolutionScale(uint32_t scale) {
     std::lock_guard lock(m_impl->mutex);
+    m_impl->last.valid = false;
     m_impl->flushDraws();
     std::string error;
     if (m_impl->targets) {

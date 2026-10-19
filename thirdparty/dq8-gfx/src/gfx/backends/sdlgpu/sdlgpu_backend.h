@@ -36,6 +36,8 @@ struct SdlGpuStats {
 
     uint64_t primitivesSubmitted = 0u;
     uint64_t primitivesDrawn = 0u;
+    // Drawn through the same-state fast path (Rogue Galaxy: added).
+    uint64_t sameStatePrimitives = 0u;
     uint64_t trianglesDrawn = 0u;
     uint64_t batches = 0u;
     uint64_t renderPasses = 0u;
@@ -43,6 +45,14 @@ struct SdlGpuStats {
     // Flushes of the queued draws into the device's pending command buffer
     // (Rogue Galaxy: added); the device counts the submissions.
     uint64_t drawFlushes = 0u;
+    // Why the queued draws were flushed, counted only when there were any
+    // (Rogue Galaxy: added): a host write or transfer settling its pages, a
+    // feedback snapshot, a draw into a view aliasing queued draws' pages, a
+    // texture read of pages queued draws write (or an imminent eviction),
+    // the flush after a recorded feedback draw, a GPU local copy, a present,
+    // a texture rewrite. The rest of drawFlushes is everything else.
+    uint64_t flushSettle = 0u, flushSnapshot = 0u, flushAlias = 0u, flushTexRead = 0u, flushFeedback = 0u,
+             flushLocalCopy = 0u, flushPresent = 0u, flushRewrite = 0u;
 
     // Places where GS semantics are approximated rather than reproduced. Each
     // one is a known gap; a nonzero count says how much a scene depends on it.

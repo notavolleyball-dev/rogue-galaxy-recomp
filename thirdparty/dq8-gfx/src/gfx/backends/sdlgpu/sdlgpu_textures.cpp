@@ -213,11 +213,16 @@ void GsTextureCache::reset() {
         }
     }
     m_entries.clear();
+    m_sourcePagesAll.reset();
     releaseUploadPool();
 }
 
 void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource source) {
     (void)source;
+    // Draws mostly land in pages no texture reads; the walk below, over up
+    // to 2048 entries, ran for every flush and every host write.
+    if ((m_sourcePagesAll & pages).none())
+        return;
     // Mapping pages to texels belongs at consumption, not at each of the
     // movie's 896 tiny writes. Bitsets merge those writes without a page walk.
     for (auto &[key, entry] : m_entries) {
@@ -327,6 +332,7 @@ SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &e
     markTexelPages(key, entry.texelPages);
     markClutPages(key, entry.clutPages);
     SDL_GPUTexture *texture = entry.texture;
+    m_sourcePagesAll |= entry.pages;
     m_entries.emplace(key, std::move(entry));
     return texture;
 }

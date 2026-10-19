@@ -211,6 +211,9 @@ public:
 
     // Brings a surface's texture up to date with local memory if needed.
     bool refresh(GsSurface &surface, std::string &error);
+    // Lands the host writes patched into the surface (its CPU patches) so a
+    // draw can sample it live (Rogue Galaxy: added).
+    bool settlePatches(GsSurface &surface, std::string &error) { return applyCpuPatches(surface, error); }
     // Only `region` of it: the CPU patches that touch the region (the rest
     // stay queued), and the whole surface when pixels local memory holds
     // and the texture does not lie there (Rogue Galaxy: added, for a
@@ -288,6 +291,9 @@ private:
     // resolution, or the reverse. `staging` is reused across calls.
     bool downloadScaled(GsSurface &surface, const GsRegion &region,
                         std::vector<uint8_t> &out, std::string &error);
+    // One CPU patch region at native size through the resolve staging
+    // texture and a nearest blit, for surfaces above 1x (Rogue Galaxy: added).
+    bool patchNative(GsSurface &surface, const GsRegion &region, std::string &error);
     bool uploadNative(GsSurface &surface, const GsRegion &region,
                       const std::vector<uint8_t> &pixels, std::string &error);
 

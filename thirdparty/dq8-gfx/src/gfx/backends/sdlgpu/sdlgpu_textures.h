@@ -232,6 +232,9 @@ private:
     mutable GsTextureKey m_lastSourceKey{};
     mutable GsPageSet m_lastSourcePages{};
     mutable bool m_lastSourceValid = false;
+    // The source pages of every entry, so an invalidation of pages no
+    // texture uses skips the walk over the entries (Rogue Galaxy: added).
+    GsPageSet m_sourcePagesAll{};
     std::vector<uint8_t> m_staging;
     // Expand scratch: raw texels for one row (indices for indexed PSMs, whole
     // words when the indices ride inside a 32-bit layout), and the palette

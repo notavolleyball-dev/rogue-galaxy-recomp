@@ -1,0 +1,284 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index b32db25..dc5ca5c 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -314,6 +314,16 @@ private:
+     void flushPipelines();
+     void progressXgkick();
+     void finishXgkick();
++    // Copies what is left of the active XGKICK's packet into its buffer at
++    // once, for when nothing can write VU memory before it would have gone
++    // out: the program has ended, or stalls on its next XGKICK. Returns the
++    // quadwords copied; the kick stays active for finishXgkick, unless the
++    // packet was malformed.
++    uint32_t gatherXgkick();
++    // The PATH1 cycles copying that many more quadwords would have taken
++    // from the current credit: one quadword per two cycles.
++    uint32_t xgkickCycles(uint32_t qwords) const;
++    bool otherPipelinesPending() const;
+     uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
+     uint64_t calculatePairReadyCycleInline(const DecodedInstructionPair &decoded) const;
+     void markPairWrites(const DecodedInstructionPair &decoded);
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 555ba52..984dfad 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -30,6 +30,60 @@ namespace
+ {
+     constexpr uint8_t kGifFmtImage = 2u;
+ 
++    // UNPACK's common shapes straight into VU memory: no write mask, no row
++    // add (STMOD 0, or 3 which the generic path treats alike), every write
++    // cycle fed from the stream (CL >= WL), 32-, 16- or 8-bit components.
++    // S-* broadcasts its one value to all four lanes; V2/V3 leave the other
++    // lanes as they were. The generic loop below reads the destination back,
++    // decodes through lambdas and masks every lane; it was 7% of the VIF1
++    // thread, almost all of it on these shapes.
++    void unpackPlain(uint8_t *vuData, const uint8_t *src, uint32_t writeVectorCount, uint32_t vuAddr,
++                     uint32_t cl, uint32_t wl, uint32_t vl, uint32_t components, uint32_t bytesPerVector,
++                     bool zeroExtend)
++    {
++        for (uint32_t writeIndex = 0u; writeIndex < writeVectorCount; ++writeIndex, src += bytesPerVector)
++        {
++            const uint32_t destVec = cl == wl ? (vuAddr + writeIndex) & 0x3FFu
++                                              : (vuAddr + (writeIndex / wl) * cl + writeIndex % wl) & 0x3FFu;
++            uint8_t *dst = vuData + destVec * 16u;
++            uint32_t words[4];
++            if (vl == 0u)
++            {
++                if (components == 1u)
++                {
++                    uint32_t scalar = 0u;
++                    std::memcpy(&scalar, src, sizeof(scalar));
++                    words[0] = words[1] = words[2] = words[3] = scalar;
++                    std::memcpy(dst, words, sizeof(words));
++                }
++                else
++                    std::memcpy(dst, src, components * 4u);
++                continue;
++            }
++            for (uint32_t c = 0u; c < components; ++c)
++            {
++                if (vl == 1u)
++                {
++                    uint16_t raw = 0u;
++                    std::memcpy(&raw, src + c * 2u, sizeof(raw));
++                    words[c] = zeroExtend ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
++                }
++                else
++                {
++                    const uint8_t raw = src[c];
++                    words[c] = zeroExtend ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
++                }
++            }
++            if (components == 1u)
++            {
++                words[1] = words[2] = words[3] = words[0];
++                std::memcpy(dst, words, sizeof(words));
++            }
++            else
++                std::memcpy(dst, words, components * 4u);
++        }
++    }
++
+     uint32_t gifImageQwcFromTag(const uint8_t *data, uint32_t sizeBytes)
+     {
+         if (!data || sizeBytes < 16u)
+@@ -545,8 +599,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+             {
+                 const uint8_t *srcBase = data + pos;
++                const uint32_t stmod = vif1_regs.mode & 3u;
++                const bool plain = !maskEnable && (stmod == 0u || stmod == 3u) && cl >= wl && vl != 3u;
++                if (plain)
++                    unpackPlain(m_vu1Data, srcBase, writeVectorCount, vuAddr, cl, wl, vl,
++                                static_cast<uint32_t>(components), bytesPerVector, zeroExtend);
+                 uint32_t srcIndex = 0u;
+-                for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
++                for (uint32_t writeIndex = 0; !plain && writeIndex < writeVectorCount; ++writeIndex)
+                 {
+                     const uint32_t cyclePos = writeIndex % wl;
+                     const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 855884c..e469a91 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -197,6 +197,97 @@ void VU1Interpreter::finishXgkick()
+     m_xgkick.active = false;
+ }
+ 
++uint32_t VU1Interpreter::gatherXgkick()
++{
++    if (!m_xgkick.active || !m_activeVuData || m_activeVuDataSize == 0u)
++        return 0u;
++
++    // VU memory wraps; the packet buffer does not.
++    const auto copy = [&](uint32_t offset, uint32_t bytes) {
++        while (bytes != 0u)
++        {
++            const uint32_t source = (m_xgkick.sourceAddress + offset) % m_activeVuDataSize;
++            const uint32_t run = std::min(bytes, m_activeVuDataSize - source);
++            std::memcpy(m_xgkick.packet.data() + offset, m_activeVuData + source, run);
++            offset += run;
++            bytes -= run;
++        }
++    };
++
++    uint32_t copied = 0u;
++    for (;;)
++    {
++        if (m_xgkick.currentTagEnd == 0u)
++        {
++            // The same checks progressXgkick makes on a tag's quadword.
++            const uint32_t offset = m_xgkick.copiedBytes;
++            if (offset > XgkickPipeline::kBufferSize - 16u)
++            {
++                reportReservedInstruction(false, 0xFFFFFFFBu);
++                m_xgkick.active = false;
++                return copied;
++            }
++            copy(offset, 16u);
++            m_xgkick.copiedBytes += 16u;
++            ++copied;
++
++            uint64_t tagLo = 0;
++            std::memcpy(&tagLo, m_xgkick.packet.data() + offset, sizeof(tagLo));
++            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
++            const uint32_t format = static_cast<uint32_t>((tagLo >> 58) & 0x3u);
++            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
++            if (nreg == 0u)
++                nreg = 16u;
++
++            uint64_t tagBytes = 16u;
++            if (format == 0u)
++                tagBytes += static_cast<uint64_t>(nloop) * nreg * 16u;
++            else if (format == 1u)
++                tagBytes += ((static_cast<uint64_t>(nloop) * nreg + 1u) & ~1ull) * 8u;
++            else if (format == 2u)
++                tagBytes += static_cast<uint64_t>(nloop) * 16u;
++            else
++            {
++                reportReservedInstruction(false, 0xFFFFFFF8u);
++                m_xgkick.active = false;
++                return copied;
++            }
++
++            if (tagBytes > XgkickPipeline::kBufferSize - offset)
++            {
++                reportReservedInstruction(false, 0xFFFFFFFBu);
++                m_xgkick.active = false;
++                return copied;
++            }
++            m_xgkick.currentTagEnd = offset + static_cast<uint32_t>(tagBytes);
++            m_xgkick.currentTagEop = ((tagLo >> 15) & 1u) != 0u;
++            if (m_xgkick.currentTagEop)
++                m_xgkick.totalBytes = m_xgkick.currentTagEnd;
++        }
++
++        const uint32_t rest = m_xgkick.currentTagEnd - m_xgkick.copiedBytes;
++        if (rest != 0u)
++        {
++            copy(m_xgkick.copiedBytes, rest);
++            m_xgkick.copiedBytes += rest;
++            copied += rest / 16u;
++        }
++        if (m_xgkick.currentTagEop)
++            return copied;
++        // The next quadword is another GIFtag.
++        m_xgkick.currentTagEnd = 0u;
++        m_xgkick.currentTagEop = false;
++    }
++}
++
++uint32_t VU1Interpreter::xgkickCycles(uint32_t qwords) const
++{
++    // progressXgkick adds one credit a cycle and copies a quadword per two;
++    // with credit enough already, the first cycle copies all of them.
++    const uint32_t needed = qwords * 2u;
++    return needed > m_xgkick.cycleCredit ? needed - m_xgkick.cycleCredit : 1u;
++}
++
+ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
+ {
+     if (m_unit != Unit::VU1 || !m_activeVuData || m_activeVuDataSize < 16u)
+@@ -215,9 +306,9 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
+     m_xgkick.issueCycle = m_cycle;
+ }
+ 
+-bool VU1Interpreter::pipelinesPending() const
++bool VU1Interpreter::otherPipelinesPending() const
+ {
+-    if (m_fdiv.valid || m_xgkick.active)
++    if (m_fdiv.valid)
+         return true;
+     for (const ScalarPipelineEntry &entry : m_efu)
+         if (entry.valid)
+@@ -225,10 +316,28 @@ bool VU1Interpreter::pipelinesPending() const
+     return (m_activeFlags | m_activeStores | m_activeVfWrites | m_activeViWrites | m_activeAccWrites) != 0u;
+ }
+ 
++bool VU1Interpreter::pipelinesPending() const
++{
++    return m_xgkick.active || otherPipelinesPending();
++}
++
+ void VU1Interpreter::flushPipelines()
+ {
+     while (pipelinesPending())
++    {
++        // With only PATH1 left, nothing writes VU memory any more: the rest
++        // of the packet goes out at once, at the clock it would have reached,
++        // instead of a quadword per two cycles of advancing.
++        if (m_xgkick.active && !otherPipelinesPending())
++        {
++            const uint32_t qwords = gatherXgkick();
++            m_cycle += xgkickCycles(qwords);
++            m_state.cycles = m_cycle;
++            finishXgkick();
++            continue;
++        }
+         advanceOneCycle();
++    }
+ }
+ 
+ uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+index 36ea65a..c37afaa 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.cpp
+@@ -255,6 +255,21 @@ bool Run::progressKick(uint32_t cycle, uint32_t nextPc)
+ Run::Clock Run::stall(uint32_t cycle, uint32_t target, uint32_t pc, bool untilIdle)
+ {
+     bool kicking = true;
++    if (untilIdle)
++    {
++        // The pair is an XGKICK waiting for the one in flight, and nothing
++        // runs meanwhile: the rest of that packet goes out at once, at the
++        // clock it would have reached. A GIF callback sees the PC and clock
++        // the interpreter would show there.
++        const uint32_t qwords = Access::gatherXgkick(m_vu);
++        cycle += Access::xgkickCycles(m_vu, qwords);
++        m_state.pc = pc;
++        m_state.cycles = m_base + cycle;
++        Access::finishXgkick(m_vu);
++        kicking = Access::xgkickActive(m_vu);
++        if (Access::codeGeneration(m_vu) != m_generation)
++            m_stale = true;
++    }
+     while (cycle < target || (untilIdle && kicking))
+     {
+         ++cycle;
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+index 7a4c75d..1f28a83 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+@@ -102,6 +102,9 @@ struct Access
+     static bool xgkickActive(const VU1Interpreter &vu) { return vu.m_xgkick.active; }
+     static void startXgkick(VU1Interpreter &vu, uint32_t address) { vu.startXgkick(address); }
+     static void progressXgkick(VU1Interpreter &vu) { vu.progressXgkick(); }
++    static uint32_t gatherXgkick(VU1Interpreter &vu) { return vu.gatherXgkick(); }
++    static uint32_t xgkickCycles(const VU1Interpreter &vu, uint32_t qwords) { return vu.xgkickCycles(qwords); }
++    static void finishXgkick(VU1Interpreter &vu) { vu.finishXgkick(); }
+     static ScalarEntry &fdiv(VU1Interpreter &vu) { return vu.m_fdiv; }
+     static std::array<ScalarEntry, 2> &efu(VU1Interpreter &vu) { return vu.m_efu; }
+     static uint64_t efuResourceReady(const VU1Interpreter &vu) { return vu.m_efuResourceReady; }

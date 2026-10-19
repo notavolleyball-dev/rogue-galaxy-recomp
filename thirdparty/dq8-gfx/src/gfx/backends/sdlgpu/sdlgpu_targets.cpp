@@ -1327,20 +1327,31 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
     }
     for (auto *source : sources) {
         const GsPageSet shared = source->ownedPages & surface.pages;
+        const uint32_t scale = std::max(surface.scale, 1u);
+        // Consecutive pages along one row of both surfaces go as one copy:
+        // the call per page, with SDL's layout transitions around each, was
+        // most of the import's cost (Rogue Galaxy: added).
         for (uint32_t page = 0u; page < kGsPageCount; ++page) {
             if (!shared.test(page)) continue;
             const uint32_t srcPage = (page + kGsPageCount - (source->base >> 5u)) % kGsPageCount;
             const uint32_t dstPage = (page + kGsPageCount - (surface.base >> 5u)) % kGsPageCount;
-            const uint32_t scale = std::max(surface.scale, 1u);
+            const uint32_t srcColumn = srcPage % source->bufferWidth;
+            const uint32_t dstColumn = dstPage % surface.bufferWidth;
+            uint32_t run = 1u;
+            while (page + run < kGsPageCount && shared.test(page + run) &&
+                   srcColumn + run < source->bufferWidth && dstColumn + run < surface.bufferWidth &&
+                   srcPage + run < kGsPageCount && dstPage + run < kGsPageCount)
+                ++run;
             SDL_GPUTextureLocation from{};
             from.texture = source->texture;
-            from.x = (srcPage % source->bufferWidth) * 64u * scale;
+            from.x = srcColumn * 64u * scale;
             from.y = (srcPage / source->bufferWidth) * 32u * scale;
             SDL_GPUTextureLocation to{};
             to.texture = surface.texture;
-            to.x = (dstPage % surface.bufferWidth) * 64u * scale;
+            to.x = dstColumn * 64u * scale;
             to.y = (dstPage / surface.bufferWidth) * 32u * scale;
-            SDL_CopyGPUTextureToTexture(copy, &from, &to, 64u * scale, 32u * scale, 1u, false);
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, 64u * run * scale, 32u * scale, 1u, false);
+            page += run - 1u;
         }
     }
     SDL_EndGPUCopyPass(copy);
@@ -1477,11 +1488,97 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
 
 // Writes one region of GS-resolution pixels into a surface, point-expanding it
 // when the surface is scaled.
+// A CPU patch region of this many GS pixels or more goes to the GPU at
+// native size (patchNative) when the surface is upscaled; smaller ones, the
+// 8x8 cells of a texture upload, are cheaper expanded on the CPU than with a
+// copy pass and a blit each (Rogue Galaxy: added).
+constexpr uint32_t kNativeBlitPixels = 1024u;
+
+bool GsTargetCache::patchNative(GsSurface &surface, const GsRegion &region, std::string &error) {
+    SDL_GPUDevice *device = m_device.handle();
+    const uint32_t width = region.width();
+    const uint32_t height = region.height();
+    const uint32_t scale = std::max(surface.scale, 1u);
+    SDL_GPUTexture *staging = acquireResolveStaging(width, height, error);
+    if (!staging) return false;
+    auto fail = [&](const char *operation) {
+        error = std::string(operation) + "(native patch): " + SDL_GetError();
+        return false;
+    };
+    const uint32_t bytes = (width * height * 4u + 255u) & ~255u;
+    SDL_GPUTransferBuffer *upload = m_uploadPool.take(m_device, bytes, error);
+    if (!upload) return false;
+    auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device, upload, false));
+    if (!mapped) return fail("SDL_MapGPUTransferBuffer");
+    for (uint32_t y = region.y0; y < region.y1; ++y)
+        GSMem::ReadRowCT32(m_vram.data(), surface.base, surface.bufferWidth, region.x0, y, width,
+                           mapped + size_t(y - region.y0) * width * 4u);
+    SDL_UnmapGPUTransferBuffer(device, upload);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    if (!commands) return false;
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+    if (!copy) {
+        m_device.cancelPending();
+        return fail("SDL_BeginGPUCopyPass");
+    }
+    SDL_GPUTextureTransferInfo source{};
+    source.transfer_buffer = upload;
+    source.pixels_per_row = width;
+    source.rows_per_layer = height;
+    SDL_GPUTextureRegion destination{};
+    destination.texture = staging;
+    destination.w = width;
+    destination.h = height;
+    destination.d = 1u;
+    SDL_UploadToGPUTexture(copy, &source, &destination, false);
+    SDL_EndGPUCopyPass(copy);
+    // Nearest at an integer scale replicates each native pixel exactly, as
+    // the CPU expansion did; the rest of the target is kept.
+    SDL_GPUBlitInfo blit{};
+    blit.source.texture = staging;
+    blit.source.w = width;
+    blit.source.h = height;
+    blit.destination.texture = surface.texture;
+    blit.destination.x = region.x0 * scale;
+    blit.destination.y = region.y0 * scale;
+    blit.destination.w = width * scale;
+    blit.destination.h = height * scale;
+    blit.load_op = SDL_GPU_LOADOP_LOAD;
+    blit.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_BlitGPUTexture(commands, &blit);
+    m_uploadPool.used(upload, m_device.pendingSerial());
+    traceSurface("native-patch", surface, uint64_t(width) * height);
+    m_stats.refreshedPixels += uint64_t(width) * height;
+    return true;
+}
+
 bool GsTargetCache::applyCpuPatches(GsSurface &surface, std::string &error) {
     if (surface.cpuPatches.empty()) return true;
     // Patches are in GS pixels; an upscaled surface takes each as a
     // scale x scale block, like an upload of the whole surface would.
     const uint32_t scale = std::max(surface.scale, 1u);
+    if (scale > 1u) {
+        // The large regions (page imports, refreshes) at native size: their
+        // scale x scale expansion into the write-combined upload buffer was
+        // 24 MB a frame at 3x in Rogue Galaxy's streets.
+        std::vector<GsRegion> small;
+        bool native = false;
+        for (const auto &region : surface.cpuPatches) {
+            if (region.width() * region.height() >= kNativeBlitPixels) {
+                if (!patchNative(surface, region, error)) return false;
+                native = true;
+            } else {
+                small.push_back(region);
+            }
+        }
+        if (native) {
+            surface.cpuPatches.swap(small);
+            if (surface.cpuPatches.empty()) {
+                ++m_stats.colorRefreshes;
+                return true;
+            }
+        }
+    }
     const auto patchBytes = [scale](const GsRegion &region) {
         return (region.width() * scale * region.height() * scale * 4u + 255u) & ~255u;
     };

@@ -684,7 +684,9 @@ every box test says yes: nothing is culled, the list overflows wherever
 the active blocks hold more than 256 triangles, and whichever block is
 late in the area's table loses its floor. The three are the only readers
 of the VU0 control registers in the main ELF (the `sceVu0Clip*` readers
-have no callers). `src/vu0_flags.cpp` replaces them with host versions
+have no callers), and a scan of the seven overlay images (VIEWER, TITLE,
+INSMENU, LAUNCHER, NORMAL, FACTORY, INSECT) for `cfc2` of registers
+16-18 finds none, so the host versions cover every reader the game has. `src/vu0_flags.cpp` replaces them with host versions
 with the same register side effects (`RG_VU0_FLAGS=0` keeps the
 generated ones); the proper fix, status and MAC flags for macro-mode
 FMAC instructions in the recompiler, is pending and would need a full
@@ -710,6 +712,112 @@ come from dq8-gfx's SDL sampler through `src/graphics.cpp` (`pump`), so
 pushed distance stay, the distance is measured as the longer axis
 (`RG_STICK_SQUARE=0` passes the round range through). Both sticks get it,
 as on the console.
+
+**In-game cutscenes at double speed (60 fps mode).** Reported 2026-10-18.
+The event system counts frames: `SystemVmUpdate` (0x2509F0, from
+`TaskStepEvent` and the battle sub-modes) resumes the system VM and runs
+`EventSysUpdate` (0x26AC10: the event camera, the event player with its
+cast, voices, sound fades and queued scripts; `EventPlayerUpdate` adds one
+to its +0x468/+0x470 counters per call and the scripts' waits count
+calls), and `TaskStepMessage` runs `MesMgrUpdateAll` (0x277AC0), whose
+windows count their character and page waits in frames. At 60 updates a
+second all of it ran twice as fast. `src/step_fixes.cpp` (`event`) now
+runs both on the frames that complete a whole step (`rg::timing::
+logicFrame`: the host's scales accumulated, capped at two; a button going
+down at this frame's `PadUpdate` runs them at once, so no press is lost),
+with the scene's scale at 1.0 for the call so the step takers inside (the
+event camera, script commands) take a whole one. Two more things fell out
+of the same reading. The field modes that lock the scale for a scripted
+sequence (`TreasureBoxModeUpdate`, `CharaInteractModeUpdateMaybe`,
+`TransporterWarpModeUpdate`) were left to the game's 1.0 while the flip
+waited one vblank: chests, talks and warps ran at double speed too. The
+lock now only protects the game's own 60 Hz overlays, told apart by the
+interval the game itself last set (`DrawEnvSetVsyncInterval`, 0x144140:
+1 from `SceneOverlayModeOn`, 2 from `Off` and at boot; a direct write by
+an overlay's own copy shows at the flip) and, for a lock at interval 2,
+by `GetGameMode` being a field mode (5-7, 9-13). And `PlayTimeStep` gets
+its interval of 2 in those locked field modes now, so the clock no longer
+runs double there. The frame-time trace (`RG_TIME_TRACE=1`) prints the
+game's interval and the logic frames run, skipped and run early. The same
+day's 40 s profile of real play (`build/run/profile-play.txt`, 60 fps
+mode, 3x, Salgin): the VIF1 thread 90% busy (compiled VU1 programs 30%,
+their flag bookkeeping 7%, XGKICK and GIF 7%, UNPACK 8%, one queue
+command per primitive 5%), the GS worker 88% (driver 18%, draw
+submission 12%, page imports 8%, CPU patches 7%, page and texture-cache
+bookkeeping 12%, memcpy 6%), the game thread 54% (46% waiting for the
+other two). The frame rate the player sees follows what is in view, 30
+through a door to the street, 60 facing a wall, 40-45 in the streets:
+both emulation threads need to lose about half their work per frame for
+a steady 60 in the heavy views, so the next cuts go to both.
+
+**Throughput, round one (2026-10-18 night).** Measured with
+`tools/bench/walk.sh`, the scripted Salgin walk on the pad clock: speed
+as the six `[gfx]` intervals before the logged frame at 3x in the 60 fps
+mode, correctness as the frame at pad read 2660 at 1x in the 30 fps mode
+against a reference made with the same build and save
+(`build/run/ref1x30`; the save changed at 21:23, so the 10-17 references
+are dead). Baseline 50.5 frames a second. Three cuts, each byte-identical
+at 1x: the VIF1 thread's XGKICK finishing in bulk once the program has
+ended or stalls on its next kick, plus a plain-shape UNPACK path
+(`patches/ps2recomp/0005`): 54.5; the GS worker's same-state fast path
+for primitives whose draw state repeats the previous one, 78% of the
+streets' primitives (`thirdparty/dq8-gfx`, `Impl::submitSameState`):
+56.2; page imports between targets copying runs of pages as one copy:
+57.9; a second pass over the fast path (no cache call for texels already
+acquired, pages by the batch's bounding box) took the worker from 96% to
+90% of wall at the same 57 to 58, the walk's own noise being about one
+frame a second between runs; an early-out in the texture cache's
+invalidation (the union of every entry's pages, so a flush or host
+write into pages no texture uses skips the walk over up to 2048 entries)
+measured 58.2 in the same noise. The worker is still the limit. The
+flushes of the queued draws, now counted by reason in the stats line,
+are about 83 a frame in the streets: 46 for texture reads of pages
+queued draws write, 17 after recorded feedback draws, 9 for transfers
+into queued pages, 8 for views aliasing queued pages; each ends a render
+pass, which is where the 230 passes a frame come from. A street-only
+profile (`PROFILE=1 LONG=1`, pacing one stretch of street for 40 s)
+puts the worker at 86% busy with a quarter of it in host writes landing
+in pages live targets own (the CT32 patches: `applyCpuPatches` 11%,
+`patchHostWrite` 5%, the VRAM row reads 5%), the driver at 19%, memcpy
+at 10%; the VIF1 thread at 78% (compiled VU1 programs 35%, `commitFlags`
+7%, the queue to the worker 5%); and the game thread at 78%, a quarter
+of that waiting to hand lists to the VIF1 thread. The large CPU patches
+now go to the GPU at native size and are blitted scaled (`patchNative`;
+the expansion was 24 MB a frame at 3x): the worker's share of the walk
+went from 93% to 84% of wall, 58.9 frames a second against a cap of 60,
+and the frame at 3x in the 30 fps mode is byte-identical to a reference
+made just before (`build/run/ref3x30`; 3x holds 29.9 there now, so
+scale-dependent changes can be checked too). The walk's six intervals
+sit at the cap now; the long walk's pacing window (`LONG=1`, printed as
+intervals 12 to 36 after the marker, 44 to 60 frames a second) is the
+speed gauge from here. A trace of three frames (`RG_GS_TRACE_BEFORE=3`)
+put 41 of the 46 texture-read flushes a frame on one read: the 512x512
+CT32 frame buffer at page 0, sampled by draws into the CT24 buffer at
+page 112, with a live target for it that the draw could not bind. A
+target behind only on patched host writes now gets them landed and is
+sampled live (`settlePatches`): pacing window 54.6 to 56.5 frames a
+second, frame identical at 3x, but the flush count did not change, so
+the frame buffer is held back by something else (needsUpload, aliasing
+queued draws, or the sampled rectangle not fitting); the trace line
+prints those now. It was the aliasing, by half a texel: the sampled
+rectangle carries bilinear's half texel past the last row, which for a
+512x448 frame buffer read in 41 strips lands in the back buffer's first
+page row, where that frame's draws are queued, and likewise for an object
+buffer read while the next one is drawn. A draw that samples within a
+live target now counts only that target's pages against queued draws:
+texture-read flushes 47 to 3 a frame, all flushes 83 to 40, render passes
+230 to 180, pacing window 56.5 to 58.3 frames a second, both reference
+frames byte-identical. What remains of the flushes: 17 a frame after
+recorded feedback draws (one snapshot texture, so each such draw lands
+before the next snapshot), 10 for transfers into queued pages, 8 for
+views aliasing queued pages; and the CT16 buffer at 0x3800 reading
+itself in 16 strips reaches two rows past its end, one more than the
+snapshot padding covers. Left on
+the list: the GS worker's draw submission and texture-cache bookkeeping,
+the render pass count, the VIF1 queue's per-primitive command and
+copies, and the compiled VU1 programs themselves. A profile taken by the
+walk (`PROFILE=1`) is diluted by the loading and menu stretches around
+it; the user's play profile is the better read.
 
 ## Open questions
 

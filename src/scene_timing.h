@@ -59,6 +59,7 @@ enum class StepFix : unsigned
     Npc = 1u << 2,     // "npc": NPC walk and turn rates
     Judge = 1u << 3,   // "judge": projectiles and thrown objects
     Gravity = 1u << 4, // "gravity": character gravity and terminal velocity
+    Event = 1u << 5,   // "event": scripts, the event player and message windows at the console's rate
 };
 bool stepFix(StepFix which);
 // Any of them.
@@ -69,6 +70,23 @@ bool traceEnabled();
 // GameSceneGetTimeStep of the current scene (its per-frame scale times its
 // base scale); 1 before the scene exists.
 float sceneStep(const uint8_t *rdram, const R5900Context *ctx);
+// The scene's per-frame scale on its own, and writing it through both
+// pointers the game reads it by.
+float sceneScale(const uint8_t *rdram, const R5900Context *ctx);
+void setSceneScale(uint8_t *rdram, const R5900Context *ctx, float scale);
+// RG_FPS=60: how a system that counts frames instead of taking the step
+// should run this frame. AsIs while the scale is the game's (its own 60 Hz
+// overlays, movies, the 30 fps mode). Otherwise the host's steps are
+// accumulated and the system runs, with the scale at 1.0 for the call, on
+// the frames that complete a whole one, and is skipped in between; a button
+// pressed this frame runs it at once, so no press is lost.
+enum class LogicFrame
+{
+    AsIs,
+    Skip,
+    WholeStep,
+};
+LogicFrame logicFrame(const uint8_t *rdram, const R5900Context *ctx);
 
 // Puts `replacement` in the function table at `address` and the entry it
 // replaced in `original`; false, with a message, when there is no entry.

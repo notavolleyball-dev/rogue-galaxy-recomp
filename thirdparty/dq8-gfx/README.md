@@ -146,6 +146,75 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
   `flushes=` and `submits=`. `DQ8_GFX_SUBMIT_DRAWS=0` submits at every
   flush, as before.
 
+- `sdlgpu_backend.cpp`: a primitive whose draw state is byte-identical to
+  the one before it, when that one went through the texture-cache path
+  (or untextured) and nothing has happened since, skips the full submit
+  path: no target lookup, view preparation, page scans, register decoding
+  or texture-cache key lookup, only its bounds, its written pages, the
+  texture-cache call for the texels it reaches (which expands the texture
+  when it must; anything that would flush or rebuild takes the full path)
+  and the append to the open batch (`Impl::submitSameState`). The frontend
+  hands over one primitive at a time and an object is thousands of them
+  under one state: in Rogue Galaxy's streets 78% of the primitives take
+  it (the stats line's `same-state primitives`), and the walk went from
+  54.5 to 56.2 frames a second at 3x in the 60 fps mode. A second pass
+  keeps the texels acquired under the state so far and skips the cache
+  call for a primitive within them whose texture pages no queued draw
+  writes, and marks a batch's pages by its bounding box (a superset of the
+  full path's union of each primitive's pages), so a primitive inside the
+  box marks nothing: the worker's share of the walk went from 96% to 90%
+  of wall at the same frame rate, byte-identical frame at 1x.
+- `sdlgpu_targets.cpp`: a page import between two targets copies
+  consecutive pages along a row of both as one `SDL_CopyGPUTextureToTexture`
+  instead of one per page, each with SDL's layout transitions around it:
+  56.2 to 57.9 frames a second on the same walk, byte-identical frame at 1x.
+
+- `sdlgpu_textures.cpp`: `GsTextureCache::invalidate` walked every entry
+  (up to 2048) for every flush and every host write; it keeps the union
+  of all entries' source pages and returns at once when the invalidated
+  pages touch none. Byte-identical frame; within the walk's noise in
+  frames a second.
+- `sdlgpu_backend.cpp`: the stats line counts why the queued draws were
+  flushed (`flushes: settle= transfer= snapshot= alias= texread=
+  feedback= localcopy= present= rewrite=`). In Rogue Galaxy's streets the
+  83 flushes a frame are 46 texture reads of pages queued draws write, 17
+  flushes after a recorded feedback draw, 9 transfers into queued pages
+  and 8 draws into a view aliasing queued pages: the render pass count
+  (about 230 a frame) follows from these.
+
+- `sdlgpu_targets.cpp`: a CPU patch region of 1024 GS pixels or more on
+  an upscaled surface (page imports, refreshes) is read out of local
+  memory at native size, uploaded to the resolve staging texture and
+  blitted into the surface with nearest filtering (`patchNative`), instead
+  of being expanded scale x scale on the CPU into the write-combined
+  upload buffer: 24 MB a frame at 3x in Rogue Galaxy's streets. The 8x8
+  cells of texture uploads keep the CPU path, where a copy pass and a blit
+  each would cost more. The worker's share of the 3x walk went from 93% to
+  84% of wall; byte-identical frame at 3x in the 30 fps mode.
+
+- `sdlgpu_backend.cpp`, `sdlgpu_targets.h`: a draw sampling a live target
+  that is behind only on host writes patched into it lands those patches
+  (`GsTargetCache::settlePatches`) and samples the target, instead of
+  flushing the queued draws and rebuilding a texture from local memory.
+  The order holds: the patches record before the queued draws, which the
+  transfer-conflict rule kept off their pages. The long walk's pacing
+  window went from 54.6 to 56.5 frames a second at 3x in the 60 fps mode;
+  byte-identical frame at 3x in the 30 fps mode. The texture-read flush
+  count itself did not move, so the streets' 46 a frame have another
+  cause (the trace line now prints the candidate's state).
+
+- `sdlgpu_backend.cpp`: the pages a textured primitive counts against
+  queued draws come from its sampled texel rectangle, which carries the
+  bilinear half texel past the last row; for a texture the size of a
+  buffer that slack lands in the next buffer's pages. Rogue Galaxy copies
+  the frame buffer into the back buffer in 41 strips a frame, and reads
+  one object buffer while the next is drawn, so every strip met queued
+  draws in those pages and flushed. A draw that samples within a live
+  target now counts only that target's pages: the texture-read flushes
+  went from 47 to 3 a frame, all flushes from 83 to 40, render passes from
+  230 to 180, the long walk's pacing window from 56.5 to 58.3 frames a
+  second at 3x; byte-identical frames at 1x and 3x in the 30 fps mode.
+
 One change fixes a result rather than speed: in `sdlgpu_backend.cpp`, a
 scissor ending past the buffer (0 to 512 with FBW 8, in Rogue Galaxy's
 menus) no longer grows the colour and depth surfaces past FBW pages unless

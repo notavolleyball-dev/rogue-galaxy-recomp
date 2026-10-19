@@ -51,6 +51,17 @@ constexpr uint32_t kHeldGravityReturn = 0x00234FC0u;
 constexpr uint32_t kCharaMoveCollide = 0x00234DC0u;
 constexpr uint32_t kVelocityY = 0x84u;
 constexpr float kTerminalVelocity = 10.0f;
+// Scripts and events. SystemVmUpdate (0x2509F0, from TaskStepEvent and the
+// battle sub-modes) resumes the system VM and runs EventSysUpdate (0x26AC10:
+// the event camera, the event player with its cast, voices, sound fades and
+// queued scripts); TaskStepMessage runs MesMgrUpdateAll (0x277AC0), the
+// message windows. They count frames, not steps: the player's +0x468/+0x470
+// counters, the scripts' waits, the windows' character and page waits. At
+// 60 fps they run on the frames rg::timing::logicFrame marks, with the
+// scene's scale at 1.0 for the call so that what does take the step inside
+// them (the event camera, script commands) takes a whole one.
+constexpr uint32_t kSystemVmUpdate = 0x002509F0u;
+constexpr uint32_t kMesMgrUpdateAll = 0x00277AC0u;
 
 PS2Runtime::RecompiledFunction g_taskStepNpc = nullptr;
 PS2Runtime::RecompiledFunction g_angleStepToward = nullptr;
@@ -58,6 +69,8 @@ PS2Runtime::RecompiledFunction g_judgeObjectsStep = nullptr;
 PS2Runtime::RecompiledFunction g_getTimeStep = nullptr;
 PS2Runtime::RecompiledFunction g_getScaledGravity = nullptr;
 PS2Runtime::RecompiledFunction g_getThrowGravity = nullptr;
+PS2Runtime::RecompiledFunction g_systemVmUpdate = nullptr;
+PS2Runtime::RecompiledFunction g_mesMgrUpdateAll = nullptr;
 PS2Runtime::RecompiledFunction g_charaMoveCollide = nullptr;
 bool g_trace = false;
 
@@ -238,6 +251,48 @@ void charaMoveCollide(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_charaMoveCollide, rdram, ctx, runtime, &clampTerminal, getRegU32(ctx, 4));
 }
 
+void restoreScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t bits)
+{
+    float scale = 0.0f;
+    std::memcpy(&scale, &bits, sizeof(scale));
+    rg::timing::setSceneScale(rdram, ctx, scale);
+}
+
+// A frame-counted system's update: skipped, run as the game would, or run
+// as one whole logic frame.
+void logicStep(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    switch (rg::timing::logicFrame(rdram, ctx))
+    {
+    case rg::timing::LogicFrame::AsIs:
+        original(rdram, ctx, runtime);
+        return;
+    case rg::timing::LogicFrame::Skip:
+        // Nothing to report this frame (SystemVmUpdate's "reset the event
+        // scene" comes back on the next run); the host stands in for `jr ra`.
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    case rg::timing::LogicFrame::WholeStep:
+        break;
+    }
+    const float scale = rg::timing::sceneScale(rdram, ctx);
+    rg::timing::setSceneScale(rdram, ctx, 1.0f);
+    uint32_t bits = 0u;
+    std::memcpy(&bits, &scale, sizeof(bits));
+    rg::hooks::callThen(original, rdram, ctx, runtime, &restoreScale, bits);
+}
+
+void systemVmUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    logicStep(g_systemVmUpdate, rdram, ctx, runtime);
+}
+
+void mesMgrUpdateAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    logicStep(g_mesMgrUpdateAll, rdram, ctx, runtime);
+}
+
 } // namespace
 
 void trace()
@@ -279,6 +334,11 @@ void install(PS2Runtime &runtime)
         complete &= hookFunction(runtime, kGetScaledGravity, &getScaledGravity, g_getScaledGravity);
         complete &= hookFunction(runtime, kGetThrowGravity, &getThrowGravity, g_getThrowGravity);
         complete &= hookFunction(runtime, kCharaMoveCollide, &charaMoveCollide, g_charaMoveCollide);
+    }
+    if (stepFix(StepFix::Event))
+    {
+        complete &= hookFunction(runtime, kSystemVmUpdate, &systemVmUpdate, g_systemVmUpdate);
+        complete &= hookFunction(runtime, kMesMgrUpdateAll, &mesMgrUpdateAll, g_mesMgrUpdateAll);
     }
     if (!complete)
     {

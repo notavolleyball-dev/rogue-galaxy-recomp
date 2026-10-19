@@ -57,6 +57,23 @@ constexpr uint32_t kMoviePlayModal = 0x00267C60u;
 // is a double at its +0x8, in vblanks.
 constexpr uint32_t kPlayTimeBlock = 0x004B8B3Cu;
 constexpr uint32_t kPlayTime = 0x8u;
+// DrawEnvSetVsyncInterval (0x144140, a1 = interval): the game's own writes,
+// 2 at boot (SystemHeapsInit) and from SceneOverlayModeOff, 1 from
+// SceneOverlayModeOn (its 60 Hz menus).
+constexpr uint32_t kDrawEnvSetVsyncInterval = 0x00144140u;
+// GetGameMode's word. The modes that lock the scale while the game's
+// interval is still 2 (TransporterWarp 11, CharaInteract 12, TreasureBox
+// 13: whole steps at 30 Hz for a scripted sequence) are field modes, and
+// get the host's half steps like the unlocked field; a lock in any other
+// mode (the title's own overlay, in GameStart) is the game's.
+constexpr uint32_t kGameMode = 0x004B51A0u;
+constexpr uint32_t kFieldModes[] = {5u, 6u, 7u, 9u, 10u, 11u, 12u, 13u};
+// The pad PadUpdate (0x1843A0) keeps: buttons held now at +0x4, held the
+// frame before at +0x5C, input disabled at +0x24C (PadIsTriggered, 0x1839F0).
+constexpr uint32_t kPad = 0x004B2570u;
+constexpr uint32_t kPadHeld = 0x4u;
+constexpr uint32_t kPadHeldBefore = 0x5Cu;
+constexpr uint32_t kPadDisabled = 0x24Cu;
 
 PS2Runtime::RecompiledFunction g_original = nullptr;
 PS2Runtime::RecompiledFunction g_movieStartOriginal = nullptr;
@@ -76,6 +93,20 @@ uint32_t g_interval = 2u;
 // value alone (the game's overlays, or the 30 fps mode).
 uint32_t g_logicInterval = 0u;
 uint32_t g_intervalRewrites = 0u;
+PS2Runtime::RecompiledFunction g_setIntervalOriginal = nullptr;
+// The interval the game itself last set (the hook, or a write seen at the
+// flip): 2 outside its own overlays.
+uint32_t g_gameInterval = 2u;
+// The scale written after this frame's update, and whether it was ours.
+float g_lastScale = 1.0f;
+bool g_ours = false;
+uint32_t g_updateCount = 0u;
+// The systems that count frames rather than step: whole steps accumulated
+// from the host's, decided once per update by the first asker.
+float g_logicAccumulator = 0.0f;
+uint32_t g_logicDecided = ~0u;
+bool g_logicDue = false;
+uint32_t g_logicRuns = 0u, g_logicSkips = 0u, g_logicEarly = 0u;
 
 template <typename T>
 bool readGuest(const uint8_t *rdram, uint32_t address, T &out)
@@ -122,15 +153,35 @@ void trace(const uint8_t *rdram, float frameTime, float scale)
     if (++count == 300u)
     {
         const double wall = std::chrono::duration<double>(Clock::now() - wallStart).count();
-        std::printf("[timing] 300 updates: frame time %.2f..%.2f vblanks, mean %.2f; interval %u, scale %.2f; play "
-                    "clock +%.0f vblanks in %.2f s; interval rewrites %u\n",
-                    low, high, sum / 300.0f, g_interval, scale, haveClock ? playTime - clockStart : 0.0, wall,
-                    g_intervalRewrites);
+        std::printf("[timing] 300 updates: frame time %.2f..%.2f vblanks, mean %.2f; interval %u (game %u), scale "
+                    "%.2f; play clock +%.0f vblanks in %.2f s; interval rewrites %u; logic frames %u run, %u "
+                    "skipped, %u early\n",
+                    low, high, sum / 300.0f, g_interval, g_gameInterval, scale,
+                    haveClock ? playTime - clockStart : 0.0, wall, g_intervalRewrites, g_logicRuns, g_logicSkips,
+                    g_logicEarly);
         count = 0u;
         sum = 0.0f;
         g_intervalRewrites = 0u;
+        g_logicRuns = g_logicSkips = g_logicEarly = 0u;
         rg::steps::trace();
     }
+}
+
+bool fieldMode(const uint8_t *rdram)
+{
+    uint32_t mode = 0u;
+    if (!readGuest(rdram, kGameMode, mode))
+    {
+        return false;
+    }
+    for (const uint32_t field : kFieldModes)
+    {
+        if (mode == field)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 // What the update itself leaves when the frame was on time, or at 60 fps
@@ -139,9 +190,16 @@ void afterUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t scene
 {
     float scale = 1.0f;
     g_logicInterval = 0u;
+    g_ours = false;
+    ++g_updateCount;
     if (g_sixty)
     {
-        // The game's own overlays run at 60 Hz with the scale held: theirs.
+        // The game's own overlays (SceneOverlayModeOn: interval 1 with the
+        // scale held, its menus) run at 60 Hz by design: theirs. A lock
+        // while the game's interval is still 2 is a field mode that wants
+        // whole steps at 30 Hz for a scripted sequence (chest, talk, warp):
+        // ours, at half steps like the unlocked field. A lock anywhere else
+        // (the title's own overlay) is left alone as well.
         uint8_t locked = 0u;
         const bool haveLock = readGuest(rdram, scene + kLocked, locked);
         if (g_trace)
@@ -153,10 +211,11 @@ void afterUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t scene
                 std::printf("[timing] update: scene 0x%08X locked %u (read %d)\n", scene, locked, haveLock ? 1 : 0);
             }
         }
-        if (haveLock && locked != 0u)
+        if (g_gameInterval != 2u || (haveLock && locked != 0u && !fieldMode(rdram)))
         {
             return;
         }
+        g_ours = true;
         g_logicInterval = 2u;
         // A movie frame keeps the 30 fps step.
         const float base = g_interval == 2u ? 1.0f : 0.5f;
@@ -177,6 +236,7 @@ void afterUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t scene
     const int32_t one = 1;
     writeGuest(rdram, scene + kStepCount, one);
     writeGuest(rdram, scene + kTimeScale, scale);
+    g_lastScale = scale;
 }
 
 void timeScaleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -258,6 +318,29 @@ void vsyncInterval(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
+// The game's own interval writes: what it believes the flip waits for.
+void setVsyncInterval(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t interval = getRegU32(ctx, 5);
+    if (interval == 1u || interval == 2u)
+    {
+        g_gameInterval = interval;
+    }
+    g_setIntervalOriginal(rdram, ctx, runtime);
+}
+
+// A button went down at this frame's PadUpdate.
+bool padEdge(const uint8_t *rdram)
+{
+    uint32_t held = 0u, before = 0u, disabled = 0u;
+    if (!readGuest(rdram, kPad + kPadHeld, held) || !readGuest(rdram, kPad + kPadHeldBefore, before) ||
+        !readGuest(rdram, kPad + kPadDisabled, disabled) || disabled != 0u)
+    {
+        return false;
+    }
+    return (held & ~before) != 0u;
+}
+
 } // namespace
 
 bool hookFunction(PS2Runtime &runtime, uint32_t address, PS2Runtime::RecompiledFunction replacement,
@@ -307,7 +390,8 @@ unsigned parseStepFixes(const char *value)
                                  {"movie", StepFix::Movie},
                                  {"npc", StepFix::Npc},
                                  {"judge", StepFix::Judge},
-                                 {"gravity", StepFix::Gravity}};
+                                 {"gravity", StepFix::Gravity},
+                                 {"event", StepFix::Event}};
     unsigned fixes = 0u;
     const char *p = value;
     while (*p)
@@ -325,7 +409,8 @@ unsigned parseStepFixes(const char *value)
         }
         if (!known && length > 0u)
         {
-            std::fprintf(stderr, "[rg] RG_STEP_FIXES: unknown name \"%.*s\" (clock, movie, npc, judge, gravity)\n",
+            std::fprintf(stderr,
+                         "[rg] RG_STEP_FIXES: unknown name \"%.*s\" (clock, movie, npc, judge, gravity, event)\n",
                          static_cast<int>(length), p);
         }
         p = end ? end + 1 : p + length;
@@ -351,6 +436,57 @@ float sceneStep(const uint8_t *rdram, const R5900Context *ctx)
     return std::isfinite(step) && step > 0.0f ? step : 1.0f;
 }
 
+float sceneScale(const uint8_t *rdram, const R5900Context *ctx)
+{
+    uint32_t scene = 0u;
+    float scale = 1.0f;
+    if (!readGuest(rdram, getRegU32(ctx, 28) + kSceneOffGp, scene) || scene == 0u ||
+        !readGuest(rdram, scene + kTimeScale, scale) || !std::isfinite(scale))
+    {
+        return 1.0f;
+    }
+    return scale;
+}
+
+void setSceneScale(uint8_t *rdram, const R5900Context *ctx, float scale)
+{
+    writeScale(rdram, getRegU32(ctx, 28), scale);
+}
+
+LogicFrame logicFrame(const uint8_t *rdram, const R5900Context *)
+{
+    if (!g_ours || g_moviePlaying || g_inMovieModal)
+    {
+        return LogicFrame::AsIs;
+    }
+    if (g_logicDecided != g_updateCount)
+    {
+        g_logicDecided = g_updateCount;
+        // Capped: a run of slow frames must not turn into a burst later.
+        g_logicAccumulator = std::min(g_logicAccumulator + g_lastScale, 2.0f);
+        g_logicDue = g_logicAccumulator >= 1.0f;
+        if (g_logicDue)
+        {
+            g_logicAccumulator -= 1.0f;
+        }
+        else if (padEdge(rdram))
+        {
+            g_logicDue = true;
+            g_logicAccumulator = 0.0f;
+            ++g_logicEarly;
+        }
+        if (g_logicDue)
+        {
+            ++g_logicRuns;
+        }
+        else
+        {
+            ++g_logicSkips;
+        }
+    }
+    return g_logicDue ? LogicFrame::WholeStep : LogicFrame::Skip;
+}
+
 void beforeFlip(uint8_t *rdram, R5900Context *ctx)
 {
     if (!g_sixty)
@@ -364,13 +500,20 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx)
         return;
     }
     const uint8_t movie = g_moviePlaying ? 1u : 0u;
+    uint32_t before = 0u;
+    readGuest(rdram, env + kVsyncInterval, before);
+    // A write of the game's that did not go through DrawEnvSetVsyncInterval
+    // (an overlay's own copy of the overlay mode) shows here as a value
+    // other than the one left at the last flip.
+    if (before != g_interval && (before == 1u || before == 2u))
+    {
+        g_gameInterval = before;
+    }
     g_interval = movie != 0u ? 2u : 1u;
     if (g_trace)
     {
         static uint32_t shown = 0u;
         static uint8_t lastMovie = 0xFFu;
-        uint32_t before = 0u;
-        readGuest(rdram, env + kVsyncInterval, before);
         if (shown < 5u || movie != lastMovie)
         {
             ++shown;
@@ -421,11 +564,16 @@ void install(PS2Runtime &runtime)
         {
             std::fprintf(stderr, "[rg] 60 fps: the play clock will run at half speed\n");
         }
-        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s\n",
+        if (!hookFunction(runtime, kDrawEnvSetVsyncInterval, &setVsyncInterval, g_setIntervalOriginal))
+        {
+            std::fprintf(stderr, "[rg] 60 fps: the game's own menus may take half steps\n");
+        }
+        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s%s\n",
                     g_adaptive ? "steps sized by the frame time, half at full rate" : "half steps",
                     g_stepFixes == 0u ? " none" : "", stepFix(StepFix::Clock) ? " clock" : "",
                     stepFix(StepFix::Movie) ? " movie" : "", stepFix(StepFix::Npc) ? " npc" : "",
-                    stepFix(StepFix::Judge) ? " judge" : "", stepFix(StepFix::Gravity) ? " gravity" : "");
+                    stepFix(StepFix::Judge) ? " judge" : "", stepFix(StepFix::Gravity) ? " gravity" : "",
+                    stepFix(StepFix::Event) ? " event" : "");
     }
 }
 
