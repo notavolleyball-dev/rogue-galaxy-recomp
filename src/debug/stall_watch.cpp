@@ -7,6 +7,7 @@
 #include <thread>
 #include <variant>
 
+#include "debug/host_stacks.h"
 #include "flip_pacing.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -137,6 +138,9 @@ void dump(PS2Runtime &runtime, double stalledSeconds, uint64_t flips)
         }
     }
     rg::hooks::describePending(stderr);
+    // The host side: a guest thread "running" with a pc that never moves is
+    // parked in host code, and only the host stacks say where.
+    printHostStacks(stderr, "[stall]");
     // Where the running thread passes its safe points over the next second:
     // the loop it is in, if it is in one.
     const int running = scheduler.currentThreadId();

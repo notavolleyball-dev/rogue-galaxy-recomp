@@ -11,6 +11,7 @@
 #include "depth_reads.h"
 #include "flip_pacing.h"
 #include "ps2_runtime.h"
+#include "stick_response.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_threaded_backend.h"
@@ -61,7 +62,7 @@ bool pump(void *userData)
     f11WasDown = f11Down;
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
     backend->hostPadState(held, pressed, sticks);
-    ps2PadPublishHostState(held, pressed, sticks);
+    ps2PadPublishHostState(held, pressed, rg::pad::shapeSticks(sticks));
     return true;
 }
 

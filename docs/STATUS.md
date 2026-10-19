@@ -642,6 +642,75 @@ or off and with the committed build too. To redo on an idle machine; the
 references in `build/run` were also made with every random number 0, so
 scenes with random effects may differ legitimately.
 
+**A fourth freeze, from the fix itself.** The first session on the fix
+froze again after an hour, differently: the watchdog showed the game
+thread "running" at pc 0x133710 (`rand`) with ra inside
+`ParticleSwirlUpdate` for 15 minutes, `v0` changing between reports and
+nothing else. The scheduler's run loop dispatches a thread parked at a
+safe point straight at its pc, and relies on the function leaving the pc
+at its return address when it finishes (`jr ra` in generated code; the
+generated stub wrappers write `ctx->pc = ra` before calling the stub). A
+host function hooked into the table that returns without touching the pc
+is dispatched again, forever, the moment a safe point lands on a call to
+it; `src/libc_rand.cpp` did that, the other replacements in `src/`
+(`movie_audio.cpp`, `overlay_manager.cpp`, `vif1_thread.cpp`) already set
+the pc. Fixed by setting it. The watchdog now also prints every host
+thread's stack (`src/debug/host_stacks.cpp`, module+offset, executable
+frames as link-time addresses for `llvm-symbolizer`), since a guest
+thread "running" with a pc that never moves is parked in host code. The
+toolchain's `lldb` crashes on start here, so there is no attaching to a
+frozen process from outside; the log has to carry everything.
+
+**The party falling out of Salgin's chest house: the VU0 flags.** Four
+times on 2026-10-18 the characters fell through the floor on the way to
+a treasure chest inside a house in Salgin. `RG_POS_TRACE=1`
+(`src/debug/pos_trace.cpp`: every `CharaSetPos`/`CharaSetPosXYZ`/
+`CharaPlaceAt` with its caller, the frame the floor clamp first finds
+nothing with the collision lists dumped to `build/run/fall_N.bin`, and
+the sweeps of the next moves) showed nobody teleporting them: at
+(-1235, 29.6, -877) the upper floor ends, a short ramp leads down to the
+chest's level, and the lower floor was not in the collision list. The
+list (`ActionMgrMoveAll`'s 256-record work buffer, filled once a move by
+`MapEvCollectCollTrisNearMaybe`: event objects and treasure boxes first,
+then every active map block whose bounds hold the character) was full,
+256 of 256, with 60 of the 113 terrain triangles more than 100 units
+away; the house block came last and lost its tail. Each block's model
+culls by `AabbOverlap` (0x13E0E0), which, like `AabbContains` (0x13E090)
+and `AabbContainsPoint` (0x13E130), is VU0 macro code: `ctc2 zero,
+Status`, two `vsub.xyz`, `cfc2` of the status register, return
+`(status & 0x80) == 0` (the sticky sign bit). The recompiler emits the
+subtractions without any flag update, so the read is always zero and
+every box test says yes: nothing is culled, the list overflows wherever
+the active blocks hold more than 256 triangles, and whichever block is
+late in the area's table loses its floor. The three are the only readers
+of the VU0 control registers in the main ELF (the `sceVu0Clip*` readers
+have no callers). `src/vu0_flags.cpp` replaces them with host versions
+with the same register side effects (`RG_VU0_FLAGS=0` keeps the
+generated ones); the proper fix, status and MAC flags for macro-mode
+FMAC instructions in the recompiler, is pending and would need a full
+regeneration. Nothing to do with the 60 fps mode or the random numbers;
+with every `AabbContainsPoint` true, `CollShapeContainsPoint` was also
+always true, so trigger shapes may have fired early before this.
+
+**Walking instead of running on diagonals: the stick's shape.** Reported
+2026-10-18 with the chest fix, but older: the character drops from a run
+to a walk depending on the direction the stick points. The game reads
+each axis as `(byte - 128)`, ignores the first 50 of its 128 steps and
+scales the rest to 0..1 (`PadGetAnalogLXNorm`, 0x183AF0), and the player
+control (0x1FC4A0, constants at 0x47DC3C/0x47DC40) stands still under a
+squared length of 0.0256, walks under 0.81 and runs from there, so a run
+needs 0.9 of the stick. A DualShock 2 fills its square range and a full
+diagonal reads near (1, 1); the Xbox 360 controller in use (and the
+DualShock 4 and DualSense) is round, so a full diagonal is (0.7, 0.7),
+which the game's deadzone turns into (0.5, 0.5), length 0.74: the party
+ran only within about 20 degrees of each of the four directions. PCSX2's
+"analog sensitivity" of 1.33 exists for the same reason. The pad bytes
+come from dq8-gfx's SDL sampler through `src/graphics.cpp` (`pump`), so
+`src/stick_response.cpp` reshapes them there: the direction and the
+pushed distance stay, the distance is measured as the longer axis
+(`RG_STICK_SQUARE=0` passes the round range through). Both sticks get it,
+as on the console.
+
 ## Open questions
 
 - What leaves the data table's VM pointer stale before the Story hang.

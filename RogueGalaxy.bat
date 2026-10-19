@@ -28,6 +28,8 @@ rem Vulkan process and sit on its presents. Remove the line to allow them.
 set VK_LOADER_LAYERS_DISABLE=~implicit~
 
 echo Rogue Galaxy is running. Close the game window to quit.
+rem The previous run's log survives one more run as last-run.prev.log.
+if exist "build\last-run.log" copy /y "build\last-run.log" "build\last-run.prev.log" >nul
 "%GAME%" "disc\SCUS_974.90" %* > "build\last-run.log" 2>&1
 rem Not "if errorlevel 1": a crash exits with a negative code (0xC0000005).
 set "RC=%ERRORLEVEL%"

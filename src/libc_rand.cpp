@@ -47,6 +47,11 @@ void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     seed = seed * kMultiplier + kIncrement;
     std::memcpy(rdram + ((reent + kSeedOffset) & 0x1FFFFFFFu), &seed, sizeof(seed));
     setReturnS32(ctx, static_cast<int32_t>((seed >> 32) & 0x7FFFFFFFu));
+    // A host function stands in for the guest's `jr ra` too. The scheduler
+    // re-dispatches a thread parked at a safe point straight at its pc, and
+    // with the pc left at this function's entry it would call it forever:
+    // the game froze that way with v0 changing and nothing else.
+    ctx->pc = getRegU32(ctx, 31);
 }
 
 } // namespace

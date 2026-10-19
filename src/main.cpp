@@ -18,6 +18,7 @@
 #include "debug/crash_report.h"
 #include "debug/hw_watch.h"
 #include "debug/input_script.h"
+#include "debug/pos_trace.h"
 #include "debug/sampler.h"
 #include "debug/selftest.h"
 #include "debug/stall_watch.h"
@@ -29,6 +30,7 @@
 #include "scene_timing.h"
 #include "step_fixes.h"
 #include "vif1_thread.h"
+#include "vu0_flags.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_native_iop.h"
 
@@ -125,9 +127,11 @@ int run(int argc, char **argv)
     rg::timing::install(runtime);
     rg::steps::install(runtime);
     rg::libc::install(runtime);
+    rg::vu0::install(runtime);
     rg::movie::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
+    rg::debug::installPosTrace(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
     rg::debug::startStallWatch(runtime);

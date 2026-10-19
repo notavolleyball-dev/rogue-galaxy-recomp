@@ -76,14 +76,18 @@ add_executable(roguegalaxy
     libc_rand.cpp
     scene_timing.cpp
     step_fixes.cpp
+    stick_response.cpp
     vif1_thread.cpp
+    vu0_flags.cpp
     overlay/overlay_manager.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
     debug/gs_census.cpp
     debug/gs_timing.cpp
+    debug/host_stacks.cpp
     debug/hw_watch.cpp
     debug/input_script.cpp
+    debug/pos_trace.cpp
     debug/sampler.cpp
     debug/stall_watch.cpp
     debug/selftest.cpp
