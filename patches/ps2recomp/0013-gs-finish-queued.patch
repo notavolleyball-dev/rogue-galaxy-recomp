@@ -1,0 +1,45 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 29e7a49..68af702 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -67,13 +67,13 @@ struct GSThreadedBackend::Impl
+         GSPresentationRequest request;
+         std::shared_ptr<PresentationResult> result;
+     };
+-    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare };
++    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare, Sync };
+     using Pixel = std::array<uint32_t, 6>;
+     struct Command
+     {
+         Op op;
+         std::variant<std::monostate, GSPrimitiveBatch, GSTransferCommand,
+-                     std::vector<uint8_t>, Pixel, Prepare> data;
++                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason> data;
+         // The VIF1 thread queues one command per primitive; std::fegetround
+         // goes through the CRT (x87 and SSE control words both) and was 3%
+         // of that thread. The VU math is SSE, so MXCSR alone names the mode.
+@@ -223,6 +223,7 @@ struct GSThreadedBackend::Impl
+         }
+         case Op::Flush: backend->Flush(); break;
+         case Op::TextureFlush: backend->TextureFlush(); break;
++        case Op::Sync: backend->Sync(std::get<GSSyncReason>(command.data)); break;
+         case Op::Write:
+         {
+             const auto &p = std::get<Pixel>(command.data);
+@@ -424,6 +425,16 @@ void GSThreadedBackend::Flush() { m_impl->enqueue({Impl::Op::Flush, {}}, true);
+ void GSThreadedBackend::TextureFlush() { m_impl->enqueue({Impl::Op::TextureFlush, {}}); }
+ void GSThreadedBackend::Sync(GSSyncReason reason)
+ {
++    // A FINISH needs no answer on this side: the backend's part of it (the
++    // queued draws go to the GPU) runs in order on the worker, and the CSR
++    // bit is the front end's. Waiting for the whole queue there held the
++    // GS front end, which runs beside VU1, at every FINISH (Rogue Galaxy:
++    // changed, 2026-10-20). The syncs that read something back still wait.
++    if (reason == GSSyncReason::Finish)
++    {
++        m_impl->enqueue({Impl::Op::Sync, reason}, true);
++        return;
++    }
+     m_impl->observe([&](auto &b) { b.Sync(reason); });
+ }
+ PresentationFrame GSThreadedBackend::Present(const GSPresentationRequest &request)

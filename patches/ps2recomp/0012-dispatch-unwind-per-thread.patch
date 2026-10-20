@@ -1,0 +1,117 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 86db8ad..6447cf2 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -131,6 +131,9 @@ struct GuestThread
+     // call and must be resumed, not re-entered from the saved pc.
+     std::unique_ptr<EeFiber> fiber;
+     bool inGuestCall = false;
++    // EeScheduler::guestUnwindSerial() when this thread last started a guest
++    // unwind (Rogue Galaxy: added; see noteGuestUnwind).
++    uint64_t lastUnwindSerial = 0;
+ 
+     [[nodiscard]] R5900Context &activeContext()
+     {
+@@ -292,6 +295,16 @@ public:
+     void requestStop();
+     void postEvent(EeEvent event);
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
++
++    // A checkpoint that told guest code to return to the scheduler (from the
++    // generated back edges and the dispatcher's own safe point) counts here,
++    // on the thread it unwinds. dispatchGuestBranch reads the serial before a
++    // call and asks afterwards whether that thread started an unwind since:
++    // a callee left at its entry by one is not a host stub's return (Rogue
++    // Galaxy: added).
++    void noteGuestUnwind() noexcept;
++    [[nodiscard]] uint64_t guestUnwindSerial() const noexcept { return m_unwindSerial; }
++    [[nodiscard]] bool guestUnwoundSince(uint64_t serial) const;
+     void accountCycles(uint32_t cycles) noexcept;
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+@@ -505,6 +518,7 @@ private:
+     bool m_insideInterrupt = false;
+     uint32_t m_pendingEeTimerInterrupts = 0;
+     uint64_t m_eeCycle = 0;
++    uint64_t m_unwindSerial = 0; // guest unwinds started, see noteGuestUnwind
+     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
+     std::thread::id m_executorThread{};
+     std::atomic<bool> m_running{false};
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index b0064fa..877d85e 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -702,6 +702,21 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     return false;
+ }
+ 
++void EeScheduler::noteGuestUnwind() noexcept
++{
++    ++m_unwindSerial;
++    if (GuestThread *running = currentThread())
++    {
++        running->lastUnwindSerial = m_unwindSerial;
++    }
++}
++
++bool EeScheduler::guestUnwoundSince(uint64_t serial) const
++{
++    const GuestThread *running = currentThread();
++    return running != nullptr && running->lastUnwindSerial > serial;
++}
++
+ void EeScheduler::accountCycles(uint32_t cycles) noexcept
+ {
+     // DQ8_EE_CYCLE_SCALE multiplies the charge per guest safe point. The model
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 3bb50ea..b790940 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1449,6 +1449,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     // this charge bounds straight-line call chains that have no local loop.
+     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+     {
++        m_eeScheduler->noteGuestUnwind();
+         return false;
+     }
+ 
+@@ -1495,6 +1496,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     RecompiledFunction targetFn = *slot;
+     const uint32_t entryPc = ctx->pc;
+     const uint32_t entrySp = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0));
++    const uint64_t unwindSerial = m_eeScheduler ? m_eeScheduler->guestUnwindSerial() : 0u;
+     targetFn(rdram, ctx, this);
+ 
+     if (isStopRequested() || ctx->pc == 0u)
+@@ -1516,7 +1518,15 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     // leaves sp moved. A flag set by the checkpoint was tried first and went
+     // stale: the scheduler resumed another thread suspended inside a stub,
+     // its return was taken for an unwind, and the stub ran a second time.
+-    if (ctx->pc == entryPc && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp)
++    // The sp alone missed one case: a frameless leaf whose loop head is its
++    // own entry (StrCmpU8, 0x1834B0, comparing names in DirTableFindFile)
++    // unwinds from its back edge with pc at the entry and sp unmoved, and the
++    // lookup went on with a character for the comparison's result. So also
++    // no thread of this call's may have started an unwind during it; the
++    // count is per guest thread, so other threads' unwinds while a stub
++    // waited do not count (Rogue Galaxy: fixed, 2026-10-20).
++    if (ctx->pc == entryPc && static_cast<uint32_t>(_mm_extract_epi32(ctx->r[29], 0)) == entrySp &&
++        !(m_eeScheduler && m_eeScheduler->guestUnwoundSince(unwindSerial)))
+     {
+         ctx->pc = fallthroughPc;
+     }
+@@ -2359,7 +2369,13 @@ void PS2Runtime::postEeEvent(EeEvent event)
+ 
+ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+ {
+-    return m_eeScheduler->checkpointDue(cycles);
++    // The generated code returns to the scheduler on true.
++    if (m_eeScheduler->checkpointDue(cycles))
++    {
++        m_eeScheduler->noteGuestUnwind();
++        return true;
++    }
++    return false;
+ }
+ 
+ [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)

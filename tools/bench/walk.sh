@@ -101,9 +101,14 @@ export RG_GS_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GF
 export RG_GS_FRAMELOG="build/run/$NAME.txt@${FRAME:-2660}"
 if [ "$FPS" = "60" ]; then export RG_FPS=60; else unset RG_FPS; fi
 unset RG_GS_FRAMESKIP RG_TIME_TRACE RG_PROFILE RG_POS_TRACE
+# TIME_TRACE=1: the 60 fps mode's timing lines ([timing] frame time and
+# scale every 300 updates).
+if [ "$TIME_TRACE" = "1" ]; then export RG_TIME_TRACE=1; fi
 AFTER=8
 if [ "$PROFILE" = "1" ]; then
-    export RG_PROFILE="build/run/$NAME.prof" RG_PROFILE_STACKS=1
+    # PROFILE_STACKS=0 samples leaf pcs only, some 50 times as often (for
+    # instruction-level reads of one hot function).
+    export RG_PROFILE="build/run/$NAME.prof" RG_PROFILE_STACKS=${PROFILE_STACKS:-1}
     export RG_PROFILE_START=${PROFILE_START:-30} RG_PROFILE_SECONDS=${PROFILE_SECONDS:-25}
     AFTER=22
     if [ "$LONG" = "1" ]; then export RG_PROFILE_START=${PROFILE_START:-62} RG_PROFILE_SECONDS=${PROFILE_SECONDS:-30}; fi

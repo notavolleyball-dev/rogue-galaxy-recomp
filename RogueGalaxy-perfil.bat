@@ -13,4 +13,8 @@ set RG_PROFILE_STACKS=1
 rem One [gfx] line a second in build\last-run.log, so a drop can be put to a
 rem moment of the session (the line counts from the start of the game).
 set DQ8_GFX_STATS_EVERY=60
+rem VU1 microprograms the build lacks (they run on the interpreter, several
+rem times slower) are recorded into build\vu1-profile, which the next build
+rem compiles in.
+set PS2_VU_PROGRAM_PROFILE=build\vu1-profile
 call "%~dp0RogueGalaxy.bat" %*

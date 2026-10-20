@@ -75,6 +75,20 @@ constexpr unsigned kStepRegister = 23u;
 // scene's scale at 1.0 for the call so that what does take the step inside
 // them (the event camera, script commands) takes a whole one.
 constexpr uint32_t kSystemVmUpdate = 0x002509F0u;
+// Callers that run a script to its end inside one frame, `do {} while
+// (SystemVmUpdate() != 1)` with no vsync wait in the loop: AbilityModeRun
+// (0x2790E0, a skill or power in battle) after SystemVmCall 0xBB8, 0x7D0
+// and 0xFA0, and AttackChainModeUpdate (0x27F840). Their return addresses.
+// The frame never ends inside such a loop, so a frame that skips the
+// script skipped every call of it: using a power hung the game at 0 fps
+// whenever it began on a skipped frame (2026-10-20). They run every call
+// as a whole step instead.
+constexpr uint32_t kSystemVmLoopReturns[] = {
+    0x0027982Cu, // AbilityModeRun, script 0xBB8
+    0x00279874u, // AbilityModeRun, script 0x7D0
+    0x00279980u, // AbilityModeRun, script 0xFA0
+    0x0027FDF0u, // AttackChainModeUpdate
+};
 constexpr uint32_t kMesMgrUpdateAll = 0x00277AC0u;
 // The field's menus and HUD windows. Each is a task: TaskTableRun
 // (0x1F5340) calls the step of every enabled entry once a frame and ignores
@@ -346,6 +360,16 @@ void restoreScale(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t bits
     rg::timing::setSceneScale(rdram, ctx, scale);
 }
 
+// One call as a whole logic frame: the scene's scale at 1.0 for it.
+void wholeStep(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const float scale = rg::timing::sceneScale(rdram, ctx);
+    rg::timing::setSceneScale(rdram, ctx, 1.0f);
+    uint32_t bits = 0u;
+    std::memcpy(&bits, &scale, sizeof(bits));
+    rg::hooks::callThen(original, rdram, ctx, runtime, &restoreScale, bits);
+}
+
 // A frame-counted system's update: skipped, run as the game would, or run
 // as one whole logic frame.
 void logicStep(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -364,15 +388,36 @@ void logicStep(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Con
     case rg::timing::LogicFrame::WholeStep:
         break;
     }
-    const float scale = rg::timing::sceneScale(rdram, ctx);
-    rg::timing::setSceneScale(rdram, ctx, 1.0f);
-    uint32_t bits = 0u;
-    std::memcpy(&bits, &scale, sizeof(bits));
-    rg::hooks::callThen(original, rdram, ctx, runtime, &restoreScale, bits);
+    wholeStep(original, rdram, ctx, runtime);
 }
 
 void systemVmUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t ra = getRegU32(ctx, 31);
+    static bool reported[std::size(kSystemVmLoopReturns)] = {};
+    for (size_t site = 0; site < std::size(kSystemVmLoopReturns); ++site)
+    {
+        if (ra == kSystemVmLoopReturns[site])
+        {
+            if (!reported[site])
+            {
+                // Once a site: the log then says the case was met.
+                reported[site] = true;
+                std::printf("[steps] a script run to its end in one frame (SystemVmUpdate from 0x%08X)\n", ra);
+                std::fflush(stdout);
+            }
+            // Outside the movies, as logicStep leaves those to the game.
+            if (rg::timing::logicFrame(rdram, ctx) == rg::timing::LogicFrame::AsIs)
+            {
+                g_systemVmUpdate(rdram, ctx, runtime);
+            }
+            else
+            {
+                wholeStep(g_systemVmUpdate, rdram, ctx, runtime);
+            }
+            return;
+        }
+    }
     logicStep(g_systemVmUpdate, rdram, ctx, runtime);
 }
 

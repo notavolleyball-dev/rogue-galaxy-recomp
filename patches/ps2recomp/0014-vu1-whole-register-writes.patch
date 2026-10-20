@@ -1,0 +1,65 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+index dea83a8..4ffcf94 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+@@ -624,6 +624,38 @@ private:
+             target[3] = value[3];
+     }
+ 
++    // A VF register or ACC written as one 16-byte store. As lane stores, a
++    // masked write (xyz: 8 bytes and 4) cannot forward to the next pair's
++    // 16-byte read of the register, which waits until both have retired; in
++    // Rogue Galaxy's busiest routine that wait was its hottest instruction
++    // (Rogue Galaxy: added, 2026-10-20). Lanes outside Mask keep their value.
++    template <uint8_t Mask>
++    static PS2_VU_FORCE_INLINE void writeVector(float *target, const float *value)
++    {
++#if PS2_VU_PROGRAM_SSE
++        if constexpr (Mask == 0xFu)
++        {
++            _mm_storeu_ps(target, _mm_loadu_ps(value));
++        }
++        else
++        {
++#if defined(__SSE4_1__) || defined(__aarch64__)
++            // Mask bit 8 is x, lane 0; the blend's bit 0 is lane 0.
++            constexpr int blend = ((Mask >> 3u) & 1u) | (((Mask >> 2u) & 1u) << 1u) | (((Mask >> 1u) & 1u) << 2u) |
++                                  ((Mask & 1u) << 3u);
++            _mm_storeu_ps(target, _mm_blend_ps(_mm_loadu_ps(target), _mm_loadu_ps(value), blend));
++#else
++            const __m128 keep = _mm_castsi128_ps(_mm_setr_epi32((Mask & 8u) ? 0 : -1, (Mask & 4u) ? 0 : -1,
++                                                                 (Mask & 2u) ? 0 : -1, (Mask & 1u) ? 0 : -1));
++            _mm_storeu_ps(target, _mm_or_ps(_mm_and_ps(keep, _mm_loadu_ps(target)),
++                                            _mm_andnot_ps(keep, _mm_loadu_ps(value))));
++#endif
++        }
++#else
++        applyLanes<Mask>(target, value);
++#endif
++    }
++
+     template <uint8_t Mask>
+     static PS2_VU_FORCE_INLINE void setReady(uint32_t *lanes, uint32_t ready)
+     {
+@@ -811,18 +843,18 @@ PS2_VU_FORCE_INLINE bool Frame::issue(uint32_t nextPc)
+     {
+         constexpr uint32_t latency = decoded.lowerUsage.vfLatency != 0u ? decoded.lowerUsage.vfLatency
+                                                                         : decoded.lowerUsage.latency;
+-        applyLanes<lowerLanes>(m_state.vf[lowerReg], lowerValue);
++        writeVector<lowerLanes>(m_state.vf[lowerReg], lowerValue);
+         setReady<lowerLanes>(m_run.m_vfReady[lowerReg].data(), m_cycle + latency);
+     }
+     if constexpr (upperReg != 0u)
+     {
+         constexpr uint32_t latency = decoded.upperUsage.vfLatency != 0u ? decoded.upperUsage.vfLatency
+                                                                         : decoded.upperUsage.latency;
+-        applyLanes<upperLanes>(m_state.vf[upperReg], upperValue);
++        writeVector<upperLanes>(m_state.vf[upperReg], upperValue);
+         setReady<upperLanes>(m_run.m_vfReady[upperReg].data(), m_cycle + latency);
+     }
+     if constexpr (accLanes != 0u)
+-        applyLanes<accLanes>(m_state.acc, upperValue);
++        writeVector<accLanes>(m_state.acc, upperValue);
+     if constexpr (viReg != 0u)
+     {
+         constexpr uint32_t latency = decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency

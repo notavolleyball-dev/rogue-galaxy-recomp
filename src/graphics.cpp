@@ -1,6 +1,7 @@
 #include "graphics.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +45,29 @@ std::string env(const char *name, const char *fallback)
 #if defined(RG_HAS_SDLGPU)
 bool g_hasMenu = false;
 
+// F9 and F10 presses, counted as SDL queues their key-down events. pump()
+// read the keyboard state once a presented frame, and a quick tap between two
+// of them went unseen, most of all in a drop, when frames are long: the
+// player's marks of 2026-10-20 never reached the log.
+std::atomic<unsigned> g_f9Presses{0u};
+std::atomic<unsigned> g_f10Presses{0u};
+
+bool SDLCALL countMarkKeys(void *, SDL_Event *event)
+{
+    if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat)
+    {
+        if (event->key.scancode == SDL_SCANCODE_F9)
+        {
+            g_f9Presses.fetch_add(1u, std::memory_order_relaxed);
+        }
+        else if (event->key.scancode == SDL_SCANCODE_F10)
+        {
+            g_f10Presses.fetch_add(1u, std::memory_order_relaxed);
+        }
+    }
+    return true;
+}
+
 // Called once per frame by the runtime when the backend owns the window:
 // services SDL events (the menu takes its own first) and hands the host pad
 // to the runtime.
@@ -51,6 +75,8 @@ bool pump(void *userData)
 {
     auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
     debug::notePresenterLoop();
+    static const bool watching = SDL_AddEventWatch(&countMarkKeys, nullptr);
+    (void)watching;
     if (!backend->pumpEvents())
     {
         return false;
@@ -66,10 +92,8 @@ bool pump(void *userData)
     f11WasDown = f11Down;
     // F9 writes "[mark] N s" to the log: pressed when a drop is felt, it
     // puts the moment next to the [gfx] lines of that second.
-    static bool f9WasDown = false;
     static const auto markStart = std::chrono::steady_clock::now();
-    const bool f9Down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F9];
-    if (f9Down && !f9WasDown)
+    for (unsigned n = g_f9Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
     {
         std::printf("[mark] %.1f s\n",
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
@@ -77,18 +101,14 @@ bool pump(void *userData)
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
     }
-    f9WasDown = f9Down;
     // F10 writes the stall watchdog's report now (the guest threads, their
     // waits, the host stacks), for a freeze that keeps flipping.
-    static bool f10WasDown = false;
-    const bool f10Down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F10];
-    if (f10Down && !f10WasDown)
+    if (g_f10Presses.exchange(0u, std::memory_order_relaxed) != 0u)
     {
         std::printf("[mark] F10: stall report requested\n");
         std::fflush(stdout);
         debug::requestStallReport();
     }
-    f10WasDown = f10Down;
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
     backend->hostPadState(held, pressed, sticks);
     ps2PadPublishHostState(held, pressed, rg::pad::shapeSticks(sticks));

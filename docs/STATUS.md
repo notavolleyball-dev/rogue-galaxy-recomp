@@ -1046,6 +1046,52 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**The VU1 programs, first cuts (2026-10-20 afternoon).** The sampler
+listed the process's threads with a system-wide snapshot every round,
+which held it to 13 rounds a second; it now lists them every quarter
+second and `RG_PROFILE_THREAD=VIF1` samples one thread (8068 samples in
+20 s instead of 263; `PROFILE_STACKS=0` in walk.sh for leaf pcs only). The
+busiest routine, `r_a786efabfa469ada_52` (16% of the VIF1 thread at the
+gate), is 134 KB of x86 with its time spread thin; its hottest instruction
+followed a 16-byte read of a VF register just written as two lane stores,
+a store-forwarding stall. Patch 0014 writes registers as one blended
+store: 16.2 to 15.9 ms of VIF1 a frame, frames identical. Compiling the
+runtime for AVX2 (VEX three-operand forms, no FMA) gave 1% and was taken
+out again. A ceiling test that dropped the stall model's bookkeeping
+altogether (register readiness, VI readiness; values only, not shipped)
+gave 15.0 ms: that model costs about 6%. The rest is the arithmetic with
+the PS2's float rules and the VF state kept in memory between pairs; a
+real cut there means keeping registers in host registers across pairs,
+as PCSX2's microVU does. FINISH no longer drains the GS worker queue
+(patch 0013), with no change at the gate. Gate bench: 54-55 fps median
+before these, 55.6-56.1 after.
+
+**Two freezes after round four (2026-10-20 morning), and a review.**
+Playing the GIF-stage build, the user met a battle whose logic stopped
+after a skill while frames kept coming (every interval the same 1195 draws
+and 1120 guest dispatches a frame) and, with the stage off, a power that
+froze the game at 0 fps. The second was the 60 fps mode's own: the stall
+report put the main thread in AbilityModeRun (0x2790E0), which after
+SystemVmCall 0xBB8 runs `do {} while (SystemVmUpdate() != 1)` inside one
+frame, and `logicStep` answers 0 on a frame it skips; the frame never ends
+inside the loop, so a power that began on a skipped frame (half of them)
+never did. Four call sites loop like that (three in AbilityModeRun, one in
+AttackChainModeUpdate); `src/step_fixes.cpp` runs every call from them as
+a whole step. A scripted battle on the bench card (triangle, Abilities,
+Flash Sword) shows the cutscene, the battle back and 6 AP spent, with the
+stage on and off. Three review agents read the stage and patch 0010 with
+the symptoms. The stage: nothing the game reads from the GS changes but
+time (SIGNAL and FINISH only set CSR bits, no GS interrupt exists, every
+readback drains); the end-of-list interrupt now comes before the GS work,
+so the frame time measured by the game follows the EE's frame alone, and a
+timing trace at the gate (`TIME_TRACE=1` in walk.sh) shows the play clock at
+real time with it (mean 1.08-1.10 vblanks at 54 fps, logic at 30 a second).
+The callbacks from threads other than VIF1 now wait for the lists in
+flight too, not only for the stage. Patch 0010: one wrong forgiveness,
+StrCmpU8 (see patch 0012), which can make a file lookup come back wrong;
+that may be what stopped the skill's logic, a wait on a file the lookup
+missed, but no dump was taken then. Frames byte-identical at 1x and 3x.
+
 **Throughput, round two (2026-10-19 morning): the emulation threads.**
 Profiles of the street view at the player's scale (3, from the menu's
 settings.ini) with the new `INPUT=`/`PROFILE_START=` overrides of

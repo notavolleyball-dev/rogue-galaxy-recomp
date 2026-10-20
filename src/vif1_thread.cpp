@@ -800,7 +800,9 @@ void install(PS2Runtime &runtime)
         }
         if (g_stage)
         {
-            g_stage->drain();
+            // The lists in flight too, not only what they handed the stage:
+            // every DMA start drains them already, this keeps it so.
+            g_thread->drain();
         }
         gs.processGIFPacket(data, size);
     });
@@ -814,7 +816,7 @@ void install(PS2Runtime &runtime)
         }
         if (g_stage)
         {
-            g_stage->drain();
+            g_thread->drain();
         }
         gs.processImageContinuation(data, size);
     });

@@ -187,28 +187,66 @@ void sampleWindow(const std::string &path, double seconds)
     const std::vector<UnwindImage> images = loadUnwindImages();
     const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
     uint64_t rounds = 0;
+    // The process's threads, listed again every quarter second: a snapshot
+    // walks every thread of the system, and taking one each round held the
+    // sampler to about 13 rounds a second. RG_PROFILE_THREAD=NAME samples
+    // only the threads whose name starts with NAME (e.g. VIF1), for many
+    // more samples of one hot function.
+    struct Sampled
+    {
+        HANDLE handle;
+        std::pair<DWORD, std::string> label;
+    };
+    std::vector<Sampled> threads;
+    const char *onlyEnv = std::getenv("RG_PROFILE_THREAD");
+    const std::string only = onlyEnv ? onlyEnv : "";
+    auto listed = std::chrono::steady_clock::time_point{};
+    auto closeAll = [&] {
+        for (const Sampled &th : threads)
+        {
+            CloseHandle(th.handle);
+        }
+        threads.clear();
+    };
     while (std::chrono::steady_clock::now() < end)
     {
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        THREADENTRY32 te{};
-        te.dwSize = sizeof(te);
-        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+        if (std::chrono::steady_clock::now() - listed >= std::chrono::milliseconds(250))
         {
-            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
+            closeAll();
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            THREADENTRY32 te{};
+            te.dwSize = sizeof(te);
+            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
             {
-                continue;
+                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
+                {
+                    continue;
+                }
+                HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION,
+                                      FALSE, te.th32ThreadID);
+                if (!t)
+                {
+                    continue;
+                }
+                auto named = names.find(te.th32ThreadID);
+                if (named == names.end())
+                {
+                    named = names.emplace(te.th32ThreadID, threadName(t) + "#" + std::to_string(te.th32ThreadID)).first;
+                }
+                if (!only.empty() && named->second.compare(0, only.size(), only) != 0)
+                {
+                    CloseHandle(t);
+                    continue;
+                }
+                threads.push_back({t, *named});
             }
-            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION,
-                                  FALSE, te.th32ThreadID);
-            if (!t)
-            {
-                continue;
-            }
-            auto it = names.find(te.th32ThreadID);
-            if (it == names.end())
-            {
-                it = names.emplace(te.th32ThreadID, threadName(t) + "#" + std::to_string(te.th32ThreadID)).first;
-            }
+            CloseHandle(snap);
+            listed = std::chrono::steady_clock::now();
+        }
+        for (const Sampled &th : threads)
+        {
+            HANDLE t = th.handle;
+            const auto *it = &th.label;
             if (SuspendThread(t) != static_cast<DWORD>(-1))
             {
                 // Nothing that may lock or allocate until the thread runs
@@ -243,12 +281,11 @@ void sampleWindow(const std::string &path, double seconds)
                     }
                 }
             }
-            CloseHandle(t);
         }
-        CloseHandle(snap);
         ++rounds;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    closeAll();
     if (FILE *f = std::fopen(path.c_str(), "w"))
     {
         std::fprintf(f, "base 0x%llx rounds %llu\n",
