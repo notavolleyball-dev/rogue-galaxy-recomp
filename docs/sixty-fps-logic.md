@@ -281,7 +281,7 @@ button press runs them at once), and the field modes that lock the scale
 | FMV subtitles | cue timing is per movie frame | covered (nothing to do) | none; his fix is PAL-specific |
 | menu timers (3.0 in menus) | menus are overlay mode (interval 1, scale locked 1.0): `PlayTimeStep` ticks 1 x 1 = correct, `PauseStepUpdate` loops once, insect cage halves itself | covered | none |
 | field minimap | `MinimapUpdate` halves GetTimeStep at interval 1 -> 0.25 | **likely broken** (minimap scroll/fade at half speed); `TextEntrySetupState` similar | hook `DrawEnvGetVsyncInterval` is wrong (the game's own menus rely on 1); either hook `MinimapUpdate` to compensate or use strategy B |
-| giant bosses leave small arenas / enemy jumps too far (code cave) | not handled | **broken** (same root cause as player gravity) | the gravity fix above; no per-boss hack |
+| giant bosses leave small arenas / enemy jumps too far (code cave) | not handled | **broken**, and not the gravity (2026-10-20, the gate fight's boss): the AI counts frames. `AiUpdate_2c05b0` runs once a frame per character, counts its timers in frames, and its script moves the character a step a call (`AiCmdCharaSetPosById_2c9ee0`: position + 29.8 units; `AiCmdMoveByLocalOffset_2c90f0`: a requested move CharaMoveCollideMaybe applies whole), while what ends the charge took as long: 54 steps at 60 fps against 27, out of the arena, held in the air | `ai` in `src/step_fixes.cpp`: AiUpdate on the logic frames as a whole step, the move it made shared half and half with the next frame |
 | backwards jump higher/longer | not handled | same | same |
 
 Two consistent ways to treat the interval field:

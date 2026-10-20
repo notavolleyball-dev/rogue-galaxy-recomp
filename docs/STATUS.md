@@ -1049,6 +1049,32 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**The characters' AI at the console's rate: a boss that left its arena
+(2026-10-20 evening).** In the gate fight the boss, after a while, charged
+across the arena and out of it, and hung in the air outside, half its
+textures gone and black shapes where it stood in the scenery, with the
+profiler off as well; at 30 fps it landed on the far side, so the game's
+logic and not the drawing. RG_JUMP_TRACE=3 now logs every enemy's
+moves with what drives them (velocity, the per-frame moves, the move
+request) and how far something else moved it between two, and every move
+request with its caller: the charge was 54 frames of (29.8, 0.9, -0.8)
+written outside the movement, and a debug-register watch on the boss's x
+(RG_HWWATCH, the boss at the same address in every fight) named the
+writer: AiCmdCharaSetPosById, from the AI script, through AiUpdate
+(0x2C05B0), which runs once a frame per character, counts its timers in
+frames and moves the character a step a call (AiCmdMoveByLocalOffset by a
+requested move that CharaMoveCollideMaybe applies whole and clears),
+while what ended the charge took as long as at 30. The documentation had
+this down as the gravity bug, which Red-tv's per-boss code cave patched
+by halving a delta; it is not. The new `ai` step fix runs AiUpdate on the
+logic frames as a whole step, like the scripts, and shares the move it
+made, by position or by requested move, half and half with the next
+frame (moves of more than 100 units are placements, made at once), so
+the characters move at the console's speed without stepping at 30 Hz.
+The boss now lands where it should (the user's fight); a battle on the
+bench card runs with its four enemies moving every frame. The enemies'
+and allies' AI had been thinking twice as fast at 60 fps.
+
 **A profile of a hitch nobody could mark in time, and a review (2026-10-20
 afternoon).** A hitch is often over before F9 is pressed. With
 `RG_PROFILE_BEFORE=S` the sampler runs all the time, keeping quarter-second

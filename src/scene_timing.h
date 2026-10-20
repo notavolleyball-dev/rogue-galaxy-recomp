@@ -61,6 +61,7 @@ enum class StepFix : unsigned
     Gravity = 1u << 4, // "gravity": character gravity, terminal velocity and the air move's step
     Event = 1u << 5,   // "event": scripts, the event player and message windows at the console's rate
     Menu = 1u << 6,    // "menu": the field's menus and HUD windows (the battle results among them)
+    Ai = 1u << 7,      // "ai": the characters' AI (its scripts and timers) at the console's rate
 };
 bool stepFix(StepFix which);
 // Any of them.

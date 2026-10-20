@@ -118,6 +118,28 @@ constexpr uint32_t kMenuTaskSteps[] = {
     0x001FFB90u, // TaskStepMenuWarp: the warp menu's fade
     0x001FFB30u, // TaskStepCaption: the area name
 };
+// The characters' AI. AiUpdate (0x2C05B0) runs once a frame for each
+// character CharaAiHandlePrmtRequestsMaybe thinks for (a0 the AI block at
+// chara+0x590, a1 a stack slot holding the character; its result unused):
+// it counts its timers in frames (+0x146, +0x174 of the block), adds moves
+// of its own (CharaAddReqMove) and resumes the AI script, whose commands
+// move the character by a step a call: AiCmdCharaSetPosById (0x2C9EE0) to
+// the position plus a step, AiCmdMoveByLocalOffset (0x2C90F0) as a
+// requested move (+0xD0), which CharaMoveCollideMaybe applies whole and
+// clears (0x234EAC, 0x236448). At 60 fps it ran twice as often while what
+// ends such a move (a motion, a timer that takes the step) took as long:
+// the gate fight's boss charged 54 steps of 29.8 units instead of 27, left
+// its arena and hung in the air (2026-10-20). It runs on the logic frames
+// as a whole step, like the scripts; on 60 fps frames the move it made, by
+// position or by requested move, is shared half and half with the next
+// frame, so the character moves at the console's speed without stepping at
+// 30 Hz.
+constexpr uint32_t kAiUpdate = 0x002C05B0u;
+constexpr uint32_t kAiBlock = 0x590u;
+constexpr uint32_t kCharaPosition = 0x70u;
+constexpr uint32_t kCharaRequestedMove = 0xD0u;
+// A larger change is a placement, made at once.
+constexpr float kMaxSharedMove = 100.0f;
 // Not in the list: TaskStepLiveTalk (0x321210), which besides the party's
 // remarks sequences the skill actions (SkillActionFindPending,
 // SkillTimerStartMaybe, SkillActionEnd, an immediate script) in step with
@@ -132,6 +154,7 @@ PS2Runtime::RecompiledFunction g_getThrowGravity = nullptr;
 PS2Runtime::RecompiledFunction g_systemVmUpdate = nullptr;
 PS2Runtime::RecompiledFunction g_mesMgrUpdateAll = nullptr;
 PS2Runtime::RecompiledFunction g_charaMoveCollide = nullptr;
+PS2Runtime::RecompiledFunction g_aiUpdate = nullptr;
 bool g_trace = false;
 
 struct Counts
@@ -144,6 +167,7 @@ struct Counts
     uint32_t launches = 0u;
     uint32_t clamps = 0u;
     uint32_t air = 0u;
+    uint32_t aiShared = 0u;
 };
 Counts g_counts;
 
@@ -426,6 +450,193 @@ void mesMgrUpdateAll(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     logicStep(g_mesMgrUpdateAll, rdram, ctx, runtime);
 }
 
+// --- The characters' AI ---------------------------------------------------
+
+// A character's AI move held over to the next frame, and what its last AI
+// run started from.
+struct AiShare
+{
+    uint32_t chara = 0u;
+    bool pending = false;
+    bool share = false;
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float requested[3] = {0.0f, 0.0f, 0.0f};
+    float positionBefore[3] = {0.0f, 0.0f, 0.0f};
+    float requestedBefore[3] = {0.0f, 0.0f, 0.0f};
+};
+AiShare g_aiShares[64];
+// The scene's scale to restore after an AI run at 1.0 (one at a time, on
+// the game's thread).
+uint32_t g_aiScaleBits = 0u;
+
+// Characters come and go with the battles; a full table frees the slots of
+// the ones that have nothing held over.
+AiShare *aiShareOf(uint32_t chara)
+{
+    for (AiShare &share : g_aiShares)
+    {
+        if (share.chara == chara)
+        {
+            return &share;
+        }
+    }
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        for (AiShare &share : g_aiShares)
+        {
+            if (share.chara == 0u || (pass == 1 && !share.pending))
+            {
+                share = AiShare{};
+                share.chara = chara;
+                return &share;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool readVec3(const uint8_t *rdram, uint32_t address, float out[3])
+{
+    return readGuest(rdram, address, out[0]) && readGuest(rdram, address + 4u, out[1]) &&
+           readGuest(rdram, address + 8u, out[2]);
+}
+
+void writeVec3(uint8_t *rdram, uint32_t address, const float value[3])
+{
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        writeGuest(rdram, address + 4u * i, value[i]);
+    }
+}
+
+// Adds the held-over half of the last AI move, before the AI runs again.
+void applyAiShare(uint8_t *rdram, AiShare &share)
+{
+    if (!share.pending)
+    {
+        return;
+    }
+    share.pending = false;
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float requested[3] = {0.0f, 0.0f, 0.0f};
+    if (!readVec3(rdram, share.chara + kCharaPosition, position) ||
+        !readVec3(rdram, share.chara + kCharaRequestedMove, requested))
+    {
+        return;
+    }
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        position[i] += share.position[i];
+        requested[i] += share.requested[i];
+    }
+    writeVec3(rdram, share.chara + kCharaPosition, position);
+    writeVec3(rdram, share.chara + kCharaRequestedMove, requested);
+}
+
+// Half of `after - before` into `held`, and before + the other half back;
+// false when nothing moved or it moved too far to be a step.
+bool halve(float before[3], const float after[3], float held[3])
+{
+    float length = 0.0f;
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        held[i] = 0.5f * (after[i] - before[i]);
+        length += held[i] * held[i];
+    }
+    if (length == 0.0f || length > 0.25f * kMaxSharedMove * kMaxSharedMove)
+    {
+        held[0] = held[1] = held[2] = 0.0f;
+        return false;
+    }
+    for (unsigned i = 0u; i < 3u; ++i)
+    {
+        before[i] += held[i];
+    }
+    return true;
+}
+
+AiShare *findAiShare(uint32_t chara)
+{
+    for (AiShare &share : g_aiShares)
+    {
+        if (share.chara == chara)
+        {
+            return &share;
+        }
+    }
+    return nullptr;
+}
+
+void afterAiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t chara)
+{
+    restoreScale(rdram, ctx, runtime, g_aiScaleBits);
+    AiShare *share = findAiShare(chara);
+    if (!share)
+    {
+        return;
+    }
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float requested[3] = {0.0f, 0.0f, 0.0f};
+    if (!share->share || !readVec3(rdram, chara + kCharaPosition, position) ||
+        !readVec3(rdram, chara + kCharaRequestedMove, requested))
+    {
+        return;
+    }
+    // What the AI moved the character by stays half done this frame.
+    const bool moved = halve(share->positionBefore, position, share->position);
+    const bool requestedMove = halve(share->requestedBefore, requested, share->requested);
+    if (moved)
+    {
+        writeVec3(rdram, chara + kCharaPosition, share->positionBefore);
+    }
+    if (requestedMove)
+    {
+        writeVec3(rdram, chara + kCharaRequestedMove, share->requestedBefore);
+    }
+    share->pending = moved || requestedMove;
+    if (share->pending)
+    {
+        ++g_counts.aiShared;
+    }
+}
+
+void aiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t chara = getRegU32(ctx, 4) - kAiBlock;
+    uint32_t slot = 0u;
+    AiShare *share =
+        readGuest(rdram, getRegU32(ctx, 5), slot) && slot == chara ? aiShareOf(chara) : nullptr;
+    if (share)
+    {
+        applyAiShare(rdram, *share);
+    }
+    switch (rg::timing::logicFrame(rdram, ctx))
+    {
+    case rg::timing::LogicFrame::AsIs:
+        g_aiUpdate(rdram, ctx, runtime);
+        return;
+    case rg::timing::LogicFrame::Skip:
+        // Its result goes unused; the host stands in for `jr ra`.
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    case rg::timing::LogicFrame::WholeStep:
+        break;
+    }
+    if (!share)
+    {
+        wholeStep(g_aiUpdate, rdram, ctx, runtime);
+        return;
+    }
+    const float scale = rg::timing::sceneScale(rdram, ctx);
+    std::memcpy(&g_aiScaleBits, &scale, sizeof(scale));
+    // At a whole step a frame there is no next frame to share with.
+    share->share = scale < 1.0f && readVec3(rdram, chara + kCharaPosition, share->positionBefore) &&
+                   readVec3(rdram, chara + kCharaRequestedMove, share->requestedBefore);
+    rg::timing::setSceneScale(rdram, ctx, 1.0f);
+    rg::hooks::callThen(g_aiUpdate, rdram, ctx, runtime, &afterAiUpdate, chara);
+}
+
 PS2Runtime::RecompiledFunction g_menuOriginals[std::size(kMenuTaskSteps)] = {};
 
 template <size_t Index>
@@ -453,9 +664,9 @@ void trace()
         return;
     }
     std::printf("[steps] NPC updates %u, turns %u, judge steps %u, gravity %u (held %u), launches %u, terminal "
-                "clamps %u, air moves %u\n",
+                "clamps %u, air moves %u, AI moves shared %u\n",
                 g_counts.npc, g_counts.turns, g_counts.judge, g_counts.gravity, g_counts.held, g_counts.launches,
-                g_counts.clamps, g_counts.air);
+                g_counts.clamps, g_counts.air, g_counts.aiShared);
     g_counts = Counts{};
 }
 
@@ -494,6 +705,10 @@ void install(PS2Runtime &runtime)
     if (stepFix(StepFix::Menu))
     {
         complete &= installMenuHooks(runtime, std::make_index_sequence<std::size(kMenuTaskSteps)>{});
+    }
+    if (stepFix(StepFix::Ai))
+    {
+        complete &= hookFunction(runtime, kAiUpdate, &aiUpdate, g_aiUpdate);
     }
     if (!complete)
     {
