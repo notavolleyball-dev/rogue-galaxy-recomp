@@ -1049,6 +1049,26 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**The GS worker in the square: a kept staging texture, whole-block page
+imports, and a town bench (2026-10-20 night).** `TOWN=1 walk.sh` loads
+the user's File 03 at Salgin's transporter and walks the square, where
+the GS worker is the limit (80-105% of the wall on its heavy stretch in
+one session, 60-77% in quieter ones: alternate builds). Its profile: the
+texture updates 15% (24% before the unchanged-texture skip), the draw
+flushes 20%, the host writes 24%, the page imports between aliased views
+7%. A scaled target's refresh (GsTargetCache::uploadNative) created a
+native-size texture for each upload and released it after the blit: the
+driver's texture creation was 1.7% of the worker; one is kept and grown,
+cycled on upload. importColorPages copied one run of pages a row; the
+same run on the next row of both surfaces now joins it, so a block of
+whole rows is one copy (each copy carries SDL's layout transitions).
+Together, three alternated pairs: the worker 76.7% -> 70.3% of the wall
+at 59.2-59.3 fps (the stretch already near the cap that session).
+DQ8_GFX_SUBMIT_DRAWS=256 instead of 96 made it worse (94% against
+81-88%). Frames byte-identical at 3x. A feedback snapshot per strip of a
+192x192 blur (113 a frame) stays: each strip reads two or three pixels of
+the strip before, so sharing one would change those pixels.
+
 **Textures that come back unchanged, and a menu that pauses by itself
 (2026-10-20 evening).** In the user's busiest street the GS worker was 95%
 busy, a quarter of it re-expanding textures (GsTextureCache::update; the

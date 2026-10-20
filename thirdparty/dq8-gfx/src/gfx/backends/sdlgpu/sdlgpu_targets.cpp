@@ -289,6 +289,10 @@ void GsTargetCache::reset() {
         SDL_ReleaseGPUTexture(m_device.handle(), m_resolveStaging);
     m_resolveStaging = nullptr;
     m_resolveStagingWidth = m_resolveStagingHeight = 0u;
+    if (m_refreshStaging && m_device.valid())
+        SDL_ReleaseGPUTexture(m_device.handle(), m_refreshStaging);
+    m_refreshStaging = nullptr;
+    m_refreshStagingWidth = m_refreshStagingHeight = 0u;
 }
 
 SDL_GPUTransferBuffer *GsTargetCache::acquireDownload(uint32_t bytes, std::string &error) {
@@ -332,6 +336,30 @@ SDL_GPUTexture *GsTargetCache::acquireResolveStaging(uint32_t width, uint32_t he
         error = std::string("SDL_CreateGPUTexture(resolve staging): ") + SDL_GetError();
     }
     return m_resolveStaging;
+}
+
+SDL_GPUTexture *GsTargetCache::acquireRefreshStaging(uint32_t width, uint32_t height, std::string &error) {
+    if (m_refreshStaging && m_refreshStagingWidth >= width && m_refreshStagingHeight >= height)
+        return m_refreshStaging;
+    if (m_refreshStaging)
+        SDL_ReleaseGPUTexture(m_device.handle(), m_refreshStaging);
+    m_refreshStagingWidth = std::max(width, m_refreshStagingWidth);
+    m_refreshStagingHeight = std::max(height, m_refreshStagingHeight);
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.width = m_refreshStagingWidth;
+    info.height = m_refreshStagingHeight;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    m_refreshStaging = SDL_CreateGPUTexture(m_device.handle(), &info);
+    if (!m_refreshStaging) {
+        m_refreshStagingWidth = m_refreshStagingHeight = 0u;
+        error = std::string("SDL_CreateGPUTexture(refresh staging): ") + SDL_GetError();
+    }
+    return m_refreshStaging;
 }
 
 void GsTargetCache::destroySurface(GsSurface &surface) {
@@ -1362,7 +1390,13 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         const uint32_t scale = std::max(surface.scale, 1u);
         // Consecutive pages along one row of both surfaces go as one copy:
         // the call per page, with SDL's layout transitions around each, was
-        // most of the import's cost (Rogue Galaxy: added).
+        // most of the import's cost (Rogue Galaxy: added). The same run on
+        // the next row of both surfaces joins it, so a block of whole rows is
+        // one copy too, not one a row (Rogue Galaxy: added).
+        struct Block {
+            uint32_t srcColumn, srcRow, dstColumn, dstRow, pages, rows;
+        };
+        std::vector<Block> blocks;
         for (uint32_t page = 0u; page < kGsPageCount; ++page) {
             if (!shared.test(page)) continue;
             const uint32_t srcPage = (page + kGsPageCount - (source->base >> 5u)) % kGsPageCount;
@@ -1374,16 +1408,27 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
                    srcColumn + run < source->bufferWidth && dstColumn + run < surface.bufferWidth &&
                    srcPage + run < kGsPageCount && dstPage + run < kGsPageCount)
                 ++run;
+            const uint32_t srcRow = srcPage / source->bufferWidth;
+            const uint32_t dstRow = dstPage / surface.bufferWidth;
+            Block *last = blocks.empty() ? nullptr : &blocks.back();
+            if (last && last->srcColumn == srcColumn && last->dstColumn == dstColumn && last->pages == run &&
+                last->srcRow + last->rows == srcRow && last->dstRow + last->rows == dstRow)
+                ++last->rows;
+            else
+                blocks.push_back({srcColumn, srcRow, dstColumn, dstRow, run, 1u});
+            page += run - 1u;
+        }
+        for (const Block &block : blocks) {
             SDL_GPUTextureLocation from{};
             from.texture = source->texture;
-            from.x = srcColumn * 64u * scale;
-            from.y = (srcPage / source->bufferWidth) * 32u * scale;
+            from.x = block.srcColumn * 64u * scale;
+            from.y = block.srcRow * 32u * scale;
             SDL_GPUTextureLocation to{};
             to.texture = surface.texture;
-            to.x = dstColumn * 64u * scale;
-            to.y = (dstPage / surface.bufferWidth) * 32u * scale;
-            SDL_CopyGPUTextureToTexture(copy, &from, &to, 64u * run * scale, 32u * scale, 1u, false);
-            page += run - 1u;
+            to.x = block.dstColumn * 64u * scale;
+            to.y = block.dstRow * 32u * scale;
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, 64u * block.pages * scale, 32u * block.rows * scale, 1u,
+                                        false);
         }
     }
     SDL_EndGPUCopyPass(copy);
@@ -1703,38 +1748,22 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
         return false;
     }
 
+    // At a scale the pixels land in the kept native-size staging texture,
+    // at its corner, and a blit takes them up to the target's scale.
     SDL_GPUTexture *native = nullptr;
     if (surface.scale != 1u) {
-        SDL_GPUTextureCreateInfo nativeInfo{};
-        nativeInfo.type = SDL_GPU_TEXTURETYPE_2D;
-        nativeInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-        nativeInfo.width = width;
-        nativeInfo.height = height;
-        nativeInfo.layer_count_or_depth = 1u;
-        nativeInfo.num_levels = 1u;
-        nativeInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        nativeInfo.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-        native = SDL_CreateGPUTexture(device, &nativeInfo);
-        if (!native) {
-            error = std::string("SDL_CreateGPUTexture(refresh staging): ") + SDL_GetError();
+        native = acquireRefreshStaging(width, height, error);
+        if (!native)
             return false;
-        }
     }
-
-    auto release = [&]() {
-        if (native)
-            SDL_ReleaseGPUTexture(device, native);
-    };
 
     SDL_GPUTransferBuffer *upload = m_uploadPool.take(m_device, bytes, error);
     if (!upload) {
-        release();
         return false;
     }
     void *mapped = SDL_MapGPUTransferBuffer(device, upload, false);
     if (!mapped) {
         error = std::string("SDL_MapGPUTransferBuffer(refresh): ") + SDL_GetError();
-        release();
         return false;
     }
     std::memcpy(mapped, pixels.data(), bytes);
@@ -1742,14 +1771,12 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
 
     SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
     if (!commands) {
-        release();
         return false;
     }
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
         error = std::string("SDL_BeginGPUCopyPass(refresh): ") + SDL_GetError();
         m_device.cancelPending();
-        release();
         return false;
     }
     SDL_GPUTextureTransferInfo source{};
@@ -1763,7 +1790,10 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
     destination.w = width;
     destination.h = height;
     destination.d = 1u;
-    SDL_UploadToGPUTexture(copy, &source, &destination, false);
+    // The staging texture is cycled: what an earlier refresh still has to
+    // blit from it keeps its own storage, and nothing outside the corner is
+    // read. A target is not: its other pixels must stay.
+    SDL_UploadToGPUTexture(copy, &source, &destination, native != nullptr);
     SDL_EndGPUCopyPass(copy);
 
     if (native) {
@@ -1783,8 +1813,6 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
     }
 
     m_uploadPool.used(upload, m_device.pendingSerial());
-    // Released now; SDL destroys it once the recorded blit has read it.
-    release();
     return true;
 }
 

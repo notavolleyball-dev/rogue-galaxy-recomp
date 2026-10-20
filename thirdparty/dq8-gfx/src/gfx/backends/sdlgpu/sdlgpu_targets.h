@@ -332,6 +332,14 @@ private:
     SDL_GPUTexture *m_resolveStaging = nullptr;
     uint32_t m_resolveStagingWidth = 0u;
     uint32_t m_resolveStagingHeight = 0u;
+    // The native-size texture a scaled target's refresh uploads into before
+    // the blit up to its scale, kept and grown the same way (Rogue Galaxy:
+    // added; one created per refresh was the driver's texture creation, 1.7%
+    // of the worker in the streets).
+    SDL_GPUTexture *acquireRefreshStaging(uint32_t width, uint32_t height, std::string &error);
+    SDL_GPUTexture *m_refreshStaging = nullptr;
+    uint32_t m_refreshStagingWidth = 0u;
+    uint32_t m_refreshStagingHeight = 0u;
     GsTargetCacheStats m_stats{};
     GsResolveReason m_reason = GsResolveReason::Unknown;
 };
