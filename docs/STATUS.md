@@ -1049,6 +1049,31 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**Textures that come back unchanged, and a menu that pauses by itself
+(2026-10-20 evening).** In the user's busiest street the GS worker was 95%
+busy, a quarter of it re-expanding textures (GsTextureCache::update; the
+expansion alone 13.6%), some 60 a frame, 1.2 Mtexels. Two measurements
+on the street walk settled what to do. Host writes that leave local
+memory as it was are rare (6% of the payloads, nearly all over pages a
+live target owns, where skipping is not allowed): the game streams other
+textures through the same pages, so a skip at the write was tried and
+taken out. But 86% of the re-expands give exactly the texels the texture
+already held (98% of them whole textures): another texture passes through
+its pages and this one is uploaded again. update() used to find that out
+after expanding it, and skipped only the upload; expand() now hashes
+without expanding (`hashOnly`, the same reads and hash), and a whole
+texture whose raw texels hash to what it holds, with no palette change
+waiting, skips the expansion as well (`textures unchanged N` on the
+stats line; DQ8_GFX_NO_UNCHANGED_SKIP=1 for the old way). Frames
+byte-identical at 1x and 3x, with and without; on the light street walk
+the worker went from 33-35% to 32-34% of the wall. The first opening of
+the main menu pauses the frames for 149 ms at 60 fps and at 30 alike:
+the game thread waits on vblanks and alarms with every guest thread
+blocked while the menu's data and sounds load (the kernel snapshots,
+PS2X_KERNEL_TRACE_MS, and a game-thread profile around the hitch against
+one of normal frames), the game's own behaviour and not a cost of the
+port. RG_TRACE's return lines now give the call's host time.
+
 **The characters' AI at the console's rate: a boss that left its arena
 (2026-10-20 evening).** In the gate fight the boss, after a while, charged
 across the arena and out of it, and hung in the air outside, half its

@@ -2750,6 +2750,15 @@ struct SdlGpuBackend::Impl {
             }
             previousPipelines = pipelines;
             previousPipelineNanos = pipelineNanos;
+            // Texture updates that found the texels unchanged (Rogue Galaxy:
+            // added).
+            static uint64_t previousUnchanged = 0u;
+            if (textureStats().unchangedUpdates != previousUnchanged) {
+                std::snprintf(buf, sizeof(buf), " | textures unchanged %llu",
+                              static_cast<unsigned long long>(textureStats().unchangedUpdates - previousUnchanged));
+                line += buf;
+                previousUnchanged = textureStats().unchangedUpdates;
+            }
             std::snprintf(buf, sizeof(buf), " | longest frame %.1f ms", longestPresentGap * 1e3);
             longestPresentGap = 0.0;
             line += buf;

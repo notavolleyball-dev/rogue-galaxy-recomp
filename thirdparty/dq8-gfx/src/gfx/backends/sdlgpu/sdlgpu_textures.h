@@ -73,6 +73,10 @@ struct GsTextureCacheStats {
     // texture.
     uint64_t partialUpdates = 0u;
     uint64_t texelsUpdated = 0u;
+    // Whole-texture updates whose raw texels hashed to what the texture
+    // already held, so nothing was expanded or uploaded (Rogue Galaxy:
+    // added).
+    uint64_t unchangedUpdates = 0u;
     uint64_t evictions = 0u;
     uint64_t texelsExpanded = 0u;
     // Textures sourced from a region a render target owns. Correct, but the
@@ -210,8 +214,9 @@ private:
     uint64_t hashClutWindow(const GsTextureKey &key) const;
     // Fills m_staging with RGBA8 for one texel rectangle. Returns the hash of
     // the raw texels it read, which is the whole texture's identity only when
-    // the region is the whole texture.
-    uint64_t expand(const GsTextureKey &key, const GsRegion &region);
+    // the region is the whole texture. `hashOnly` reads and hashes them the
+    // same way and expands nothing (Rogue Galaxy: added).
+    uint64_t expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly = false);
     bool uploadRegion(SDL_GPUTexture *texture, const GsRegion &region, std::string &error);
     // Transfer buffers come from a pool guarded by the device's submission
     // serials: the movie path uploads dozens of regions a frame, and creating

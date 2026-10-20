@@ -385,7 +385,7 @@ void GsTextureCache::buildPalette(const GsTextureKey &key) {
     }
 }
 
-uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region) {
+uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly) {
     const TexaState texa = unpackTexa(key.texa);
     const uint32_t clutWidth = std::max<uint32_t>(key.texclut & 0xffu, 1u);
     const uint32_t clutOriginU = (key.texclut >> 8u) & 0xffu;
@@ -395,14 +395,15 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
     const uint32_t regionHeight = region.height();
     const uint32_t psm = key.psm & 0x3fu;
 
-    m_staging.resize(static_cast<size_t>(regionWidth) * regionHeight * 4u);
+    if (!hashOnly)
+        m_staging.resize(static_cast<size_t>(regionWidth) * regionHeight * 4u);
     uint64_t texelHash =
         hashStep(hashStep(hashStep(kHashSeed, key.width), key.height), key.psm);
 
     // The palette resolved to final RGBA once per expand, so the texel loop is
     // a load and a store. A per-pixel swizzled palette read here was the
     // single most expensive thing in the old loop.
-    if (indexed)
+    if (indexed && !hashOnly)
         buildPalette(key);
 
     const bool rowIsWords = psm == GS_PSM_CT32 || psm == GS_PSM_Z32 ||
@@ -411,15 +412,18 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
     m_idxRow.resize(regionWidth);
 
     for (uint32_t y = region.y0; y < region.y1; ++y) {
-        uint8_t *row =
-            m_staging.data() + static_cast<size_t>(y - region.y0) * regionWidth * 4u;
+        // Hashing only, the texels are read and hashed exactly as below and
+        // nothing is written (Rogue Galaxy: added).
+        uint8_t *row = hashOnly ? nullptr
+                                : m_staging.data() + static_cast<size_t>(y - region.y0) * regionWidth * 4u;
         switch (psm) {
         case GS_PSM_CT32:
         case GS_PSM_Z32: {
             // The raw word is the RGBA byte sequence; TEXA does not apply.
             const auto readRow = psm == GS_PSM_Z32 ? GSMem::ReadRowZ32 : GSMem::ReadRowCT32;
-            readRow(m_vram.data(), key.tbp0, key.tbw, region.x0, y, regionWidth, row);
-            texelHash = hashBytes(texelHash, row, static_cast<size_t>(regionWidth) * 4u);
+            uint8_t *out = hashOnly ? m_rawRow.data() : row;
+            readRow(m_vram.data(), key.tbp0, key.tbw, region.x0, y, regionWidth, out);
+            texelHash = hashBytes(texelHash, out, static_cast<size_t>(regionWidth) * 4u);
             continue;
         }
         case GS_PSM_T8: {
@@ -427,6 +431,8 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
             GSMem::ReadRowP8(m_vram.data(), key.tbp0, key.tbw, region.x0, y,
                              regionWidth, raw);
             texelHash = hashBytes(texelHash, raw, regionWidth);
+            if (hashOnly)
+                continue;
             for (uint32_t x = 0u; x < regionWidth; ++x)
                 std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x]], 4u);
             continue;
@@ -437,8 +443,9 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
             // local memory although buildPalette has already resolved them.
             uint8_t *raw = m_idxRow.data();
             m_vram.readRowT4(key.tbp0, key.tbw, region.x0, y, regionWidth, raw);
-            for (uint32_t x = 0u; x < regionWidth; ++x)
-                std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x] & 0x0fu], 4u);
+            if (!hashOnly)
+                for (uint32_t x = 0u; x < regionWidth; ++x)
+                    std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x] & 0x0fu], 4u);
             // Hashed as two nibbles per byte, low first, like T4HL/T4HH.
             const uint32_t pairs = (regionWidth + 1u) / 2u;
             for (uint32_t p = 0u; p < pairs; ++p)
@@ -476,6 +483,8 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
                                                    << 4u));
                 texelHash = hashBytes(texelHash, raw, pairs);
             }
+            if (hashOnly)
+                continue;
             for (uint32_t x = 0u; x < regionWidth; ++x) {
                 const uint32_t index = (words[x] >> shift) & mask;
                 std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[index], 4u);
@@ -491,6 +500,8 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region)
         for (uint32_t x = region.x0; x < region.x1; ++x) {
             const uint32_t raw = m_vram.read(key.psm, key.tbp0, key.tbw, x, y);
             texelHash = hashStep(texelHash, raw);
+            if (hashOnly)
+                continue;
             uint32_t color = 0u;
 
             if (indexed) {
@@ -864,6 +875,19 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
 
     const bool wholeTexture = region.x0 == 0u && region.y0 == 0u &&
                               region.x1 >= key.width && region.y1 >= key.height;
+    // A whole texture dirty again with no palette change waiting is most
+    // often back to what it held: another texture passed through its pages
+    // and this one was uploaded again (Rogue Galaxy: added; 86% of the
+    // re-expands in its streets). Hashing the raw texels first costs their
+    // read; when they match, the expansion and the upload are skipped.
+    // DQ8_GFX_NO_UNCHANGED_SKIP=1 expands them anyway, as before.
+    static const bool skipUnchanged = std::getenv("DQ8_GFX_NO_UNCHANGED_SKIP") == nullptr;
+    if (skipUnchanged && wholeTexture && !entry.clutUploadPending && entry.identity.texels != 0u &&
+        expand(key, region, true) == entry.identity.texels) {
+        entry.dirty.clear();
+        ++m_stats.unchangedUpdates;
+        return true;
+    }
     const uint64_t texelHash = expand(key, region);
     // A whole-texture re-expand whose raw texels hash to what we already hold,
     // with no palette change waiting, is the title screen re-uploading its own

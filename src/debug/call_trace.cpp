@@ -134,11 +134,14 @@ void traced(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         printArg0Peek(rdram, a0);
         std::printf("\n");
     }
+    const auto started = std::chrono::steady_clock::now();
     original(rdram, ctx, runtime);
     if (log)
     {
         // pc other than ra: the callee yielded to the scheduler and resumes later.
-        std::printf("[trace] 0x%08X #%u -> v0=0x%08X pc=0x%08X", address, call, getRegU32(ctx, 2), ctx->pc);
+        // The host time the call took, to tell a slow function from a slow frame.
+        std::printf("[trace] 0x%08X #%u -> v0=0x%08X pc=0x%08X (%.2f ms)", address, call, getRegU32(ctx, 2), ctx->pc,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
         printPeek(rdram);
         printArg0Peek(rdram, a0);
         if (!g_arg0Peek.empty())
