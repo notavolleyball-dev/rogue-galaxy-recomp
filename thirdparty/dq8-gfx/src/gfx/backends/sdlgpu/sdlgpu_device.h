@@ -210,6 +210,10 @@ public:
     SDL_GPUSampler *sampler() const { return m_sampler; }
 
     size_t pipelineCount() const { return m_pipelines.size() + (m_reinterpretPipeline ? 1u : 0u) + (m_displayPipeline ? 1u : 0u); }
+    // Nanoseconds spent in SDL_CreateGPUGraphicsPipeline for draw pipelines:
+    // each new state combination compiles one, a hitch the first time it is
+    // drawn (Rogue Galaxy: added, for the stats line).
+    uint64_t pipelineCreateNanos() const { return m_pipelineCreateNanos; }
     bool framebufferFetch() const { return m_framebufferFetch; }
 
 private:
@@ -252,6 +256,7 @@ private:
     };
     std::deque<Submission> m_inFlight;
     std::unordered_map<GsPipelineKey, SDL_GPUGraphicsPipeline *, GsPipelineKeyHash> m_pipelines;
+    uint64_t m_pipelineCreateNanos = 0u;
 };
 
 // Upload transfer buffers for the pending command buffer (Rogue Galaxy:

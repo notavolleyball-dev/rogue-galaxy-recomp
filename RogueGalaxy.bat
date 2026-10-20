@@ -20,11 +20,12 @@ if not exist "disc\SCUS_974.90" (
 rem Options (see "Running" in README.md), for example:
 rem   set RG_SHOW_FPS=1
 rem   set RG_MUTE=1
-rem 60 fps mode (experimental, see RG_FPS in README.md): remove the line for 30.
-set RG_FPS=60
+rem 60 fps mode (see RG_FPS in README.md): set RG_FPS=30 before this file in
+rem a terminal, or remove the line, for the game's own 30.
+if not defined RG_FPS set RG_FPS=60
 rem One [gfx] line a second in build\last-run.log (the frame rate and the
 rem backend's counters), so an F9 mark can be put next to that second.
-set DQ8_GFX_STATS_EVERY=60
+if not defined DQ8_GFX_STATS_EVERY set DQ8_GFX_STATS_EVERY=60
 rem Keeps other programs' Vulkan layers (OBS's capture hook, ReShade, the
 rem Steam, GOG and Epic overlays) out of the game: they load into every
 rem Vulkan process and sit on its presents. Remove the line to allow them.

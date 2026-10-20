@@ -1,0 +1,68 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index 68af702..1fde224 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -10,6 +10,7 @@
+ #endif
+ #include <condition_variable>
+ #include <exception>
++#include <iterator>
+ #include <mutex>
+ #include <stdexcept>
+ #include <thread>
+@@ -136,6 +137,26 @@ struct GSThreadedBackend::Impl
+             publishStaged(flush);
+     }
+ 
++    // Moves the staged commands behind the pending ones. Caller holds both
++    // locks. The range insert grows the queue geometrically: an exact
++    // reserve of size + staged grew it by one stage at a time, so while the
++    // worker was behind each publish of 128 commands moved the whole queue
++    // (up to its 16 MB) into a new block. At a scene's first frames, with
++    // the worker building textures, that made the GIF stage the bottleneck
++    // and held the presenter on `submission` for a third of a second (Rogue
++    // Galaxy: fixed, 2026-10-20). A failed allocation throws before anything
++    // moves (Command moves without throwing), so `staged` and the byte count
++    // stay as they were.
++    void appendStaged()
++    {
++        if (pending.empty())
++            pending.swap(staged);
++        else
++            pending.insert(pending.end(), std::make_move_iterator(staged.begin()),
++                           std::make_move_iterator(staged.end()));
++        staged.clear();
++    }
++
+     // The worker's side of publishStaged, when it is idle: nothing outstanding,
+     // so no capacity to wait for. Caller holds `submission`, not `mutex`.
+     void takeStaged()
+@@ -143,10 +164,7 @@ struct GSThreadedBackend::Impl
+         if (staged.empty())
+             return;
+         std::lock_guard lock(mutex);
+-        pending.reserve(pending.size() + staged.size());
+-        for (auto &command : staged)
+-            pending.push_back(std::move(command));
+-        staged.clear();
++        appendStaged();
+         outstandingBytes += stagedBytes;
+         stagedBytes = 0u;
+     }
+@@ -167,15 +185,7 @@ struct GSThreadedBackend::Impl
+             });
+         }
+         rethrow();
+-        if (pending.empty())
+-            pending.swap(staged);
+-        else
+-        {
+-            pending.reserve(pending.size() + staged.size());
+-            for (auto &command : staged)
+-                pending.push_back(std::move(command));
+-        }
+-        staged.clear();
++        appendStaged();
+         outstandingBytes += stagedBytes;
+         stagedBytes = 0u;
+         urgent = urgent || flush;

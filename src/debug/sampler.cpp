@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <string>
 #include <thread>
@@ -164,86 +165,76 @@ std::string callerKey(const uint64_t (&callers)[kCallerDepth], int count)
     return out;
 }
 
-void sampleWindow(const std::string &path, double seconds)
+// stopSampler sets g_stop: an open window ends early and is written (the
+// player closing the game a second before a window's end lost the whole
+// profile, 2026-10-20); g_windowOpen tells stopSampler to wait for that.
+std::atomic<bool> g_stop{false};
+std::atomic<bool> g_windowOpen{false};
+
+// What a profile file holds: the counts of a stretch of sampling.
+struct Samples
 {
-    const DWORD self = GetCurrentThreadId();
-    const DWORD pid = GetCurrentProcessId();
     std::map<std::pair<std::string, uint64_t>, uint64_t> counts;
     // Samples outside the executable, by thread and exe callers.
     std::map<std::pair<std::string, std::string>, uint64_t> callers;
     // RG_PROFILE_STACKS=1: samples inside the executable with their callers
     // too, for inclusive times.
     std::map<std::pair<std::string, std::string>, uint64_t> stacks;
-    const char *stacksEnv = std::getenv("RG_PROFILE_STACKS");
-    const bool allStacks = stacksEnv && *stacksEnv && *stacksEnv != '0';
-    std::map<DWORD, std::string> names;
-    const auto exeBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    uintptr_t exeEnd = exeBase;
-    {
-        const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(exeBase);
-        const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(exeBase + dos->e_lfanew);
-        exeEnd = exeBase + nt->OptionalHeader.SizeOfImage;
-    }
-    const std::vector<UnwindImage> images = loadUnwindImages();
-    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
     uint64_t rounds = 0;
-    // The process's threads, listed again every quarter second: a snapshot
-    // walks every thread of the system, and taking one each round held the
-    // sampler to about 13 rounds a second. RG_PROFILE_THREAD=NAME samples
-    // only the threads whose name starts with NAME (e.g. VIF1), for many
-    // more samples of one hot function.
-    struct Sampled
+
+    void add(const Samples &other)
     {
-        HANDLE handle;
-        std::pair<DWORD, std::string> label;
-    };
-    std::vector<Sampled> threads;
-    const char *onlyEnv = std::getenv("RG_PROFILE_THREAD");
-    const std::string only = onlyEnv ? onlyEnv : "";
-    auto listed = std::chrono::steady_clock::time_point{};
-    auto closeAll = [&] {
-        for (const Sampled &th : threads)
+        for (const auto &[key, n] : other.counts)
         {
-            CloseHandle(th.handle);
+            counts[key] += n;
         }
-        threads.clear();
-    };
-    while (std::chrono::steady_clock::now() < end)
+        for (const auto &[key, n] : other.callers)
+        {
+            callers[key] += n;
+        }
+        for (const auto &[key, n] : other.stacks)
+        {
+            stacks[key] += n;
+        }
+        rounds += other.rounds;
+    }
+};
+
+// Samples every thread of the process but its own, one round at a time.
+class Sampler
+{
+public:
+    Sampler()
     {
-        if (std::chrono::steady_clock::now() - listed >= std::chrono::milliseconds(250))
+        const char *stacksEnv = std::getenv("RG_PROFILE_STACKS");
+        m_allStacks = stacksEnv && *stacksEnv && *stacksEnv != '0';
+        const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(m_exeBase);
+        const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(m_exeBase + dos->e_lfanew);
+        m_exeEnd = m_exeBase + nt->OptionalHeader.SizeOfImage;
+        const char *onlyEnv = std::getenv("RG_PROFILE_THREAD");
+        m_only = onlyEnv ? onlyEnv : "";
+    }
+    ~Sampler() { closeAll(); }
+    Sampler(const Sampler &) = delete;
+    Sampler &operator=(const Sampler &) = delete;
+
+    void round(Samples &into)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        // The unwind tables of the loaded modules, again every few seconds:
+        // a sampler running from the start would otherwise miss the GPU
+        // driver, which loads later.
+        if (now - m_imagesLoaded >= std::chrono::seconds(5))
         {
-            closeAll();
-            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            THREADENTRY32 te{};
-            te.dwSize = sizeof(te);
-            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
-            {
-                if (te.th32OwnerProcessID != pid || te.th32ThreadID == self)
-                {
-                    continue;
-                }
-                HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION,
-                                      FALSE, te.th32ThreadID);
-                if (!t)
-                {
-                    continue;
-                }
-                auto named = names.find(te.th32ThreadID);
-                if (named == names.end())
-                {
-                    named = names.emplace(te.th32ThreadID, threadName(t) + "#" + std::to_string(te.th32ThreadID)).first;
-                }
-                if (!only.empty() && named->second.compare(0, only.size(), only) != 0)
-                {
-                    CloseHandle(t);
-                    continue;
-                }
-                threads.push_back({t, *named});
-            }
-            CloseHandle(snap);
-            listed = std::chrono::steady_clock::now();
+            m_images = loadUnwindImages();
+            m_imagesLoaded = now;
         }
-        for (const Sampled &th : threads)
+        if (now - m_listed >= std::chrono::milliseconds(250))
+        {
+            listThreads();
+            m_listed = std::chrono::steady_clock::now();
+        }
+        for (const Sampled &th : m_threads)
         {
             HANDLE t = th.handle;
             const auto *it = &th.label;
@@ -256,80 +247,165 @@ void sampleWindow(const std::string &path, double seconds)
                 const bool got = GetThreadContext(t, &ctx) != 0;
                 uint64_t chain[kCallerDepth] = {};
                 int depth = 0;
-                const bool outside = got && (ctx.Rip < exeBase || ctx.Rip >= exeEnd);
-                if (outside || (got && allStacks))
+                const bool outside = got && (ctx.Rip < m_exeBase || ctx.Rip >= m_exeEnd);
+                if (outside || (got && m_allStacks))
                 {
-                    depth = exeCallers(images, ctx, exeBase, exeEnd, chain);
+                    depth = exeCallers(m_images, ctx, m_exeBase, m_exeEnd, chain);
                 }
                 ResumeThread(t);
                 if (got)
                 {
-                    ++counts[{it->second, ctx.Rip}];
+                    ++into.counts[{it->second, ctx.Rip}];
                     if (outside)
                     {
-                        ++callers[{it->second, callerKey(chain, depth)}];
+                        ++into.callers[{it->second, callerKey(chain, depth)}];
                     }
-                    else if (allStacks)
+                    else if (m_allStacks)
                     {
                         // The leaf first, then its callers.
-                        uint64_t leaf[1] = {ctx.Rip};
                         const std::string callersOnly = callerKey(chain, depth);
                         char head[24];
-                        std::snprintf(head, sizeof(head), "0x%llx", static_cast<unsigned long long>(leaf[0]));
-                        ++stacks[{it->second, callersOnly.empty() ? std::string(head)
-                                                                  : std::string(head) + "," + callersOnly}];
+                        std::snprintf(head, sizeof(head), "0x%llx", static_cast<unsigned long long>(ctx.Rip));
+                        ++into.stacks[{it->second, callersOnly.empty() ? std::string(head)
+                                                                      : std::string(head) + "," + callersOnly}];
                     }
                 }
             }
         }
-        ++rounds;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ++into.rounds;
     }
-    closeAll();
-    if (FILE *f = std::fopen(path.c_str(), "w"))
+
+private:
+    struct Sampled
     {
-        std::fprintf(f, "base 0x%llx rounds %llu\n",
-                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
-                     static_cast<unsigned long long>(rounds));
-        for (const auto &[key, n] : counts)
+        HANDLE handle;
+        std::pair<DWORD, std::string> label;
+    };
+
+    // The process's threads, listed again every quarter second: a snapshot
+    // walks every thread of the system, and taking one each round held the
+    // sampler to about 13 rounds a second. RG_PROFILE_THREAD=NAME samples
+    // only the threads whose name starts with NAME (e.g. VIF1), for many
+    // more samples of one hot function.
+    void listThreads()
+    {
+        closeAll();
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te{};
+        te.dwSize = sizeof(te);
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
         {
-            std::fprintf(f, "%s 0x%llx %llu\n", key.first.c_str(), static_cast<unsigned long long>(key.second),
-                         static_cast<unsigned long long>(n));
-        }
-        for (const auto &[key, n] : callers)
-        {
-            if (!key.second.empty())
+            if (te.th32OwnerProcessID != m_pid || te.th32ThreadID == m_self)
             {
-                std::fprintf(f, "callers %s %s %llu\n", key.first.c_str(), key.second.c_str(),
-                             static_cast<unsigned long long>(n));
+                continue;
             }
-        }
-        for (const auto &[key, n] : stacks)
-        {
-            std::fprintf(f, "stack %s %s %llu\n", key.first.c_str(), key.second.c_str(),
-                         static_cast<unsigned long long>(n));
-        }
-        // The loaded modules, so samples outside the executable can be put
-        // down to the driver, the C runtime or a kernel wait.
-        HANDLE modules = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
-        MODULEENTRY32W me{};
-        me.dwSize = sizeof(me);
-        for (BOOL ok = Module32FirstW(modules, &me); ok; ok = Module32NextW(modules, &me))
-        {
-            std::string name;
-            for (const wchar_t *p = me.szModule; *p; ++p)
+            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION,
+                                  FALSE, te.th32ThreadID);
+            if (!t)
             {
-                name += (*p < 128 && *p > 32) ? static_cast<char>(*p) : '_';
+                continue;
             }
-            std::fprintf(f, "module 0x%llx 0x%lx %s\n",
-                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(me.modBaseAddr)),
-                         static_cast<unsigned long>(me.modBaseSize), name.c_str());
+            auto named = m_names.find(te.th32ThreadID);
+            if (named == m_names.end())
+            {
+                named = m_names.emplace(te.th32ThreadID, threadName(t) + "#" + std::to_string(te.th32ThreadID)).first;
+            }
+            if (!m_only.empty() && named->second.compare(0, m_only.size(), m_only) != 0)
+            {
+                CloseHandle(t);
+                continue;
+            }
+            m_threads.push_back({t, *named});
         }
-        CloseHandle(modules);
-        std::fclose(f);
-        std::printf("[profile] %llu rounds written to %s\n", static_cast<unsigned long long>(rounds), path.c_str());
-        std::fflush(stdout);
+        CloseHandle(snap);
     }
+
+    void closeAll()
+    {
+        for (const Sampled &th : m_threads)
+        {
+            CloseHandle(th.handle);
+        }
+        m_threads.clear();
+    }
+
+    const DWORD m_self = GetCurrentThreadId();
+    const DWORD m_pid = GetCurrentProcessId();
+    const uintptr_t m_exeBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uintptr_t m_exeEnd = 0;
+    bool m_allStacks = false;
+    std::string m_only;
+    std::vector<UnwindImage> m_images;
+    std::chrono::steady_clock::time_point m_imagesLoaded{};
+    std::map<DWORD, std::string> m_names;
+    std::vector<Sampled> m_threads;
+    std::chrono::steady_clock::time_point m_listed{};
+};
+
+void writeProfile(const std::string &path, const Samples &samples)
+{
+    FILE *f = std::fopen(path.c_str(), "w");
+    if (!f)
+    {
+        return;
+    }
+    std::fprintf(f, "base 0x%llx rounds %llu\n",
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
+                 static_cast<unsigned long long>(samples.rounds));
+    for (const auto &[key, n] : samples.counts)
+    {
+        std::fprintf(f, "%s 0x%llx %llu\n", key.first.c_str(), static_cast<unsigned long long>(key.second),
+                     static_cast<unsigned long long>(n));
+    }
+    for (const auto &[key, n] : samples.callers)
+    {
+        if (!key.second.empty())
+        {
+            std::fprintf(f, "callers %s %s %llu\n", key.first.c_str(), key.second.c_str(),
+                         static_cast<unsigned long long>(n));
+        }
+    }
+    for (const auto &[key, n] : samples.stacks)
+    {
+        std::fprintf(f, "stack %s %s %llu\n", key.first.c_str(), key.second.c_str(),
+                     static_cast<unsigned long long>(n));
+    }
+    // The loaded modules, so samples outside the executable can be put
+    // down to the driver, the C runtime or a kernel wait.
+    HANDLE modules = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof(me);
+    for (BOOL ok = Module32FirstW(modules, &me); ok; ok = Module32NextW(modules, &me))
+    {
+        std::string name;
+        for (const wchar_t *p = me.szModule; *p; ++p)
+        {
+            name += (*p < 128 && *p > 32) ? static_cast<char>(*p) : '_';
+        }
+        std::fprintf(f, "module 0x%llx 0x%lx %s\n",
+                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(me.modBaseAddr)),
+                     static_cast<unsigned long>(me.modBaseSize), name.c_str());
+    }
+    CloseHandle(modules);
+    std::fclose(f);
+    std::fprintf(stderr, "[profile] %llu rounds written to %s\n",
+                 static_cast<unsigned long long>(samples.rounds), path.c_str());
+}
+
+std::chrono::milliseconds roundPause(int replayDefault);
+
+void sampleWindow(const std::string &path, double seconds)
+{
+    const auto pause = roundPause(1);
+    Sampler sampler;
+    Samples samples;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end && !g_stop.load(std::memory_order_relaxed))
+    {
+        sampler.round(samples);
+        std::this_thread::sleep_for(pause);
+    }
+    writeProfile(path, samples);
 }
 
 // RG_PROFILE_ON_MARK=1: a window opens at each F9 instead of at a fixed time,
@@ -338,6 +414,19 @@ void sampleWindow(const std::string &path, double seconds)
 // during a window are folded into it.
 std::atomic<unsigned> g_windowRequests{0u};
 bool g_onMark = false;
+
+// RG_PROFILE_BEFORE=S (with RG_PROFILE_ON_MARK=1): sampling runs all the
+// time, kept in quarter-second slices for the last S seconds, and a window
+// holds the S seconds before its mark besides RG_PROFILE_SECONDS after it:
+// a short hitch is over before F9 is pressed (Rogue Galaxy: added,
+// 2026-10-20). RG_PROFILE_AUTO_MS=N with it also opens a window at a hitch
+// nobody marked (noteFrameTime), the hitch and half a second either side,
+// at most kMaxAutoWindows a run.
+std::atomic<unsigned> g_autoRequests{0u};
+std::atomic<uint32_t> g_autoFrameMillis{0u};
+std::atomic<uint32_t> g_autoRecentMillis{0u};
+double g_autoThresholdMillis = 0.0;
+constexpr unsigned kMaxAutoWindows = 30u;
 
 std::string numberedPath(const std::string &path, unsigned index)
 {
@@ -351,26 +440,188 @@ std::string numberedPath(const std::string &path, unsigned index)
     return path.substr(0, dot) + suffix + path.substr(dot);
 }
 
-void run(std::string path, double startSeconds, double seconds)
+// The next number after the files already there: numbering from 1 at each
+// start overwrote the last session's profiles.
+std::string nextNumberedPath(const std::string &path, unsigned &index)
 {
+    for (;;)
+    {
+        const std::string out = numberedPath(path, ++index);
+        if (GetFileAttributesA(out.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return out;
+        }
+    }
+}
+
+// While the sampler has a thread suspended, nothing of the game's may wait on
+// it: at normal priority a preemption between SuspendThread and ResumeThread
+// left the VIF1 thread or the GS worker frozen for a scheduler quantum. The
+// sampler sleeps between rounds, so the top priority costs no one else.
+void raisePriority()
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+}
+
+// Opens a window unless the game is stopping. g_windowOpen goes up before
+// g_stop is read, and stopSampler sets g_stop before reading g_windowOpen
+// (both sequentially consistent), so either stopSampler waits for this
+// window or this sees the stop and opens none: a window opened after
+// stopSampler had looked would be cut mid-write by the exit.
+bool openWindow()
+{
+    g_windowOpen.store(true);
+    if (g_stop.load())
+    {
+        g_windowOpen.store(false);
+        return false;
+    }
+    return true;
+}
+
+// The pause between two rounds. A round suspends every thread once and walks
+// its stack while it waits: at a round a millisecond (about 380 a second)
+// the VIF1 thread took 16% longer a frame at the gate, harmless for a
+// 20-second window but not for sampling all the time, so the replay
+// defaults to 5 ms (RG_PROFILE_INTERVAL_MS overrides both).
+std::chrono::milliseconds roundPause(int replayDefault)
+{
+    const char *value = std::getenv("RG_PROFILE_INTERVAL_MS");
+    return std::chrono::milliseconds(value && *value ? std::max(0, std::atoi(value)) : replayDefault);
+}
+
+void runReplay(const std::string &path, double before, double after)
+{
+    using Clock = std::chrono::steady_clock;
+    raisePriority();
+    const auto pause = roundPause(5);
+    const auto seconds = [](double s) {
+        return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(s));
+    };
+    constexpr auto kSlice = std::chrono::milliseconds(250);
+    Sampler sampler;
+    // Each slice runs from its start to the next one's; while a window is
+    // open only those reaching into it are kept, otherwise the last S s.
+    std::deque<std::pair<Clock::time_point, Samples>> slices;
+    slices.emplace_back(Clock::now(), Samples{});
+    unsigned servedMarks = 0u, servedAuto = 0u, index = 0u, autoWindows = 0u;
+    bool open = false;
+    Clock::time_point from{}, until{};
+    std::string out;
+    const auto write = [&] {
+        Samples merged;
+        for (const auto &slice : slices)
+        {
+            merged.add(slice.second);
+        }
+        writeProfile(out, merged);
+        open = false;
+        g_windowOpen.store(false);
+    };
+    while (!g_stop.load(std::memory_order_relaxed))
+    {
+        sampler.round(slices.back().second);
+        const Clock::time_point now = Clock::now();
+        if (now - slices.back().first >= kSlice)
+        {
+            slices.emplace_back(now, Samples{});
+        }
+        const unsigned marks = g_windowRequests.load(std::memory_order_acquire);
+        const unsigned autos = g_autoRequests.load(std::memory_order_acquire);
+        if (marks != servedMarks || autos != servedAuto)
+        {
+            const bool marked = marks != servedMarks;
+            servedMarks = marks;
+            servedAuto = autos;
+            if (!open && (marked || autoWindows < kMaxAutoWindows) && openWindow())
+            {
+                autoWindows += marked ? 0u : 1u;
+                open = true;
+                // A hitch found by noteFrameTime is the frame that just
+                // ended: its own length and half a second either side,
+                // so the profile is mostly the hitch. F9 comes late by a
+                // reaction time, hence its seconds before.
+                const double hitch = g_autoFrameMillis.load() / 1000.0;
+                from = now - seconds(marked ? before : hitch + 0.5);
+                until = now + seconds(marked ? after : 0.5);
+                out = nextNumberedPath(path, index);
+                // On stderr, the stats lines' stream: its lock keeps a line
+                // whole, where printf on stdout cut a [gfx] line in two.
+                if (marked)
+                {
+                    std::fprintf(stderr,
+                                 "[profile] window %u: the %.0f s before the mark and %.0f s after, into %s\n",
+                                 index, before, after, out.c_str());
+                }
+                else
+                {
+                    std::fprintf(stderr,
+                                 "[profile] window %u: a hitch (a %u ms frame, %u ms on average lately), the "
+                                 "%.1f s around it, into %s\n",
+                                 index, g_autoFrameMillis.load(), g_autoRecentMillis.load(), hitch + 1.0,
+                                 out.c_str());
+                }
+            }
+        }
+        if (open && now >= until)
+        {
+            write();
+        }
+        const Clock::time_point keepFrom = open ? from : now - seconds(before);
+        while (slices.size() > 1u && slices[1].first <= keepFrom)
+        {
+            slices.pop_front();
+        }
+        std::this_thread::sleep_for(pause);
+    }
+    if (open)
+    {
+        write();
+    }
+}
+
+void run(std::string path, double startSeconds, double seconds, double before)
+{
+    raisePriority();
+    if (g_onMark && before > 0.0)
+    {
+        runReplay(path, before, seconds);
+        return;
+    }
     if (!g_onMark)
     {
-        std::this_thread::sleep_for(std::chrono::duration<double>(startSeconds));
-        sampleWindow(path, seconds);
+        const auto start = std::chrono::steady_clock::now() + std::chrono::duration<double>(startSeconds);
+        while (std::chrono::steady_clock::now() < start)
+        {
+            if (g_stop.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (openWindow())
+        {
+            sampleWindow(path, seconds);
+            g_windowOpen.store(false);
+        }
         return;
     }
     unsigned served = 0u, index = 0u;
-    for (;;)
+    while (!g_stop.load(std::memory_order_relaxed))
     {
         if (g_windowRequests.load(std::memory_order_acquire) == served)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
-        const std::string out = numberedPath(path, ++index);
-        std::printf("[profile] window %u: %.0f s from the mark, into %s\n", index, seconds, out.c_str());
-        std::fflush(stdout);
+        if (!openWindow())
+        {
+            return;
+        }
+        const std::string out = nextNumberedPath(path, index);
+        std::fprintf(stderr, "[profile] window %u: %.0f s from the mark, into %s\n", index, seconds, out.c_str());
         sampleWindow(out, seconds);
+        g_windowOpen.store(false);
         served = g_windowRequests.load(std::memory_order_acquire);
     }
 }
@@ -380,6 +631,30 @@ void run(std::string path, double startSeconds, double seconds)
 void requestProfileWindow()
 {
     g_windowRequests.fetch_add(1u, std::memory_order_acq_rel);
+}
+
+void noteFrameTime(double seconds)
+{
+    if (g_autoThresholdMillis <= 0.0)
+    {
+        return;
+    }
+    // Called from one thread, the one preparing presentations. A hitch is a
+    // frame both RG_PROFILE_AUTO_MS long and three times the usual (a slow
+    // scene's every frame is not one), or a few frames in a row near twice
+    // the usual: the frame rate halved for a moment.
+    static double recent = 1.0 / 60.0; // about the last 5 frames
+    static double usual = 1.0 / 60.0;  // about the last 50
+    recent += (seconds - recent) * 0.2;
+    const bool longFrame = seconds * 1000.0 >= g_autoThresholdMillis && seconds >= 3.0 * usual;
+    const bool halved = recent >= 1.8 * usual && recent >= 0.025;
+    usual += (seconds - usual) * 0.02;
+    if (longFrame || halved)
+    {
+        g_autoFrameMillis.store(static_cast<uint32_t>(seconds * 1000.0));
+        g_autoRecentMillis.store(static_cast<uint32_t>(recent * 1000.0));
+        g_autoRequests.fetch_add(1u, std::memory_order_acq_rel);
+    }
 }
 
 void startSampler()
@@ -392,8 +667,28 @@ void startSampler()
     const char *start = std::getenv("RG_PROFILE_START");
     const char *seconds = std::getenv("RG_PROFILE_SECONDS");
     const char *onMark = std::getenv("RG_PROFILE_ON_MARK");
+    const char *before = std::getenv("RG_PROFILE_BEFORE");
+    const char *autoMs = std::getenv("RG_PROFILE_AUTO_MS");
     g_onMark = onMark && *onMark && *onMark != '0';
-    std::thread(run, std::string(path), start ? std::atof(start) : 0.0, seconds ? std::atof(seconds) : 20.0).detach();
+    const double beforeSeconds = before ? std::atof(before) : 0.0;
+    if (g_onMark && beforeSeconds > 0.0 && autoMs)
+    {
+        g_autoThresholdMillis = std::atof(autoMs);
+    }
+    std::thread(run, std::string(path), start ? std::atof(start) : 0.0, seconds ? std::atof(seconds) : 20.0,
+                beforeSeconds)
+        .detach();
+}
+
+void stopSampler()
+{
+    g_stop.store(true);
+    // A window in progress writes what it has; wait for that, not forever.
+    const auto giveUp = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (g_windowOpen.load() && std::chrono::steady_clock::now() < giveUp)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 } // namespace rg::debug
@@ -403,7 +698,9 @@ void startSampler()
 namespace rg::debug
 {
 void startSampler() {}
+void stopSampler() {}
 void requestProfileWindow() {}
+void noteFrameTime(double) {}
 } // namespace rg::debug
 
 #endif

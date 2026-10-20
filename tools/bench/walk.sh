@@ -36,6 +36,15 @@
 #                tools/bench/gatefps.py (fps, VIF1 ms a frame).
 #   MC0=DIR      another memory card directory (default build/run/mc0-bench).
 #   AFFINITY=HEX the instance's processor mask, set two seconds after start.
+#   STATS_EVERY=N the [gfx] stats every N frames instead of 60 (10 for
+#                hitches: tools/bench/hitches.py build/run/NAME.log).
+#                gatefps.py and battlefps.py scale for it; fpscmp.py's
+#                interval counts (-n, -w) assume 60.
+#   EXE=PATH     another build (a saved copy, for a before/after). A copy
+#                under a new file name ran with the driver's shader cache
+#                cold (the gate's first 29 pipelines in 495 ms, against 2 ms
+#                for the usual path). Not stopped by this script unless
+#                named roguegalaxy.exe: taskkill it afterwards.
 #   INPUT=FILE   another input script (default build/run/input_pad3.txt);
 #                PROFILE_START=, PROFILE_SECONDS= and AFTER_OVERRIDE= (the
 #                seconds kept running after the logged frame) go with it.
@@ -96,7 +105,7 @@ fi
 # MC0=DIR: another card, e.g. build/run/mc0-battle holding only the
 # player's File 03 (two characters, a field where walking meets a battle).
 export RG_MC0_DIR=${MC0:-build/run/mc0-bench}
-export RG_GS_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GFX_STATS_EVERY=60
+export RG_GS_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GFX_STATS_EVERY=${STATS_EVERY:-60}
 # FRAME=N logs the frame at another pad read (the battle script: 5400).
 export RG_GS_FRAMELOG="build/run/$NAME.txt@${FRAME:-2660}"
 if [ "$FPS" = "60" ]; then export RG_FPS=60; else unset RG_FPS; fi
@@ -127,7 +136,7 @@ cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1
 start=$(date +%s)
 # A forward-slash disc path marks this instance; RogueGalaxy.bat passes a
 # backslash one, so the user's game is never the one stopped below.
-build/game/src/roguegalaxy.exe disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
+${EXE:-build/game/src/roguegalaxy.exe} disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
 # AFFINITY=HEX: the instance's processor mask (5555: one logical processor
 # per core of an 8-core SMT machine), to see whether two busy threads
 # sharing a core is what varies between runs.

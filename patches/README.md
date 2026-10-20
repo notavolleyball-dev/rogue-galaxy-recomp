@@ -12,8 +12,9 @@ base that holds the earlier ones: a detached `git worktree` of the
 submodule at its commit with patches 0001 to N-1 applied and committed,
 the modified files copied over it, `git diff` into the patch file. Then
 check that the new patch reverse-applies to the checkout. A later patch
-may change lines an earlier one added (0011 does, in 0004's and 0006's),
-after which the earlier one no longer reverse-applies; the stamp file is
+may change lines an earlier one added (0011 does, in 0004's and 0006's;
+0012 in 0010's), after which the earlier one no longer reverse-applies
+(today 0004, 0006, 0008 and 0010 do not); the stamp file is
 what keeps configure from applying it again (before the stamp this
 failed twice, 2026-10-19). A build does not reconfigure by itself, so
 run `cmake -S . -B build/game` once after.
@@ -34,6 +35,8 @@ run `cmake -S . -B build/game` once after.
 | `0012-dispatch-unwind-per-thread.patch` | The stack-pointer rule of 0010 missed one case: a frameless leaf whose loop head is its own entry (`StrCmpU8`, 0x1834B0, comparing names for `DirTableFindFile`) unwinds from its back edge with pc at the entry and sp unmoved, and the lookup went on with a character for the comparison's result. The scheduler now counts the guest unwinds a checkpoint starts (`noteGuestUnwind`, from `eeCheckpointDue` and the dispatcher's own safe point) and records on each guest thread the serial of its latest; the dispatcher forgives a callee left at its entry only when sp is back and that thread started no unwind during the call. The count is per thread, so another thread's unwinds while a stub waited (what made the flag of 0010's first version stale) do not count. Found by the 2026-10-20 review. |
 | `0013-gs-finish-queued.patch` | `GSThreadedBackend::Sync(Finish)` is queued for the worker instead of draining the queue: the backend's part of a FINISH (the queued draws go to the GPU) keeps its place in order, and the CSR bit is the front end's. The drain held the GS front end (the VIF1 thread, then the GIF stage) at every FINISH until the worker had caught up. Syncs that read something back (LocalToHost, DebugReadback, Reset, Presentation) still wait. |
 | `0014-vu1-whole-register-writes.patch` | Compiled VU1 programs write a VF register or ACC as one 16-byte store, blending the written lanes into the old value (`Frame::writeVector`), instead of one store per lane. A masked write (xyz: an 8-byte and a 4-byte store) cannot forward to the next pair's 16-byte read of the register, which then waits for both stores to retire; that wait was the hottest instruction of Rogue Galaxy's busiest routine. About 2% of the VIF1 thread at a boss gate; frames byte-identical. |
+| `0015-gs-queue-geometric-growth.patch` | The GS worker's queue grows geometrically. Publishing a stage of commands behind pending ones reserved exactly the new size, so the queue grew one stage at a time and, while the worker was behind, every publish of 128 commands moved the whole queue (up to its 16 MB) into a new block. At a scene's first frames, with the worker building textures and waiting on readbacks, that made the GIF stage the bottleneck and held the presenter on the submission lock: the frame after Rogue Galaxy's boss-gate load took 0.6 s. The append is a range insert, so a failed allocation throws before any command moves. |
+| `0016-dispatch-jump-unwind.patch` | A jump the dispatcher hands back to the scheduler (an unresolved `jr`, or a direct jump to an address with no function) unwinds the host frames as a checkpoint does, and now counts as one for the forgiveness of 0010 and 0012 (`noteGuestUnwind`): a frameless function jumping back to its own entry through a register, sp unmoved, would have been taken for a stub's return by an outer call. Not seen in Rogue Galaxy; found by the 2026-10-20 afternoon review. |
 
 A new patch is the output of `git -C thirdparty/PS2Recomp diff` for the
 files it changes, with the earlier patches applied.

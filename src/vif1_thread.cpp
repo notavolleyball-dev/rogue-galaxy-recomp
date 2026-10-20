@@ -419,6 +419,8 @@ private:
 };
 
 GifStage *g_stage = nullptr;
+// For busyReport's VU1 pair counts.
+PS2Runtime *g_runtime = nullptr;
 
 // One handed-over list, with the VU1 D/T-bit enables (VU0 FBRST bits 10 and
 // 11) the game thread had when it started it.
@@ -775,6 +777,7 @@ void install(PS2Runtime &runtime)
         return;
     }
     g_thread = new Vif1Thread(runtime);
+    g_runtime = &runtime;
 
     // GS packets from the VIF1 thread and from the game's own GIF transfers
     // reach the GS through PS2Memory. Its GifArbiter queues them unlocked and
@@ -883,6 +886,29 @@ std::string busyReport()
     lastTime = now;
     lastBusy = busy;
     lastGif = gif;
+    // VU1 pairs run on the interpreter since the last report: a program the
+    // build has not compiled (several times slower), e.g. an effect's, shows
+    // up here. Read unsynchronised from the VIF1 thread's counters; a stats
+    // line can live with a torn count.
+    if (g_runtime)
+    {
+        static uint64_t lastInterpreted = 0u, lastCompiled = 0u;
+        const uint64_t interpreted = g_runtime->vu1().interpretedPairsExecuted();
+        const uint64_t compiled = g_runtime->vu1().compiledPairsExecuted();
+        const uint64_t newInterpreted = interpreted - std::min(interpreted, lastInterpreted);
+        const uint64_t newCompiled = compiled - std::min(compiled, lastCompiled);
+        lastInterpreted = interpreted;
+        lastCompiled = compiled;
+        if (newInterpreted != 0u)
+        {
+            char more[96];
+            std::snprintf(more, sizeof(more), " | vu1 interpreted %llu pairs (%.0f%%)",
+                          static_cast<unsigned long long>(newInterpreted),
+                          100.0 * static_cast<double>(newInterpreted) /
+                              static_cast<double>(newInterpreted + newCompiled));
+            return std::string(text) + more;
+        }
+    }
     return text;
 }
 

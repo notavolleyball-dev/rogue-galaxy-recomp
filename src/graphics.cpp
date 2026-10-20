@@ -51,6 +51,19 @@ bool g_hasMenu = false;
 // player's marks of 2026-10-20 never reached the log.
 std::atomic<unsigned> g_f9Presses{0u};
 std::atomic<unsigned> g_f10Presses{0u};
+// The longest gap between two pump() calls since the stats line last printed
+// it. The presenter loop calls pump several times a frame, so this is not the
+// frame time (the backend's "longest frame" is) but the longest the main
+// thread was held up: by a wait for the GS, a present, a load.
+std::atomic<int64_t> g_longestPumpGapNanos{0};
+
+std::string mainStallReport()
+{
+    const int64_t longest = g_longestPumpGapNanos.exchange(0, std::memory_order_relaxed);
+    char text[48];
+    std::snprintf(text, sizeof(text), " | main stall %.1f ms", static_cast<double>(longest) / 1e6);
+    return text;
+}
 
 bool SDLCALL countMarkKeys(void *, SDL_Event *event)
 {
@@ -77,6 +90,17 @@ bool pump(void *userData)
     debug::notePresenterLoop();
     static const bool watching = SDL_AddEventWatch(&countMarkKeys, nullptr);
     (void)watching;
+    {
+        static auto previous = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t gap = std::chrono::duration_cast<std::chrono::nanoseconds>(now - previous).count();
+        previous = now;
+        int64_t longest = g_longestPumpGapNanos.load(std::memory_order_relaxed);
+        while (gap > longest &&
+               !g_longestPumpGapNanos.compare_exchange_weak(longest, gap, std::memory_order_relaxed))
+        {
+        }
+    }
     if (!backend->pumpEvents())
     {
         return false;
@@ -95,9 +119,9 @@ bool pump(void *userData)
     static const auto markStart = std::chrono::steady_clock::now();
     for (unsigned n = g_f9Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
     {
-        std::printf("[mark] %.1f s\n",
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
-        std::fflush(stdout);
+        // On stderr with the stats lines, so a mark cannot cut one in two.
+        std::fprintf(stderr, "[mark] %.1f s\n",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
     }
@@ -105,8 +129,7 @@ bool pump(void *userData)
     // waits, the host stacks), for a freeze that keeps flipping.
     if (g_f10Presses.exchange(0u, std::memory_order_relaxed) != 0u)
     {
-        std::printf("[mark] F10: stall report requested\n");
-        std::fflush(stdout);
+        std::fprintf(stderr, "[mark] F10: stall report requested\n");
         debug::requestStallReport();
     }
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
@@ -216,7 +239,8 @@ Setup::Setup(PS2Runtime &runtime)
         sdl->setResolutionScale(runScale);
         // The VIF1 thread's share of the wall on every stats line, beside the
         // worker's: an F9 mark then says which thread was saturated.
-        dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport(); });
+        dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport() + mainStallReport(); });
+        dq8::gfx::setPresentObserver(&debug::noteFrameTime);
         if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");

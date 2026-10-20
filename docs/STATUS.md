@@ -2,14 +2,15 @@
 
 **The game runs.** `roguegalaxy` boots to the title screen, starts a new
 game, plays the opening movie and the real-time cutscenes in Salgin, and
-fights the first battles (HUD, damage, allies, results screen) at the game's
-own 30 frames per second, every frame presented once, with the GS on the
-GPU, VU1 compiled ahead of time and on a thread of its own, music and sound
-effects, keyboard or gamepad. The first battle, the heaviest scene so far,
-dips to 15 to 22 and then runs in slow motion.
+fights battles (HUD, damage, allies, results screen) at 60 frames per
+second with `RogueGalaxy.bat` (the scene's step follows the frame time, so
+a slow frame does not play in slow motion; the game's own 30 without
+`RG_FPS=60`), with the GS on the GPU, VU1 compiled ahead of time and on a
+thread of its own, music and sound effects, keyboard or gamepad. The
+heaviest field scene measured, a boss gate, holds 50 to 60, limited by the
+VU1 programs.
 Known gaps: a rare hang after the Story loading screen (below), and the
-remaining phase 5 work (widescreen, 60 fps logic, self-contained
-packaging).
+remaining phase 5 work (widescreen, self-contained packaging).
 
 | Phase | Goal | State |
 |---|---|---|
@@ -18,7 +19,7 @@ packaging).
 | 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
 | 3 | Boot to the title screen | done |
 | 4 | Field, battle, movies, sound | done |
-| 5 | Performance, widescreen, 60 fps, launcher | 30 fps nearly everywhere, launcher, in-game menu; rest next |
+| 5 | Performance, widescreen, 60 fps, launcher | 60 fps mode by default (50-60 in the heaviest scenes), launcher, in-game menu; rest next |
 
 ## Phase 1 in short
 
@@ -783,8 +784,9 @@ from `CharaActLoco`): a rise of 55 units driven by the motion with the
 gravity flags set (bits 46 and 37 of chara+0x3D0), a hold at the top
 under the same flags, then the fall under gravity (move id 1) until
 `CharaHasLandedMaybe` (id 4). Its state counter at chara+0xAD0 advances by
-the step the action manager passes in its context (+0x4 =
-`GameSceneGetTimeStep`, 0x232220), so it keeps wall time. 30 fps mode:
+the step the action manager passes in its context (+0x4, set from
+`GameSceneGetTimeStep` at 0x232220 in `ActionMgrRunActions`), so it keeps
+wall time. 30 fps mode:
 rise 0.268 s (8 moves), hold 0.235 s (7), fall 0.50 s (15 moves,
 -0.4356 a move), peak 55.00. 60 fps mode: rise 0.267 s (16 moves), hold
 0.220 s (13), fall 0.50 s (30 moves, -0.1089 a move), peak 55.00. The
@@ -1015,7 +1017,8 @@ VIF1 thread's busy share, put that thread at 94% of the wall with the
 draws per frame unchanged; the game thread spent half its time waiting
 for it, and the doubled `ee-dispatches` a frame were its polling, not new
 game logic. Inside the VIF1 thread: compiled VU1 programs 56% (one
-routine, `r_a786efabfa469ada_44`, 18%), queueing each primitive for the GS
+routine, `r_a786efabfa469ada_44`, 18%; `_52` in the builds since the
+recorded programs were compiled in), queueing each primitive for the GS
 worker 17% (42,000 a frame, 312 bytes each), the GS front end 9%, texture
 uploads into the worker's queue 6%, and a wait for the worker at every
 FINISH. A microbenchmark of the worker queue alone (one producer, a
@@ -1045,6 +1048,72 @@ the stage), the frame rate 33-41 before and 39-54 after (means 37.5 and
 street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
+
+**A profile of a hitch nobody could mark in time, and a review (2026-10-20
+afternoon).** A hitch is often over before F9 is pressed. With
+`RG_PROFILE_BEFORE=S` the sampler runs all the time, keeping quarter-second
+slices of the last S seconds, and a window holds the S seconds before its
+mark as well as the ones after; `RG_PROFILE_AUTO_MS=N` opens a window by
+itself when a present comes N ms after the one before and three times the
+usual gap, or when the frame rate halves for a few frames (dq8-gfx's new
+`setPresentObserver` feeds the frame times to `debug::noteFrameTime`), and
+such a window is the hitch and half a second either side. At the gate it
+caught the boot, the area load, the field entry (376 ms; the GS worker
+building textures and waiting on readbacks, the GIF stage waiting for room
+in its queue) and the bench's frame capture. Sampling all the time costs:
+at a round a millisecond the VIF1 thread took 16% longer a frame; at the
+replay's round every 5 ms, with the sampler at time-critical priority (a
+preemption between SuspendThread and ResumeThread froze the suspended
+thread for a quantum), 15.7 against 17.2 ms a frame, about 9%. So only
+`RogueGalaxy-engasgos.bat` samples all the time; `-perfil` keeps its 20 s
+window from the F9. Profiles are numbered on from the files already there
+(a new session overwrote the last one's), `-perfil` copies the build to
+`build/run/exe-perfil.exe` at each start, and the `[profile]` and `[mark]`
+lines go to stderr with the stats, whose lines another stream's printf cut
+in two. Three review agents read the uncommitted work and the last commit
+(host code, framework patches 0012-0015, documentation). No bug confirmed
+in the patches; two cheap hardenings taken: the queue append of 0015 is a
+range insert (a failed allocation throws before anything moves) and patch
+0016 counts a jump the dispatcher hands to the scheduler as an unwind. Left
+as known: the unwind serial follows the scheduler's current thread, which an
+interrupt-side rotate or suspend can clear while guest code runs (Rogue
+Galaxy calls neither); with the software GS and the worker, a lens-flare
+depth read no longer waits for a FINISH (the GPU backend never writes depth
+to local memory). The documentation still described the 30 fps game in its
+summaries, and a few notes were stale; fixed. Frames byte-identical at 1x.
+
+**Short hitches (2026-10-20 afternoon).** The user marked four in a few
+minutes with `RogueGalaxy-engasgos.bat` (the profile launcher with a stats
+line every 10 frames; each line now gives the longest frame between two
+presents, the longest the main thread was held up, the GPU pipelines
+created and what they cost, and the VU1 pairs run on the interpreter;
+`tools/bench/hitches.py` turns a log into one row per interval). Two kinds.
+The drops to 47-50 fps for a second or so are the VIF1 thread at 87-89%
+with more on screen (12,600 draws a 10-frame interval against 8,000-9,000):
+the VU1 programs' known limit. The others, at the field's first frames and
+once a few seconds into it, had the GIF stage at 70-90% with the VIF1
+thread and the GS worker below normal, and frames of 60-120 ms (the gate
+bench: one of 629 ms after the load, then 152 ms). A profile of the GIF
+thread put most of its own work in reallocating the GS worker's queue:
+publishing a stage of commands behind pending ones reserved exactly the
+new size, so while the worker was behind every publish of 128 commands
+moved the whole queue, up to 16 MB, to a new block, and the presenter
+waited on the submission lock meanwhile. Patch 0015 lets the queue grow
+geometrically: the frame after the load is 372-391 ms instead of 629 ms
+plus a 152 ms one, the GIF thread's time inside the executable over that
+window 6% instead of 16%; steady gate numbers unchanged within noise
+(VIF1 16.5 to 16.2 ms a frame). The 1x walk's frame is byte-identical.
+What is left of that frame is 1,044 texture resolves (readbacks of
+render-target pages a texture build reads) in its interval, 0.24-0.28 s
+of waits, and 62 texture builds. A mid-field hitch of the second kind did
+not come back in a bench that walks and turns the camera at the gate,
+with either build, so whether the patch removes it is for the user's next
+session to show. Two traps of the bench: the frame capture
+(`[gs-census] frame logged`) is a quarter to half a second hitch of its
+own, and a build copied under a new file name runs with the driver's
+shader cache cold (the first 29 pipelines in 495 ms, not 2 ms). The
+sampler now writes a profile window still open when the game is closed
+(the user's first window was lost a second before its end).
 
 **The VU1 programs, first cuts (2026-10-20 afternoon).** The sampler
 listed the process's threads with a system-wide snapshot every round,

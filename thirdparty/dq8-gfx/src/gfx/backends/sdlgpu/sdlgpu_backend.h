@@ -20,6 +20,11 @@ namespace dq8::gfx {
 // interval; empty for none (Rogue Galaxy: added).
 void setStatsExtraLine(std::function<std::string()> provider);
 
+// Called at every present with the seconds since the previous one, on the
+// thread that prepares presentations (the GS worker behind the threaded
+// backend), e.g. to notice a hitch as it happens (Rogue Galaxy: added).
+void setPresentObserver(std::function<void(double)> observer);
+
 
 class SdlPadInput;
 

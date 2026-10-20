@@ -155,6 +155,7 @@ int run(int argc, char **argv)
     std::fflush(stdout);
 
     runtime.run();
+    rg::debug::stopSampler();
     rg::debug::stopStallWatch();
     rg::vif1::shutdown();
 

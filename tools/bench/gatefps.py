@@ -23,8 +23,8 @@ def main() -> int:
             if m:
                 busy = (int(m.group(1)), int(m.group(2)) if m.group(2) else None)
                 continue
-            m = re.match(r"\[gfx\] ([\d.]+) fps .*gif packets=(\d+)", line)
-            if m and int(m.group(2)) // 60 > 5000 and busy:
+            m = re.match(r"\[gfx\] ([\d.]+) fps .*? over (\d+) frames .*gif packets=(\d+)", line)
+            if m and int(m.group(3)) // int(m.group(2)) > 5000 and busy:
                 rate = float(m.group(1))
                 fps.append(rate)
                 vif1.append(busy[0] * 10.0 / rate)

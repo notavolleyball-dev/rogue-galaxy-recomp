@@ -7,7 +7,7 @@ native PC executable, built on [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 |---|---|
 | Release | NTSC-U, **SCUS-97490** v1.01 (one DVD9) |
 | Framework | [Sinan-Karakaya/PS2Recomp](https://github.com/Sinan-Karakaya/PS2Recomp) fork, pinned in `thirdparty/PS2Recomp` |
-| State | **Runs**: title screen, opening, field and the first battles at the game's 30 fps, dipping to about 15 to 22 in the first battle, where it then runs in slow motion rather than skipping (GS on the GPU, VU1 compiled ahead of time and on its own thread), with music and sound. See [`docs/STATUS.md`](docs/STATUS.md). |
+| State | **Runs**: title screen, opening, field and battles at 60 fps by default (`RG_FPS=60` in `RogueGalaxy.bat`; the scene's step follows the frame time, so a slow frame does not play in slow motion), 50 to 60 at a boss gate, the heaviest field scene measured, where the VU1 programs are the limit; GS on the GPU, VU1 compiled ahead of time and on its own thread, music and sound. See [`docs/STATUS.md`](docs/STATUS.md). |
 
 ## Setup
 
@@ -96,9 +96,10 @@ screenshots (F12) and renderer statistics. F11 or Alt+Enter toggles
 fullscreen. The settings live in `%APPDATA%\RogueGalaxy\Recompiled\settings.ini`
 (`RG_SETTINGS_FILE` names another file).
 
-The game runs at 30 frames per second; on a 144 Hz monitor each frame lasts
-4 or 5 refreshes, which reads as judder, so 120 Hz or variable refresh looks
-smoother.
+`RogueGalaxy.bat` runs the game at 60 frames per second (`RG_FPS=60`; set
+`RG_FPS=30` before it in a terminal for the game's own 30). On a 144 Hz
+monitor a frame lasts 2 or 3 refreshes at 60 and 4 or 5 at 30, which reads
+as judder, so 120 Hz or variable refresh looks smoother.
 
 ## Running
 
@@ -113,11 +114,15 @@ layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
 `RogueGalaxy-perfil.bat` runs the same game with the profiler ready:
 each F9 samples every thread for the next 20 seconds
-(`RG_PROFILE_ON_MARK=1`, into `build/run/play-perfil-1.prof`, `-2`, ...),
-so a profile holds exactly the moment the player marked; report it with
-`tools/profile/report.py` against `build/run/exe-perfil.exe`, the copy of
-the build it was recorded with. Without `RG_PROFILE_ON_MARK` the window
-is fixed (`RG_PROFILE_START`, `RG_PROFILE_SECONDS`). It also prints a `[gfx]` line a second
+(`RG_PROFILE_ON_MARK=1`, into `build/run/play-perfil-1.prof`, `-2`, ...,
+numbered on from the files already there), so a profile holds the moment
+the player marked; report it with `tools/profile/report.py` against
+`build/run/exe-perfil.exe`, the copy of the build it was recorded with,
+which the launcher makes at each start (a report of an older session's
+profile needs that session's build). `RG_PROFILE_BEFORE` makes the windows
+reach back before the F9 (`RogueGalaxy-engasgos.bat`, below); without
+`RG_PROFILE_ON_MARK` the window is fixed (`RG_PROFILE_START`,
+`RG_PROFILE_SECONDS`). It also prints a `[gfx]` line a second
 into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`; the worker's share
 of the wall is "backend", the VIF1 thread's is the "vif1 busy" line, the
 game thread's load the "ee-dispatches" per frame), and F9 writes a
@@ -133,6 +138,8 @@ process can be dumped with `tools\hang\dumpmem.ps1` (its guest RAM and
 thread contexts) and a thread's call chain read from the dump with
 `python tools/hang/stackwalk.py DUMPDIR SP RA`.
 
+`RogueGalaxy-engasgos.bat` is the profile launcher with a stats line every 10 frames, for short hitches: each line also gives the longest frame of its interval (the longest gap between two presents), the longest the main thread was held up ("main stall"), the GPU pipelines created in it and what creating them cost (a first-time state compiles one), and the VU1 pairs that ran on the interpreter (a program the build lacks; the session records it into `build/vu1-profile`, see VU1 programs above). Its profiler samples all the time (`RG_PROFILE_BEFORE=10`; about 9% of the VIF1 thread's time at the boss gate, so it is for hunting hitches, not for playing): it writes a profile by itself at a hitch nobody marked (`RG_PROFILE_AUTO_MS=50`: a frame of 50 ms or more and three times the usual, or the frame rate halved for a few frames), of the hitch and half a second either side, up to 30 a session, and the log says so in a `[profile] window N: a hitch` line; an F9 window holds the 10 seconds before the press and the 5 after. Press F9 at each hitch felt, then read the lines around the `[mark]` (`python tools/bench/hitches.py build/last-run.log`, one row per interval); a profile window still open when the game is closed is cut short and written.
+
 | Variable | Effect |
 |---|---|
 | `RG_GS=sw` | Software GS rasterizer instead of the SDL3 GPU backend |
@@ -146,7 +153,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
 | `RG_GIF_THREAD=0` | Run the GS packets of the VIF1 lists on the VIF1 thread instead of a GIF stage of their own |
-| `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity and the jump's flight, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity`, `event`, `menu` picks which take the step (`event`: the scripts, the event player and the message windows count frames, so they run on the frames that complete a whole step, and at once when a button is pressed; the field modes that hold the scale for a scripted sequence, chests, talks and warps, take the half steps too; `menu`: the field's menus and HUD windows, the battle results among them, count frames as well and run on the same frames) |
+| `RG_FPS=60` | Set by `RogueGalaxy.bat` unless `RG_FPS` is already set (any other value keeps the game's 30): the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity and the jump's flight, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity`, `event`, `menu` picks which take the step (`event`: the scripts, the event player and the message windows count frames, so they run on the frames that complete a whole step, and at once when a button is pressed; the field modes that hold the scale for a scripted sequence, chests, talks and warps, take the half steps too; `menu`: the field's menus and HUD windows, the battle results among them, count frames as well and run on the same frames) |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
 | `RG_MOVIE_AUDIO=game` | The game's own movie PCM callback, which drops packets the runtime's demux delivers too early (noise) |
@@ -159,7 +166,12 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` (default 1000) |
 | `RG_HWWATCH=0xADDR` | x86 debug register on a guest word: writes leaving a value in `RG_HWWATCH_RANGE=lo-hi` (default the main stack) print the writer's stack (`RG_HWWATCH_READS=1`, `RG_HWWATCH_READER=0xFUNC`, `RG_HWWATCH_DELAY=s`); Windows only |
 | `RG_PROFILE=out.txt` | Sample all threads for `RG_PROFILE_SECONDS` (default 20) from `RG_PROFILE_START` seconds in (default 0); report with `tools/profile/report.py` (`RG_PROFILE_STACKS=1` also records the callers of samples inside the executable, which the report skips) |
-| `RG_STALL_SECONDS=15` | When no frame has been flipped for that long while the window is active, the log gets every guest thread's state (what it waits on; the running one's registers and the addresses it passes over the next second) and every host thread's stack (`exe!0x...` frames resolve with `llvm-symbolizer --obj=build/game/src/roguegalaxy.exe`, from the toolchain's `bin`), again every minute; `RG_STALL_WATCH=0` turns the watchdog off |
+| `RG_PROFILE_THREAD=NAME` | With `RG_PROFILE`: sample only the threads whose name starts with NAME (`VIF1`, `GIF`, `GSWorker`, `GameThread`), for many more samples of one |
+| `RG_PROFILE_ON_MARK=1` | With `RG_PROFILE`: a window of `RG_PROFILE_SECONDS` at each F9 instead, into `out-1.txt`, `out-2.txt`, ... (numbered on from the last file already there; an F9 during an open window is folded into it) |
+| `RG_PROFILE_BEFORE=S` | With `RG_PROFILE_ON_MARK=1`: sample all the time (every 5 ms; about 9% of the VIF1 thread at the boss gate) and put the S seconds before each F9 into its window too |
+| `RG_PROFILE_AUTO_MS=N` | With `RG_PROFILE_BEFORE`: a hitch opens a window by itself (a frame N ms long and three times the usual, or the frame rate halved for a few frames), of the hitch and half a second either side, at most 30 a run |
+| `RG_PROFILE_INTERVAL_MS=N` | The pause between two sampling rounds (default 1 for a window, 5 when sampling all the time with `RG_PROFILE_BEFORE`) |
+| `RG_STALL_SECONDS=15` | When no frame has been flipped for that long while the game is not paused, the log gets every guest thread's state (what it waits on; the running one's registers and the addresses it passes over the next second) and every host thread's stack (`exe!0x...` frames resolve with `llvm-symbolizer --obj=build/game/src/roguegalaxy.exe`, from the toolchain's `bin`), again every minute; `RG_STALL_WATCH=0` turns the watchdog off |
 | `RG_VU0_FLAGS=0` | Keep the generated code for the game's three VU0 macro-mode bounding-box tests (`AabbOverlap`, `AabbContains`, `AabbContainsPoint`), which always answer yes because the recompiler does not model the VU0 status flags; by default `src/vu0_flags.cpp` replaces them with host versions, which is what keeps the collision list from overflowing and the floor under the player |
 | `RG_POS_TRACE=1` | Log every call that puts a character somewhere it did not walk to (`CharaSetPos`, `CharaSetPosXYZ`, `CharaPlaceAt`: character, id, old and new position, caller), and any character still falling after 90 movement updates, with where it fell from |
 | `RG_MC0_DIR=path` | Memory card folder instead of `disc/mc0` (`mc1` is its sibling). The benchmarks point it at `build/run/mc0-bench`, a copy holding only the save they load, since a second save changes what the scripted load menu picks |

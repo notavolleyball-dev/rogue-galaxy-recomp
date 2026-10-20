@@ -84,6 +84,11 @@ std::function<std::string()> &statsExtraLine() {
     return provider;
 }
 
+std::function<void(double)> &presentObserver() {
+    static std::function<void(double)> observer;
+    return observer;
+}
+
 uint32_t statsInterval() {
     static const uint32_t interval = [] {
         const char *value = std::getenv("DQ8_GFX_STATS_EVERY");
@@ -500,6 +505,10 @@ bool batchTraceEnabled() {
 
 void setStatsExtraLine(std::function<std::string()> provider) {
     statsExtraLine() = std::move(provider);
+}
+
+void setPresentObserver(std::function<void(double)> observer) {
+    presentObserver() = std::move(observer);
 }
 struct SdlGpuBackend::Impl {
     mutable std::mutex mutex;
@@ -2508,10 +2517,22 @@ struct SdlGpuBackend::Impl {
     // question a profile of the whole process answers badly.
     void reportStats() {
         const uint32_t interval = statsInterval();
+        using Clock = std::chrono::steady_clock;
+        // The longest gap between two presents in the interval (Rogue Galaxy:
+        // added): a hitch of a frame or two disappears into the mean fps.
+        static Clock::time_point previousPresent = Clock::now();
+        static double longestPresentGap = 0.0;
+        if (interval != 0u || presentObserver()) {
+            const Clock::time_point presented = Clock::now();
+            const double gap = std::chrono::duration<double>(presented - previousPresent).count();
+            previousPresent = presented;
+            longestPresentGap = std::max(longestPresentGap, gap);
+            if (const auto &observe = presentObserver())
+                observe(gap);
+        }
         if (interval == 0u || (stats.presents % interval) != 0u)
             return;
 
-        using Clock = std::chrono::steady_clock;
         static Clock::time_point last = Clock::now();
         static SdlGpuStats previous{};
         static bool primed = false;
@@ -2713,6 +2734,24 @@ struct SdlGpuBackend::Impl {
                                               seconds * 100.0
                                         : 0.0);
             previousResolveNanos = targetStats().resolveNanos;
+            line += buf;
+            // New draw pipelines and what creating them cost (Rogue Galaxy:
+            // added): a compile stalls the worker the first time a state is
+            // drawn.
+            static size_t previousPipelines = 0u;
+            static uint64_t previousPipelineNanos = 0u;
+            const size_t pipelines = device.pipelineCount();
+            const uint64_t pipelineNanos = device.pipelineCreateNanos();
+            if (pipelines != previousPipelines) {
+                std::snprintf(buf, sizeof(buf), " | pipelines +%llu (%.1f ms)",
+                              static_cast<unsigned long long>(pipelines - std::min(pipelines, previousPipelines)),
+                              static_cast<double>(pipelineNanos - previousPipelineNanos) / 1e6);
+                line += buf;
+            }
+            previousPipelines = pipelines;
+            previousPipelineNanos = pipelineNanos;
+            std::snprintf(buf, sizeof(buf), " | longest frame %.1f ms", longestPresentGap * 1e3);
+            longestPresentGap = 0.0;
             line += buf;
             std::fprintf(stderr, "%s\n", line.c_str());
         }

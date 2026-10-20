@@ -1,18 +1,24 @@
 @echo off
 rem Rogue Galaxy with the profiler ready: each F9 in the game window marks
 rem the moment in build\last-run.log and samples every thread for the next
-rem 20 seconds into build\run\play-perfil-1.prof, -2, ... (stay where the
-rem frame rate drops while it runs). Report afterwards with
+rem 20 seconds into build\run\play-perfil-1.prof, -2, ... (numbered on from
+rem the files already there; stay where the frame rate drops while it runs).
+rem For a hitch over before F9 can be pressed, RogueGalaxy-engasgos.bat.
+rem Report afterwards with
 rem   python tools\profile\report.py build\run\play-perfil-1.prof build\run\exe-perfil.exe --top 30
 rem (exe-perfil.exe is the copy of the build this was recorded with; the
-rem report needs the symbols of that same build).
+rem report needs the symbols of that same build, so it is copied at each
+rem start: a report of an older session's profile needs that session's build).
+setlocal
+if not exist "%~dp0build\run" mkdir "%~dp0build\run"
+if exist "%~dp0build\game\src\roguegalaxy.exe" copy /y "%~dp0build\game\src\roguegalaxy.exe" "%~dp0build\run\exe-perfil.exe" >nul
 set RG_PROFILE=build\run\play-perfil.prof
 set RG_PROFILE_ON_MARK=1
-set RG_PROFILE_SECONDS=20
+if not defined RG_PROFILE_SECONDS set RG_PROFILE_SECONDS=20
 set RG_PROFILE_STACKS=1
 rem One [gfx] line a second in build\last-run.log, so a drop can be put to a
 rem moment of the session (the line counts from the start of the game).
-set DQ8_GFX_STATS_EVERY=60
+if not defined DQ8_GFX_STATS_EVERY set DQ8_GFX_STATS_EVERY=60
 rem VU1 microprograms the build lacks (they run on the interpreter, several
 rem times slower) are recorded into build\vu1-profile, which the next build
 rem compiles in.

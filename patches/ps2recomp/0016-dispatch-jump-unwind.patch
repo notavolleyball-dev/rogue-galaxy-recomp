@@ -1,0 +1,20 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b790940..da1e445 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1468,6 +1468,15 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         }
+ 
+         ctx->pc = targetPc;
++        // Returning false here unwinds the host frames to the scheduler as
++        // a checkpoint does, so it counts as one: a frameless function that
++        // jumps back to its own entry through a register would otherwise be
++        // taken for a stub's return by an outer call (Rogue Galaxy: added
++        // with the 2026-10-20 review; see the forgiveness below).
++        if (m_eeScheduler)
++        {
++            m_eeScheduler->noteGuestUnwind();
++        }
+         return false;
+     }
+ 

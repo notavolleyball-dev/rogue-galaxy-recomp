@@ -18,6 +18,7 @@
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -857,7 +858,10 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     info.target_info.has_depth_stencil_target = key.hasDepth != 0u;
     info.target_info.depth_stencil_format = static_cast<SDL_GPUTextureFormat>(key.depthFormat);
 
+    const auto started = std::chrono::steady_clock::now();
     SDL_GPUGraphicsPipeline *pipeline = SDL_CreateGPUGraphicsPipeline(m_device, &info);
+    m_pipelineCreateNanos += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
     if (!pipeline) {
         error = std::string("SDL_CreateGPUGraphicsPipeline: ") + SDL_GetError();
         return nullptr;
