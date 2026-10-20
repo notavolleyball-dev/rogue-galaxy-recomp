@@ -22,7 +22,7 @@ index 48fea3a..502a60e 100644
      uint64_t m_interpretedPairsExecuted = 0;
  
 diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
-index b3bd9c1..d59db5b 100644
+index c4ea831..b0064fa 100644
 --- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 @@ -426,6 +426,16 @@ void EeScheduler::run()
@@ -42,7 +42,7 @@ index b3bd9c1..d59db5b 100644
                  makeDormant(*running);
                  m_currentThreadId = 0;
              }
-@@ -2648,6 +2658,9 @@ void EeScheduler::waitForEvent()
+@@ -2643,6 +2653,9 @@ void EeScheduler::waitForEvent()
      {
          return;
      }
@@ -76,10 +76,10 @@ index 7300101..f90d9ef 100644
      if (m_eeTimerPendingCycles < kEeTimerBatchCycles)
      {
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 6ac119f..e04749b 100644
+index 3976419..3bb50ea 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -1552,6 +1552,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+@@ -1556,6 +1556,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                    vu0Data, PS2_VU0_DATA_SIZE,
                    m_gs, &m_memory,
                    startPC, 0u, ctx->vu0_itop, 4096);

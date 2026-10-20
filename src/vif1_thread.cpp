@@ -5,6 +5,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <string>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -15,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include <xmmintrin.h>
+
 #include "ThreadNaming.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
@@ -22,6 +26,15 @@
 
 namespace rg::vif1
 {
+namespace
+{
+// Nanoseconds the worker spent inside processVIF1Data, for busyReport().
+std::atomic<uint64_t> g_busyNanos{0u};
+// And the GIF stage in the GS, for the same line.
+std::atomic<uint64_t> g_gifBusyNanos{0u};
+// Set on the VIF1 thread: its GS packets go to the GIF stage.
+thread_local bool t_onVif1Thread = false;
+} // namespace
 namespace
 {
 
@@ -191,6 +204,222 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vect
     }
 }
 
+// The GS half of the lists. What the VIF1 thread hands the GS -- the
+// packets its VU1 programs XGKICK, DIRECT packets, and the textures that
+// continue across DIRECTs -- is copied here and run on a thread of its own,
+// in the order the VIF1 thread made it, as the PS2's GS draws beside VU1.
+// At a boss gate (40 fps, 2026-10-20) the VIF1 thread was 94% busy, a third
+// of it in the GS front end and in queueing each of its 42,000 primitives a
+// frame for the GS worker, and it waited for that worker at every FINISH;
+// copying the packets costs a few percent. RG_GIF_THREAD=0 keeps the GS on
+// the VIF1 thread, as before.
+//
+// Only the GS state lock is shared: the front end calls nothing back on the
+// game's side (SIGNAL and FINISH set CSR bits, which are atomic), so waiting
+// for this stage cannot deadlock a thread that does not hold that lock.
+class GifStage
+{
+public:
+    explicit GifStage(GS &gs) : m_gs(gs)
+    {
+        m_thread = std::thread([this] { run(); });
+        m_id = m_thread.get_id();
+    }
+
+    std::thread::id id() const { return m_id; }
+
+    // From the VIF1 thread: a packet or an image continuation, copied (the
+    // VU reuses its XGKICK buffer, the list its bytes).
+    void packet(const uint8_t *data, uint32_t size) { append(Kind::Packet, data, size); }
+    void image(const uint8_t *data, uint32_t size) { append(Kind::Image, data, size); }
+
+    // From the VIF1 thread, at the end of each list and as a list fills a
+    // buffer: hands over what it staged.
+    void publish()
+    {
+        if (m_staged.empty())
+        {
+            return;
+        }
+        const size_t bytes = m_staged.size();
+        {
+            std::unique_lock lock(m_mutex);
+            // A GS that falls behind holds the VIF1 thread back instead of
+            // letting the copies pile up.
+            m_space.wait(lock, [&] { return m_outstanding == 0u || m_outstanding + bytes <= kCapacity; });
+            m_buffers.push_back(std::move(m_staged));
+            m_outstanding += bytes;
+            ++m_published;
+            m_staged.clear();
+            if (!m_pool.empty())
+            {
+                m_staged = std::move(m_pool.back());
+                m_pool.pop_back();
+            }
+        }
+        m_work.notify_one();
+    }
+
+    // Waits until everything handed over has run; a no-op on this stage's
+    // own thread.
+    void drain()
+    {
+        if (std::this_thread::get_id() == m_id)
+        {
+            return;
+        }
+        std::unique_lock lock(m_mutex);
+        m_idle.wait(lock, [&] { return m_done == m_published; });
+    }
+
+    bool busy()
+    {
+        std::lock_guard lock(m_mutex);
+        return m_done != m_published;
+    }
+
+    // Runs what is queued, then ends the thread.
+    void stop()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_stop = true;
+        }
+        m_work.notify_all();
+        if (m_thread.joinable())
+        {
+            m_thread.join();
+        }
+    }
+
+private:
+    enum class Kind : uint32_t
+    {
+        Packet,
+        Image,
+    };
+    // Sixteen bytes, so the data after it stays quadword aligned.
+    struct Header
+    {
+        Kind kind;
+        uint32_t size;
+        // The VIF1 thread's MXCSR when it handed the packet over, without
+        // the sticky exception flags. The GS front end's float work (Q, S
+        // and T among them) ran under it: VU1 programs select rounding
+        // toward zero, and under this thread's default the logged frames
+        // differed in the last bit of those values.
+        uint32_t mxcsr;
+        uint32_t unused;
+    };
+    static_assert(sizeof(Header) == 16u);
+
+    void append(Kind kind, const uint8_t *data, uint32_t size)
+    {
+        if (!data || size == 0u)
+        {
+            return;
+        }
+        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, 0u};
+        const auto *raw = reinterpret_cast<const uint8_t *>(&header);
+        m_staged.insert(m_staged.end(), raw, raw + sizeof(header));
+        m_staged.insert(m_staged.end(), data, data + size);
+        m_staged.resize((m_staged.size() + 15u) & ~size_t{15u});
+        if (m_staged.size() >= kPublishBytes)
+        {
+            publish();
+        }
+    }
+
+    void run()
+    {
+        ThreadNaming::SetCurrentThreadName("GIF");
+        uint32_t mxcsr = _mm_getcsr() & ~kMxcsrFlags;
+        for (;;)
+        {
+            std::vector<uint8_t> buffer;
+            {
+                std::unique_lock lock(m_mutex);
+                m_work.wait(lock, [&] { return !m_buffers.empty() || m_stop; });
+                if (m_buffers.empty())
+                {
+                    return;
+                }
+                buffer = std::move(m_buffers.front());
+                m_buffers.pop_front();
+            }
+            const auto started = std::chrono::steady_clock::now();
+            size_t at = 0u;
+            while (at + sizeof(Header) <= buffer.size())
+            {
+                Header header;
+                std::memcpy(&header, buffer.data() + at, sizeof(header));
+                const uint8_t *data = buffer.data() + at + sizeof(Header);
+                if (header.mxcsr != mxcsr)
+                {
+                    _mm_setcsr(header.mxcsr);
+                    mxcsr = header.mxcsr;
+                }
+                try
+                {
+                    if (header.kind == Kind::Packet)
+                    {
+                        m_gs.processGIFPacket(data, header.size);
+                    }
+                    else
+                    {
+                        m_gs.processImageContinuation(data, header.size);
+                    }
+                }
+                catch (const std::exception &error)
+                {
+                    std::fprintf(stderr, "[gif] packet failed: %s\n", error.what());
+                }
+                at += sizeof(Header) + ((static_cast<size_t>(header.size) + 15u) & ~size_t{15u});
+            }
+            g_gifBusyNanos.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
+                        .count()),
+                std::memory_order_relaxed);
+            const size_t bytes = buffer.size();
+            {
+                std::lock_guard lock(m_mutex);
+                m_outstanding -= bytes;
+                ++m_done;
+                if (m_pool.size() < kPoolSize && buffer.capacity() <= 4u * kPublishBytes)
+                {
+                    buffer.clear();
+                    m_pool.push_back(std::move(buffer));
+                }
+            }
+            m_space.notify_one();
+            m_idle.notify_all();
+        }
+    }
+
+    // A buffer goes over once it holds this much: a frame is several
+    // megabytes, so the stage works beside the list, not after it.
+    static constexpr size_t kPublishBytes = 128u * 1024u;
+    static constexpr size_t kCapacity = 64u * 1024u * 1024u;
+    static constexpr size_t kPoolSize = 16u;
+    static constexpr uint32_t kMxcsrFlags = 0x3Fu;
+
+    GS &m_gs;
+    std::thread m_thread;
+    std::thread::id m_id;
+    std::mutex m_mutex;
+    std::condition_variable m_work, m_space, m_idle;
+    std::deque<std::vector<uint8_t>> m_buffers; // guarded by m_mutex
+    std::vector<std::vector<uint8_t>> m_pool;   // guarded by m_mutex
+    std::vector<uint8_t> m_staged;              // the VIF1 thread's
+    size_t m_outstanding = 0u;
+    uint64_t m_published = 0u;
+    uint64_t m_done = 0u;
+    bool m_stop = false;
+};
+
+GifStage *g_stage = nullptr;
+
 // One handed-over list, with the VU1 D/T-bit enables (VU0 FBRST bits 10 and
 // 11) the game thread had when it started it.
 struct List
@@ -277,22 +506,35 @@ public:
     // VPU_STAT's VU1 D/T stop bits after the last MSCAL/MSCNT.
     uint32_t takeVpuStat() const { return m_vpuStat.load(std::memory_order_acquire); }
 
-    // Waits until every list handed over has run. A no-op on the VIF1
-    // thread itself, which never starts DMA but could reach a hook.
+    // Waits until every list handed over has run, and the GS packets they
+    // made with them. A no-op on the VIF1 thread itself, which never starts
+    // DMA but could reach a hook, and on the GIF stage's.
     void drain()
     {
-        if (std::this_thread::get_id() == m_workerId)
+        if (std::this_thread::get_id() == m_workerId || (g_stage && std::this_thread::get_id() == g_stage->id()))
         {
             return;
         }
-        std::unique_lock lock(m_mutex);
-        m_idle.wait(lock, [&] { return m_completed == m_submitted; });
+        {
+            std::unique_lock lock(m_mutex);
+            m_idle.wait(lock, [&] { return m_completed == m_submitted; });
+        }
+        if (g_stage)
+        {
+            g_stage->drain();
+        }
     }
 
     bool busy()
     {
-        std::lock_guard lock(m_mutex);
-        return m_completed != m_submitted;
+        {
+            std::lock_guard lock(m_mutex);
+            if (m_completed != m_submitted)
+            {
+                return true;
+            }
+        }
+        return g_stage && g_stage->busy();
     }
 
     // Lists that finished since the last call, for their DMAC completion.
@@ -308,6 +550,7 @@ private:
     void run()
     {
         ThreadNaming::SetCurrentThreadName("VIF1");
+        t_onVif1Thread = true;
         PS2Memory &memory = m_runtime.memory();
         for (;;)
         {
@@ -321,6 +564,7 @@ private:
                 m_current = std::move(m_lists.front());
                 m_lists.pop_front();
             }
+            const auto started = std::chrono::steady_clock::now();
             try
             {
                 if (!m_current.data.empty())
@@ -332,6 +576,17 @@ private:
             {
                 std::fprintf(stderr, "[vif1] list failed: %s\n", error.what());
             }
+            // The list's GS packets go over before it counts as done, so a
+            // drain that sees it done waits for them too.
+            if (g_stage)
+            {
+                g_stage->publish();
+            }
+            g_busyNanos.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
+                        .count()),
+                std::memory_order_relaxed);
             {
                 std::lock_guard lock(m_mutex);
                 ++m_completed;
@@ -529,12 +784,38 @@ void install(PS2Runtime &runtime)
     // and the VIF1 paths already drained it after each one.
     PS2Memory &memory = runtime.memory();
     memory.setGifArbiter(nullptr);
+    const char *gifMode = std::getenv("RG_GIF_THREAD");
+    if (!gifMode || std::strcmp(gifMode, "0") != 0)
+    {
+        g_stage = new GifStage(runtime.gs());
+    }
+    // From the VIF1 thread through the GIF stage. From any other thread (the
+    // game's own GIF transfers, after the drain every DMA start does) straight
+    // to the GS, behind whatever the stage still holds.
     memory.setGifPacketCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+        if (g_stage && t_onVif1Thread)
+        {
+            g_stage->packet(data, size);
+            return;
+        }
+        if (g_stage)
+        {
+            g_stage->drain();
+        }
         gs.processGIFPacket(data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+        if (g_stage && t_onVif1Thread)
+        {
+            g_stage->image(data, size);
+            return;
+        }
+        if (g_stage)
+        {
+            g_stage->drain();
+        }
         gs.processImageContinuation(data, size);
     });
     // DMA the game starts through the registers rather than sceDmaSend.
@@ -563,7 +844,7 @@ void install(PS2Runtime &runtime)
         g_gsWaiters[i].first = kGsWaiters[i];
         hook(runtime, kGsWaiters[i], hooks[i], g_gsWaiters[i].second);
     }
-    std::printf("[rg] VIF1 lists run on their own thread\n");
+    std::printf("[rg] VIF1 lists run on their own thread%s\n", g_stage ? ", their GS packets on another" : "");
 }
 
 void shutdown()
@@ -572,6 +853,35 @@ void shutdown()
     {
         g_thread->stop();
     }
+    if (g_stage)
+    {
+        g_stage->stop();
+    }
+}
+
+std::string busyReport()
+{
+    static auto lastTime = std::chrono::steady_clock::now();
+    static uint64_t lastBusy = 0u, lastGif = 0u;
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t busy = g_busyNanos.load(std::memory_order_relaxed);
+    const uint64_t gif = g_gifBusyNanos.load(std::memory_order_relaxed);
+    const double wall = std::chrono::duration<double>(now - lastTime).count();
+    auto share = [&](uint64_t nanos) { return wall > 0.0 ? (static_cast<double>(nanos) * 1e-9) / wall * 100.0 : 0.0; };
+    char text[96];
+    if (g_stage)
+    {
+        std::snprintf(text, sizeof(text), "vif1 busy=%.0f%% gif busy=%.0f%% of wall", share(busy - lastBusy),
+                      share(gif - lastGif));
+    }
+    else
+    {
+        std::snprintf(text, sizeof(text), "vif1 busy=%.0f%% of wall", share(busy - lastBusy));
+    }
+    lastTime = now;
+    lastBusy = busy;
+    lastGif = gif;
+    return text;
 }
 
 void drainForSnapshot()

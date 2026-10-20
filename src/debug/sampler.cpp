@@ -6,6 +6,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -163,9 +164,8 @@ std::string callerKey(const uint64_t (&callers)[kCallerDepth], int count)
     return out;
 }
 
-void run(std::string path, double startSeconds, double seconds)
+void sampleWindow(const std::string &path, double seconds)
 {
-    std::this_thread::sleep_for(std::chrono::duration<double>(startSeconds));
     const DWORD self = GetCurrentThreadId();
     const DWORD pid = GetCurrentProcessId();
     std::map<std::pair<std::string, uint64_t>, uint64_t> counts;
@@ -295,7 +295,55 @@ void run(std::string path, double startSeconds, double seconds)
     }
 }
 
+// RG_PROFILE_ON_MARK=1: a window opens at each F9 instead of at a fixed time,
+// into PATH with "-1", "-2"... before its extension, so the profile holds the
+// moment the player marked and nothing else (Rogue Galaxy: added). Presses
+// during a window are folded into it.
+std::atomic<unsigned> g_windowRequests{0u};
+bool g_onMark = false;
+
+std::string numberedPath(const std::string &path, unsigned index)
+{
+    const size_t dot = path.find_last_of('.');
+    const size_t slash = path.find_last_of("/\\");
+    const std::string suffix = "-" + std::to_string(index);
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+    {
+        return path + suffix;
+    }
+    return path.substr(0, dot) + suffix + path.substr(dot);
+}
+
+void run(std::string path, double startSeconds, double seconds)
+{
+    if (!g_onMark)
+    {
+        std::this_thread::sleep_for(std::chrono::duration<double>(startSeconds));
+        sampleWindow(path, seconds);
+        return;
+    }
+    unsigned served = 0u, index = 0u;
+    for (;;)
+    {
+        if (g_windowRequests.load(std::memory_order_acquire) == served)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        const std::string out = numberedPath(path, ++index);
+        std::printf("[profile] window %u: %.0f s from the mark, into %s\n", index, seconds, out.c_str());
+        std::fflush(stdout);
+        sampleWindow(out, seconds);
+        served = g_windowRequests.load(std::memory_order_acquire);
+    }
+}
+
 } // namespace
+
+void requestProfileWindow()
+{
+    g_windowRequests.fetch_add(1u, std::memory_order_acq_rel);
+}
 
 void startSampler()
 {
@@ -306,6 +354,8 @@ void startSampler()
     }
     const char *start = std::getenv("RG_PROFILE_START");
     const char *seconds = std::getenv("RG_PROFILE_SECONDS");
+    const char *onMark = std::getenv("RG_PROFILE_ON_MARK");
+    g_onMark = onMark && *onMark && *onMark != '0';
     std::thread(run, std::string(path), start ? std::atof(start) : 0.0, seconds ? std::atof(seconds) : 20.0).detach();
 }
 
@@ -316,6 +366,7 @@ void startSampler()
 namespace rg::debug
 {
 void startSampler() {}
+void requestProfileWindow() {}
 } // namespace rg::debug
 
 #endif

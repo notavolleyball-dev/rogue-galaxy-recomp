@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 class PS2Runtime;
 
 // Runs the game's VIF1 DMA lists -- the VU1 microprograms and the GS packets
@@ -20,7 +22,11 @@ class PS2Runtime;
 // to runtime stubs, DMA started through sceDmaSend, and DMA started through
 // the registers (via a framework patch, see patches/README.md).
 //
-// RG_VIF1_THREAD=0 runs the lists on the game's thread, as before.
+// The GS packets the lists make run on one more thread, the GIF stage, in
+// order; waiting for the lists in flight waits for them too.
+//
+// RG_VIF1_THREAD=0 runs the lists on the game's thread, as before;
+// RG_GIF_THREAD=0 keeps their GS packets on the VIF1 thread.
 namespace rg::vif1
 {
 
@@ -36,6 +42,11 @@ void shutdown();
 // started is otherwise still running at the flip, and where it is cut would
 // depend on thread timing. A no-op on the VIF1 thread or without it.
 void drainForSnapshot();
+// "vif1 busy=NN% gif busy=NN% of wall" over the time since the previous
+// call: the share the VIF1 thread spent processing lists (the rest it waited
+// for them), and the GIF stage running their GS packets.
+// For the stats line, so an F9 mark says which thread was saturated.
+std::string busyReport();
 
 // Lists handed over and not yet finished (the stall watch).
 bool busy();

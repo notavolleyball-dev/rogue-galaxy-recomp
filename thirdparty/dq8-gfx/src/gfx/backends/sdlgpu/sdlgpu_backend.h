@@ -10,9 +10,16 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <string>
 
 namespace dq8::gfx {
+
+// A line the embedder appends to every DQ8_GFX_STATS_EVERY report (without
+// the trailing newline), e.g. how busy its own threads were over the
+// interval; empty for none (Rogue Galaxy: added).
+void setStatsExtraLine(std::function<std::string()> provider);
+
 
 class SdlPadInput;
 

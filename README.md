@@ -111,12 +111,16 @@ them in the terminal before running it. The batch file also sets
 `VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
 layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
-`RogueGalaxy-perfil.bat` runs the same game with the profiler on
-(`RG_PROFILE`, fifteen minutes from one minute after boot, into
-`build/run/play-perfil.prof`) for a session of real play; report it with
+`RogueGalaxy-perfil.bat` runs the same game with the profiler ready:
+each F9 samples every thread for the next 20 seconds
+(`RG_PROFILE_ON_MARK=1`, into `build/run/play-perfil-1.prof`, `-2`, ...),
+so a profile holds exactly the moment the player marked; report it with
 `tools/profile/report.py` against `build/run/exe-perfil.exe`, the copy of
-the build it was recorded with. It also prints a `[gfx]` line a second
-into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`), and F9 writes a
+the build it was recorded with. Without `RG_PROFILE_ON_MARK` the window
+is fixed (`RG_PROFILE_START`, `RG_PROFILE_SECONDS`). It also prints a `[gfx]` line a second
+into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`; the worker's share
+of the wall is "backend", the VIF1 thread's is the "vif1 busy" line, the
+game thread's load the "ee-dispatches" per frame), and F9 writes a
 `[mark]` line with the seconds since launch (any launcher), so pressing
 it when a drop is felt puts the drop next to the `[gfx]` lines of that
 moment. F10 writes the stall watchdog's report at once (the guest
@@ -141,6 +145,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_UI_SCRIPT=file\|text` | Drive the menu for tests and screenshots: `<guest frame> <command> [args]` entries, `;`-separated (see `thirdparty/dq8-gfx/src/ui/ui_script.cpp`) |
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
+| `RG_GIF_THREAD=0` | Run the GS packets of the VIF1 lists on the VIF1 thread instead of a GIF stage of their own |
 | `RG_FPS=60` | Experimental: the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity and the jump's flight, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity`, `event`, `menu` picks which take the step (`event`: the scripts, the event player and the message windows count frames, so they run on the frames that complete a whole step, and at once when a button is pressed; the field modes that hold the scale for a scripted sequence, chests, talks and warps, take the half steps too; `menu`: the field's menus and HUD windows, the battle results among them, count frames as well and run on the same frames) |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |

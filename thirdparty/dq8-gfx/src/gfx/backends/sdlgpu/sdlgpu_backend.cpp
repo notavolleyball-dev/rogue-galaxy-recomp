@@ -79,6 +79,11 @@ bool gsScreenshotEnabled() {
 
 // DQ8_GFX_STATS_EVERY=N prints a counter delta every N presented frames; zero
 // when unset. The timing behind those numbers is only taken when it is set.
+std::function<std::string()> &statsExtraLine() {
+    static std::function<std::string()> provider;
+    return provider;
+}
+
 uint32_t statsInterval() {
     static const uint32_t interval = [] {
         const char *value = std::getenv("DQ8_GFX_STATS_EVERY");
@@ -492,6 +497,10 @@ bool batchTraceEnabled() {
 
 } // namespace
 
+
+void setStatsExtraLine(std::function<std::string()> provider) {
+    statsExtraLine() = std::move(provider);
+}
 struct SdlGpuBackend::Impl {
     mutable std::mutex mutex;
     SdlGpuDevice device;
@@ -2606,6 +2615,11 @@ struct SdlGpuBackend::Impl {
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
+        if (const auto &extra = statsExtraLine()) {
+            const std::string line = extra();
+            if (!line.empty())
+                std::fprintf(stderr, "  %s\n", line.c_str());
+        }
 
         std::fprintf(stderr,
                      "[gfx] %.1f fps (backend %.0f%% of wall) over %u frames | transfers=%llu (%llu KiB, "

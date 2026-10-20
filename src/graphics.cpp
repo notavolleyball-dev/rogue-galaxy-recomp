@@ -9,9 +9,11 @@
 
 #include "debug/gs_census.h"
 #include "debug/gs_timing.h"
+#include "debug/sampler.h"
 #include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
+#include "vif1_thread.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
 #include "runtime/gs/gs_cpu_backend.h"
@@ -72,6 +74,8 @@ bool pump(void *userData)
         std::printf("[mark] %.1f s\n",
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
         std::fflush(stdout);
+        // With the profile launcher, the mark also opens a profile window.
+        debug::requestProfileWindow();
     }
     f9WasDown = f9Down;
     // F10 writes the stall watchdog's report now (the guest threads, their
@@ -190,6 +194,9 @@ Setup::Setup(PS2Runtime &runtime)
             settings.showFps = true;
         }
         sdl->setResolutionScale(runScale);
+        // The VIF1 thread's share of the wall on every stats line, beside the
+        // worker's: an F9 mark then says which thread was saturated.
+        dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport(); });
         if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");

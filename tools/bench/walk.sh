@@ -31,7 +31,11 @@
 #                second, 60-70k in the battle against 25-50k on the field,
 #                or tools/bench/battlefps.py NAME..., the frame rate over
 #                the intervals with 55k draws or more (the comparable number).
+#   GATE=1       the boss gate bench: the player's File 03 saved beside it
+#                (build/run/mc0-gate), loaded and left standing; prints
+#                tools/bench/gatefps.py (fps, VIF1 ms a frame).
 #   MC0=DIR      another memory card directory (default build/run/mc0-bench).
+#   AFFINITY=HEX the instance's processor mask, set two seconds after start.
 #   INPUT=FILE   another input script (default build/run/input_pad3.txt);
 #                PROFILE_START=, PROFILE_SECONDS= and AFTER_OVERRIDE= (the
 #                seconds kept running after the logged frame) go with it.
@@ -52,6 +56,21 @@ if [ "$BATTLE" = "1" ]; then
     PROFILE_SECONDS=${PROFILE_SECONDS:-35}
     if [ ! -d build/run/mc0-battle/BASCUS-97490LV5RG_02 ]; then
         mkdir -p build/run/mc0-battle && cp -r disc/mc0/BASCUS-97490LV5RG_02 build/run/mc0-battle/
+    fi
+fi
+if [ "$GATE" = "1" ]; then
+    # The boss gate: the user's File 03 as saved beside it (2026-10-19
+    # 21:16, copied to build/run/mc0-gate; delete the copy to refresh it),
+    # loaded and left standing, where the VIF1 thread is the limit.
+    INPUT=build/run/input_gate0.txt
+    MC0=${MC0:-build/run/mc0-gate}
+    FRAME=${FRAME:-3200}
+    AFTER_OVERRIDE=${AFTER_OVERRIDE:-25}
+    if [ ! -f "$INPUT" ]; then
+        echo "909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5,2223:CIRCLE:5,2277:CIRCLE:5" > "$INPUT"
+    fi
+    if [ ! -d build/run/mc0-gate/BASCUS-97490LV5RG_02 ]; then
+        mkdir -p build/run/mc0-gate && cp -r disc/mc0/BASCUS-97490LV5RG_02 build/run/mc0-gate/
     fi
 fi
 if [ "$LONG" = "1" ]; then
@@ -93,10 +112,24 @@ if [ "$LONG" = "1" ]; then AFTER=52; fi
 # INPUT=, PROFILE_START=, PROFILE_SECONDS= and AFTER= override the above
 # for other scripts (the street view: build/run/input_street.txt).
 AFTER=${AFTER_OVERRIDE:-$AFTER}
+# The walk's inputs count pad reads, and the pad is read during the load
+# screen too: a load that takes longer on the clock (the disc's data out of
+# the file cache) starts the walk at another point of the area's arrival and
+# the frame differs. Reading the data first keeps the load time the same
+# (4 s when cold, nothing when cached; 2026-10-19: three runs out of four
+# diverged until this).
+cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1
 start=$(date +%s)
 # A forward-slash disc path marks this instance; RogueGalaxy.bat passes a
 # backslash one, so the user's game is never the one stopped below.
 build/game/src/roguegalaxy.exe disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
+# AFFINITY=HEX: the instance's processor mask (5555: one logical processor
+# per core of an 8-core SMT machine), to see whether two busy threads
+# sharing a core is what varies between runs.
+if [ -n "$AFFINITY" ]; then
+    sleep 2
+    powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='roguegalaxy.exe'\" | Where-Object { \$_.CommandLine -like '*disc/SCUS*' } | ForEach-Object { (Get-Process -Id \$_.ProcessId).ProcessorAffinity = 0x$AFFINITY }"
+fi
 for i in $(seq 1 120); do
     sleep 3
     grep -q "frame logged\|\[crash\]\|fatal" "build/run/$NAME.log" && break
@@ -108,4 +141,5 @@ grep -n "frame logged\|\[crash\]\|fatal\|VK_ERROR" "build/run/$NAME.log" | head 
 grep -m1 "internal scale" "build/run/$NAME.log"
 if [ "$LONG" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 12:36
 elif [ "$BATTLE" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 25 -w 0:50
+elif [ "$GATE" = "1" ]; then python tools/bench/gatefps.py "$NAME"
 else python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6; fi

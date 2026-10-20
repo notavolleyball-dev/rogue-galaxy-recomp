@@ -956,9 +956,14 @@ at 0x1fff500 that was in the log all along) and the main thread went
 dormant. Both dumps' main-thread stacks show the duplicated callee and
 the bogus frame, slot by slot. The VIF1 thread made it frequent: it
 posts an event per finished list, each a checkpoint at the next call.
-Patch 0010: the scheduler remembers that a checkpoint asked for an
-unwind (`EeScheduler::unwinding()`, cleared when guest code is entered
-again) and the dispatcher does not forgive while it is set. Also found:
+Patch 0010: the dispatcher forgives only with the stack pointer back
+where the call left it (the unwind comes from a deeper frame; a stub
+never leaves sp moved). A first version, a scheduler flag set by the
+checkpoint and cleared on guest entry, went stale when the scheduler
+resumed a thread suspended inside a stub (not a new entry): the stub's
+return was taken for an unwind and the stub ran twice, a semaphore wait
+twice over, and the 1x walk landed on a different frame each run
+(13609, 13363 and 9613 batches) and once hung at the load. Also found:
 the loading freeze's "main thread in WaitSema(25)" context was the
 loading-screen thread's (the main thread's stack sits at the top of RAM
 and `dumpmem.ps1` rejected its context: fixed; `tools/hang/stackwalk.py`
@@ -992,7 +997,54 @@ thread's count + n. One bench run of the fixed build hung silently at the
 title-to-load transition (42 s in, no line after; the bench window is
 never active, so the watchdog does not report there); four more runs,
 two with the watchdog off, did not reproduce it. Frames byte-identical
-at 1x and 3x; the street and the battle bench at the 60 cap.
+at 1x and 3x; the street and the battle bench at the 60 cap. Later that
+night the 1x walk diverged in three runs out of four with the same exe
+that had matched, which first looked like the flag version of patch 0010
+(it was wrong too, see above) and then was not: the disc's data had left
+the Windows file cache, the pad is read during the load screen, and a
+load that takes longer on the clock starts the scripted walk at another
+point of the area's arrival. `walk.sh` now reads the data files first
+(4 s when cold); with that, 1x and 3x match byte for byte again.
+
+**Throughput, round four (2026-10-20 morning): the boss gate, and the
+GIF stage.** The user's F9 at a boss gate (File 03, beside its save
+point; 34-44 frames a second against 60 everywhere before it) opened a
+20-second profile (`RogueGalaxy-perfil.bat` now samples at each F9, into
+`build/run/play-perfil-N.prof`). The stats line, which now carries the
+VIF1 thread's busy share, put that thread at 94% of the wall with the
+draws per frame unchanged; the game thread spent half its time waiting
+for it, and the doubled `ee-dispatches` a frame were its polling, not new
+game logic. Inside the VIF1 thread: compiled VU1 programs 56% (one
+routine, `r_a786efabfa469ada_44`, 18%), queueing each primitive for the GS
+worker 17% (42,000 a frame, 312 bytes each), the GS front end 9%, texture
+uploads into the worker's queue 6%, and a wait for the worker at every
+FINISH. A microbenchmark of the worker queue alone (one producer, a
+spinning stub backend) found the per-primitive cost in memory traffic,
+not in the copies or the locks: a chunked queue that sends a state only
+when it changes saved 8% there with the producer's caches polluted, and
+was left aside. What moved instead is the GS front end: the VIF1 thread
+now copies the packets it hands the GS (XGKICK, DIRECT, image
+continuations) into a GIF stage, a thread of its own that runs them in
+order (`src/vif1_thread.cpp`, `RG_GIF_THREAD=0` for the old way). Waiting
+for the lists in flight waits for the stage too, so the game's own GS
+work and the frame log's cut see what they did before; the front end
+calls nothing back on the game's side, so only the GS state lock is
+shared. Each packet carries the VIF1 thread's MXCSR: VU1 programs select
+rounding toward zero, the front end's Q/S/T arithmetic ran under it, and
+without it the logged frames differed in the last bit of those values.
+Frames byte-identical at 1x and 3x (both the batch logs and VRAM). A gate
+bench came with it (`GATE=1 tools/bench/walk.sh NAME 3 60`: a copy of the
+user's File 03 of 2026-10-19 21:16 in `build/run/mc0-gate`, loaded and
+left standing; `tools/bench/gatefps.py`). The scene there varies between
+runs of the 60 fps mode (one build gave 39 to 54 frames a second;
+pinning the process to one logical processor a core, `AFFINITY=5555`,
+did not change that), so the steadier number is the VIF1 thread's
+milliseconds a frame: 23-28 before, 16.5-22.5 with the stage (7-9 ms on
+the stage), the frame rate 33-41 before and 39-54 after (means 37.5 and
+45). The battle bench sits at the cap (median 59.9, it was 53-57) and the
+street walk at 60. What limits the gate now is VU1 itself: three quarters
+of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
+sixth of it, `commitFlags` and `stall` 6%.
 
 **Throughput, round two (2026-10-19 morning): the emulation threads.**
 Profiles of the street view at the player's scale (3, from the menu's

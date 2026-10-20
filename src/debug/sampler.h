@@ -8,6 +8,12 @@ namespace rg::debug
 // for RG_PROFILE_SECONDS (default 0 and 20), and writes "thread address count"
 // lines plus the executable's load address. tools/profile/report.py turns that
 // into a per-function report. Windows only; a no-op elsewhere.
+// RG_PROFILE_ON_MARK=1 opens the window at each F9 instead (see
+// requestProfileWindow), into numbered files.
 void startSampler();
+
+// With RG_PROFILE and RG_PROFILE_ON_MARK=1, opens a sampling window of
+// RG_PROFILE_SECONDS now (F9 in the game window); otherwise does nothing.
+void requestProfileWindow();
 
 } // namespace rg::debug
