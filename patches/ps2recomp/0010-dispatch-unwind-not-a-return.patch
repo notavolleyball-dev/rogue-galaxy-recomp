@@ -1,0 +1,85 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 86db8ad..042ea89 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -292,6 +292,11 @@ public:
+     void requestStop();
+     void postEvent(EeEvent event);
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
++    // True from a checkpoint that asked the guest to unwind to the scheduler
++    // until the scheduler enters guest code again. dispatchGuestBranch uses
++    // it to tell a callee's real return from the unwind passing through it
++    // (Rogue Galaxy: added; see the comment there).
++    [[nodiscard]] bool unwinding() const noexcept { return m_unwinding; }
+     void accountCycles(uint32_t cycles) noexcept;
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+@@ -501,6 +506,7 @@ private:
+             m_lastRunThreadId = 0;
+     }
+     bool m_rescheduleRequested = false;
++    bool m_unwinding = false;
+     bool m_timeSliceExpired = false;
+     bool m_insideInterrupt = false;
+     uint32_t m_pendingEeTimerInterrupts = 0;
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c4ea831..b3bd9c1 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -665,6 +665,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     if (m_checkpointPending.load(std::memory_order_acquire) ||
+         m_stopRequested.load(std::memory_order_acquire))
+     {
++        m_unwinding = true;
+         return true;
+     }
+ 
+@@ -672,6 +673,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+     {
+         m_checkpointPending.store(true, std::memory_order_release);
++        m_unwinding = true;
+         return true;
+     }
+ 
+@@ -685,6 +687,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     {
+         m_rescheduleRequested = true;
+         m_timeSliceExpired = true;
++        m_unwinding = true;
+         return true;
+     }
+ 
+@@ -2144,6 +2147,8 @@ void EeScheduler::runPendingGuestCall()
+     {
+         m_insideInterrupt = m_pendingInsideInterrupt;
+         m_guestExecuting.store(true, std::memory_order_release);
++        // Guest code starts (or resumes) here: nothing is unwinding any more.
++        m_unwinding = false;
+         if (function != nullptr && context != nullptr)
+         {
+             function(m_rdram, context, &m_runtime);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index d3311f8..6ac119f 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1501,7 +1501,18 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+         return false;
+     }
+ 
+-    if (ctx->pc == entryPc)
++    // A host replacement that leaves pc at the entry has returned: continue
++    // at the fallthrough. Not when a checkpoint is unwinding the guest to the
++    // scheduler through this frame: the pc it carries is the entry of the
++    // function the innermost frame was about to call, and when that is the
++    // same function as this frame's callee (a recursive script VM, a
++    // re-entrant event runner) the two were told apart only by luck. Taking
++    // the unwind for a return resumed the caller with the innermost frame's
++    // registers and stack pointer, and the next epilogue read a stale slot:
++    // the game's main thread ended at pc 0 in a battle, and jumped to an
++    // address off the stack while loading (Rogue Galaxy: fixed, two freezes
++    // on 2026-10-19).
++    if (ctx->pc == entryPc && !(m_eeScheduler && m_eeScheduler->unwinding()))
+     {
+         ctx->pc = fallthroughPc;
+     }

@@ -3,18 +3,20 @@
 `ps2recomp/` holds changes to the framework in `thirdparty/PS2Recomp`. The
 submodule stays at its upstream commit; configuring the game applies each
 patch here to its checkout, in name order, and skips one that is already
-applied (`git apply --reverse --check`). To undo them, run
-`git -C thirdparty/PS2Recomp checkout -- .`.
+applied (listed in `thirdparty/PS2Recomp/.rg-patches-applied`, or
+`git apply --reverse --check` for one not listed yet). To undo them, run
+`git -C thirdparty/PS2Recomp checkout -- .` and delete that stamp.
 
 To change the newest patch, edit the checkout and regenerate it from a
 base that holds the earlier ones: a detached `git worktree` of the
 submodule at its commit with patches 0001 to N-1 applied and committed,
 the modified files copied over it, `git diff` into the patch file. Then
-check that every patch still reverse-applies to the checkout: a later
-patch that inserts lines inside an earlier patch's context breaks that
-earlier patch's check, and the next configure tries to apply it again
-and fails (which happened once, 2026-10-19). A build does not
-reconfigure by itself, so run `cmake -S . -B build/game` once after.
+check that the new patch reverse-applies to the checkout. A later patch
+may change lines an earlier one added (0011 does, in 0004's and 0006's),
+after which the earlier one no longer reverse-applies; the stamp file is
+what keeps configure from applying it again (before the stamp this
+failed twice, 2026-10-19). A build does not reconfigure by itself, so
+run `cmake -S . -B build/game` once after.
 
 | Patch | Why |
 |---|---|
@@ -26,6 +28,9 @@ reconfigure by itself, so run `cmake -S . -B build/game` once after.
 | `0006-vu1-fmac-flags-ee-timer-batch.patch` | Three cuts on the emulation threads. The VU1 flags: `compile_vu_programs.py` decides pair by pair whether a MAC flag reader (FMEQ, FMAND, FMOR) can still see an FMAC's result (`flag_liveness`: a later FMAC that lands before any reader kills it; a call, a register jump or a pair left to the interpreter keeps it; the E bit ends it), and the compiled pair queues the result only then (`Block::flags`, `Frame::issue<..., Needed>`). The status flags are sticky, so an image that reads them (FSEQ, FSAND, FSOR; `VU1Interpreter::fmacFlagsWanted`, from a bit per pair that `PS2Memory::markVU1CodeWritten` keeps as the VIF's MPG writes the code, so no scan of the image after each of the game's code uploads, which was 2% of the VIF1 thread; a write from the EE side rescans once) queues every result, as does `PS2X_VU_FMAC_FLAGS=1`. Rogue Galaxy reads status flags nowhere, and 138 of its 1775 FMAC pairs keep their flags; the map's routine went from 14% to 9% of the VIF1 thread and `commitFlags` from 7% to 3%, byte-identical frames at 1x and 3x. And `PS2Memory::advanceEeTimers`, called at every guest safe point, batches its cycles to 2048 before walking the timers (a compare or overflow interrupt arrives up to 7 us late); the timer register reads and writes settle the batch first, so they see the exact count. And a texture split over DIRECT packets (a GIF IMAGE continuing in the next DIRECT) is handed to the GS in place through `PS2Memory::setGifImageCallback` / `GS::processImageContinuation` instead of being copied whole behind a synthesized IMAGE tag, which was 5% of the VIF1 thread in the streets. |
 | `0007-vu-region-counters-extern.patch` | `ps2_vu_detail::regionCounters`, a thread_local with a destructor, is declared `extern` in `ps2_vu1_region.h` and defined once in `ps2_vu1_core.cpp`: as an inline variable every translation unit including the header emitted its TLS initialization wrapper, and lld on COFF refuses the duplicates as soon as the compiled VU blocks' shards (`PS2X_VU_AOT_IMAGES`, 32 of them) include it. Needed to compile the game's VU0 micro programs as blocks. |
 | `0008-dispatch-single-lookup.patch` | `PS2Runtime::dispatchGuestBranch` looks the target up in the function table once, for the presence test and the call, instead of `hasFunction` and then `lookupFunction` (which looked again). It runs for every inter-function transfer of the generated code; with File 03's three characters the dispatcher was 7% of the game thread and the second lookup 3%. The dispatch history still records the call. |
+| `0009-ee-thread-end-report.patch` | The scheduler says on stderr when a guest thread ends with pc 0 outside any callback (a jump to address 0, or a return past the entry) and when the main thread calls ExitThread or ExitDeleteThread, with the registers and the last 64 dispatched pcs (`PS2Runtime::dispatchHistory`, new). Before, the thread went dormant silently, and a game whose main thread did so looked frozen with every other thread waiting on a semaphore (Rogue Galaxy, 2026-10-19: a hit that poisoned and knocked the player down). |
+| `0010-dispatch-unwind-not-a-return.patch` | The freezes' cause. `PS2Runtime::dispatchGuestBranch` forgives a callee that comes back with pc still at its entry (a host stub that never set pc) by continuing at the fallthrough. A scheduler checkpoint unwinds the guest the same way, pc at the entry of the function the innermost frame was about to call; when that is also an outer in-flight frame's callee (indirect recursion: the config script VM while loading, the action dispatch on a knockdown, the script runner on a skill) the outer frame took the unwind for a return and resumed its caller with the inner frame's registers and stack pointer, and the next epilogue read a stale slot: the main thread ended at pc 0, or jumped into its own stack. `EeScheduler::unwinding()` is set by a checkpoint that returns true and cleared when guest code is entered again; the dispatcher does not forgive while it is set. Found by the 2026-10-19 review from the two memory dumps. |
+| `0011-review-fixes.patch` | Smaller findings of the same review. An FMAC-class upper with an empty dest mask publishes no flags (`upperPublishesFlags`, and `compile_vu_programs.py`'s liveness agreed only by luck: none of the recorded routines crosses a zero word). The EE timer batch delivers a late interrupt even when no timer is cued any more, and the idle wait settles the batch before computing its deadline. A thread that ends because its pc names no function says so (the report behind it prints once per process). A VU0 micro program that runs out of its 4096-cycle budget is reported (`VU1Interpreter::lastRunEnded`). |
 
 A new patch is the output of `git -C thirdparty/PS2Recomp diff` for the
 files it changes, with the earlier patches applied.

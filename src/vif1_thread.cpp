@@ -175,9 +175,11 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vect
         }
         return true;
     });
-    out.reserve(total);
     try
     {
+        // A garbage chain can sum to more than a buffer can hold; the list
+        // then ends where the copy stops, like one that cannot be read.
+        out.reserve(total);
         for (const auto &[address, bytes] : spans)
         {
             appendBytes(memory, out, address, bytes);

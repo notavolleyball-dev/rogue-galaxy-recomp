@@ -9,6 +9,7 @@
 
 #include "debug/gs_census.h"
 #include "debug/gs_timing.h"
+#include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
 #include "ps2_runtime.h"
@@ -73,6 +74,17 @@ bool pump(void *userData)
         std::fflush(stdout);
     }
     f9WasDown = f9Down;
+    // F10 writes the stall watchdog's report now (the guest threads, their
+    // waits, the host stacks), for a freeze that keeps flipping.
+    static bool f10WasDown = false;
+    const bool f10Down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F10];
+    if (f10Down && !f10WasDown)
+    {
+        std::printf("[mark] F10: stall report requested\n");
+        std::fflush(stdout);
+        debug::requestStallReport();
+    }
+    f10WasDown = f10Down;
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
     backend->hostPadState(held, pressed, sticks);
     ps2PadPublishHostState(held, pressed, rg::pad::shapeSticks(sticks));

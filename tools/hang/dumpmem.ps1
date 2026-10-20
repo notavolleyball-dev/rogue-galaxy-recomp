@@ -86,7 +86,7 @@ public static class MemDump {
             uint sp = BitConverter.ToUInt32(b, i + 16); uint ra = BitConverter.ToUInt32(b, i + 48);
             if (!ZeroTail(b, i + 16) || !ZeroTail(b, i + 48)) continue;
             if (sp == 0 || sp >= 0x02000000 || (sp & 0xF) != 0) continue;
-            if (ra < 0x100000 || ra >= 0x600000 || (ra & 3) != 0) continue;
+            if ((ra & 3) != 0 || (ra != 0 && (ra < 0x100000 || ra >= 0x600000) && (sp < 0x1FF0000 || sp >= 0x2000000))) continue; // a thread that ended has ra 0; the main thread's stack sits at the top of RAM and its ra can point into it
             ulong hit = bas + off + (ulong)i; ulong ctxBase = hit - 448;
             byte[] ctx = Read(h, ctxBase, 4096);
             if (ctx == null) continue;

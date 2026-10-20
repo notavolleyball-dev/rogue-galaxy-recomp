@@ -1,0 +1,75 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index b8f9a80..d894040 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -395,6 +395,9 @@ public:
+                                const char *debugName);
+     void setMissingFunctionPolicy(MissingFunctionPolicy policy);
+     MissingFunctionPolicy missingFunctionPolicy() const;
++    // The last guest pcs this thread dispatched to, newest last, for a
++    // report (Rogue Galaxy: added).
++    std::string dispatchHistory() const;
+     void resetMissingFunctionReportOnce();
+ 
+     static const IoPaths &getIoPaths();
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 991d90b..c4ea831 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -372,6 +372,24 @@ void EeScheduler::run()
+                 }
+                 continue;
+             }
++            // A thread whose pc reached 0 outside any callback jumped to
++            // address 0 (a null function pointer) or returned past its entry.
++            // It ends here, which looks like a freeze when it is the game's
++            // main thread, so say so, with the dispatches that led to it
++            // (Rogue Galaxy: added). The dispatcher pseudo-threads (negative
++            // ids) end this way after every callback, and a worker thread
++            // returning from its entry ends with ra 0 by design; a line is
++            // worth it for the main thread, or for a jump that left ra behind.
++            const bool worthALine = running->id > 0 &&
++                                    (running->id == kMainThreadId || getRegU32(&context, 31) != 0u);
++            if (worthALine)
++            std::fprintf(stderr,
++                         "[ee] thread %d ended at pc 0: ra 0x%08X sp 0x%08X a0 0x%08X a1 0x%08X s0 0x%08X; last "
++                         "dispatches %s\n",
++                         running->id, getRegU32(&context, 31), getRegU32(&context, 29), getRegU32(&context, 4),
++                         getRegU32(&context, 5), getRegU32(&context, 16), m_runtime.dispatchHistory().c_str());
++            if (worthALine)
++                std::fflush(stderr);
+             makeDormant(*running);
+             m_currentThreadId = 0;
+             continue;
+@@ -827,6 +845,15 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
+     assert(exiting != nullptr);
+     const int id = exiting->id;
+     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
++    if (id == kMainThreadId)
++    {
++        // The game's main thread never exits on purpose (Rogue Galaxy: added).
++        const R5900Context &context = exiting->activeContext();
++        std::fprintf(stderr, "[ee] main thread exited (%s): pc 0x%08X ra 0x%08X; last dispatches %s\n",
++                     deleteThreadRecord ? "ExitDeleteThread" : "ExitThread", context.pc, getRegU32(&context, 31),
++                     m_runtime.dispatchHistory().c_str());
++        std::fflush(stderr);
++    }
+     makeDormant(*exiting);
+     m_currentThreadId = 0;
+     if (deleteThreadRecord && id != kMainThreadId)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index db76095..d3311f8 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1255,6 +1255,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
+     return missingFunction;
+ }
+ 
++std::string PS2Runtime::dispatchHistory() const
++{
++    return formatDispatchHistory();
++}
++
+ void PS2Runtime::setMissingFunctionPolicy(MissingFunctionPolicy policy)
+ {
+     m_missingFunctionPolicy.store(static_cast<uint32_t>(policy), std::memory_order_release);

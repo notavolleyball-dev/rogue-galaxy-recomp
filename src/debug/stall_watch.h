@@ -15,5 +15,10 @@ void startStallWatch(PS2Runtime &runtime);
 
 // After PS2Runtime::run() returns, before the runtime goes.
 void stopStallWatch();
+// The same report now, from any thread: F10 in the game window. For a
+// freeze the flip count does not show (a loading screen that keeps
+// flipping while the main thread waits forever).
+void requestStallReport();
+
 
 } // namespace rg::debug

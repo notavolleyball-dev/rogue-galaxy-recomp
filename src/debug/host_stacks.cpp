@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -47,7 +48,26 @@ std::vector<Image> loadImages()
         }
         const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(image.base);
         const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(image.base + dos->e_lfanew);
-        image.linkBase = static_cast<uintptr_t>(nt->OptionalHeader.ImageBase);
+        // The loader writes the load address into the mapped header's
+        // ImageBase, so the link-time base (what llvm-nm prints) is read
+        // from the file; without it the report showed load addresses.
+        image.linkBase = image.base;
+        if (FILE *file = _wfopen(me.szExePath, L"rb"))
+        {
+            unsigned char head[4096];
+            const size_t got = std::fread(head, 1, sizeof(head), file);
+            std::fclose(file);
+            if (got >= sizeof(IMAGE_DOS_HEADER))
+            {
+                const auto *fileDos = reinterpret_cast<const IMAGE_DOS_HEADER *>(head);
+                const size_t ntOffset = static_cast<size_t>(fileDos->e_lfanew);
+                if (ntOffset + sizeof(IMAGE_NT_HEADERS64) <= got)
+                {
+                    image.linkBase = static_cast<uintptr_t>(
+                        reinterpret_cast<const IMAGE_NT_HEADERS64 *>(head + ntOffset)->OptionalHeader.ImageBase);
+                }
+            }
+        }
         const IMAGE_DATA_DIRECTORY &dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         if (dir.VirtualAddress && dir.Size)
         {

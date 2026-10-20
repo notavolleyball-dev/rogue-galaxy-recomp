@@ -119,7 +119,15 @@ the build it was recorded with. It also prints a `[gfx]` line a second
 into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`), and F9 writes a
 `[mark]` line with the seconds since launch (any launcher), so pressing
 it when a drop is felt puts the drop next to the `[gfx]` lines of that
-moment.
+moment. F10 writes the stall watchdog's report at once (the guest
+threads and what each waits on, the semaphores' counts, the host
+stacks), for a freeze the watchdog does not see by itself because the
+screen keeps flipping; the watchdog also reports on its own when the
+main thread has not moved for 15 s, and the runtime logs a `[ee]` line
+when a guest thread ends with pc 0 or the main thread exits. A frozen
+process can be dumped with `tools\hang\dumpmem.ps1` (its guest RAM and
+thread contexts) and a thread's call chain read from the dump with
+`python tools/hang/stackwalk.py DUMPDIR SP RA`.
 
 | Variable | Effect |
 |---|---|

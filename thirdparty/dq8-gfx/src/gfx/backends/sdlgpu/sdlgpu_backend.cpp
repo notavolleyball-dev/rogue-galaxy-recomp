@@ -501,6 +501,10 @@ struct SdlGpuBackend::Impl {
     bool patchingHostWrite = false;
     // A host write that skipped resolving the pages it covers is still arriving.
     bool coveredTransferOpen = false;
+    // Pages of the open host write already released to local memory, so a
+    // page goes once, when the rows that fill it have arrived (Rogue Galaxy:
+    // added; see UploadImage).
+    GsPageSet coveredReleased;
 
     // Counts the open covered host write if something meets it before its last
     // pixel, once; called before a draw or another transfer.
@@ -3696,6 +3700,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
                      command.bitbltbuf.sbp, command.bitbltbuf.sbw, command.bitbltbuf.spsm);
     GsPageSet pages;
     bool patchLocalCopy = false;
+    m_impl->coveredReleased.reset();
     if (command.direction == 0u || command.direction == 2u) {
         gsMarkPages(pages, command.bitbltbuf.dbp,
                     std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
@@ -3789,23 +3794,39 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
         if (!m_impl->patchingHostWrite) {
             if (!m_impl->settleFor(pages, GsResolveReason::HostWrite, true, covered, false)) return;
             m_impl->coveredTransferOpen = m_impl->coveredTransferOpen || covered.any();
-        } else if (m_impl->coveredRelease && covered.any()) {
-            // Whole pages of a live target leave it; only the partial ones
-            // are patched (Rogue Galaxy: added).
-            const uint32_t released = m_impl->targets->releaseCoveredPages(covered);
-            if (released != 0u) {
-                ++m_impl->stats.coveredReleases;
-                m_impl->stats.coveredPages += released;
-                pages &= ~covered;
-                if (pages.none())
-                    m_impl->patchingHostWrite = false;
-            }
         }
     }
     m_impl->transfer->upload(data, sizeBytes);
     if (m_impl->coveredTransferOpen) {
         const auto state = m_impl->transfer->snapshot();
         m_impl->coveredTransferOpen = state.direction == 0u && state.copiedPixels < state.totalPixels;
+    }
+    if (m_impl->patchingHostWrite && m_impl->coveredRelease) {
+        // Whole pages of a live target leave it, each once the rows that
+        // fill it have landed: a draw between two payloads of a split
+        // upload, or an upload cut short, then still finds the GPU's pixels
+        // where the bytes never came. Only the partial pages are patched
+        // (Rogue Galaxy: added; released at the first payload before).
+        const auto after = m_impl->transfer->snapshot();
+        const uint32_t width = std::max<uint32_t>(command.trxreg.rrw, 1u);
+        const uint32_t rowsLanded = std::min<uint32_t>(after.copiedPixels / width, command.trxreg.rrh);
+        if (rowsLanded != 0u) {
+            GsPageSet landed;
+            gsMarkCoveredPages(landed, command.bitbltbuf.dbp, std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
+                               width, rowsLanded, command.trxpos.dsax, command.trxpos.dsay);
+            landed &= ~m_impl->coveredReleased;
+            if (landed.any()) {
+                const uint32_t released = m_impl->targets->releaseCoveredPages(landed);
+                if (released != 0u) {
+                    ++m_impl->stats.coveredReleases;
+                    m_impl->stats.coveredPages += released;
+                }
+                m_impl->coveredReleased |= landed;
+                pages &= ~landed;
+                if (pages.none())
+                    m_impl->patchingHostWrite = false;
+            }
+        }
     }
     if (m_impl->patchingHostWrite) {
         const auto after = m_impl->transfer->snapshot();

@@ -72,7 +72,21 @@ message(STATUS "VU blocks: ${rg_vu_blocks}")
 find_package(Git REQUIRED)
 file(GLOB rg_framework_patches CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/patches/ps2recomp/*.patch")
 list(SORT rg_framework_patches)
+# The patches applied so far are listed in a stamp inside the checkout: a
+# later patch may change lines an earlier one added, after which the earlier
+# one no longer reverse-applies, so that check alone cannot tell "applied"
+# from "not yet" (it failed configure twice). Undoing the patches
+# (`git -C thirdparty/PS2Recomp checkout -- .`) must remove the stamp too.
+set(rg_patch_stamp "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/PS2Recomp/.rg-patches-applied")
+set(rg_patches_applied "")
+if(EXISTS "${rg_patch_stamp}")
+    file(STRINGS "${rg_patch_stamp}" rg_patches_applied)
+endif()
 foreach(patch IN LISTS rg_framework_patches)
+    get_filename_component(rg_patch_name "${patch}" NAME)
+    if(rg_patch_name IN_LIST rg_patches_applied)
+        continue()
+    endif()
     execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${patch}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/PS2Recomp"
         RESULT_VARIABLE rg_patch_present OUTPUT_QUIET ERROR_QUIET)
@@ -85,6 +99,8 @@ foreach(patch IN LISTS rg_framework_patches)
         endif()
         message(STATUS "Applied ${patch}")
     endif()
+    file(APPEND "${rg_patch_stamp}" "${rg_patch_name}
+")
 endforeach()
 
 add_subdirectory(thirdparty/PS2Recomp EXCLUDE_FROM_ALL)

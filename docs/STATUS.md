@@ -907,6 +907,93 @@ profiled run of a heavy one sat at 41-47 with no thread above 77% busy:
 the three wait on each other's queues, which is the next thing to look
 at, together with the flip's wait when a frame runs late).
 
+**Two freezes, and the tools for them (2026-10-19 evening).** Playing
+File 03, the player froze twice in one evening. First, in a battle, on a
+hit that poisoned and knocked the player down: the watchdog's report
+listed every service thread waiting on its semaphore and the main
+thread not at all, and a memory dump (`tools/hang/dumpmem.ps1`) found no
+context for it either: it had ended. The scheduler has a silent path for
+that: a thread whose pc reaches 0 outside a callback (a jump through a
+null function pointer, or a return past the entry) goes dormant without
+a word; patch 0009 now reports it with the registers and the last 64
+dispatched pcs (`PS2Runtime::dispatchHistory`), and the report says so
+when the main thread is gone or dormant. Second, on a return to the
+title, the loading screen stuck at 99%: the main thread alive inside
+`WaitSema(25)`, the vsync semaphore of `WaitVsyncCount`; the game's
+vblank handler (`GfxVblankStartHandler`) still ran every frame (the
+counter at gp-0x40AC kept advancing in the live process) but signals
+that semaphore only while the "waiting" flag at gp-0x40B0 is set, and
+the flag was 0 with the thread still blocked: the signal was given and
+did not wake it. The semaphore's own state (count, waiters) is the
+scheduler's and was not in the dump; the watchdog never fired because
+the loading screen kept flipping. Tools since: F10 writes the watchdog's
+report at once, the watchdog fires by itself when the main thread has
+not moved for 15 s while the game flips, and `host_stacks` prints
+link-time addresses again (the mapped PE header's ImageBase is the load
+address; the file's is read instead). The next freeze of either kind
+should name its cause.
+
+**The freezes' cause (2026-10-19 night): a checkpoint unwind taken for a
+return.** Five review agents (scheduler, hooks, VU compile, the day's
+patches, forensics on the two dumps) ran while the player played; three
+converged on one mechanism in `PS2Runtime::dispatchGuestBranch`. A
+scheduler checkpoint at a `jal` makes the dispatcher set `pc` to the
+callee's entry and return false, and every generated frame above it
+returns too, up to the scheduler, which re-enters at that pc with the
+guest's own stack intact (that is how time slices and interrupts work).
+But the dispatcher also forgives a callee that comes back with `pc` still
+at its entry (a host stub that never set pc) by continuing at the
+fallthrough. When the function the innermost frame was about to call is
+also the callee of an outer frame still in flight (indirect recursion:
+the config script VM `CfgVmRun`/`CfgVmStep`/`CfgVmFindOp` during a map
+load, the action dispatch `ActionMgrRunActions`/`CharaActDispatch`/
+`CharaActBlownAway` on a knockdown, `ScriptCallWithArgs`/`ScriptListRun`
+on a skill), that outer frame took the unwind for a return and resumed
+its caller with the innermost frame's registers and stack pointer; the
+next epilogue read a stale slot (0 in the battle: "ended at pc 0"; a
+stack address while loading: the `[guest-branch:missing-target]` line
+at 0x1fff500 that was in the log all along) and the main thread went
+dormant. Both dumps' main-thread stacks show the duplicated callee and
+the bogus frame, slot by slot. The VIF1 thread made it frequent: it
+posts an event per finished list, each a checkpoint at the next call.
+Patch 0010: the scheduler remembers that a checkpoint asked for an
+unwind (`EeScheduler::unwinding()`, cleared when guest code is entered
+again) and the dispatcher does not forgive while it is set. Also found:
+the loading freeze's "main thread in WaitSema(25)" context was the
+loading-screen thread's (the main thread's stack sits at the top of RAM
+and `dumpmem.ps1` rejected its context: fixed; `tools/hang/stackwalk.py`
+now walks a thread's frames in a dump from its sp and ra, through the
+prologues in the recompiled sources, which is how the chains above were
+read); the 30 s slow loading is
+not explained yet (the report cannot tell a thread re-waiting every
+vblank from one never woken: the next step is to print the vsync
+counter and the waiter's count next to such a thread). Smaller findings,
+to do: the covered-page release lets whole pages go at the first payload
+of a split upload, before their bytes land (release only pages whose
+rows have arrived); `flag_liveness` treats an FMAC upper with an empty
+dest mask as publishing flags (none of the recorded routines crosses
+one, but a zero word is what padding decodes to); the EE timer batch
+should settle before the idle wait and drain late interrupts before the
+"cued" test; `gatherChain`'s reserve belongs inside its try; a VU0 micro
+program that runs out of its 4096-cycle budget is truncated silently;
+the callback stack pool (20 x 16 KB) overflowed into the game heap once
+(`runtime callback stacks grew into the game heap`), so it gets 32; the
+scheduler drops a pending interrupt invocation's checkpoint flag in
+`processPendingEvents` (bounded latency, not a loss); the missing-target
+report prints once per process. Done the same night as patch 0011 and
+in `thirdparty/dq8-gfx` / `src`: all of the above except the callback
+pool, which cannot grow downwards (the heap end at 0x01F50000 made the
+game's big memalign fail again: a black boot at 0.6 fps with every file
+path empty, caught by the walk), and the interrupt-invocation checkpoint
+flag, left as is. The watchdog's main-thread trigger fired on every
+intro movie (the main loop sits in WaitVsyncCount each frame) and was
+taught the vsync rule: stuck only once the counter has passed the
+thread's count + n. One bench run of the fixed build hung silently at the
+title-to-load transition (42 s in, no line after; the bench window is
+never active, so the watchdog does not report there); four more runs,
+two with the watchdog off, did not reproduce it. Frames byte-identical
+at 1x and 3x; the street and the battle bench at the 60 cap.
+
 **Throughput, round two (2026-10-19 morning): the emulation threads.**
 Profiles of the street view at the player's scale (3, from the menu's
 settings.ini) with the new `INPUT=`/`PROFILE_START=` overrides of

@@ -1,0 +1,143 @@
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index 48fea3a..502a60e 100644
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -68,6 +68,10 @@ public:
+     const VU1State &state() const { return m_state; }
+ 
+     void setCompiledExecutionEnabled(bool enabled) { m_useCompiledExecution = enabled; }
++    // Whether the last run() reached the program's end rather than its cycle
++    // budget (Rogue Galaxy: added; a truncated VU0 program left half a result
++    // for the EE without a word).
++    bool lastRunEnded() const { return m_lastRunEnded; }
+     uint64_t compiledPairsExecuted() const { return m_compiledPairsExecuted; }
+     uint64_t interpretedPairsExecuted() const { return m_interpretedPairsExecuted; }
+ 
+@@ -215,6 +219,7 @@ private:
+     using CompiledBlock = bool (*)(VU1Interpreter &, uint64_t);
+     std::array<CompiledBlock, kMaxDecodedPairs> m_compiledCodeCache{};
+     bool m_useCompiledExecution = true;
++    bool m_lastRunEnded = true;
+     uint64_t m_compiledPairsExecuted = 0;
+     uint64_t m_interpretedPairsExecuted = 0;
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index b3bd9c1..d59db5b 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -426,6 +426,16 @@ void EeScheduler::run()
+                                                 context.pc,
+                                                 PS2Runtime::GuestBranchKind::DirectJump,
+                                                 "EE scheduler");
++                if (running->id > 0)
++                {
++                    // reportMissingFunction prints only the first time in a
++                    // process; a game thread ending is always worth a line
++                    // (Rogue Galaxy: added).
++                    std::fprintf(stderr, "[ee] thread %d ended: no function at pc 0x%08X (ra 0x%08X sp 0x%08X); last dispatches %s\n",
++                                 running->id, context.pc, getRegU32(&context, 31), getRegU32(&context, 29),
++                                 m_runtime.dispatchHistory().c_str());
++                    std::fflush(stderr);
++                }
+                 makeDormant(*running);
+                 m_currentThreadId = 0;
+             }
+@@ -2648,6 +2658,9 @@ void EeScheduler::waitForEvent()
+     {
+         return;
+     }
++    // The batched cycles first, or a deadline within the batch would be
++    // recomputed from the stale count after every short sleep.
++    m_runtime.memory().settleEeTimers();
+     const uint64_t timerCycles = m_runtime.memory().cyclesUntilNextEeTimerInterrupt();
+     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
+     if (m_deadlines.empty() && !hasTimerDeadline)
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 7300101..f90d9ef 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -495,12 +495,15 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+     // the cycles are batched: a compare or overflow interrupt arrives up to
+     // kEeTimerBatchCycles (7 us) late, and readIORegister/writeIORegister
+     // settle the batch first, so the count a register access sees is exact.
++    // A settle may have raised an interrupt as the write that cleared the
++    // last CUE went by: it is delivered whether or not a timer still runs.
++    const uint32_t late = m_eeTimerLateInterrupts;
++    m_eeTimerLateInterrupts = 0u;
+     if (!m_anyEeTimerCued)
+     {
+-        return 0u;
++        m_eeTimerPendingCycles = 0u;
++        return late;
+     }
+-    const uint32_t late = m_eeTimerLateInterrupts;
+-    m_eeTimerLateInterrupts = 0u;
+     m_eeTimerPendingCycles += eeCycles;
+     if (m_eeTimerPendingCycles < kEeTimerBatchCycles)
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 6ac119f..e04749b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1552,6 +1552,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
+                   vu0Data, PS2_VU0_DATA_SIZE,
+                   m_gs, &m_memory,
+                   startPC, 0u, ctx->vu0_itop, 4096);
++    if (!m_vu0.lastRunEnded())
++    {
++        // The EE goes on with a half-finished result; say so, a few times
++        // (Rogue Galaxy: added).
++        static unsigned reported = 0u;
++        if (reported < 8u)
++        {
++            ++reported;
++            std::fprintf(stderr, "[vu0] micro program at 0x%03X ran out of its 4096-cycle budget at pc 0x%03X\n",
++                         startPC, m_vu0.state().pc);
++        }
++    }
+     copyVu0StateToContext(m_vu0.state(), ctx);
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 0fb12ab..2751eec 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -587,6 +587,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         m_pendingHaltD = false;
+         m_pendingHaltT = false;
+     }
++    m_lastRunEnded = programEnded;
+     m_state.cycles = m_cycle;
+ #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+     _mm_setcsr(previousCsr);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+index 2c1fd21..dea83a8 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_program.h
+@@ -299,6 +299,11 @@ constexpr bool upperReadsQ(uint32_t upper)
+ // MAX, MINI, ITOF, FTOI, ABS and CLIP publish no FMAC flags; their code is small.
+ constexpr bool upperPublishesFlags(uint32_t upper)
+ {
++    // An empty dest mask lands nothing (the fast and exact paths both skip
++    // dest 0), so it publishes no flags either; the generator's liveness
++    // agrees (Rogue Galaxy: changed).
++    if (((upper >> 21u) & 0xFu) == 0u)
++        return false;
+     const uint32_t code = upperCode(upper);
+     if ((code >= 0x10u && code <= 0x17u) || code == 0x1Du || code == 0x1Fu)
+         return false;
+diff --git a/tools/compile_vu_programs.py b/tools/compile_vu_programs.py
+index 6e5ce98..80e748d 100644
+--- a/tools/compile_vu_programs.py
++++ b/tools/compile_vu_programs.py
+@@ -322,6 +322,10 @@ def upper_code(upper):
+ 
+ def publishes_flags(pair):
+     """Whether the upper instruction queues an FMAC result (upperPublishesFlags)."""
++    if (pair.upper >> 21) & 0xF == 0:
++        # An empty dest mask lands no result in the runtime (a zero word is
++        # what padding decodes to); treating it as an FMAC killed live flags.
++        return False
+     code = upper_code(pair.upper)
+     if 0x10 <= code <= 0x17 or code in (0x1D, 0x1F):
+         return False

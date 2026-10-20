@@ -52,6 +52,10 @@ namespace
 //   0x00528200..0x01F80000  game heap (EndOfHeap returns the end)
 //   0x01F80000..0x01FD0000  runtime callback stacks (20 of them)
 //   0x01FD0000..0x02000000  main thread stack
+// The heap end cannot go lower: at 0x01F50000 the game's big memalign
+// failed again and the boot died with every file path empty (2026-10-19).
+// The pool once reached 0x01F74000 (23 stacks, a return to the title); the
+// top of the heap is unused by the game in practice, and it only warns.
 constexpr uint32_t kMainStackBottom = 0x01FD0000u;
 constexpr uint32_t kGuestHeapEnd = 0x01F80000u;
 constexpr uint32_t kRuntimeHeapBase = 0x00080000u;
