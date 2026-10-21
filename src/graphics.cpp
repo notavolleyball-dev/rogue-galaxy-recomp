@@ -250,6 +250,11 @@ Setup::Setup(PS2Runtime &runtime)
         {
             runScale = std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
         }
+        // The game leaves a border of its frame black or half drawn (a column
+        // each side, the top row and the last two), which the television's
+        // overscan hid, and at a raised scale its half-pixel effects leave a
+        // sliver beyond it: two GS pixels off each edge. RG_CROP=0 shows it.
+        settings.display.crop = static_cast<uint32_t>(std::strtoul(env("RG_CROP", "2").c_str(), nullptr, 10));
         dq8::gfx::SdlGpuDisplayOptions runDisplay = settings.display;
         if (const std::string mode = env("RG_PRESENT_MODE", ""); !mode.empty())
         {

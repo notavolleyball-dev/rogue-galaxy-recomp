@@ -2945,11 +2945,22 @@ struct SdlGpuBackend::Impl {
 
     // The game picture into `target` at `rect`. CLEAR, not LOAD: the bars
     // around it have to be painted, and swapchain images are recycled.
+    // The part of a slot that is shown: the crop at the slot's scale, at
+    // most an eighth of it. Half a GS pixel more at a raised scale, where a
+    // game's half-pixel offsets move its border by a texel or so.
+    SdlGpuRect pictureRegion(const PresentationSlot &slot) const {
+        const uint32_t factor = std::max(scale, 1u);
+        const uint32_t crop = displayOptions.crop * factor + (displayOptions.crop != 0u ? factor / 2u : 0u);
+        const uint32_t trim = std::min(crop, std::min(slot.width, slot.height) / 8u);
+        return {trim, trim, slot.width - 2u * trim, slot.height - 2u * trim};
+    }
+
     void drawPicture(SDL_GPUCommandBuffer *commands, const PresentationSlot &slot,
                      SDL_GPUTexture *target, SdlGpuRect rect) {
         SDL_GPUTexture *source = slot.texture;
-        uint32_t width = slot.width;
-        uint32_t height = slot.height;
+        SdlGpuRect from = pictureRegion(slot);
+        uint32_t width = from.width;
+        uint32_t height = from.height;
         SDL_GPUFilter filter = SDL_GPU_FILTER_LINEAR;
         if (displayOptions.filter == SdlGpuFilter::Nearest) {
             filter = SDL_GPU_FILTER_NEAREST;
@@ -2971,17 +2982,19 @@ struct SdlGpuBackend::Impl {
                 if (width * factorX <= kLimit && height * factorY <= kLimit &&
                     ensureScratch(sharpTexture, width * factorX, height * factorY,
                                   SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM)) {
-                    blitRegion(commands, source, {0u, 0u, width, height}, sharpTexture.texture,
+                    // The crop goes first: the bilinear pass then reads no
+                    // texel beyond the picture.
+                    blitRegion(commands, source, from, sharpTexture.texture,
                                {0u, 0u, width * factorX, height * factorY}, SDL_GPU_FILTER_NEAREST,
                                SDL_GPU_LOADOP_DONT_CARE);
                     source = sharpTexture.texture;
                     width *= factorX;
                     height *= factorY;
+                    from = {0u, 0u, width, height};
                 }
             }
         }
-        blitRegion(commands, source, {0u, 0u, width, height}, target, rect, filter,
-                   SDL_GPU_LOADOP_CLEAR);
+        blitRegion(commands, source, from, target, rect, filter, SDL_GPU_LOADOP_CLEAR);
     }
 
     void clearTarget(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *target) {
@@ -3063,7 +3076,8 @@ struct SdlGpuBackend::Impl {
 
         SdlGpuRect rect{};
         if (slot) {
-            rect = sdlGpuDisplayRect(displayOptions, slot->width, slot->height, swapchainWidth,
+            const SdlGpuRect picture = pictureRegion(*slot);
+            rect = sdlGpuDisplayRect(displayOptions, picture.width, picture.height, swapchainWidth,
                                      swapchainHeight, gameWidescreen());
             drawPicture(commands, *slot, target, rect);
         } else {

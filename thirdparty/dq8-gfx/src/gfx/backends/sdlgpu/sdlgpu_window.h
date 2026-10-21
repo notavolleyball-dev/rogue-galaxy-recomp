@@ -33,6 +33,9 @@ struct SdlGpuDisplayOptions {
     // Shows both display circuits at one origin, which leaves DQ8's one-line
     // deflicker blend a no-op. Off is the PS2's own picture.
     bool removeLineBlend = false;
+    // GS pixels left off each edge of the picture: the border a game leaves
+    // undrawn or half drawn, which a television's overscan hid.
+    uint32_t crop = 0u;
     bool operator==(const SdlGpuDisplayOptions &) const = default;
 };
 

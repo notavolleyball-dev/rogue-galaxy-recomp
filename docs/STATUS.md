@@ -1104,6 +1104,21 @@ up some 5 s after boot instead of 20. The battle bench no longer meets
 its battle: with or without these, three runs walked up into the
 residential gate's event.
 
+**The picture's edges cropped (2026-10-21).** The user saw a stripe along
+the right and bottom edges. The game leaves a border of its frame
+undrawn: at 1x the first and last columns are black, the top row half
+bright, the last row black and the one above it half bright (the title,
+a 2D screen, has the right column and the bottom rows only). At 3x its
+half-pixel effects move that border by a texel and leave a sliver of
+picture past the black. Neither came from the presenter: the composed
+slot ends in black and the blits read inside it. On a television the
+overscan hid it. The presenter now shows the slot less `crop` GS pixels
+an edge, and half a pixel more at a raised scale
+(`SdlGpuDisplayOptions::crop`, applied before the Sharp filter's
+nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
+sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
+to all four edges.
+
 **The VU1 programs again: three tries that gave nothing (2026-10-20
 night).** A VIF1 profile over the gate's busy stretch (PROFILE_START=62:
 the field starts near 57 s on the stats clock; an earlier window caught
