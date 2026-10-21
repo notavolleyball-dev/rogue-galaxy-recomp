@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <set>
@@ -322,6 +323,25 @@ private:
 #endif
     }
 
+    static unsigned highestCapture(const std::string &dir)
+    {
+        unsigned highest = 0u;
+        std::error_code error;
+        if (dir.empty())
+        {
+            return 0u;
+        }
+        for (const auto &entry : std::filesystem::directory_iterator(dir, error))
+        {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("capture-", 0) == 0 && name.size() > 12u && name.compare(name.size() - 4u, 4u, ".txt") == 0)
+            {
+                highest = std::max(highest, static_cast<unsigned>(std::strtoul(name.c_str() + 8, nullptr, 10)));
+            }
+        }
+        return highest;
+    }
+
     static unsigned framesFromEnv()
     {
         const char *value = std::getenv("RG_GS_FRAMELOG_COUNT");
@@ -458,7 +478,9 @@ private:
     uint32_t m_logAt;
     const uint32_t m_snapAt;
     const std::string m_captureDir;
-    unsigned m_captures = 0u;
+    // Numbered on from the folder's highest capture-N.txt, so a later run
+    // keeps an earlier one's captures.
+    unsigned m_captures = highestCapture(m_captureDir);
     // The frames logged after the first (RG_GS_FRAMELOG_COUNT), named from
     // RG_GS_FRAMELOG's path without its extension.
     unsigned m_moreFrames = framesFromEnv();

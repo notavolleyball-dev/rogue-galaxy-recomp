@@ -1,6 +1,7 @@
 #include "scene_timing.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -168,6 +169,29 @@ void trace(const uint8_t *rdram, float frameTime, float scale)
     }
 }
 
+std::atomic<bool> g_reportRequested{false};
+uint32_t g_reportedRuns = 0u, g_reportedSkips = 0u, g_reportedEarly = 0u;
+
+void reportState(const uint8_t *rdram, uint32_t scene, float scale)
+{
+    if (!g_reportRequested.exchange(false, std::memory_order_relaxed))
+    {
+        return;
+    }
+    uint32_t mode = 0u;
+    uint8_t locked = 0u;
+    readGuest(rdram, kGameMode, mode);
+    readGuest(rdram, scene + kLocked, locked);
+    std::printf("[timing] state: game mode %u, interval %u (game %u), locked %u, %s step %.2f; logic frames %u run, "
+                "%u skipped, %u early since the last report%s\n",
+                mode, g_interval, g_gameInterval, locked, g_ours ? "our" : "the game's", scale,
+                g_logicRuns - g_reportedRuns, g_logicSkips - g_reportedSkips, g_logicEarly - g_reportedEarly,
+                g_moviePlaying || g_inMovieModal ? ", movie" : "");
+    g_reportedRuns = g_logicRuns;
+    g_reportedSkips = g_logicSkips;
+    g_reportedEarly = g_logicEarly;
+}
+
 bool fieldMode(const uint8_t *rdram)
 {
     uint32_t mode = 0u;
@@ -214,6 +238,7 @@ void afterUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t scene
         }
         if (g_gameInterval != 2u || (haveLock && locked != 0u && !fieldMode(rdram)))
         {
+            reportState(rdram, scene, 1.0f);
             return;
         }
         g_ours = true;
@@ -238,6 +263,7 @@ void afterUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *, uint32_t scene
     writeGuest(rdram, scene + kStepCount, one);
     writeGuest(rdram, scene + kTimeScale, scale);
     g_lastScale = scale;
+    reportState(rdram, scene, scale);
 }
 
 void timeScaleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -528,6 +554,11 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx)
         }
     }
     writeGuest(rdram, env + kVsyncInterval, g_interval);
+}
+
+void requestStateReport()
+{
+    g_reportRequested.store(true, std::memory_order_relaxed);
 }
 
 void install(PS2Runtime &runtime)

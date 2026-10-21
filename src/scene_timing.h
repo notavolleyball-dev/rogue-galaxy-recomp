@@ -49,6 +49,12 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx);
 // RG_FPS=60 is on, with its hooks in place.
 bool sixtyFps();
 
+// Has the game thread print, at the scene's next update, the state the
+// mode runs in ([timing] state: game mode, intervals, lock, whose step,
+// logic frames run and skipped since the last report): for an F7 capture
+// of something that plays at the wrong speed.
+void requestStateReport();
+
 // The systems made to take the step (RG_STEP_FIXES: unset, 1 or "all" for
 // every one, 0 or "none" for none, or a comma list of the names below, e.g.
 // RG_STEP_FIXES=clock,gravity).

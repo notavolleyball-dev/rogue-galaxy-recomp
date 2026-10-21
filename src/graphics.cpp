@@ -17,6 +17,7 @@
 #include "loading_screen.h"
 #include "movie_filter.h"
 #include "opening.h"
+#include "scene_timing.h"
 #include "vif1_thread.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
@@ -149,6 +150,7 @@ bool pump(void *userData)
     {
         std::fprintf(stderr, "[mark] F7: frame capture requested\n");
         debug::requestFrameCapture();
+        rg::timing::requestStateReport();
     }
     // F10 writes the stall watchdog's report now (the guest threads, their
     // waits, the host stacks), for a freeze that keeps flipping.

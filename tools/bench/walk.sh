@@ -20,17 +20,21 @@
 #                build/run/NAME.prof (tools/profile/report.py); with LONG=1
 #                the walk goes on 40 s more and the window is 62 s to 92 s,
 #                all of it in the streets.
-#   BATTLE=1     the battle bench: the player's File 03 (build/run/mc0-battle,
-#                three characters on a field), build/run/input_battle1.txt
-#                loads it and walks up and down; a battle runs from about
-#                80 s to 125 s, the frame is logged at pad read 5400 (in
-#                it), the profile window is 85 s to 120 s, and fpscmp
-#                prints the 25 intervals before the marker and the 50 after.
-#                The battle's length and timing vary run to run (the 60 fps
-#                walk is not deterministic): read the [gfx] draws per
-#                second, 60-70k in the battle against 25-50k on the field,
-#                or tools/bench/battlefps.py NAME..., the frame rate over
-#                the intervals with 55k draws or more (the comparable number).
+#   BATTLE=1     the battle bench: the player's File 03 as saved
+#                2026-10-21 16:34 in Salgin near the waterway, three
+#                characters (build/run/mc0-battle; delete the copy to
+#                refresh it). build/run/input_battle4.txt loads it, walks up
+#                and down into the area with enemies and taps Cross every
+#                half second (an attack, and "Keep fighting" if the leader
+#                strays out of the battle), with RG_FORCE_ENCOUNTER=1, so
+#                the battle starts on the first step there: at pad read
+#                2547, about 43 s, to about 58 s; a second often follows at
+#                about 65 s. The frame is logged at pad read 3000 (in the
+#                first), the profile window is 45 s to 57 s, and fpscmp
+#                prints the 6 intervals before the marker and the 8 after.
+#                Read the [gfx] draws per second (55-75k in a battle) or
+#                tools/bench/battlefps.py NAME..., the frame rate over the
+#                intervals with 55k draws or more (the comparable number).
 #   GATE=1       the boss gate bench: the player's File 03 saved beside it
 #                (build/run/mc0-gate), loaded and left standing; prints
 #                tools/bench/gatefps.py (fps, VIF1 ms a frame).
@@ -68,12 +72,23 @@ if tasklist | grep -qi "roguegalaxy.exe"; then echo "a game is running; not star
 mkdir -p build/run
 INPUT=${INPUT:-build/run/input_pad3.txt}
 if [ "$BATTLE" = "1" ]; then
-    INPUT=build/run/input_battle1.txt
+    INPUT=build/run/input_battle4.txt
     MC0=${MC0:-build/run/mc0-battle}
-    FRAME=${FRAME:-5400}
-    AFTER_OVERRIDE=${AFTER_OVERRIDE:-70}
-    PROFILE_START=${PROFILE_START:-85}
-    PROFILE_SECONDS=${PROFILE_SECONDS:-35}
+    FRAME=${FRAME:-3000}
+    AFTER_OVERRIDE=${AFTER_OVERRIDE:-10}
+    PROFILE_START=${PROFILE_START:-45}
+    PROFILE_SECONDS=${PROFILE_SECONDS:-12}
+    export RG_FORCE_ENCOUNTER=1
+    if [ ! -f "$INPUT" ]; then
+        # The gate bench's load of File 03, then the stick up and down for
+        # 300 pad reads each way and Cross every 30.
+        walk="909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5,2223:CIRCLE:5,2277:CIRCLE:5"
+        t=2400
+        while [ $t -lt 6100 ]; do walk="$walk,$t:LUP:300,$((t+330)):LDOWN:300"; t=$((t+660)); done
+        t=2420
+        while [ $t -lt 9600 ]; do walk="$walk,$t:CROSS:4"; t=$((t+30)); done
+        echo "$walk" > "$INPUT"
+    fi
     if [ ! -d build/run/mc0-battle/BASCUS-97490LV5RG_02 ]; then
         mkdir -p build/run/mc0-battle && cp -r disc/mc0/BASCUS-97490LV5RG_02 build/run/mc0-battle/
     fi
@@ -183,7 +198,7 @@ echo "--- $NAME: scale $SCALE fps-mode $FPS, $(( $(date +%s) - start )) s"
 grep -n "frame logged\|\[crash\]\|fatal\|VK_ERROR" "build/run/$NAME.log" | head -5
 grep -m1 "internal scale" "build/run/$NAME.log"
 if [ "$LONG" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 12:36
-elif [ "$BATTLE" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 25 -w 0:50
+elif [ "$BATTLE" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 0:8
 elif [ "$GATE" = "1" ]; then python tools/bench/gatefps.py "$NAME"
 elif [ "$TOWN" = "1" ]; then
     python tools/bench/hitches.py "build/run/$NAME.log" | awk -v n="$NAME" '{ if (match($0, /^ *[0-9.]+ /)) { t = substr($0, RSTART, RLENGTH) + 0; if (t >= 56 && t <= 80) { f += $2; w += $7; v += $5; c++ } } } END { if (c) printf "%s: %d intervals at 56-80 s, %.1f fps, GS worker %.0f%%, VIF1 %.0f%% of the wall\n", n, c, f / c, w / c, v / c }'

@@ -1119,6 +1119,19 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The battle bench back (2026-10-21).** The user saved a new File 03 in
+Salgin near the waterway for it. Its old route walked out of the battle
+area and froze on "Escape from the battle?"; the start has no encounters
+either (TaskAddEncountDist returns before the countdown). Now the walk
+reaches the next area, `RG_FORCE_ENCOUNTER=1` (`src/debug/encounter.cpp`)
+cuts the encounter countdown so the battle starts at its first step there
+(pad read 2547-2549 in three runs, about 43 s, to about 58 s), and Cross
+every 30 pad reads attacks and answers "Keep fighting". First run: 13
+intervals with 55k draws or more, median 59.8 fps, minimum 47.7. F7 now
+also has the game thread print the 60 fps mode's state (`[timing] state:`
+game mode, intervals, lock, whose step, logic frames run and skipped),
+and captures number on from the folder's highest.
+
 **Bench runs off the desktop (2026-10-21).** `tools/bench/walk.sh` now
 starts the game with its window hidden (`DQ8_GFX_HIDDEN_WINDOW=1`;
 `HIDDEN=0` shows it, for window captures), so a scripted run no longer
