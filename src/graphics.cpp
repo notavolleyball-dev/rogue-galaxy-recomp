@@ -15,6 +15,7 @@
 #include "depth_reads.h"
 #include "flip_pacing.h"
 #include "loading_screen.h"
+#include "movie_filter.h"
 #include "opening.h"
 #include "vif1_thread.h"
 #include "widescreen.h"
@@ -211,6 +212,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
          "it has loaded.",
          false},
+        {"smooth_movies", "Smooth the movies",
+         "The movies' frames are filtered when they are drawn larger, as a television blurred them, instead of "
+         "showing every pixel of their low resolution as a block. Off, they are drawn as the PS2 did.",
+         true},
     };
     host.setGameOption = [](const std::string &key, bool on) {
         if (key == "widescreen")
@@ -219,6 +224,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
             rg::opening::setSkip(on);
         else if (key == "instant_loading_recap")
             rg::loading::setInstantRecap(on);
+        else if (key == "smooth_movies")
+            rg::movie::setSmooth(on);
     };
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
     std::string error;

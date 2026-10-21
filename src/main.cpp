@@ -27,6 +27,7 @@
 #include "flip_pacing.h"
 #include "graphics.h"
 #include "movie_audio.h"
+#include "movie_filter.h"
 #include "libc_rand.h"
 #include "loading_screen.h"
 #include "opening.h"
@@ -147,6 +148,7 @@ int run(int argc, char **argv)
     rg::libc::install(runtime);
     rg::vu0::install(runtime);
     rg::movie::install(runtime);
+    rg::movie::installFilter(runtime);
     rg::loading::install(runtime);
     rg::widescreen::install(runtime);
     rg::opening::install(runtime);

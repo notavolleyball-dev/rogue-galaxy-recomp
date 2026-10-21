@@ -105,6 +105,11 @@ game's own switches:
 - "Show the loading recap at once": the whole story so far on the loading
   screen at once, instead of line by line, and Press X comes as soon as the
   game has loaded.
+- "Smooth the movies" (on by default): the movies (the logos, the title
+  screen, the pre-rendered scenes) are filtered when drawn larger, as a
+  television blurred them, instead of showing each of their pixels as a
+  block; off, they are drawn as the PS2 did. They play at their own 30
+  frames a second either way.
 
 F11 or Alt+Enter toggles fullscreen. The settings live in
 `%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
@@ -195,6 +200,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `RogueGalaxy-captura.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |
 | `RG_INSTANT_RECAP=1` | The loading screen's story so far appears whole at once, then Press X (the menu's "Show the loading recap at once") |
+| `RG_SMOOTH_MOVIES=0` | The movies' frames drawn unfiltered, as on the PS2 (the menu's "Smooth the movies", on by default; `src/movie_filter.cpp`) |
 | `RG_STICK_SQUARE=0` | Hand the game the host's round analog stick range as it is. By default `src/stick_response.cpp` reshapes both sticks onto the DualShock 2's square range (the direction and the pushed distance stay, the distance counts as the longer axis, so a full diagonal reads full on both), which the game's run threshold was tuned for: with a round stick the party only runs within about 20 degrees of each of the four directions and walks in between |
 | `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |
 | `RG_GS_CENSUS=1` | Every 2 s, the draw states the GPU backend only approximates (destination alpha test and the like), and draws whose scissor is wider than their buffer; `RG_GS_SKIP=MASK:VALUE` drops draws by TEST register |

@@ -1119,6 +1119,21 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The movies smoothed (2026-10-21).** In a scene the user took for a
+flashback the picture went jagged and the frame rate to 30. Four F7
+captures of it hold 952 batches each and no 3D scene: 240 black
+sprites, one textured sprite from 0x2E00, the subtitles, and 672 uploads of
+16x16 to 0x2E00 covering 512x336, the decoder's macroblocks of the next
+frame; the picture changes between the captures. It is a pre-rendered
+movie, at its own 30 frames a second as on the PS2. MovieDrawFrame
+(0x1D5870) draws the frame with the texture filter off; at 3x every texel
+is a hard block, and with Widescreen its 336 lines are stretched over 448,
+so one in three is doubled and the edges step. The menu's "Smooth the
+movies" (on by default, `src/movie_filter.cpp`, `RG_SMOOTH_MOVIES=0` for
+the PS2's look) answers the frame's GsPktSetTexFilter call (returning to
+0x1D5A08) with 1, so GsPktSetTexture sets TEX1 to bilinear. The title
+screen, a movie too, has smooth edges at 3x where it had 3x3 steps.
+
 **The Monography Shot solid (2026-10-21).** The user saw the gun Jaster
 is handed in an event translucent, in the event and in battle, at 60 and
 then at 30 fps too; a PS2 recording shows it solid. Frame logs of the
