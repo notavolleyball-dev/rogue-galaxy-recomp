@@ -1119,6 +1119,21 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**VU0 macro flags in the recompiler (2026-10-21).** The generated code for
+VU0 macro-mode FMAC ops never updated the status or MAC flags, which broke
+the game's three bounding-box tests until `src/vu0_flags.cpp` replaced
+them (2026-10-18). The recompiler now emits the update
+(`patches/ps2recomp/0017`: `PS2_VU0_FMAC_FLAGS` in ps2_runtime_macros.h,
+zero and sign per field of the destination mask, current and sticky) after
+every ADD, SUB, MUL, MADD, MSUB, OPMULA and OPMSUB form, but only in the
+functions that read the flags (a `cfc2` of $vi16 or $vi17), so the rest of
+the game's vector code costs what it did. In this build that is the three
+box tests, two updates each, and a regeneration rewrote only their files.
+With `RG_VU0_FLAGS=check` the generated tests answer and the host versions
+check them: 1,769,472 tests on the bench walk, none disagreeing; with
+`RG_VU0_FLAGS=0` the walk's frame is byte-identical to the default's. The
+host versions stay the default, as the shorter path.
+
 **Destination reads without framebuffer fetch (2026-10-21).** After the
 Monography Shot, the renderer's fixed-function path (every GPU but
 Apple's) was searched for more of the kind. `tools/bench/gsstates.py` over

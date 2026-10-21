@@ -28,6 +28,10 @@ constexpr uint16_t kSignSticky = 0x0080u;
 PS2Runtime::RecompiledFunction g_contains = nullptr;
 PS2Runtime::RecompiledFunction g_overlap = nullptr;
 PS2Runtime::RecompiledFunction g_containsPoint = nullptr;
+// RG_VU0_FLAGS=check: the generated code answers, and its answers are
+// counted against these (tests, disagreements).
+bool g_check = false;
+uint64_t g_checked = 0u, g_disagreed = 0u;
 
 bool readVec4(const uint8_t *rdram, uint32_t address, float out[4])
 {
@@ -81,7 +85,30 @@ void test(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
             original(rdram, ctx, runtime);
             return;
         }
-        setVf(ctx, loadRegs[i], v[i]);
+        if (!g_check)
+        {
+            setVf(ctx, loadRegs[i], v[i]);
+        }
+    }
+    if (g_check)
+    {
+        float scratch[4] = {};
+        const uint16_t first = subtractFlags(v[firstA], v[firstB], scratch);
+        const uint16_t second = subtractFlags(v[secondA], v[secondB], scratch);
+        const int expected = ((first | second) & kSignSticky) ? 0 : 1;
+        original(rdram, ctx, runtime);
+        ++g_checked;
+        if (static_cast<int>(getRegU32(ctx, 2)) != expected && ++g_disagreed <= 8u)
+        {
+            std::fprintf(stderr, "[rg] VU0 flags: the generated box test said %d where %d was right\n",
+                         static_cast<int>(getRegU32(ctx, 2)), expected);
+        }
+        if ((g_checked & 0xFFFFu) == 0u)
+        {
+            std::fprintf(stderr, "[rg] VU0 flags: %llu box tests checked, %llu disagreed\n",
+                         static_cast<unsigned long long>(g_checked), static_cast<unsigned long long>(g_disagreed));
+        }
+        return;
     }
     float result[4];
     std::memcpy(result, &ctx->vu0_vf[25], 16u);
@@ -128,6 +155,11 @@ void install(PS2Runtime &runtime)
     {
         std::fprintf(stderr, "[rg] VU0 flags: the generated box tests stay (RG_VU0_FLAGS=0)\n");
         return;
+    }
+    g_check = enabled && std::strcmp(enabled, "check") == 0;
+    if (g_check)
+    {
+        std::fprintf(stderr, "[rg] VU0 flags: the generated box tests answer, checked against the host's\n");
     }
     using rg::timing::hookFunction;
     bool complete = hookFunction(runtime, kAabbContains, &aabbContains, g_contains);

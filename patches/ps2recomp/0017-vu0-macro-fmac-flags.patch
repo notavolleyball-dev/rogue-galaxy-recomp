@@ -1,0 +1,114 @@
+diff --git a/ps2xRecomp/include/ps2recomp/code_generator.h b/ps2xRecomp/include/ps2recomp/code_generator.h
+index 1bdf0f6..6977df4 100644
+--- a/ps2xRecomp/include/ps2recomp/code_generator.h
++++ b/ps2xRecomp/include/ps2recomp/code_generator.h
+@@ -71,6 +71,11 @@ namespace ps2recomp
+         bool m_emitInstructionComments = true;
+         RecompilerReporter *m_reporter = nullptr;
+         std::string m_currentFunctionName;
++        // The function being generated reads VU0's status or MAC flags
++        // (cfc2 of $vi16/$vi17): its macro FMAC ops then update them, which
++        // they skip elsewhere for speed (Rogue Galaxy: added).
++        bool m_vu0FlagsWanted = false;
++        std::string vu0FmacFlags(const Instruction &inst) const;
+ 
+         std::string translateInstruction(const Instruction &inst);
+         std::string translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint);
+diff --git a/ps2xRecomp/src/lib/code_generator.cpp b/ps2xRecomp/src/lib/code_generator.cpp
+index 68b0984..2ea66a2 100644
+--- a/ps2xRecomp/src/lib/code_generator.cpp
++++ b/ps2xRecomp/src/lib/code_generator.cpp
+@@ -260,7 +260,42 @@ namespace ps2recomp
+ 
+     std::string CodeGenerator::translateVUInstruction(const Instruction &inst)
+     {
+-        return VuTranslator(*this).translate(inst);
++        std::string code = VuTranslator(*this).translate(inst);
++        if (m_vu0FlagsWanted)
++        {
++            const std::string flags = vu0FmacFlags(inst);
++            if (!flags.empty())
++                code += " " + flags;
++        }
++        return code;
++    }
++
++    // The flag update after a macro FMAC op (ADD, SUB, MUL, MADD, MSUB in
++    // every form, OPMULA, OPMSUB): from the destination's fields once the op
++    // has written them, the accumulator's for the A forms. MAX, MINI, ABS,
++    // the conversions and CLIP leave the MAC and status flags alone.
++    std::string CodeGenerator::vu0FmacFlags(const Instruction &inst) const
++    {
++        if (inst.opcode != OPCODE_COP2 || inst.rs < COP2_CO)
++            return {};
++        const uint32_t dest = inst.vectorInfo.vectorField & 0xFu;
++        const uint8_t special1 = static_cast<uint8_t>(inst.function & 0x3F);
++        if (special1 < 0x3C)
++        {
++            const bool fmac = special1 <= VU0_S1_VMSUBw || (special1 >= VU0_S1_VMULx && special1 <= VU0_S1_VMULq) ||
++                              special1 == VU0_S1_VMULi || (special1 >= VU0_S1_VADDq && special1 <= VU0_S1_VMUL) ||
++                              special1 == VU0_S1_VSUB || special1 == VU0_S1_VMSUB || special1 == VU0_S1_VOPMSUB;
++            if (!fmac)
++                return {};
++            return fmt::format("PS2_VU0_FMAC_FLAGS(ctx, ctx->vu0_vf[{}], {}u);", inst.sa, dest);
++        }
++        const uint8_t special2 = static_cast<uint8_t>((((inst.raw >> 6) & 0x1F) << 2) | (inst.raw & 0x3));
++        const bool fmac = special2 <= VU0_S2_VMSUBAw || (special2 >= VU0_S2_VMULAx && special2 <= VU0_S2_VMULAq) ||
++                          special2 == VU0_S2_VMULAi || (special2 >= VU0_S2_VADDAq && special2 <= VU0_S2_VMULA) ||
++                          special2 == VU0_S2_VSUBA || special2 == VU0_S2_VMSUBA || special2 == VU0_S2_VOPMULA;
++        if (!fmac)
++            return {};
++        return fmt::format("PS2_VU0_FMAC_FLAGS(ctx, ctx->vu0_acc, {}u);", dest);
+     }
+ 
+     CodeGenerator::AnalysisResult CodeGenerator::collectInternalBranchTargets(
+@@ -275,8 +310,19 @@ namespace ps2recomp
+         const std::vector<Instruction> &instructions,
+         const bool &useHeaders)
+     {
++        m_vu0FlagsWanted = false;
++        for (const Instruction &inst : instructions)
++        {
++            if (inst.opcode == OPCODE_COP2 && inst.rs == COP2_CFC2 && (inst.rd == VU0_CR_STATUS || inst.rd == VU0_CR_MAC))
++            {
++                m_vu0FlagsWanted = true;
++                break;
++            }
++        }
+         FunctionEmitter emitter(*this);
+-        return emitter.emit(function, instructions, useHeaders);
++        std::string code = emitter.emit(function, instructions, useHeaders);
++        m_vu0FlagsWanted = false;
++        return code;
+     }
+ 
+     std::string CodeGenerator::emitUnhandledInstruction(const Instruction &inst, const std::string &message)
+diff --git a/ps2xRuntime/include/ps2_runtime_macros.h b/ps2xRuntime/include/ps2_runtime_macros.h
+index f7b3316..042b2ea 100644
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -148,6 +148,24 @@ static inline uint32_t ps2_plzcw32(uint32_t x)
+ #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
+ #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
+ 
++// The MAC and status flags a VU0 macro FMAC op leaves (Rogue Galaxy: added),
++// for the fields of `dest` (the instruction's x=8 y=4 z=2 w=1 mask, the MAC
++// nibbles' order): sign from the result's sign bit, zero on an exact zero,
++// no underflow or overflow (the host's floats have neither the VU's range
++// nor its clamp). Status keeps D and I, sets Z and S from this result and
++// ORs them into their sticky bits.
++static inline void ps2Vu0FmacFlags(uint16_t *status, uint32_t *mac, __m128 result, uint32_t dest)
++{
++    static const uint8_t kFields[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
++    const uint32_t sign = kFields[_mm_movemask_ps(result)] & dest;
++    const uint32_t zero = kFields[_mm_movemask_ps(_mm_cmpeq_ps(result, _mm_setzero_ps()))] & dest;
++    *mac = (sign << 4) | zero;
++    const uint32_t now = (zero ? 0x1u : 0u) | (sign ? 0x2u : 0u);
++    *status = static_cast<uint16_t>((*status & ~0xFu) | now | (now << 6));
++}
++#define PS2_VU0_FMAC_FLAGS(ctx, value, dest) \
++    ps2Vu0FmacFlags(&(ctx)->vu0_status, &(ctx)->vu0_mac_flags, (value), (dest))
++
+ // Memory access helpers - Hybrid Fast/Slow Path
+ // Fast path: Direct RDRAM access (masked).
+ // Slow path: Full runtime->Load/Store
