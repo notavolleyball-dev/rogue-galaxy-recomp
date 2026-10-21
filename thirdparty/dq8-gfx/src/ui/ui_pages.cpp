@@ -224,15 +224,18 @@ void Overlay::drawDisplayPage() {
         const char *aspectHelp = "";
         switch (m_settings.display.aspect) {
         case gfx::SdlGpuAspect::Auto: {
-            // Rogue Galaxy has no wide-screen option of its own to follow.
+            // Rogue Galaxy's is under Interface > Game.
             const int wide = m_backend.gameWidescreen();
-            aspectHelp = wide == 1   ? "Follows the game's wide-screen option: 16:9."
-                         : wide == 0 ? "Follows the game's wide-screen option: 4:3."
+            aspectHelp = wide == 1   ? "Follows Interface > Game > Widescreen: 16:9."
+                         : wide == 0 ? "Follows Interface > Game > Widescreen: 4:3."
                                      : "4:3, the shape the game draws for; it has no wide-screen option.";
             break;
         }
         case gfx::SdlGpuAspect::Standard: aspectHelp = "The shape a television gave the game."; break;
-        case gfx::SdlGpuAspect::Wide: aspectHelp = "Stretches the 4:3 picture to 16:9; the game draws for 4:3."; break;
+        case gfx::SdlGpuAspect::Wide:
+            aspectHelp = m_backend.gameWidescreen() == 1 ? "The shape the game draws for with Widescreen on."
+                                                         : "Stretches the 4:3 picture to 16:9; the game draws for 4:3.";
+            break;
         case gfx::SdlGpuAspect::Native: aspectHelp = "Square pixels, as drawn; narrower than on a television."; break;
         case gfx::SdlGpuAspect::Stretch: aspectHelp = "Fills the window, whatever its shape."; break;
         }

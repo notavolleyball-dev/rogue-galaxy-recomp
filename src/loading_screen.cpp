@@ -32,7 +32,7 @@ constexpr int32_t kMaxLines = 14;
 PS2Runtime::RecompiledFunction g_start = nullptr;
 PS2Runtime::RecompiledFunction g_stop = nullptr;
 PS2Runtime::RecompiledFunction g_frame = nullptr;
-bool g_active = false;
+std::atomic<bool> g_active{false};
 std::atomic<bool> g_instantRecap{false};
 
 template <typename T>
@@ -59,13 +59,13 @@ void writeGuest(uint8_t *rdram, uint32_t address, T value)
 
 void start(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    g_active = true;
+    g_active.store(true, std::memory_order_relaxed);
     g_start(rdram, ctx, runtime);
 }
 
 void afterStop(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    g_active = false;
+    g_active.store(false, std::memory_order_relaxed);
 }
 
 void stop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -109,7 +109,7 @@ void install(PS2Runtime &runtime)
 
 bool active()
 {
-    return g_active;
+    return g_active.load(std::memory_order_relaxed);
 }
 
 void setInstantRecap(bool on)

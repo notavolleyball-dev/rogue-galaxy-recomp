@@ -93,11 +93,21 @@ DQ8-Recompiled: window and fullscreen, vertical sync, internal resolution,
 aspect and scaling filter, volume, controller and keyboard remapping with
 dead zones, pause (F2), fast-forward (F4), a frame-rate counter (F3),
 screenshots (F12) and renderer statistics, and under Interface > Game the
-game's own switches: "Show the loading recap at once" puts the whole story
-so far on the loading screen at once, instead of line by line, and Press X
-comes as soon as the game has loaded. F11 or Alt+Enter toggles
-fullscreen. The settings live in `%APPDATA%\RogueGalaxy\Recompiled\settings.ini`
-(`RG_SETTINGS_FILE` names another file).
+game's own switches:
+- "Widescreen (16:9)": the game draws a wider view, with the HUD over the
+  scene, the compass and the movies fitted to it, and no letterbox at the
+  start of events; with Display > Aspect ratio on Auto the picture turns
+  16:9 once a game is loaded (the title, load menu and loading screen stay
+  4:3). Menus and text are drawn for 4:3 and come out stretched.
+- "Skip the opening": at boot the Sony, Japan Studio and Level-5 logos give
+  way to the title screen at once.
+- "Show the loading recap at once": the whole story so far on the loading
+  screen at once, instead of line by line, and Press X comes as soon as the
+  game has loaded.
+
+F11 or Alt+Enter toggles fullscreen. The settings live in
+`%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
+another file).
 
 `RogueGalaxy.bat` runs the game at 60 frames per second (`RG_FPS=60`; set
 `RG_FPS=30` before it in a terminal for the game's own 30). On a 144 Hz
@@ -179,6 +189,8 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_POS_TRACE=1` | Log every call that puts a character somewhere it did not walk to (`CharaSetPos`, `CharaSetPosXYZ`, `CharaPlaceAt`: character, id, old and new position, caller), and any character still falling after 90 movement updates, with where it fell from |
 | `RG_MC0_DIR=path` | Memory card folder instead of `disc/mc0` (`mc1` is its sibling). The benchmarks point it at `build/run/mc0-bench`, a copy holding only the save they load, since a second save changes what the scripted load menu picks |
 | `RG_JUMP_TRACE=1` | Log the party leader's movement updates while off the ground (host time, position, step-scaled velocity, the motion's displacement, the action mode and the gravity flags, one line per `CharaMoveCollideMaybe`; `=2` logs the moves on the ground too, for the speed ramps; `=3` every character's, tagged with address and id, and for enemies every move with what drives it and every move request with its caller): compares a jump's arc and timing between the 30 and 60 fps modes |
+| `RG_WIDESCREEN=1` | The game drawn for 16:9 (the menu's "Widescreen (16:9)"; `src/widescreen.cpp`) |
+| `RG_SKIP_OPENING=1` | The logos at boot give way to the title screen (the menu's "Skip the opening") |
 | `RG_INSTANT_RECAP=1` | The loading screen's story so far appears whole at once, then Press X (the menu's "Show the loading recap at once") |
 | `RG_STICK_SQUARE=0` | Hand the game the host's round analog stick range as it is. By default `src/stick_response.cpp` reshapes both sticks onto the DualShock 2's square range (the direction and the pushed distance stay, the distance counts as the longer axis, so a full diagonal reads full on both), which the game's run threshold was tuned for: with a round stick the party only runs within about 20 degrees of each of the four directions and walks in between |
 | `RG_GS_TIMING=1` | Time every GS backend call on both sides of the worker queue, every 2 s |

@@ -10,7 +10,7 @@ thread of its own, music and sound effects, keyboard or gamepad. The
 heaviest field scene measured, a boss gate, holds 50 to 60, limited by the
 VU1 programs.
 Known gaps: a rare hang after the Story loading screen (below), and the
-remaining phase 5 work (widescreen, self-contained packaging).
+remaining phase 5 work (self-contained packaging).
 
 | Phase | Goal | State |
 |---|---|---|
@@ -19,7 +19,7 @@ remaining phase 5 work (widescreen, self-contained packaging).
 | 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
 | 3 | Boot to the title screen | done |
 | 4 | Field, battle, movies, sound | done |
-| 5 | Performance, widescreen, 60 fps, launcher | 60 fps mode by default (50-60 in the heaviest scenes), launcher, in-game menu; rest next |
+| 5 | Performance, widescreen, 60 fps, launcher | 60 fps mode by default (50-60 in the heaviest scenes), launcher, in-game menu, widescreen option; packaging next |
 
 ## Phase 1 in short
 
@@ -444,9 +444,10 @@ game (2x, mailbox, no line-blend change) and about sixty lines of host glue
 in `src/graphics.cpp`. The counter counts the game's flips (the hook in
 `src/flip_pacing.cpp` now installs even without flip pacing), not presents,
 which go on while the game is paused. Widescreen and 60 fps are separate
-work: the game has no 16:9 option of its own; nemesis2000's PCSX2 patch (five
-words in the ELF, verified) would give it, and no speed-correct 60 fps code
-exists for the NTSC-U release.
+work: the game shows no 16:9 option of its own (it has a hidden wide mode,
+used since 2026-10-21, below); nemesis2000's PCSX2 patch (five words in the
+ELF, verified) gives the rest, and no speed-correct 60 fps code exists for
+the NTSC-U release.
 
 **60 fps (`RG_FPS=60`, experimental).** The game paces itself with a vsync
 interval the flip waits for (2 at boot, `DrawEnvSetVsyncInterval`; its own
@@ -1068,6 +1069,40 @@ in state 5 LoadingScreenFrame calls LoadingScreenTryFinish on a press,
 which finishes once every line is shown (a spare X in the bench's load
 script ended the instant screen at once; RG_TRACE on 0x3430C0 showed the
 press path, 0x343724). Frames byte-identical at 1x.
+
+**Widescreen, and the opening skipped (2026-10-21).** The game keeps a
+wide mode nothing in this release turns on: an aspect mode at 0x481638
+that the system config's "TVMODE WIDE" sets to 1 (SysCfgTvModeCmd) and two
+readers, GetAspectMode and IsWidescreen. In it SceneCameraApplyAspect gives
+the scene camera 9/16 for 3/4, and the HUD drawn over the scene (HP gauges,
+target slots, minimap entries, the attack chain, the sprite helpers
+GsDrawSpriteCentered/AnchorBR/AnchorBL and DrawRotatedQuad) narrows its
+sprites by 3/4. `src/widescreen.cpp` has both readers answer 1 and adds
+what nemesis2000's PCSX2 patch does besides 0x1C6A50 (the scene camera's
+3/4, which the mode replaces): the compass's ViewSetPerspective (0x37112C)
+takes 9/16, and so do the insect menus' model previews
+(DrawModelWithCamera, 0x28C070, not in the patch; untested); a movie made for 16:9, 512x336 between bars,
+is stretched over the 448 lines (MovieDrawFrame's two GsPktSetXYZPixel
+corners), and one made for 4:3 (512x448, as the title overlay's are)
+narrows to 384 columns with bars at its sides; an event's start leaves the letterbox
+open (LetterboxSetFade from 0x2611F8 gets 0). The backend's game
+wide-screen query, which DQ8 used for its Screen Size option, makes
+Aspect ratio Auto 16:9. The screens before the game stay 4:3 and the game
+draws for 4:3 there (the title overlay resident, or the loading screen
+up): the title's 2D menu and copyright would otherwise run wider than its
+movie. The menu's Interface > Game > "Widescreen (16:9)",
+`RG_WIDESCREEN=1`. The town bench holds its frame rate (56.4 against
+56.2 at 4:3), the GS worker and VIF1 6 points busier for the wider view.
+Seen in the town and the residential gate's event:
+proportions right, the compass round, no bars; NPC names, subtitles and
+menus are 2D drawn for 4:3 and come out stretched. The opening
+(TitleOpeningMovieTick, the title overlay's 0x4EBAF0) fades out on a
+button once it has run six frames, but only once it has been seen
+(0x481B90): "Skip the opening" (`RG_SKIP_OPENING=1`) marks it seen and
+answers the tick's first PadIsTriggered with a press, so the title comes
+up some 5 s after boot instead of 20. The battle bench no longer meets
+its battle: with or without these, three runs walked up into the
+residential gate's event.
 
 **The VU1 programs again: three tries that gave nothing (2026-10-20
 night).** A VIF1 profile over the gate's busy stretch (PROFILE_START=62:

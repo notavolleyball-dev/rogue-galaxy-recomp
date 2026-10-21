@@ -15,7 +15,9 @@
 #include "depth_reads.h"
 #include "flip_pacing.h"
 #include "loading_screen.h"
+#include "opening.h"
 #include "vif1_thread.h"
+#include "widescreen.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
 #include "runtime/gs/gs_cpu_backend.h"
@@ -177,13 +179,24 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
     // The game's own switches, under Interface > Game.
     host.gameOptions = {
+        {"widescreen", "Widescreen (16:9)",
+         "The game draws a wider view for a 16:9 screen, and the HUD over the scene and the movies fit it; with "
+         "Display > Aspect ratio on Auto the picture turns 16:9 once a game is loaded. Menus and text are drawn "
+         "for 4:3 and come out stretched.",
+         false},
+        {"skip_opening", "Skip the opening",
+         "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
         {"instant_loading_recap", "Show the loading recap at once",
          "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
          "it has loaded.",
          false},
     };
     host.setGameOption = [](const std::string &key, bool on) {
-        if (key == "instant_loading_recap")
+        if (key == "widescreen")
+            rg::widescreen::setEnabled(on);
+        else if (key == "skip_opening")
+            rg::opening::setSkip(on);
+        else if (key == "instant_loading_recap")
             rg::loading::setInstantRecap(on);
     };
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
@@ -253,6 +266,8 @@ Setup::Setup(PS2Runtime &runtime)
         // worker's: an F9 mark then says which thread was saturated.
         dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport() + mainStallReport(); });
         dq8::gfx::setPresentObserver(&debug::noteFrameTime);
+        // Aspect ratio Auto follows the Widescreen option.
+        sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
         if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");

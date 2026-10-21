@@ -75,6 +75,8 @@ add_executable(roguegalaxy
     return_hook.cpp
     libc_rand.cpp
     loading_screen.cpp
+    opening.cpp
+    widescreen.cpp
     scene_timing.cpp
     step_fixes.cpp
     stick_response.cpp
