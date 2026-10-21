@@ -837,6 +837,32 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
     };
     ScratchTexture sharpTexture, compositeTexture, captureTexture;
+    // A frame read back to the host and sent back unchanged (Rogue Galaxy:
+    // added). The game's screen captures (ScreenFadeCaptureFrame: the
+    // frozen frame of an event under an item's message, the fades) go
+    // through EE memory at GS size, so a scaled frame came back at 1x. A
+    // read of a scaled CT32 region keeps the region on the GPU and a hash of
+    // the bytes the host got; an upload of the same size and format whose
+    // bytes hash the same, onto a surface of that size, gets the kept copy.
+    // Bytes the host changed hash otherwise and land as they are.
+    struct RoundTrip {
+        ScratchTexture copy;
+        uint32_t width = 0u, height = 0u, scale = 0u;
+        uint64_t hash = 0u, seen = 0u, expected = 0u;
+        bool reading = false, valid = false;
+    } roundTrip;
+    struct RoundTripUpload {
+        bool active = false;
+        uint64_t hash = 0u, seen = 0u, expected = 0u;
+    } roundTripUpload;
+    static constexpr uint64_t kFnvOffset = 0xcbf29ce484222325ull;
+    static uint64_t fnv(uint64_t hash, const uint8_t *data, size_t size) {
+        for (size_t i = 0u; i < size; ++i) {
+            hash ^= data[i];
+            hash *= 0x100000001b3ull;
+        }
+        return hash;
+    }
     struct CaptureRequest {
         bool withOverlay = false;
         SdlGpuCaptureCallback done;
@@ -962,6 +988,118 @@ struct SdlGpuBackend::Impl {
     // character layer for every frame of a dialogue close-up. The swizzle
     // tables say which source byte lands in which destination byte; the GPU
     // applies that per sub-sample plane. Anything else keeps the CPU path.
+    // At a transfer's start: a read of a scaled CT32 region keeps it (its
+    // hash is taken as the host consumes it), an upload that could be its
+    // return starts hashing.
+    void noteRoundTrip(const GSTransferCommand &command) {
+        // DQ8_GFX_NO_ROUND_TRIP: the 1x frame back as the host sent it.
+        static const bool disabled = std::getenv("DQ8_GFX_NO_ROUND_TRIP") != nullptr;
+        roundTripUpload.active = false;
+        if (disabled)
+            return;
+        const GSBitBltBuf &blt = command.bitbltbuf;
+        const uint32_t width = command.trxreg.rrw, height = command.trxreg.rrh;
+        if (command.direction == 1u) {
+            roundTrip.reading = false;
+            roundTrip.valid = false;
+            const uint32_t sbw = std::max<uint32_t>(blt.sbw, 1u);
+            const uint32_t x = command.trxpos.ssax, y = command.trxpos.ssay;
+            if ((blt.spsm & 0x3fu) != GS_PSM_CT32 || width == 0u || height == 0u)
+                return;
+            GsPageSet sourcePages;
+            gsMarkPages(sourcePages, blt.sbp, sbw, GS_PSM_CT32, width, height, x, y);
+            GsSurface *from = targets->nativeOwner(sourcePages, true);
+            if (!from || !from->texture || from->scale <= 1u || from->base != blt.sbp ||
+                from->bufferWidth != sbw || x + width > from->width || y + height > from->height)
+                return;
+            const uint32_t s = from->scale;
+            std::string error;
+            if (!targets->refresh(*from, error) || !device.submitPending(error))
+                return;
+            if (!ensureScratch(roundTrip.copy, width * s, height * s, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM))
+                return;
+            SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device.handle());
+            if (!commands)
+                return;
+            blitRegion(commands, from->texture, {x * s, y * s, width * s, height * s}, roundTrip.copy.texture,
+                       {0u, 0u, width * s, height * s}, SDL_GPU_FILTER_NEAREST, SDL_GPU_LOADOP_DONT_CARE);
+            if (!SDL_SubmitGPUCommandBuffer(commands))
+                return;
+            roundTrip.width = width;
+            roundTrip.height = height;
+            roundTrip.scale = s;
+            roundTrip.hash = kFnvOffset;
+            roundTrip.seen = 0u;
+            roundTrip.expected = uint64_t(width) * height * 4u;
+            roundTrip.reading = true;
+            if (gsTargetTraceEnabled())
+                std::fprintf(stderr, "[target] round-trip read sbp=%05x sbw=%u %ux%u@%u,%u scale=%u\n", blt.sbp, sbw,
+                             width, height, x, y, s);
+        } else if (command.direction == 0u && roundTrip.valid && (blt.dpsm & 0x3fu) == GS_PSM_CT32 &&
+                   width == roundTrip.width && height == roundTrip.height) {
+            roundTripUpload.active = true;
+            roundTripUpload.hash = kFnvOffset;
+            roundTripUpload.seen = 0u;
+            roundTripUpload.expected = roundTrip.expected;
+        }
+    }
+
+    void noteRoundTripRead(const uint8_t *data, uint32_t size) {
+        if (!roundTrip.reading || !data)
+            return;
+        roundTrip.hash = fnv(roundTrip.hash, data, size);
+        roundTrip.seen += size;
+        if (roundTrip.seen >= roundTrip.expected) {
+            roundTrip.reading = false;
+            roundTrip.valid = true;
+        }
+    }
+
+    // True once the last payload of an upload that matches the read lands.
+    bool noteRoundTripUpload(const uint8_t *data, uint32_t size) {
+        if (!roundTripUpload.active || !data)
+            return false;
+        roundTripUpload.hash = fnv(roundTripUpload.hash, data, size);
+        roundTripUpload.seen += size;
+        if (roundTripUpload.seen < roundTripUpload.expected)
+            return false;
+        roundTripUpload.active = false;
+        return roundTripUpload.seen == roundTripUpload.expected && roundTripUpload.hash == roundTrip.hash;
+    }
+
+    // After the upload has landed: the kept copy over the surface it filled,
+    // when it filled one whole at the read's scale.
+    void applyRoundTrip(const GSTransferCommand &command) {
+        const GSBitBltBuf &blt = command.bitbltbuf;
+        const uint32_t dbw = std::max<uint32_t>(blt.dbw, 1u);
+        const uint32_t width = roundTrip.width, height = roundTrip.height, s = roundTrip.scale;
+        if (command.trxpos.dsax != 0u || command.trxpos.dsay != 0u || width != dbw * 64u)
+            return;
+        std::string error;
+        GsSurface *to = targets->acquire(blt.dbp, dbw, GS_PSM_CT32, false, width, height, error);
+        if (!to || !to->texture || to->scale != s || to->width != width || to->height != height)
+            return;
+        targets->claimWhole(*to);
+        if (!device.submitPending(error))
+            return;
+        SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device.handle());
+        if (!commands)
+            return;
+        blitRegion(commands, roundTrip.copy.texture, {0u, 0u, width * s, height * s}, to->texture,
+                   {0u, 0u, width * s, height * s}, SDL_GPU_FILTER_NEAREST, SDL_GPU_LOADOP_DONT_CARE);
+        if (!SDL_SubmitGPUCommandBuffer(commands))
+            return;
+        targets->markDrawn(*to, {0u, 0u, width, height});
+        GsPageSet pages;
+        gsMarkPages(pages, blt.dbp, dbw, GS_PSM_CT32, width, height, 0u, 0u);
+        if (textures)
+            textures->invalidate(pages, GsTextureCache::InvalidationSource::Draw);
+        ++stats.roundTrips;
+        if (gsTargetTraceEnabled())
+            std::fprintf(stderr, "[target] round-trip return dbp=%05x dbw=%u %ux%u scale=%u\n", blt.dbp, dbw, width,
+                         height, s);
+    }
+
     bool gpuLocalCopy(const GSTransferCommand &command) {
         static const bool disabled = std::getenv("DQ8_GFX_CPU_LOCAL_COPY") != nullptr;
         const GSBitBltBuf &blt = command.bitbltbuf;
@@ -2767,6 +2905,12 @@ struct SdlGpuBackend::Impl {
                 line += buf;
                 previousUnchanged = textureStats().unchangedUpdates;
             }
+            // Frames read back and returned at scale (Rogue Galaxy: added).
+            if (stats.roundTrips != previous.roundTrips) {
+                std::snprintf(buf, sizeof(buf), " | round trips %llu",
+                              static_cast<unsigned long long>(stats.roundTrips - previous.roundTrips));
+                line += buf;
+            }
             std::snprintf(buf, sizeof(buf), " | longest frame %.1f ms", longestPresentGap * 1e3);
             longestPresentGap = 0.0;
             line += buf;
@@ -3692,7 +3836,8 @@ SdlGpuBackend::~SdlGpuBackend() {
             SDL_ReleaseGPUTransferBuffer(m_impl->device.handle(), m_impl->feedbackUpload);
         if (m_impl->presentUpload)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->presentUpload);
-        for (auto *scratch : {&m_impl->sharpTexture, &m_impl->compositeTexture, &m_impl->captureTexture})
+        for (auto *scratch : {&m_impl->sharpTexture, &m_impl->compositeTexture, &m_impl->captureTexture,
+                              &m_impl->roundTrip.copy})
             m_impl->releaseScratch(*scratch);
         if (m_impl->window) {
             SDL_ReleaseWindowFromGPUDevice(m_impl->device.handle(), m_impl->window);
@@ -3834,6 +3979,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
                                        {ssax, ssay, ssax + command.trxreg.rrw, ssay + command.trxreg.rrh});
         m_impl->copySourceCurrent = sourcePages & ~needed;
     }
+    m_impl->noteRoundTrip(command);
     m_impl->transferCommand = command;
     m_impl->transfer->begin(command);
     m_impl->copySourceCurrent.reset();
@@ -3851,6 +3997,7 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->stats.transferBytes += sizeBytes;
     if (!m_impl->transfer) return;
+    const bool roundTripReturned = m_impl->noteRoundTripUpload(data, sizeBytes);
     const auto before = m_impl->transfer->snapshot();
     const auto &command = m_impl->transferCommand;
     const uint32_t dpsm = command.bitbltbuf.dpsm;
@@ -3922,6 +4069,8 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
                 before.copiedPixels, after.copiedPixels);
         m_impl->patchingHostWrite = false;
     }
+    if (roundTripReturned)
+        m_impl->applyRoundTrip(command);
 }
 
 void SdlGpuBackend::Flush() {
@@ -4058,7 +4207,9 @@ uint32_t SdlGpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     std::lock_guard lock(m_impl->mutex);
     if (!m_impl->transfer)
         return 0u;
-    return m_impl->transfer->consumeLocalToHost(dst, maxBytes);
+    const uint32_t consumed = m_impl->transfer->consumeLocalToHost(dst, maxBytes);
+    m_impl->noteRoundTripRead(dst, consumed);
+    return consumed;
 }
 
 uint32_t SdlGpuBackend::ReadVram(uint32_t psm, uint32_t base, uint32_t bw,

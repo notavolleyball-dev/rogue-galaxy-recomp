@@ -242,8 +242,20 @@ the geometry reaches there (a clear never does), and a draw's host scissor
 and written region are clipped to its surface. Grown surfaces took in the page after the
 buffer; texture uploads to it then discarded the depth buffer mid-frame.
 
-Two more fix results:
+Three more fix results:
 
+- `sdlgpu_backend.cpp`: a frame read back to the host and sent back
+  unchanged keeps its scale. Rogue Galaxy's screen captures
+  (ScreenFadeCaptureFrame: the frozen frame of an event under an item's
+  message, the dissolves into and out of battle) read the frame into EE
+  memory at GS size and upload it every frame, so at 3x the picture went
+  to 1x for as long. A local-to-host read of a scaled CT32 region now keeps
+  the region on the GPU and an FNV-1a hash of the bytes the host got; a
+  host-to-local upload of the same size and format whose bytes hash the
+  same, onto a whole surface of that size at that scale, gets the kept copy
+  (`claimWhole`, a blit, `markDrawn`). Bytes the host changed (the field
+  menu's darkened 256x256 copy) land as before. The stats line counts
+  `round trips`; `DQ8_GFX_NO_ROUND_TRIP=1` leaves them at 1x.
 - `sdlgpu_backend.cpp`, `sdlgpu_window.h`: `SdlGpuDisplayOptions::crop`
   leaves GS pixels off each edge of the picture (and half a pixel more at a
   raised scale), before the Sharp filter's passes. Rogue Galaxy leaves a

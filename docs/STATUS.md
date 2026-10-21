@@ -1119,6 +1119,27 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**Captured frames keep their scale (2026-10-21).** In an event where the
+party is handed an item the user saw the whole picture, background and
+characters, in blocks at 3x. Two frames captured with F7
+(`RogueGalaxy-captura.bat`: `RG_GS_CAPTURE` logs the frame after the
+press, with the renderer's target trace, now numbered by batch) showed
+why: the item's message runs `EvCmdMenuWinShowScreenCapture`, which reads
+the frame into EE memory (ScreenFadeCaptureFrame, GsDownloadImage, a
+StoreImage of 512x448 CT32) and shows it in a 512x448 window under the
+message, uploading it to 0x2A00 and drawing it unfiltered every frame;
+read back through local memory, the frame comes at 1x. The same capture
+makes the dissolves into and out of battle (BattleModeUpdate) and the
+events' dissolves and wipes. The renderer now keeps a scaled read's
+region on the GPU with a hash of the bytes the host got, and an upload of
+the same bytes onto a surface of that size gets the scaled copy
+(`thirdparty/dq8-gfx`, see its README). On the town bench's battle the
+stats line counts 15 round trips at its start, and the dissolving frame
+keeps its detail; frames byte-identical at 1x. On the way: the event's
+blur chain (0x150 and 0x162, 192x192) shares its pages with the textures
+uploaded that frame, and the first blur pass imports 0x162 from local
+memory, harmless as the passes cover it whole.
+
 **Widescreen of the window's shape (2026-10-21).** The user's window,
 maximised, is 2560x1352 (1.89:1), so a 16:9 picture left bars at its sides.
 Under Auto a wide game now fills the window (`sdlGpuWideAspect`, its shape
