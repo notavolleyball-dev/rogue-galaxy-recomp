@@ -252,3 +252,6 @@ Two more fix results:
   of picture past it.
 - `sdlgpu_display.cpp`: under Auto a game drawn wide fills the window's
   shape (`sdlGpuWideAspect`, 4:3 to 32:9) instead of 16:9.
+
+The target trace numbers the batches from each present (`[target] batch N`),
+as a frame log numbers them.

@@ -23,7 +23,15 @@ namespace rg::debug
 // pad read count reaches N (see RG_INPUT_CLOCK=pad in input_script.h).
 // GS memory goes beside it as file.vram at the end of that frame, and with
 // file@N#K also as file.K.vram just before batch K (textures it samples).
+// RG_GS_FRAMELOG_COUNT=K logs the K-1 frames after it too, as file.1.txt,
+// file.2.txt, ... (file named without its extension).
+// RG_GS_CAPTURE=DIR: the same for the frame after each F7 press, to
+// DIR/capture-N.txt (and .vram), with the backend's target trace
+// (DQ8_GFX_TRACE_TARGETS) in the log for that frame.
 // Returns the backend unchanged when none is set.
 std::unique_ptr<GSRasterBackend> censusGsBackend(std::unique_ptr<GSRasterBackend> backend);
+
+// F7 (from the window's pump): log the next frame when RG_GS_CAPTURE is set.
+void requestFrameCapture();
 
 } // namespace rg::debug

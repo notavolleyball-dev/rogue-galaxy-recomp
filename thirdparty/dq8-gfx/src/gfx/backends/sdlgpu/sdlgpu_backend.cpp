@@ -860,6 +860,8 @@ struct SdlGpuBackend::Impl {
 
     uint32_t scale = 1u;
     SdlGpuStats stats{};
+    // Batches since the last present, for the target trace.
+    uint32_t tracedBatch = 0u;
     std::string lastError;
 
     // Wall time spent inside backend entry points, so a slow frame can be
@@ -1532,6 +1534,12 @@ struct SdlGpuBackend::Impl {
 
     void submit(const GSPrimitiveBatch &batch) {
         ++stats.primitivesSubmitted;
+        // Numbered as a frame log numbers them (from the frame's start), so
+        // a traced move can be put next to the batch that made it.
+        if (gsTargetTraceEnabled())
+            std::fprintf(stderr, "[target] batch %u fbp=%03x tbp=%05x\n", tracedBatch,
+                         batch.state.context.frame.fbp, batch.state.context.tex0.tbp0);
+        ++tracedBatch;
         noteTransferInterrupted();
         if (!device.valid() || !vram.attached() || batch.vertexCount == 0u)
             return;
@@ -3344,6 +3352,7 @@ struct SdlGpuBackend::Impl {
     void acquirePresentation(const GSPresentationRequest &request, PresentStage &stage) {
         PresentationFrame &frame = stage.frame;
         ++stats.presents;
+        tracedBatch = 0u;
         if (gsTargetTraceEnabled())
             std::fprintf(stderr, "[target] present #%llu\n", static_cast<unsigned long long>(stats.presents));
         if (!flushFor(stats.flushPresent) || !device.valid())

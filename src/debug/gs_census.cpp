@@ -1,6 +1,7 @@
 #include "debug/gs_census.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -72,14 +73,17 @@ bool unsupported(const GSDrawState &state)
     return (test & kTestDate) || afail || destAlpha || partialMask(state.context.frame.fbmsk);
 }
 
+// F7 presses not yet turned into a captured frame (RG_GS_CAPTURE).
+std::atomic<unsigned> g_captureRequests{0u};
+
 class CensusBackend final : public GSRasterBackend
 {
 public:
     CensusBackend(std::unique_ptr<GSRasterBackend> inner, bool census, uint64_t skipMask, uint64_t skipValue,
-                  std::string logPath, uint32_t logAt, uint32_t snapAt)
+                  std::string logPath, uint32_t logAt, uint32_t snapAt, std::string captureDir)
         : m_inner(std::move(inner)), m_census(census), m_skipMask(skipMask), m_skipValue(skipValue),
-          m_logPath(std::move(logPath)), m_logAt(logAt), m_snapAt(snapAt), m_logging(!m_logPath.empty()),
-          m_last(Clock::now())
+          m_logPath(std::move(logPath)), m_logAt(logAt), m_snapAt(snapAt), m_captureDir(std::move(captureDir)),
+          m_logging(!m_logPath.empty() || !m_captureDir.empty()), m_last(Clock::now())
     {
         // RG_GS_FRAMESKIP=A-B[,C-D]: batches of the logged frame left out,
         // both ends included; "A-" runs to the end of the frame.
@@ -259,8 +263,31 @@ private:
             dumpVram(".vram");
             m_logPath.clear();
             std::fprintf(stderr, "[gs-census] frame logged (%u batches)\n", m_logIndex);
-            setTargetTrace(false);
+            // RG_GS_FRAMELOG_COUNT=K: the K-1 frames after it too, as
+            // file.1.txt, file.2.txt...
+            if (m_moreFrames != 0u && !m_logBase.empty())
+            {
+                --m_moreFrames;
+                m_logPath = m_logBase + "." + std::to_string(++m_extraFrame) + ".txt";
+                m_logAt = 0u;
+            }
+            else
+            {
+                setTargetTrace(false);
+                m_tracing = false;
+            }
             return;
+        }
+        // RG_GS_CAPTURE=DIR: F7 logs the next frame to DIR/capture-N.txt,
+        // the backend's target trace on for it.
+        if (m_logPath.empty() && !m_captureDir.empty() &&
+            g_captureRequests.exchange(0u, std::memory_order_relaxed) != 0u)
+        {
+            m_logPath = m_captureDir + "/capture-" + std::to_string(++m_captures) + ".txt";
+            m_logAt = 0u;
+            m_tracing = true;
+            setTargetTrace(true);
+            std::fprintf(stderr, "[gs-census] F7: capturing the next frame to %s\n", m_logPath.c_str());
         }
         const uint32_t padReads = ps2_stubs::getPadDebugSnapshot().ports[0][0].readCount;
         // RG_GS_TRACE_BEFORE=N: the backend's target trace
@@ -293,6 +320,19 @@ private:
 #else
         (void)on;
 #endif
+    }
+
+    static unsigned framesFromEnv()
+    {
+        const char *value = std::getenv("RG_GS_FRAMELOG_COUNT");
+        const unsigned long count = value ? std::strtoul(value, nullptr, 10) : 1ul;
+        return count > 1ul ? static_cast<unsigned>(std::min(count, 120ul) - 1ul) : 0u;
+    }
+
+    static std::string stripExtension(const std::string &path)
+    {
+        const size_t dot = path.rfind('.');
+        return dot == std::string::npos ? path : path.substr(0, dot);
     }
 
     static uint32_t traceBeforeFromEnv()
@@ -415,9 +455,16 @@ private:
     const uint64_t m_skipMask;
     const uint64_t m_skipValue;
     std::string m_logPath;
-    const uint32_t m_logAt;
+    uint32_t m_logAt;
     const uint32_t m_snapAt;
-    const bool m_logging; // a log path was given; m_logPath empties once it is written
+    const std::string m_captureDir;
+    unsigned m_captures = 0u;
+    // The frames logged after the first (RG_GS_FRAMELOG_COUNT), named from
+    // RG_GS_FRAMELOG's path without its extension.
+    unsigned m_moreFrames = framesFromEnv();
+    unsigned m_extraFrame = 0u;
+    std::string m_logBase = stripExtension(m_logPath);
+    const bool m_logging; // a log path or a capture folder was given; m_logPath empties once it is written
     const uint32_t m_traceBefore = traceBeforeFromEnv();
     bool m_tracing = false;
     std::mutex m_logMutex;
@@ -461,13 +508,25 @@ std::unique_ptr<GSRasterBackend> censusGsBackend(std::unique_ptr<GSRasterBackend
             logPath.resize(at);
         }
     }
-    if (!enabled && !mask && logPath.empty())
+    std::string captureDir;
+    if (const char *dir = std::getenv("RG_GS_CAPTURE"); dir && *dir)
+    {
+        captureDir = dir;
+    }
+    if (!enabled && !mask && logPath.empty() && captureDir.empty())
     {
         return backend;
     }
-    std::printf("[rg] GS census%s%s%s\n", enabled ? " on" : "", mask ? ", skipping some draws (RG_GS_SKIP)" : "",
-                logPath.empty() ? "" : ", logging a frame (RG_GS_FRAMELOG)");
-    return std::make_unique<CensusBackend>(std::move(backend), enabled, mask, value, std::move(logPath), logAt, snapAt);
+    std::printf("[rg] GS census%s%s%s%s\n", enabled ? " on" : "", mask ? ", skipping some draws (RG_GS_SKIP)" : "",
+                logPath.empty() ? "" : ", logging a frame (RG_GS_FRAMELOG)",
+                captureDir.empty() ? "" : ", F7 logs a frame (RG_GS_CAPTURE)");
+    return std::make_unique<CensusBackend>(std::move(backend), enabled, mask, value, std::move(logPath), logAt, snapAt,
+                                           std::move(captureDir));
+}
+
+void requestFrameCapture()
+{
+    g_captureRequests.fetch_add(1u, std::memory_order_relaxed);
 }
 
 } // namespace rg::debug

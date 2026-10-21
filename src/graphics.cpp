@@ -54,6 +54,7 @@ bool g_hasMenu = false;
 // player's marks of 2026-10-20 never reached the log.
 std::atomic<unsigned> g_f9Presses{0u};
 std::atomic<unsigned> g_f10Presses{0u};
+std::atomic<unsigned> g_f7Presses{0u};
 // The longest gap between two pump() calls since the stats line last printed
 // it. The presenter loop calls pump several times a frame, so this is not the
 // frame time (the backend's "longest frame" is) but the longest the main
@@ -79,6 +80,10 @@ bool SDLCALL countMarkKeys(void *, SDL_Event *event)
         else if (event->key.scancode == SDL_SCANCODE_F10)
         {
             g_f10Presses.fetch_add(1u, std::memory_order_relaxed);
+        }
+        else if (event->key.scancode == SDL_SCANCODE_F7)
+        {
+            g_f7Presses.fetch_add(1u, std::memory_order_relaxed);
         }
     }
     return true;
@@ -137,6 +142,12 @@ bool pump(void *userData)
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - markStart).count());
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
+    }
+    // F7 logs the next GS frame with RG_GS_CAPTURE (RogueGalaxy-captura.bat).
+    for (unsigned n = g_f7Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
+    {
+        std::fprintf(stderr, "[mark] F7: frame capture requested\n");
+        debug::requestFrameCapture();
     }
     // F10 writes the stall watchdog's report now (the guest threads, their
     // waits, the host stacks), for a freeze that keeps flipping.
