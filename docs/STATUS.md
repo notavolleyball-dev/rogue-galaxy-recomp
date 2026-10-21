@@ -1119,6 +1119,25 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The Monography Shot solid (2026-10-21).** The user saw the gun Jaster
+is handed in an event translucent, in the event and in battle, at 60 and
+then at 30 fps too; a PS2 recording shows it solid. Frame logs of the
+user's save, walking at 30 fps with the gun holstered, show how the game
+draws a character's weapons: each into its own layer in the 0x150 buffer
+(0x158 for the sword, 0x152 for the gun), then over the frame with
+sprites: the layer read as CT24 with AEM at alpha 0x3D-0x3F, twice, a
+fraction of a pixel apart (a soft edge), then as CT32 with an alpha test
+of 1 or more and a fixed factor of 0x80 (the copy). The gun's 328 batches use texture alpha
+0 and FBA; GS memory dumped before the copy (`RG_GS_FRAMELOG=file@N#K`)
+had 493 of its 503 pixels at alpha 0, so the copy skipped them. The
+renderer applied FBA only where it has framebuffer fetch; now its
+fixed-function path sets the bit too (`thirdparty/dq8-gfx`, see its
+README). All 503 pixels then carry alpha 128 and the gun is drawn solid;
+the rest of that frame is unchanged, and the 1x bench walk differs from
+its reference in 10 pixels, the edge of the gun Jaster held then. The
+60 fps step fixes were cleared first (with `RG_STEP_FIXES=0` the gun
+was still translucent).
+
 **Captured frames keep their scale (2026-10-21).** In an event where the
 party is handed an item the user saw the whole picture, background and
 characters, in blocks at 3x. Two frames captured with F7

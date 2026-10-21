@@ -242,7 +242,7 @@ the geometry reaches there (a clear never does), and a draw's host scissor
 and written region are clipped to its surface. Grown surfaces took in the page after the
 buffer; texture uploads to it then discarded the depth buffer mid-frame.
 
-Three more fix results:
+Four more fix results:
 
 - `sdlgpu_backend.cpp`: a frame read back to the host and sent back
   unchanged keeps its scale. Rogue Galaxy's screen captures
@@ -264,6 +264,15 @@ Three more fix results:
   of picture past it.
 - `sdlgpu_display.cpp`: under Auto a game drawn wide fills the window's
   shape (`sdlGpuWideAspect`, 4:3 to 32:9) instead of 16:9.
+- `shaders/gs_draw.frag`: FBA without framebuffer fetch. Only the fetch
+  path (Apple's GPUs) set the stored alpha's top bit; the fixed-function
+  path stored the draw's alpha as it was. Rogue Galaxy draws a weapon
+  into a layer (the Monography Shot: texture alpha 0, FBA on), then copies
+  over the frame only the layer's pixels whose alpha is set, after two
+  soft-edge passes at about half alpha; the gun got only those and showed
+  the scene through it. An exact emitted alpha now gets bit 7 under FBA
+  (not on CT24); a scaled one is a source-alpha blend factor, and that
+  draw's alpha replay stores it.
 
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them.

@@ -325,5 +325,12 @@ void main() {
     outColor = blendPixel(color);
 #else
     outColor = vec4(color.rgb, min(color.a * params.misc.x, 1.0));
+    // FBA: the stored alpha gets its top bit (CT24 stores none). Rogue
+    // Galaxy: added; it draws a weapon with alpha 0 and FBA into a layer,
+    // then copies only the layer's pixels whose alpha is set. Only an exact
+    // alpha is the stored one: a scaled one is a blend factor, and that
+    // draw's alpha replay stores it.
+    if ((params.blend.w & 8u) != 0u && (params.blend.w >> 8u) != 1u && params.misc.x == 1.0)
+        outColor.a = float(uint(round(outColor.a * 255.0)) | 128u) / 255.0;
 #endif
 }
