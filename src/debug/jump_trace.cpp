@@ -63,8 +63,8 @@ constexpr unsigned kMaxLinesAll = 300000u;
 PS2Runtime::RecompiledFunction g_moveCollide = nullptr;
 PS2Runtime::RecompiledFunction g_moveReqSet = nullptr;
 std::chrono::steady_clock::time_point g_start;
-bool g_everyMove = false; // RG_JUMP_TRACE=2: on the ground as well (speed ramps)
-bool g_allCharas = false; // RG_JUMP_TRACE=3: every character, not only the leader
+bool g_everyMove = false; // RG_JUMP_TRACE=2 or 4: on the ground as well (speed ramps, a party following)
+bool g_allCharas = false; // RG_JUMP_TRACE=3 or 4: every character, not only the leader
 unsigned g_lines = 0u;
 uint32_t g_moves = 0u;
 
@@ -310,8 +310,8 @@ void installJumpTrace(PS2Runtime &runtime)
         return;
     }
     g_start = std::chrono::steady_clock::now();
-    g_everyMove = *enabled == '2';
-    g_allCharas = *enabled == '3';
+    g_everyMove = *enabled == '2' || *enabled == '4';
+    g_allCharas = *enabled == '3' || *enabled == '4';
     bool complete = rg::timing::hookFunction(runtime, kCharaMoveCollide, &moveCollide, g_moveCollide);
     if (g_allCharas)
     {

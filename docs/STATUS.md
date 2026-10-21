@@ -1119,6 +1119,26 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The party's AI holds its walk between its runs (2026-10-21).** The
+user saw the party following Jaster walk in little steps and stops, from
+the moment a game loaded, and walk normally with the `ai` step fix off
+(`RogueGalaxy-sem-ia.bat`). RGDecomp's C for the AI shows why: its walk
+and run are inputs held for one frame. CharaAiHandlePrmtRequestsMaybe
+clears the character's flags (+0x568) and calls AiUpdate, whose
+AiMoveWalkOrRunToTarget / AiMoveRunToTarget add 1 (walk) and 2 (run)
+(AiRouteSegmentStep and AiClimbOrJumpWall 0x10002, the ladder 0x80020 and
+0x80040), and the character's update reads them after; with AiUpdate on
+the logic frames only, every other frame had no input and the character
+stopped. The frame in between now holds again the low-word flags the
+AI's last run added. A first try, the fix only while IsInBattle
+(0x4821B8), did not do: SetInBattle comes with a battle and only
+GameFlowReset clears it, so it stays set after the first fight (the town
+bench meets one at 88 s). Measured with `RG_JUMP_TRACE=4` (new: every
+character's moves on the ground too) over the town bench, the two
+followers' stops of one to six frames: 30 and 22 in the walk with the
+first try (20 and 19 of them after its fight), 5 and 6 now, 3 and 1 with
+the fix off; the share of frames they move is the same as with it off.
+
 **The VU1 programs again: three tries that gave nothing (2026-10-20
 night).** A VIF1 profile over the gate's busy stretch (PROFILE_START=62:
 the field starts near 57 s on the stats clock; an earlier window caught

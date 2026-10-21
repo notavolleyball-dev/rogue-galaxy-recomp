@@ -133,8 +133,19 @@ constexpr uint32_t kMenuTaskSteps[] = {
 // as a whole step, like the scripts; on 60 fps frames the move it made, by
 // position or by requested move, is shared half and half with the next
 // frame, so the character moves at the console's speed without stepping at
-// 30 Hz.
+// 30 Hz. Its walk and run are inputs held for the frame: its caller clears
+// the character's flags (+0x568) before it, and AiMoveWalkOrRunToTarget
+// and the like add 1 (walk), 2 (run), 0x10000 and the ladder's 0x80020 and
+// 0x80040, which the character's own update reads after. A frame without
+// the AI's run would leave them clear and the party following its leader
+// walked in little steps and stops (2026-10-21): on those frames the inputs
+// the AI held last are held again, as the console held them for its 30th
+// of a second.
 constexpr uint32_t kAiUpdate = 0x002C05B0u;
+constexpr uint32_t kCharaFlags = 0x568u;
+// The low word: what the AI holds. The high one is the hit and action
+// state others set (BattleApplyHit, ActionMgrRunActions).
+constexpr uint64_t kAiHeldFlags = 0xFFFFFFFFull;
 constexpr uint32_t kAiBlock = 0x590u;
 constexpr uint32_t kCharaPosition = 0x70u;
 constexpr uint32_t kCharaRequestedMove = 0xD0u;
@@ -463,6 +474,9 @@ struct AiShare
     float requested[3] = {0.0f, 0.0f, 0.0f};
     float positionBefore[3] = {0.0f, 0.0f, 0.0f};
     float requestedBefore[3] = {0.0f, 0.0f, 0.0f};
+    // The character's flags before the AI's run, and the inputs it added.
+    uint64_t flagsBefore = 0u;
+    uint64_t heldFlags = 0u;
 };
 AiShare g_aiShares[64];
 // The scene's scale to restore after an AI run at 1.0 (one at a time, on
@@ -484,7 +498,7 @@ AiShare *aiShareOf(uint32_t chara)
     {
         for (AiShare &share : g_aiShares)
         {
-            if (share.chara == 0u || (pass == 1 && !share.pending))
+            if (share.chara == 0u || (pass == 1 && !share.pending && share.heldFlags == 0u))
             {
                 share = AiShare{};
                 share.chara = chara;
@@ -575,6 +589,9 @@ void afterAiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint3
     {
         return;
     }
+    uint64_t flags = 0u;
+    share->heldFlags =
+        readGuest(rdram, chara + kCharaFlags, flags) ? (flags & ~share->flagsBefore) & kAiHeldFlags : 0u;
     float position[3] = {0.0f, 0.0f, 0.0f};
     float requested[3] = {0.0f, 0.0f, 0.0f};
     if (!share->share || !readVec3(rdram, chara + kCharaPosition, position) ||
@@ -613,13 +630,24 @@ void aiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     switch (rg::timing::logicFrame(rdram, ctx))
     {
     case rg::timing::LogicFrame::AsIs:
+        if (share)
+        {
+            share->heldFlags = 0u;
+        }
         g_aiUpdate(rdram, ctx, runtime);
         return;
     case rg::timing::LogicFrame::Skip:
+    {
+        uint64_t flags = 0u;
+        if (share && share->heldFlags != 0u && readGuest(rdram, chara + kCharaFlags, flags))
+        {
+            writeGuest(rdram, chara + kCharaFlags, flags | share->heldFlags);
+        }
         // Its result goes unused; the host stands in for `jr ra`.
         setReturnS32(ctx, 0);
         ctx->pc = getRegU32(ctx, 31);
         return;
+    }
     case rg::timing::LogicFrame::WholeStep:
         break;
     }
@@ -627,6 +655,10 @@ void aiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         wholeStep(g_aiUpdate, rdram, ctx, runtime);
         return;
+    }
+    if (!readGuest(rdram, chara + kCharaFlags, share->flagsBefore))
+    {
+        share->flagsBefore = 0u;
     }
     const float scale = rg::timing::sceneScale(rdram, ctx);
     std::memcpy(&g_aiScaleBits, &scale, sizeof(scale));
