@@ -133,6 +133,13 @@ void apply(Settings &s, const std::string &section, const std::string &key, cons
         else if (key == "hide_idle_cursor") parseBool(value, s.hideIdleCursor);
     } else if (section == "game") {
         if (key == "fast_forward_speed") parseNumber(value, s.fastForwardSpeed, 0.0f, 16.0f);
+        else if (value == "1" || value == "true" || value == "yes" || value == "0" || value == "false" ||
+                 value == "no") {
+            // Any other key is one of the game's switches (Rogue Galaxy: added).
+            bool on = false;
+            parseBool(value, on);
+            s.gameOptions[key] = on;
+        }
     }
 }
 } // namespace
@@ -174,6 +181,8 @@ std::string serializeSettings(const Settings &s) {
         << "\npause_in_background = " << flag(s.pauseInBackground)
         << "\nhide_idle_cursor = " << flag(s.hideIdleCursor) << '\n'
         << "\n[game]\nfast_forward_speed = " << s.fastForwardSpeed << '\n';
+    for (const auto &[key, on] : s.gameOptions)
+        out << key << " = " << flag(on) << '\n';
     return out.str();
 }
 

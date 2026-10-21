@@ -9,6 +9,7 @@
 
 #include "ps2_runtime.h"
 #include "return_hook.h"
+#include "loading_screen.h"
 #include "step_fixes.h"
 
 namespace rg::timing
@@ -501,7 +502,9 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx)
     {
         return;
     }
-    const uint8_t movie = g_moviePlaying ? 1u : 0u;
+    // A movie, or the loading screen, whose fades count frames: both flip at
+    // the console's 30.
+    const uint8_t movie = g_moviePlaying || rg::loading::active() ? 1u : 0u;
     uint32_t before = 0u;
     readGuest(rdram, env + kVsyncInterval, before);
     // A write of the game's that did not go through DrawEnvSetVsyncInterval

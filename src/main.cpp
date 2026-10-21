@@ -28,6 +28,7 @@
 #include "graphics.h"
 #include "movie_audio.h"
 #include "libc_rand.h"
+#include "loading_screen.h"
 #include "scene_timing.h"
 #include "step_fixes.h"
 #include "vif1_thread.h"
@@ -144,6 +145,7 @@ int run(int argc, char **argv)
     rg::libc::install(runtime);
     rg::vu0::install(runtime);
     rg::movie::install(runtime);
+    rg::loading::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);

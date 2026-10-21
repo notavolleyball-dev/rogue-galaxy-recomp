@@ -370,6 +370,24 @@ void Overlay::drawInterfacePage() {
         }
         endSettings();
     }
+
+    // The game's own switches (Rogue Galaxy: added).
+    if (!m_host.gameOptions.empty()) {
+        sectionHeader("Game");
+        if (beginSettings("game")) {
+            for (const GameOption &option : m_host.gameOptions) {
+                settingRow(option.label.c_str(), option.help.empty() ? nullptr : option.help.c_str());
+                bool on = gameOption(option);
+                if (toggle(option.key.c_str(), &on)) {
+                    m_settings.gameOptions[option.key] = on;
+                    if (m_host.setGameOption)
+                        m_host.setGameOption(option.key, on);
+                    markDirty();
+                }
+            }
+            endSettings();
+        }
+    }
 }
 
 void Overlay::drawControlsPage() {

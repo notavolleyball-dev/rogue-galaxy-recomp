@@ -1049,6 +1049,26 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**The loading screen at the console's pace, and a recap at once
+(2026-10-20 night).** The story so far that a loaded game shows, its lines
+fading in one by one before Press X, ran at twice its speed in the 60 fps
+mode. A thread of its own draws it (LoadingScreenThread, 0x343510:
+LoadingScreenFrame, then GfxEndFrame's flip) while GameSessionInit loads,
+between LoadingScreenStart and LoadingScreenStop, and each line's alpha
+gains a constant a frame (0x3445B4..0x344628, at 1.0 the next line
+starts); every flip there waited one vblank. `src/loading_screen.cpp`
+flags the screen and the flip waits two while it is up, as for the
+movies (the `[timing]` trace shows the interval 2 there, 1 after). The
+menu has a new Interface > Game section for the game's own switches
+(dq8-gfx's HostServices::gameOptions, kept under [game] in settings.ini):
+"Show the loading recap at once" (`RG_INSTANT_RECAP=1` too) sets every
+line's alpha and the shown count before each frame, so the whole recap
+and Press X come up with the screen. Only X or START ends it, as before:
+in state 5 LoadingScreenFrame calls LoadingScreenTryFinish on a press,
+which finishes once every line is shown (a spare X in the bench's load
+script ended the instant screen at once; RG_TRACE on 0x3430C0 showed the
+press path, 0x343724). Frames byte-identical at 1x.
+
 **The VU1 programs again: three tries that gave nothing (2026-10-20
 night).** A VIF1 profile over the gate's busy stretch (PROFILE_START=62:
 the field starts near 57 s on the stats clock; an earlier window caught

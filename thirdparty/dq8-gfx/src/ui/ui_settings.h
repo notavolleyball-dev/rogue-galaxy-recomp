@@ -5,6 +5,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_window.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace dq8::ui {
@@ -44,6 +45,10 @@ struct Settings {
 
     // Game
     float fastForwardSpeed = 2.0f; // 0 runs unpaced
+    // The game's own switches (HostServices::gameOptions), by key, as the
+    // file has them; one it does not have takes the option's default (Rogue
+    // Galaxy: added).
+    std::map<std::string, bool> gameOptions;
 };
 
 std::string serializeSettings(const Settings &settings);

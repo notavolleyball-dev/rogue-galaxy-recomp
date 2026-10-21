@@ -14,6 +14,7 @@
 #include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
+#include "loading_screen.h"
 #include "vif1_thread.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
@@ -174,6 +175,17 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     // it is paused.
     host.completedRenders = [] { return guestFlips(); };
     host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
+    // The game's own switches, under Interface > Game.
+    host.gameOptions = {
+        {"instant_loading_recap", "Show the loading recap at once",
+         "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
+         "it has loaded.",
+         false},
+    };
+    host.setGameOption = [](const std::string &key, bool on) {
+        if (key == "instant_loading_recap")
+            rg::loading::setInstantRecap(on);
+    };
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
     std::string error;
     if (!menu->initialize(backend.window(), backend.windowTextureFormat(), error))

@@ -33,6 +33,15 @@ inline bool saveImage(SDL_Surface *surface, const char *path) { return SDL_SaveB
 
 // What the menu can ask of the game around it. A control whose function is
 // empty is not shown.
+// A switch of the game's own, shown under Interface > Game and kept in the
+// settings file's [game] section under `key` (Rogue Galaxy: added).
+struct GameOption {
+    std::string key;
+    std::string label;
+    std::string help;
+    bool defaultValue = false;
+};
+
 struct HostServices {
     std::string version;
     std::function<void(float)> setVolume; // 0 to 1
@@ -45,6 +54,10 @@ struct HostServices {
     // The guest's vsync clock, which DQ8_UI_SCRIPT is timed against, as
     // DQ8_PAD_SCRIPT is; presents are counted instead when it is empty.
     std::function<uint64_t()> guestFrame;
+    // The game's own switches, and what turns one on or off (Rogue Galaxy:
+    // added).
+    std::vector<GameOption> gameOptions;
+    std::function<void(const std::string &key, bool on)> setGameOption;
 };
 
 enum class SettingsPage : uint8_t { Display, Sound, Controls, Interface, Count };
@@ -149,6 +162,8 @@ private:
     void saveIfDirty(bool force);
     void applyVolume();
     void applyPause();
+    // A game switch's value: the settings file's, or the option's default.
+    bool gameOption(const GameOption &option) const;
     void setFullscreen(bool fullscreen);
     void setPadConfig(const gfx::PadConfig &config);
     // Asks for an internal resolution and saves it. Asking for the active one

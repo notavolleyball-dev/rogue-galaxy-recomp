@@ -104,6 +104,14 @@ void Overlay::applySettings() {
         SDL_SetWindowFullscreen(m_window, true);
     applyVolume();
     applyPause();
+    if (m_host.setGameOption)
+        for (const GameOption &option : m_host.gameOptions)
+            m_host.setGameOption(option.key, gameOption(option));
+}
+
+bool Overlay::gameOption(const GameOption &option) const {
+    const auto found = m_settings.gameOptions.find(option.key);
+    return found != m_settings.gameOptions.end() ? found->second : option.defaultValue;
 }
 
 bool Overlay::capturesInput() const { return m_menuOpen || m_capture.active; }

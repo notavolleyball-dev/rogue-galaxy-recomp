@@ -74,6 +74,7 @@ add_executable(roguegalaxy
     movie_audio.cpp
     return_hook.cpp
     libc_rand.cpp
+    loading_screen.cpp
     scene_timing.cpp
     step_fixes.cpp
     stick_response.cpp
