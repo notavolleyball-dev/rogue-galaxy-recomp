@@ -28,23 +28,28 @@
 #                half second (an attack, and "Keep fighting" if the leader
 #                strays out of the battle), with RG_FORCE_ENCOUNTER=1, so
 #                the battle starts on the first step there: at pad read
-#                2547, about 43 s, to about 58 s; a second often follows at
-#                about 65 s. The frame is logged at pad read 3000 (in the
-#                first), the profile window is 45 s to 57 s, and fpscmp
+#                2547, about 68 s of the run (the loading screen takes to
+#                about 58 s), to about 83 s; a second often follows. The
+#                frame is logged at pad read 3000 (about 76 s, in the
+#                first), the profile window is 68 s to 83 s, and fpscmp
 #                prints the 6 intervals before the marker and the 8 after.
 #                Read the [gfx] draws per second (55-75k in a battle) or
 #                tools/bench/battlefps.py NAME..., the frame rate over the
 #                intervals with 55k draws or more (the comparable number).
 #   GATE=1       the boss gate bench: the player's File 03 saved beside it
 #                (build/run/mc0-gate), loaded and left standing; prints
-#                tools/bench/gatefps.py (fps, VIF1 ms a frame).
+#                tools/bench/gatefps.py (fps, VIF1 ms a frame) and profiles
+#                64-81 s (the field from about 60 s).
 #   TOWN=1       the town bench, where the GS worker is the limit: the
 #                player's File 03 as saved at Salgin's transporter
 #                (2026-10-20 noon, copied to build/run/mc0-town; delete the
 #                copy to refresh it), loaded and walked about the square
 #                (build/run/input_town_walk.txt); prints the fps and the
-#                GS worker's and VIF1's share over its heavy stretch (56-80
-#                s). It varies a few points run to run: alternate builds.
+#                GS worker's and VIF1's share over its heavy stretch (76-95
+#                s since the loading screen keeps the console's pace; until
+#                2026-10-21 56-80 s, which now takes in the loading screen's
+#                30 fps), and profiles 76-95 s. It varies a few points run
+#                to run: alternate builds.
 #   MC0=DIR      another memory card directory (default build/run/mc0-bench).
 #   AFFINITY=HEX the instance's processor mask, set two seconds after start.
 #   STATS_EVERY=N the [gfx] stats every N frames instead of 60 (10 for
@@ -76,8 +81,8 @@ if [ "$BATTLE" = "1" ]; then
     MC0=${MC0:-build/run/mc0-battle}
     FRAME=${FRAME:-3000}
     AFTER_OVERRIDE=${AFTER_OVERRIDE:-10}
-    PROFILE_START=${PROFILE_START:-45}
-    PROFILE_SECONDS=${PROFILE_SECONDS:-12}
+    PROFILE_START=${PROFILE_START:-68}
+    PROFILE_SECONDS=${PROFILE_SECONDS:-15}
     export RG_FORCE_ENCOUNTER=1
     if [ ! -f "$INPUT" ]; then
         # The gate bench's load of File 03, then the stick up and down for
@@ -101,6 +106,10 @@ if [ "$GATE" = "1" ]; then
     MC0=${MC0:-build/run/mc0-gate}
     FRAME=${FRAME:-3200}
     AFTER_OVERRIDE=${AFTER_OVERRIDE:-25}
+    # The field from about 60 s (the loading screen at the console's pace
+    # before it), the frame capture's own hitch at about 82 s.
+    PROFILE_START=${PROFILE_START:-64}
+    PROFILE_SECONDS=${PROFILE_SECONDS:-17}
     if [ ! -f "$INPUT" ]; then
         echo "909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5,2223:CIRCLE:5,2277:CIRCLE:5" > "$INPUT"
     fi
@@ -113,6 +122,8 @@ if [ "$TOWN" = "1" ]; then
     MC0=${MC0:-build/run/mc0-town}
     FRAME=${FRAME:-5000}
     AFTER_OVERRIDE=${AFTER_OVERRIDE:-3}
+    PROFILE_START=${PROFILE_START:-76}
+    PROFILE_SECONDS=${PROFILE_SECONDS:-19}
     if [ ! -f "$INPUT" ]; then
         # The gate bench's load of File 03, then ten moves of the left
         # stick, four seconds each.
@@ -201,5 +212,5 @@ if [ "$LONG" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n
 elif [ "$BATTLE" = "1" ]; then python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6 -w 0:8
 elif [ "$GATE" = "1" ]; then python tools/bench/gatefps.py "$NAME"
 elif [ "$TOWN" = "1" ]; then
-    python tools/bench/hitches.py "build/run/$NAME.log" | awk -v n="$NAME" '{ if (match($0, /^ *[0-9.]+ /)) { t = substr($0, RSTART, RLENGTH) + 0; if (t >= 56 && t <= 80) { f += $2; w += $7; v += $5; c++ } } } END { if (c) printf "%s: %d intervals at 56-80 s, %.1f fps, GS worker %.0f%%, VIF1 %.0f%% of the wall\n", n, c, f / c, w / c, v / c }'
+    python tools/bench/hitches.py "build/run/$NAME.log" | awk -v n="$NAME" '{ if (match($0, /^ *[0-9.]+ /)) { t = substr($0, RSTART, RLENGTH) + 0; if (t >= 76 && t <= 95) { f += $2; w += $7; v += $5; c++ } } } END { if (c) printf "%s: %d intervals at 76-95 s, %.1f fps, GS worker %.0f%%, VIF1 %.0f%% of the wall\n", n, c, f / c, w / c, v / c }'
 else python tools/bench/fpscmp.py "build/run/$NAME.log" -n 6; fi

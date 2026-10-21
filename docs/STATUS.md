@@ -1119,13 +1119,42 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The EE safe point inline (2026-10-21).** Every inter-function transfer
+and back edge of the generated code charges cycles and asks the scheduler
+whether to unwind: PS2Runtime::eeCheckpointDue -> EeScheduler::checkpointDue
+-> accountCycles -> PS2Memory::advanceEeTimers, three calls across
+translation units for a few compares; in the battle bench's profile
+checkpointDue and advanceEeTimers were 6% of the game's thread on top of
+the dispatcher's 7.9%. Patch 0018 has the three in the headers (the end of
+a time slice and the timers' batch flush stay out of line), same logic:
+the 1x bench walk's frame is byte-identical. Battle profile: the game's
+thread idle 22.6% of the window against 19.0%, dispatcher plus checkpoint
+11% against about 14%; the heavy intervals' minimum 55.0 fps against 51.9
+(one run each; battles vary).
+
+**Bench windows after the loading screen's pace (2026-10-21).** With the
+loading screen at the console's 30 fps (2026-10-21 morning) the field
+appears about 20 s later than the benches assumed: the town bench's
+summary over 56-80 s took in the loading screen's 30 fps and read 56.3 fps
+where the town runs at 59-60 (its heavy stretch is now 76-95 s, the GS
+worker at 77-85%); the gate's field starts at about 60 s and its profile
+window is 64-81 s; the battle's 68-83 s. A 0.5-0.63 s frame at the gate's
+82 s, twice the same, is the bench's own frame capture, not a game hitch;
+the field entry's 0.3-0.44 s is the known load. Gate: median 55.9 fps, the
+VIF1 thread 89% busy, one VU1 program 16% of it. A CLIP-only fast path in
+Run::commitFlags (4% of that thread: a vertex program's CLIP results,
+queued one per vertex, went through the per-entry loop) gave nothing in
+three alternated pairs (VIF1 16.0/16.2/16.1 against 16.0/16.2/16.4 ms a
+frame) and was dropped.
+
 **The battle bench back (2026-10-21).** The user saved a new File 03 in
 Salgin near the waterway for it. Its old route walked out of the battle
 area and froze on "Escape from the battle?"; the start has no encounters
 either (TaskAddEncountDist returns before the countdown). Now the walk
 reaches the next area, `RG_FORCE_ENCOUNTER=1` (`src/debug/encounter.cpp`)
 cuts the encounter countdown so the battle starts at its first step there
-(pad read 2547-2549 in three runs, about 43 s, to about 58 s), and Cross
+(pad read 2547-2549 in three runs, about 68 s into the run, after the
+loading screen's 58, to about 83 s), and Cross
 every 30 pad reads attacks and answers "Keep fighting". First run: 13
 intervals with 55k draws or more, median 59.8 fps, minimum 47.7. F7 now
 also has the game thread print the 60 fps mode's state (`[timing] state:`
