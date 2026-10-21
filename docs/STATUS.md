@@ -1119,6 +1119,26 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**Destination reads without framebuffer fetch (2026-10-21).** After the
+Monography Shot, the renderer's fixed-function path (every GPU but
+Apple's) was searched for more of the kind. `tools/bench/gsstates.py` over
+397 frame logs (town, battles, the gate, menus, events, F7 captures)
+lists the states a GPU blend cannot express that the game uses: FBA
+(fixed), CT16 byte masks (exact as write masks), and three left: a factor
+of destination alpha in 323 logs (the sun flare: a 64x64 buffer's alpha
+turned into colour, Cs times Ad, which a fixed-function blend weighs by
+Ad/255 against the GS's Ad/128), a destination alpha test in 134 (one
+full-screen sprite writing alpha 0 only where the frame's alpha is under
+0x80, before the depth of field sorts pixels by alpha; ignored, it cleared
+every pixel's), and additive lines and fans with vertex alpha up to 0xB4 in
+14 (clamped at 0x80). Those draws now take a snapshot of the primitive's
+region of their target and blend in the shader, with the fetch path's code
+(`thirdparty/dq8-gfx`, see its README). GS memory dumped around the test
+shows it right (56831 pixels at 0x80 or more kept, 513 cleared). No
+on-screen change in the frames at hand: the frame's alpha there is 0x80,
+which the later tests treat as they did 0, and the sun was out of view
+(its 64x64 visibility buffer all 0); one to four reads a frame.
+
 **The movies smoothed (2026-10-21).** In a scene the user took for a
 flashback the picture went jagged and the frame rate to 30. Four F7
 captures of it hold 952 batches each and no 3D scene: 240 black

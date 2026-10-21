@@ -108,6 +108,9 @@ struct GsPipelineKey {
     uint8_t sourceFactor = 0u;
     uint8_t destinationFactor = 0u;
     uint8_t blendOperation = 0u;
+    // The draw shader that reads the destination from a snapshot bound as a
+    // second texture, with the blend done in the shader (Rogue Galaxy: added).
+    uint8_t destinationCopy = 0u;
 
     bool operator==(const GsPipelineKey &other) const = default;
 };
@@ -215,11 +218,15 @@ public:
     // drawn (Rogue Galaxy: added, for the stats line).
     uint64_t pipelineCreateNanos() const { return m_pipelineCreateNanos; }
     bool framebufferFetch() const { return m_framebufferFetch; }
+    // Pipelines with GsPipelineKey::destinationCopy can be made (Rogue
+    // Galaxy: added).
+    bool destinationCopy() const { return m_destinationShader != nullptr; }
 
 private:
     SDL_GPUDevice *m_device = nullptr;
     SDL_GPUShader *m_vertexShader = nullptr;
     SDL_GPUShader *m_fragmentShader = nullptr;
+    SDL_GPUShader *m_destinationShader = nullptr;
     SDL_GPUSampler *m_sampler = nullptr;
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     bool m_framebufferFetch = false;

@@ -242,7 +242,7 @@ the geometry reaches there (a clear never does), and a draw's host scissor
 and written region are clipped to its surface. Grown surfaces took in the page after the
 buffer; texture uploads to it then discarded the depth buffer mid-frame.
 
-Four more fix results:
+Five more fix results:
 
 - `sdlgpu_backend.cpp`: a frame read back to the host and sent back
   unchanged keeps its scale. Rogue Galaxy's screen captures
@@ -273,6 +273,20 @@ Four more fix results:
   the scene through it. An exact emitted alpha now gets bit 7 under FBA
   (not on CT24); a scaled one is a source-alpha blend factor, and that
   draw's alpha replay stores it.
+- `sdlgpu_backend.cpp`, `sdlgpu_device.cpp`, `shaders/gs_draw.frag`:
+  destination reads without framebuffer fetch. A draw with a destination
+  alpha test, a factor of destination alpha (/128 on the GS, /255 in a
+  fixed-function blend) or a factor past one (FIX, or vertex alpha where
+  the texture brings none, above 0x80) uses the `DQ8_DESTINATION_COPY`
+  build of the draw shader: a snapshot of its target, of the primitive's
+  region, taken before each primitive and bound as a second texture, and
+  the fetch path's integer blend, test and masks on it. Rogue Galaxy draws
+  one to four a frame: the full-screen test that clears its depth of
+  field's mask where it is unset (the fixed path cleared it all), the sun
+  flare's visibility turned from alpha into colour in a 64x64 buffer
+  (half as bright), and additive sparkles and light shafts at alpha up
+  to 0xB4 (clamped at 0x80). The stats line counts `destination reads`;
+  `DQ8_GFX_NO_DESTINATION_COPY=1` keeps the approximations.
 
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them.

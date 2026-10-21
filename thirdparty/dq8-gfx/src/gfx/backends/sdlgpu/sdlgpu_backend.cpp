@@ -166,12 +166,17 @@ struct DrawBatch {
     // batch before it.
     bool feedback = false;
     bool snapshot = false;
+    // Reads its colour target's pixels through a snapshot the flush takes
+    // before it, bound as the second texture, and blends in the shader
+    // (Rogue Galaxy: added). Always with a snapshot of its own.
+    bool destination = false;
 
     // Everything except the vertex range; two consecutive primitives with the
     // same answer here can share one draw call. One that needs a snapshot of
     // its own starts a new batch.
     bool sameStateAs(const DrawBatch &other) const {
-        return !other.snapshot && feedback == other.feedback && source == other.source &&
+        return !other.snapshot && feedback == other.feedback && destination == other.destination &&
+               source == other.source &&
                color == other.color && depth == other.depth &&
                pipeline == other.pipeline && texture == other.texture &&
                usesBlendConstant == other.usesBlendConstant &&
@@ -565,7 +570,7 @@ struct SdlGpuBackend::Impl {
     void noteSampled(const DrawBatch &draw) {
         if (draw.source)
             pendingSourcePages |= draw.source->pages;
-        if (draw.feedback && draw.color)
+        if ((draw.feedback || draw.destination) && draw.color)
             pendingSourcePages |= draw.color->pages;
     }
     void clearBatches() {
@@ -1375,9 +1380,24 @@ struct SdlGpuBackend::Impl {
     }
 
     // Copies a surface into its snapshot texture as part of a flush, after
-    // the batches recorded before it.
-    SDL_GPUTexture *recordSnapshot(SDL_GPUCommandBuffer *&commands, const GsSurface &surface) {
+    // the batches recorded before it. With `region` (GS pixels), only that
+    // part, at its place: a destination read samples no other (Rogue Galaxy:
+    // added).
+    SDL_GPUTexture *recordSnapshot(SDL_GPUCommandBuffer *&commands, const GsSurface &surface,
+                                   const GsRegion *region = nullptr) {
         const uint32_t width = surface.width * surface.scale, height = surface.height * surface.scale;
+        uint32_t x = 0u, y = 0u, copyWidth = width, copyHeight = height;
+        if (region && !region->empty()) {
+            x = std::min(region->x0 * surface.scale, width);
+            y = std::min(region->y0 * surface.scale, height);
+            copyWidth = std::min(region->x1 * surface.scale, width) - x;
+            copyHeight = std::min(region->y1 * surface.scale, height) - y;
+            if (copyWidth == 0u || copyHeight == 0u) {
+                x = y = 0u;
+                copyWidth = width;
+                copyHeight = height;
+            }
+        }
         std::string error;
         SDL_GPUTexture *snapshot = feedbackTextureFor(width, height, error);
         if (!snapshot) {
@@ -1387,7 +1407,7 @@ struct SdlGpuBackend::Impl {
         // The copy cycles the snapshot, so each one recorded ahead of a
         // submission keeps its own storage: it counts against the budget, and
         // the pending work may go out here (the caller is between passes).
-        if (!device.reservePending(uint64_t(width) * height * 4u, error)) {
+        if (!device.reservePending(uint64_t(copyWidth) * copyHeight * 4u, error)) {
             setError(std::move(error));
             return nullptr;
         }
@@ -1403,8 +1423,12 @@ struct SdlGpuBackend::Impl {
         }
         SDL_GPUTextureLocation source{}, destination{};
         source.texture = surface.texture;
+        source.x = x;
+        source.y = y;
         destination.texture = snapshot;
-        SDL_CopyGPUTextureToTexture(copy, &source, &destination, width, height, 1u, true);
+        destination.x = x;
+        destination.y = y;
+        SDL_CopyGPUTextureToTexture(copy, &source, &destination, copyWidth, copyHeight, 1u, true);
         SDL_EndGPUCopyPass(copy);
         ++stats.feedbackCopies;
         return snapshot;
@@ -1802,18 +1826,36 @@ struct SdlGpuBackend::Impl {
         }
         const GsBlendTranslation blend = gsTranslateBlend(alpha, state.prim.abe);
         const bool framebufferFetch = device.framebufferFetch();
-        if (!framebufferFetch && blend.enabled && !blend.exact)
+        // Without framebuffer fetch, a draw whose result depends on the
+        // destination in a way fixed-function blending cannot carry (a
+        // destination alpha test; a factor of destination alpha, /128 on the
+        // GS and /255 here) reads it from a snapshot of its target, one per
+        // primitive, and blends in the shader (Rogue Galaxy: added). Rogue
+        // Galaxy draws about two a frame: the full-screen alpha test that
+        // clears the depth of field's mask where it is unset, and the sun
+        // flare's visibility, turned from alpha into colour in a 64x64 buffer.
+        // Then the blends weighted past one, which a fixed-point attachment
+        // clamps: FIX above 0x80, and vertex alpha above it where the texture
+        // brings none (the town's additive sparkles and light shafts carry
+        // up to 0xB4).
+        bool overOne = blend.enabled && alpha.c == kBlendAlphaFixed && alpha.fix > 0x80u;
+        if (blend.enabled && alpha.c == kBlendAlphaSource && (!state.prim.tme || !context.tex0.tcc))
+            for (uint8_t index = 0u; index < batch.vertexCount && !overOne; ++index)
+                overOne = batch.vertices[index].a > 0x80u;
+        const bool destinationRead = !framebufferFetch && device.destinationCopy() &&
+            (test.destinationAlphaTestEnabled || (blend.enabled && alpha.c == kBlendAlphaDest) || overOne);
+        if (!framebufferFetch && !destinationRead && blend.enabled && !blend.exact)
             ++stats.inexactBlends;
-        if (!framebufferFetch && state.colclamp == 0u)
+        if (!framebufferFetch && !destinationRead && state.colclamp == 0u)
             ++stats.disabledColorClamps;
-        if (!framebufferFetch && test.destinationAlphaTestEnabled)
+        if (!framebufferFetch && !destinationRead && test.destinationAlphaTestEnabled)
             ++stats.destinationAlphaTests;
         if (test.alphaTestEnabled && test.alphaFail != kAfailKeep)
             ++stats.alphaFailModes;
 
         bool partialMask = false;
         uint8_t writeMask = colorWriteMaskFromFbmsk(context.frame.fbmsk, partialMask);
-        if (!framebufferFetch && partialMask)
+        if (!framebufferFetch && !destinationRead && partialMask)
             ++stats.partialChannelMasks;
 
         // The GS blend factor is A/128 while the host reads the emitted alpha
@@ -1821,9 +1863,10 @@ struct SdlGpuBackend::Impl {
         // which only matters if the alpha channel is written at all -- so it is
         // dropped from the write mask instead. Framebuffer fetch avoids this
         // fallback limitation, including later effects which sample alpha.
-        if (!framebufferFetch && blend.enabled && alpha.c == kBlendAlphaDest)
+        if (!framebufferFetch && !destinationRead && blend.enabled && alpha.c == kBlendAlphaDest)
             ++stats.destinationAlphaFactors;
-        const bool scaleAlpha = !framebufferFetch && blend.enabled && alpha.c == kBlendAlphaSource;
+        const bool scaleAlpha = !framebufferFetch && !destinationRead && blend.enabled &&
+                                alpha.c == kBlendAlphaSource;
         // Those draws still write their alpha on the GS, and games read it
         // back: DQ8 draws its characters into a layer whose alpha becomes the
         // shadow mask. A second pass over the same primitives stores it.
@@ -1848,12 +1891,14 @@ struct SdlGpuBackend::Impl {
             : static_cast<uint8_t>(gsTranslateDepthCompare(test.depthTest, test.depthTestEnabled));
         draw.pipeline.depthWrite = (depth != nullptr && !passiveDepth && !context.zbuf.zmask) ? 1u : 0u;
         draw.pipeline.colorWriteMask = writeMask;
-        draw.pipeline.blendEnabled = !framebufferFetch && blend.enabled ? 1u : 0u;
+        const bool fixedBlend = !framebufferFetch && !destinationRead;
+        draw.pipeline.blendEnabled = fixedBlend && blend.enabled ? 1u : 0u;
+        draw.pipeline.destinationCopy = destinationRead ? 1u : 0u;
         draw.pipeline.sourceFactor = static_cast<uint8_t>(blend.sourceFactor);
         draw.pipeline.destinationFactor = static_cast<uint8_t>(blend.destinationFactor);
         draw.pipeline.blendOperation = static_cast<uint8_t>(blend.operation);
-        draw.usesBlendConstant = !framebufferFetch && blend.usesConstant;
-        draw.blendConstant = framebufferFetch ? 0.0f : blend.constant;
+        draw.usesBlendConstant = fixedBlend && blend.usesConstant;
+        draw.blendConstant = fixedBlend ? blend.constant : 0.0f;
         draw.fragmentUniforms.blend[0] = uint32_t(context.alpha & 0xffu) |
             (uint32_t((context.alpha >> 32u) & 0xffu) << 8u);
         draw.fragmentUniforms.blend[1] = context.frame.fbmsk;
@@ -2103,6 +2148,13 @@ struct SdlGpuBackend::Impl {
         draw.fragmentUniforms.region[3] = static_cast<float>(clampState.maxV);
         draw.fragmentUniforms.misc[0] = scaleAlpha ? (255.0f / 128.0f) : 1.0f;
         draw.fragmentUniforms.misc[1] = textureScale;
+        if (destinationRead) {
+            // A snapshot per primitive: the GS reads what the one before
+            // left.
+            draw.destination = true;
+            draw.snapshot = true;
+            ++stats.destinationReads;
+        }
 
         const uint32_t scissorScale = color->scale;
         // Within the surface: a scissor past the buffer no longer widens it
@@ -2191,7 +2243,8 @@ struct SdlGpuBackend::Impl {
         // What the next primitive may reuse (submitSameState). A scissor
         // past the buffer decides per vertex whether the surface widens.
         const bool widens = static_cast<uint32_t>(context.scissor.x1) + 1u > bufferPixels && bufferPixels != 0u;
-        last.valid = !feedbackRecorded && !draw.feedback && !draw.source && !clearsWhole && !widens &&
+        last.valid = !feedbackRecorded && !draw.feedback && !draw.destination && !draw.source && !clearsWhole &&
+                     !widens &&
                      (!state.prim.tme || plainTexture);
         if (last.valid) {
             std::memcpy(&last.state, &state, sizeof(last.state));
@@ -2339,11 +2392,18 @@ struct SdlGpuBackend::Impl {
 
         for (const DrawBatch &batch : batches) {
             SDL_GPUTexture *sampledTexture = batch.source ? batch.source->texture : batch.texture;
+            SDL_GPUTexture *destinationTexture = nullptr;
             if (batch.snapshot) {
                 endPass();
-                sampledTexture = recordSnapshot(commands, *batch.color);
-                if (!sampledTexture)
+                SDL_GPUTexture *snapshot =
+                    recordSnapshot(commands, *batch.color,
+                                   batch.destination && !batch.feedback ? &batch.written : nullptr);
+                if (!snapshot)
                     return false;
+                if (batch.feedback || !batch.destination)
+                    sampledTexture = snapshot;
+                if (batch.destination)
+                    destinationTexture = snapshot;
             }
             if (!pass || batch.color != activeColor || batch.depth != activeDepth) {
                 endPass();
@@ -2402,9 +2462,10 @@ struct SdlGpuBackend::Impl {
                 SDL_SetGPUBlendConstants(pass, constant);
             }
 
-            const SDL_GPUTextureSamplerBinding textureBinding{
-                sampledTexture ? sampledTexture : dummyTexture, device.sampler()};
-            SDL_BindGPUFragmentSamplers(pass, 0u, &textureBinding, 1u);
+            const SDL_GPUTextureSamplerBinding textureBindings[2] = {
+                {sampledTexture ? sampledTexture : dummyTexture, device.sampler()},
+                {destinationTexture ? destinationTexture : dummyTexture, device.sampler()}};
+            SDL_BindGPUFragmentSamplers(pass, 0u, textureBindings, batch.destination ? 2u : 1u);
 
             SDL_PushGPUVertexUniformData(commands, 0u, &batch.vertexUniforms,
                                          sizeof(batch.vertexUniforms));
@@ -2904,6 +2965,12 @@ struct SdlGpuBackend::Impl {
                               static_cast<unsigned long long>(textureStats().unchangedUpdates - previousUnchanged));
                 line += buf;
                 previousUnchanged = textureStats().unchangedUpdates;
+            }
+            // Draws blended in the shader from a snapshot (Rogue Galaxy: added).
+            if (stats.destinationReads != previous.destinationReads) {
+                std::snprintf(buf, sizeof(buf), " | destination reads %llu",
+                              static_cast<unsigned long long>(stats.destinationReads - previous.destinationReads));
+                line += buf;
             }
             // Frames read back and returned at scale (Rogue Galaxy: added).
             if (stats.roundTrips != previous.roundTrips) {

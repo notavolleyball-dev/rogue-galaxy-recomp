@@ -1,6 +1,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
 
 #include "gs_draw.frag.spv.h"
+#include "gs_draw.frag.dstcopy.spv.h"
 #include "gs_draw.vert.spv.h"
 #include "gs_index8.frag.spv.h"
 #include "gs_local_copy.frag.spv.h"
@@ -21,6 +22,7 @@
 #include <chrono>
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -163,6 +165,7 @@ size_t GsPipelineKeyHash::operator()(const GsPipelineKey &key) const {
         (static_cast<uint64_t>(key.sourceFactor) << 40u) |
         (static_cast<uint64_t>(key.destinationFactor) << 48u) |
         (static_cast<uint64_t>(key.blendOperation) << 56u));
+    mix(key.destinationCopy);
     return static_cast<size_t>(hash);
 }
 
@@ -243,6 +246,21 @@ bool SdlGpuDevice::create(std::string &error) {
         destroy();
         return false;
     }
+    // Without framebuffer fetch, the variant that reads the destination from
+    // a snapshot (a second sampler); SPIR-V only, and the draws that would
+    // use it keep their approximation if it cannot be made, or with
+    // DQ8_GFX_NO_DESTINATION_COPY=1 (Rogue Galaxy: added).
+    const char *noDestinationCopy = std::getenv("DQ8_GFX_NO_DESTINATION_COPY");
+    if (!m_framebufferFetch && fragmentInfo.format == SDL_GPU_SHADERFORMAT_SPIRV &&
+        !(noDestinationCopy && *noDestinationCopy && *noDestinationCopy != '0')) {
+        SDL_GPUShaderCreateInfo destinationInfo = fragmentInfo;
+        destinationInfo.code = reinterpret_cast<const uint8_t *>(kGsDrawDstCopyFragSpirv);
+        destinationInfo.code_size = sizeof(kGsDrawDstCopyFragSpirv);
+        destinationInfo.num_samplers = 2u;
+        m_destinationShader = SDL_CreateGPUShader(m_device, &destinationInfo);
+        if (!m_destinationShader)
+            std::fprintf(stderr, "[gfx] no destination-copy shader: %s\n", SDL_GetError());
+    }
 
     SDL_GPUSamplerCreateInfo samplerInfo{};
     samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -290,6 +308,9 @@ void SdlGpuDevice::destroy() {
         SDL_ReleaseGPUSampler(m_device, m_sampler);
     if (m_fragmentShader)
         SDL_ReleaseGPUShader(m_device, m_fragmentShader);
+    if (m_destinationShader)
+        SDL_ReleaseGPUShader(m_device, m_destinationShader);
+    m_destinationShader = nullptr;
     if (m_vertexShader)
         SDL_ReleaseGPUShader(m_device, m_vertexShader);
     m_sampler = nullptr;
@@ -838,7 +859,7 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = m_vertexShader;
-    info.fragment_shader = m_fragmentShader;
+    info.fragment_shader = key.destinationCopy ? m_destinationShader : m_fragmentShader;
     info.vertex_input_state.vertex_buffer_descriptions = &bufferDescription;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = kAttributes.data();

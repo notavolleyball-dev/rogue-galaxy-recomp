@@ -59,6 +59,12 @@ foreach(shader IN ITEMS
         SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/${file}"
         STAGE ${stage} SYMBOL ${symbol})
 endforeach()
+# The draw shader reading the destination from a snapshot, for the draws the
+# fixed-function blend cannot express without framebuffer fetch (Rogue
+# Galaxy: added).
+dq8_add_shader(dq8_gfx_sdlgpu
+    SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/gs_draw.frag"
+    STAGE frag SYMBOL kGsDrawDstCopyFragSpirv DESTINATION_COPY)
 
 # The in-game menu (src/ui), drawn with Dear ImGui over the backend's window.
 # Dear ImGui is the submodule at thirdparty/imgui, the commit DQ8 pins.

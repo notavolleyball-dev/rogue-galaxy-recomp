@@ -3,7 +3,11 @@
 // GS pixel pipeline: texture lookup, TFX combine, fog, alpha test.
 //
 // Apple GPUs use framebuffer fetch for GS integer blending and destination
-// tests. Other devices use the fixed-function mapping in sdlgpu_device.cpp.
+// tests. Other devices use the fixed-function mapping in sdlgpu_device.cpp,
+// and for the draws it cannot express (a destination alpha test, a blend
+// weighted by destination alpha) the DQ8_DESTINATION_COPY variant, which
+// reads the destination from a snapshot of the target taken before the draw
+// (Rogue Galaxy: added).
 //
 // Filtering and wrapping are done by hand rather than by the sampler because
 // GS wrap modes REGION_CLAMP and REGION_REPEAT have no sampler equivalent:
@@ -20,6 +24,8 @@ layout(location = 3) noperspective in float vFog;
 layout(set = 2, binding = 0) uniform sampler2D gsTexture;
 #ifdef DQ8_FRAMEBUFFER_FETCH
 layout(input_attachment_index = 0, set = 2, binding = 1) uniform subpassInput gsDestination;
+#elif defined(DQ8_DESTINATION_COPY)
+layout(set = 2, binding = 1) uniform sampler2D gsDestinationCopy;
 #endif
 
 layout(set = 3, binding = 0) uniform FragmentParams {
@@ -264,14 +270,23 @@ bool alphaTestPasses(float alpha) {
     return true;
 }
 
-#ifdef DQ8_FRAMEBUFFER_FETCH
+#if defined(DQ8_FRAMEBUFFER_FETCH) || defined(DQ8_DESTINATION_COPY)
 ivec3 blendOperand(uint selector, ivec3 source, ivec3 destination) {
     return selector == 0u ? source : selector == 1u ? destination : ivec3(0);
 }
 
+vec4 loadDestination() {
+#ifdef DQ8_FRAMEBUFFER_FETCH
+    return subpassLoad(gsDestination);
+#else
+    // The snapshot is the whole target at its scale, as the attachment is.
+    return texelFetch(gsDestinationCopy, ivec2(gl_FragCoord.xy), 0);
+#endif
+}
+
 vec4 blendPixel(vec4 color) {
     ivec4 source = ivec4(round(color * 255.0));
-    ivec4 destination = ivec4(round(subpassLoad(gsDestination) * 255.0));
+    ivec4 destination = ivec4(round(loadDestination() * 255.0));
     const uint flags = params.blend.w;
     const uint psm = flags >> 8u;
     const bool ct16 = psm == 2u || psm == 10u;
@@ -321,7 +336,7 @@ void main() {
     // The GS blend factor is A/128, not A/255. Fixed-function blending reads
     // the emitted alpha, so the scale is folded in here; params.misc.x is 1.0
     // whenever the alpha channel is written and must stay exact instead.
-#ifdef DQ8_FRAMEBUFFER_FETCH
+#if defined(DQ8_FRAMEBUFFER_FETCH) || defined(DQ8_DESTINATION_COPY)
     outColor = blendPixel(color);
 #else
     outColor = vec4(color.rgb, min(color.a * params.misc.x, 1.0));

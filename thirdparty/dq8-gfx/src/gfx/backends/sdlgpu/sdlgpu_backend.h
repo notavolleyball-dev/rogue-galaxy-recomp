@@ -33,6 +33,10 @@ struct SdlGpuStats {
     // Frames read back and sent back unchanged, returned at scale (Rogue
     // Galaxy: added).
     uint64_t roundTrips = 0u;
+    // Draws whose destination alpha test or destination-alpha factor was
+    // done in the shader from a snapshot, without framebuffer fetch (Rogue
+    // Galaxy: added).
+    uint64_t destinationReads = 0u;
     // Local-to-local transfers done on the GPU, not through local memory.
     uint64_t gpuLocalCopies = 0u;
     // Frames shown straight from a render target, with no readback or CPU
