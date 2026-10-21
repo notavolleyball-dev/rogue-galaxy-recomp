@@ -1,0 +1,244 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 6447cf2..43c6252 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -5,6 +5,7 @@
+ 
+ #include <memory>
+ 
++#include <algorithm>
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -294,7 +295,34 @@ public:
+     void run();
+     void requestStop();
+     void postEvent(EeEvent event);
+-    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
++    // Inline with accountCycles and the timers' batch: every inter-function
++    // transfer and back edge of the generated code comes through here, and
++    // the three calls deep were 6% of the game's thread in Rogue Galaxy's
++    // battles; the end of a time slice stays out of line (Rogue Galaxy:
++    // changed).
++    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept
++    {
++        accountCycles(cycles);
++
++        if (m_checkpointPending.load(std::memory_order_acquire) ||
++            m_stopRequested.load(std::memory_order_acquire))
++        {
++            return true;
++        }
++
++        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
++        if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
++        {
++            m_checkpointPending.store(true, std::memory_order_release);
++            return true;
++        }
++
++        if (m_eeCycle < m_sliceEndCycle)
++        {
++            return false;
++        }
++        return sliceEnded();
++    }
+ 
+     // A checkpoint that told guest code to return to the scheduler (from the
+     // generated back edges and the dispatcher's own safe point) counts here,
+@@ -305,7 +333,23 @@ public:
+     void noteGuestUnwind() noexcept;
+     [[nodiscard]] uint64_t guestUnwindSerial() const noexcept { return m_unwindSerial; }
+     [[nodiscard]] bool guestUnwoundSince(uint64_t serial) const;
+-    void accountCycles(uint32_t cycles) noexcept;
++    // DQ8_EE_CYCLE_SCALE multiplies the charge per guest safe point. The model
++    // charges per inter-function branch and ignores the instructions between,
++    // so it undercounts badly against a real 294 MHz EE; a spinning guest loop
++    // then gets far more iterations per emulated frame than hardware allows.
++    // Only raises the floor: a frame still cannot retire before its host
++    // deadline, so this can never run the game faster than real time.
++    void accountCycles(uint32_t cycles) noexcept
++    {
++        const uint64_t elapsed = std::max<uint64_t>(1u, cycles) * s_eeCycleScale;
++        m_eeCycle += elapsed;
++        m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
++        if (m_pendingEeTimerInterrupts != 0u)
++        {
++            m_checkpointPending.store(true, std::memory_order_release);
++        }
++    }
++    static const uint64_t s_eeCycleScale;
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+     // Kernel object API. All calls except postEvent/requestStop execute on the
+@@ -467,6 +511,9 @@ private:
+                          Predicate predicate);
+     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
+     void renewTimeSlice();
++    // checkpointDue past the slice's end: a ready thread at the running one's
++    // priority or above takes the EE, else a new slice.
++    bool sliceEnded() noexcept;
+     void copyMainContextToRuntime();
+ 
+     PS2Runtime &m_runtime;
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index c1c2932..0e719e0 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -309,7 +309,30 @@ public:
+ 
+     // EE timers advance from the scheduler's emulated EE-cycle clock. The
+     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+-    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
++    //
++    // Called at every guest safe point with a handful of cycles, so the
++    // cycles are batched: a compare or overflow interrupt arrives up to
++    // kEeTimerBatchCycles (7 us) late, and readIORegister/writeIORegister
++    // settle the batch first, so the count a register access sees is exact.
++    // A settle may have raised an interrupt as the write that cleared the
++    // last CUE went by: it is delivered whether or not a timer still runs.
++    // Inline, the batch's flush out of line (Rogue Galaxy: changed).
++    uint32_t advanceEeTimers(uint64_t eeCycles) noexcept
++    {
++        const uint32_t late = m_eeTimerLateInterrupts;
++        m_eeTimerLateInterrupts = 0u;
++        if (!m_anyEeTimerCued)
++        {
++            m_eeTimerPendingCycles = 0u;
++            return late;
++        }
++        m_eeTimerPendingCycles += eeCycles;
++        if (m_eeTimerPendingCycles < kEeTimerBatchCycles)
++        {
++            return late;
++        }
++        return late | flushEeTimerBatch();
++    }
+     // Applies the cycles advanceEeTimers has batched, so a register read or
+     // write sees the exact count. Interrupts it finds come back from the
+     // next advanceEeTimers.
+@@ -496,6 +519,8 @@ public:
+     uint32_t m_eeTimerLateInterrupts = 0;
+     static constexpr uint64_t kEeTimerBatchCycles = 2048u;
+     uint32_t advanceEeTimersNow(uint64_t eeCycles) noexcept;
++    // The batched cycles applied, for advanceEeTimers.
++    uint32_t flushEeTimerBatch() noexcept;
+     void queueCompletedDmacCause(uint32_t cause);
+ };
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 877d85e..869fd54 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -39,12 +39,6 @@ std::atomic<uint64_t> g_eeEnterGuestCount{0};
+ 
+ namespace
+ {
+-    const uint64_t g_eeCycleScale = [] {
+-        const char *value = std::getenv("DQ8_EE_CYCLE_SCALE");
+-        const long long parsed = value ? std::atoll(value) : 0;
+-        return parsed > 0 ? static_cast<uint64_t>(parsed) : 1ull;
+-    }();
+-
+     const uint64_t g_eeDispatchHistogramInterval = [] {
+         const char *value = std::getenv("DQ8_EE_DISPATCH_HISTOGRAM");
+         const long long parsed = value ? std::atoll(value) : 0;
+@@ -668,28 +662,14 @@ void EeScheduler::postEvent(EeEvent event)
+     m_eventCv.notify_one();
+ }
+ 
+-bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+-{
+-    accountCycles(cycles);
+-
+-    if (m_checkpointPending.load(std::memory_order_acquire) ||
+-        m_stopRequested.load(std::memory_order_acquire))
+-    {
+-        return true;
+-    }
+-
+-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+-    if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+-    {
+-        m_checkpointPending.store(true, std::memory_order_release);
+-        return true;
+-    }
+-
+-    if (m_eeCycle < m_sliceEndCycle)
+-    {
+-        return false;
+-    }
++const uint64_t EeScheduler::s_eeCycleScale = [] {
++    const char *value = std::getenv("DQ8_EE_CYCLE_SCALE");
++    const long long parsed = value ? std::atoll(value) : 0;
++    return parsed > 0 ? static_cast<uint64_t>(parsed) : 1ull;
++}();
+ 
++bool EeScheduler::sliceEnded() noexcept
++{
+     const GuestThread *running = currentThread();
+     if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
+     {
+@@ -717,23 +697,6 @@ bool EeScheduler::guestUnwoundSince(uint64_t serial) const
+     return running != nullptr && running->lastUnwindSerial > serial;
+ }
+ 
+-void EeScheduler::accountCycles(uint32_t cycles) noexcept
+-{
+-    // DQ8_EE_CYCLE_SCALE multiplies the charge per guest safe point. The model
+-    // charges per inter-function branch and ignores the instructions between,
+-    // so it undercounts badly against a real 294 MHz EE; a spinning guest loop
+-    // then gets far more iterations per emulated frame than hardware allows.
+-    // Only raises the floor: a frame still cannot retire before its host
+-    // deadline, so this can never run the game faster than real time.
+-    const uint64_t elapsed = std::max<uint64_t>(1u, cycles) * g_eeCycleScale;
+-    m_eeCycle += elapsed;
+-    m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+-    if (m_pendingEeTimerInterrupts != 0u)
+-    {
+-        m_checkpointPending.store(true, std::memory_order_release);
+-    }
+-}
+-
+ bool EeScheduler::isExecutingGuest() const noexcept
+ {
+     return m_guestExecuting.load(std::memory_order_acquire);
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index f90d9ef..1cd5194 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -488,30 +488,13 @@ uint32_t PS2Memory::takePendingVifInterrupts() noexcept
+     return m_pendingVifInterrupts.exchange(0u, std::memory_order_acq_rel);
+ }
+ 
+-uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
++uint32_t PS2Memory::flushEeTimerBatch() noexcept
+ {
+-    // Called at every guest safe point with a handful of cycles. The walk
+-    // below is cheap but it was 5% of the game's thread by sheer count, so
+-    // the cycles are batched: a compare or overflow interrupt arrives up to
+-    // kEeTimerBatchCycles (7 us) late, and readIORegister/writeIORegister
+-    // settle the batch first, so the count a register access sees is exact.
+-    // A settle may have raised an interrupt as the write that cleared the
+-    // last CUE went by: it is delivered whether or not a timer still runs.
+-    const uint32_t late = m_eeTimerLateInterrupts;
+-    m_eeTimerLateInterrupts = 0u;
+-    if (!m_anyEeTimerCued)
+-    {
+-        m_eeTimerPendingCycles = 0u;
+-        return late;
+-    }
+-    m_eeTimerPendingCycles += eeCycles;
+-    if (m_eeTimerPendingCycles < kEeTimerBatchCycles)
+-    {
+-        return late;
+-    }
++    // The walk below is cheap but it was 5% of the game's thread by sheer
++    // count when it ran at every safe point (see advanceEeTimers).
+     const uint64_t cycles = m_eeTimerPendingCycles;
+     m_eeTimerPendingCycles = 0u;
+-    return late | advanceEeTimersNow(cycles);
++    return advanceEeTimersNow(cycles);
+ }
+ 
+ void PS2Memory::settleEeTimers() noexcept
