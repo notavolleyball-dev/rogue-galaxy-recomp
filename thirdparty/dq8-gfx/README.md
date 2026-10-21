@@ -241,3 +241,14 @@ menus) no longer grows the colour and depth surfaces past FBW pages unless
 the geometry reaches there (a clear never does), and a draw's host scissor
 and written region are clipped to its surface. Grown surfaces took in the page after the
 buffer; texture uploads to it then discarded the depth buffer mid-frame.
+
+Two more fix results:
+
+- `sdlgpu_backend.cpp`, `sdlgpu_window.h`: `SdlGpuDisplayOptions::crop`
+  leaves GS pixels off each edge of the picture (and half a pixel more at a
+  raised scale), before the Sharp filter's passes. Rogue Galaxy leaves a
+  border of its frame black or half drawn, which a television's overscan
+  hid; its half-pixel effects move it by a texel at 3x and leave a sliver
+  of picture past it.
+- `sdlgpu_display.cpp`: under Auto a game drawn wide fills the window's
+  shape (`sdlGpuWideAspect`, 4:3 to 32:9) instead of 16:9.

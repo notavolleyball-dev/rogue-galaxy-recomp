@@ -13,12 +13,17 @@
 
 namespace dq8::gfx {
 
+double sdlGpuWideAspect(uint32_t windowWidth, uint32_t windowHeight) {
+    const double window = double(std::max(windowWidth, 1u)) / double(std::max(windowHeight, 1u));
+    return std::clamp(window, 4.0 / 3.0, 32.0 / 9.0);
+}
+
 double sdlGpuDisplayAspect(const SdlGpuDisplayOptions &options, uint32_t sourceWidth,
                            uint32_t sourceHeight, uint32_t windowWidth, uint32_t windowHeight,
                            int gameWidescreen) {
     switch (options.aspect) {
     case SdlGpuAspect::Auto:
-        return gameWidescreen == 1 ? 16.0 / 9.0 : 4.0 / 3.0;
+        return gameWidescreen == 1 ? sdlGpuWideAspect(windowWidth, windowHeight) : 4.0 / 3.0;
     case SdlGpuAspect::Standard:
         return 4.0 / 3.0;
     case SdlGpuAspect::Wide:

@@ -49,6 +49,10 @@ struct SdlGpuRect {
 SdlGpuRect sdlGpuDisplayRect(const SdlGpuDisplayOptions &options, uint32_t sourceWidth,
                              uint32_t sourceHeight, uint32_t windowWidth, uint32_t windowHeight,
                              int gameWidescreen);
+// The shape of a window a game drawn for a wide screen fills under Auto:
+// the window's own, from 4:3 to 32:9.
+double sdlGpuWideAspect(uint32_t windowWidth, uint32_t windowHeight);
+
 // The aspect ratio the picture is shown at, before fitting.
 double sdlGpuDisplayAspect(const SdlGpuDisplayOptions &options, uint32_t sourceWidth,
                            uint32_t sourceHeight, uint32_t windowWidth, uint32_t windowHeight,

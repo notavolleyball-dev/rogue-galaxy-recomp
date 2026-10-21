@@ -1119,6 +1119,22 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**Widescreen of the window's shape (2026-10-21).** The user's window,
+maximised, is 2560x1352 (1.89:1), so a 16:9 picture left bars at its sides.
+Under Auto a wide game now fills the window (`sdlGpuWideAspect`, its shape
+clamped to 4:3..32:9), and `src/graphics.cpp`'s pump hands the shape shown
+to `rg::widescreen::setAspect` every frame: the scene camera (ViewSetAspect
+from SceneCameraApplyAspect's wide call, 0x1C6A58), the compass and the
+model previews take its inverse for 9/16, and the movies fit it. The HUD's
+3/4 is the mode's own and right at 16:9 (6% wide at 1.89:1). At 1.89:1 in
+the town the picture runs to all four edges with the right proportions;
+the 2D menus are stretched the more. Frames byte-identical at 1x with the
+option off. The patch's letterbox fix is dropped: in an event where the
+party is handed an item the messages ran off the bottom and a dark line
+stayed across the top, since the letterbox's fade also places the text
+over the scene (LetterboxFadeStep moves the map captions by it); events
+keep their bars.
+
 **The party's AI holds its walk between its runs (2026-10-21).** The
 user saw the party following Jaster walk in little steps and stops, from
 the moment a game loaded, and walk normally with the `ai` step fix off

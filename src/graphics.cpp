@@ -108,6 +108,16 @@ bool pump(void *userData)
     {
         return false;
     }
+    // The shape the picture takes with Widescreen on, for the game's camera:
+    // under Auto the window's.
+    int windowWidth = 0, windowHeight = 0;
+    if (SDL_GetWindowSizeInPixels(backend->window(), &windowWidth, &windowHeight) && windowWidth > 0 &&
+        windowHeight > 0)
+    {
+        rg::widescreen::setAspect(static_cast<float>(dq8::gfx::sdlGpuDisplayAspect(
+            backend->displayOptions(), 512u, 448u, static_cast<uint32_t>(windowWidth),
+            static_cast<uint32_t>(windowHeight), 1)));
+    }
     // The menu has F11 and Alt+Enter; without it, F11 still toggles.
     static bool f11WasDown = false;
     const bool f11Down = !g_hasMenu && SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F11];
@@ -179,10 +189,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
     // The game's own switches, under Interface > Game.
     host.gameOptions = {
-        {"widescreen", "Widescreen (16:9)",
-         "The game draws a wider view for a 16:9 screen, and the HUD over the scene and the movies fit it; with "
-         "Display > Aspect ratio on Auto the picture turns 16:9 once a game is loaded. Menus and text are drawn "
-         "for 4:3 and come out stretched.",
+        {"widescreen", "Widescreen",
+         "The game draws a wider view, and the HUD over the scene and the movies fit it; with Display > Aspect "
+         "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded. Menus and text "
+         "are drawn for 4:3 and come out stretched.",
          false},
         {"skip_opening", "Skip the opening",
          "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
