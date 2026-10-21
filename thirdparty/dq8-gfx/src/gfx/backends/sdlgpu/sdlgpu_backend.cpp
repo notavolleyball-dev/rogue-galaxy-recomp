@@ -4422,8 +4422,14 @@ bool SdlGpuBackend::openWindow(const char *title, uint32_t width, uint32_t heigh
     // pixels as the window covers, rather than its logical size stretched by
     // the compositor, which would shrink a high internal resolution and blur
     // what is left.
+    // DQ8_GFX_HIDDEN_WINDOW=1: the window is never shown or raised, for
+    // scripted runs that should not take the desktop; the GS work is the
+    // same, and frames reach DQ8_GFX_SCREENSHOT_DIR (Rogue Galaxy: added).
+    const char *hiddenWindow = std::getenv("DQ8_GFX_HIDDEN_WINDOW");
+    const bool hidden = hiddenWindow && *hiddenWindow && *hiddenWindow != '0';
     m_impl->window = SDL_CreateWindow(title, static_cast<int>(width), static_cast<int>(height),
-                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                          (hidden ? SDL_WINDOW_HIDDEN : 0u));
     if (!m_impl->window) {
         error = std::string("SDL_CreateWindow: ") + SDL_GetError();
         return false;
@@ -4436,8 +4442,10 @@ bool SdlGpuBackend::openWindow(const char *title, uint32_t width, uint32_t heigh
         m_impl->window = nullptr;
         return false;
     }
-    SDL_ShowWindow(m_impl->window);
-    SDL_RaiseWindow(m_impl->window);
+    if (!hidden) {
+        SDL_ShowWindow(m_impl->window);
+        SDL_RaiseWindow(m_impl->window);
+    }
     std::string inputError;
     if (!m_impl->pad.initialize(inputError))
         std::fprintf(stderr, "[pad] %s; keyboard remains available\n", inputError.c_str());

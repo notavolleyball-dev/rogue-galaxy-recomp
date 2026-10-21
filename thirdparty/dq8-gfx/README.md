@@ -289,4 +289,7 @@ Five more fix results:
   `DQ8_GFX_NO_DESTINATION_COPY=1` keeps the approximations.
 
 The target trace numbers the batches from each present (`[target] batch N`),
-as a frame log numbers them.
+as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window
+hidden and never raises it, for scripted runs that should leave the desktop
+alone; the GS work is the same and `DQ8_GFX_SCREENSHOT_DIR` still writes
+frames.

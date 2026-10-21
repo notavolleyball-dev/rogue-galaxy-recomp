@@ -55,6 +55,10 @@
 #   INPUT=FILE   another input script (default build/run/input_pad3.txt);
 #                PROFILE_START=, PROFILE_SECONDS= and AFTER_OVERRIDE= (the
 #                seconds kept running after the logged frame) go with it.
+#   HIDDEN=0     show the window (needed for window captures such as
+#                shots.ps1); by default it stays hidden and never takes the
+#                desktop or the focus (DQ8_GFX_HIDDEN_WINDOW), with the same
+#                GS work: compare speed only between runs alike.
 # Refuses to start while a game is running; loads File 01 from a copy of
 # the card (build/run/mc0-bench), so the player's card is never touched.
 cd "$(dirname "$0")/../.." || exit 1
@@ -120,6 +124,7 @@ if [ "$LONG" = "1" ]; then
     fi
 fi
 export RG_INPUT="$(cat $INPUT)" RG_INPUT_CLOCK=pad RG_MUTE=1
+export DQ8_GFX_HIDDEN_WINDOW=${HIDDEN:-1}
 # The scripted load menu picks a save by position: a second save of the
 # player's would change which one loads. The runs use a card holding only
 # File 01 (copied once from disc/mc0; delete the copy to refresh it).

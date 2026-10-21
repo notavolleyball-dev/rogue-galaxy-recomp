@@ -1119,6 +1119,14 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**Bench runs off the desktop (2026-10-21).** `tools/bench/walk.sh` now
+starts the game with its window hidden (`DQ8_GFX_HIDDEN_WINDOW=1`;
+`HIDDEN=0` shows it, for window captures), so a scripted run no longer
+takes the user's screen or focus. The 1x bench walk's frame came out
+byte-identical to a visible run's; one earlier hidden run logged 206
+batches fewer (scenery out of view, the same picture), a run-to-run
+difference that a second hidden run did not repeat.
+
 **VU0 macro flags in the recompiler (2026-10-21).** The generated code for
 VU0 macro-mode FMAC ops never updated the status or MAC flags, which broke
 the game's three bounding-box tests until `src/vu0_flags.cpp` replaced
