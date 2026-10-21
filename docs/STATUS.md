@@ -1049,6 +1049,30 @@ street walk at 60. What limits the gate now is VU1 itself: three quarters
 of the VIF1 thread are the compiled programs, `r_a786efabfa469ada_44` a
 sixth of it, `commitFlags` and `stall` 6%.
 
+**The VU1 programs again: three tries that gave nothing (2026-10-20
+night).** A VIF1 profile over the gate's busy stretch (PROFILE_START=62:
+the field starts near 57 s on the stats clock; an earlier window caught
+the load and showed the thread idle) splits it into about 53% compiled
+VU routines, 9% copying GS packets into the GIF stage, 4% commitFlags,
+2.4% VIF unpack and 1.4% exactUpper. The routines read their registers
+from memory at every pair: each pair's rare path (a stall, a kick) calls
+out of the routine and rejoins it, and the routines are too large (the
+busiest, r_a786efabfa469ada_52, 134 KB) for the compiler to prove the
+registers unchanged. Three changes, each alternated with the build before
+over three pairs of gate benches, frames byte-identical: the ready stamps
+as the Frame's own copy (20.7 against 20.8 ms of VIF1 a frame, and 2.6 MB
+more code); the VI registers as the Frame's own copy, copied in at its
+construction and out in save() (19.9 -> 20.9 ms: the memory accesses went,
+72 to 2 for one register in the busiest routine, but its stack reloads
+doubled, the register allocator spilling in these functions); and the
+stage's copies through memcpy instead of vector::insert (9.3% -> 8.8% of
+VIF1: the cost is the bytes copied). All three were taken out again. A
+real cut needs another shape of compiled code (small register-friendly
+regions, rare paths that leave instead of rejoining, timing and flags
+dropped where nothing reads them, as PCSX2's microVU does), a project of
+its own. These benches ran beside another game the user had open, which
+took the gate from about 56 fps to about 42 and made it noisier.
+
 **The GS worker in the square: a kept staging texture, whole-block page
 imports, and a town bench (2026-10-20 night).** `TOWN=1 walk.sh` loads
 the user's File 03 at Salgin's transporter and walks the square, where
