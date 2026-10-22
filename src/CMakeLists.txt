@@ -72,7 +72,6 @@ add_executable(roguegalaxy
     ee_fpu.cpp
     flip_pacing.cpp
     movie_audio.cpp
-    movie_filter.cpp
     return_hook.cpp
     libc_rand.cpp
     loading_screen.cpp

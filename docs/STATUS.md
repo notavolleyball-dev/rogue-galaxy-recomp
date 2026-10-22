@@ -1130,7 +1130,8 @@ user found the items still fast: they are icons the chest's script bursts
 out (EvCmdEventIconBurst, up at 5.0 and staggered by 10 frames), which
 EventIconUpdate (0x2789B0) moves a frame at a time, velocity, gravity, a
 bounce at half and 45 frames of life, from the Draw Event Icon task, which
-runs every frame. It joins the list too.
+runs every frame. It joins the list too. On 2026-10-22 the user saw the
+items jump out at the PS2's pace.
 
 **The 60 fps mode a menu switch, the launchers tidied (2026-10-21).**
 Interface > Game > 60 frames per second (on by default; `sixty_fps` in
@@ -1265,6 +1266,8 @@ movies" (on by default, `src/movie_filter.cpp`, `RG_SMOOTH_MOVIES=0` for
 the PS2's look) answers the frame's GsPktSetTexFilter call (returning to
 0x1D5A08) with 1, so GsPktSetTexture sets TEX1 to bilinear. The title
 screen, a movie too, has smooth edges at 3x where it had 3x3 steps.
+Removed on 2026-10-22: in play the user saw little difference, and the
+movies are drawn unfiltered again, as on the PS2.
 
 **The Monography Shot solid (2026-10-21).** The user saw the gun Jaster
 is handed in an event translucent, in the event and in battle, at 60 and
