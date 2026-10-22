@@ -1142,7 +1142,11 @@ for a run (the benches set it either way), and `RogueGalaxy.bat` no
 longer sets it. The diagnostic launchers (captura, perfil, engasgos)
 moved to `ferramentas\`; `RogueGalaxy-30fps.bat` (the switch now),
 `-sem-ia.bat` (the `ai` fix confirmed) and `-pulos.bat` (the jump fixed;
-`RG_JUMP_TRACE=3 RG_POS_TRACE=1` by hand) are gone.
+`RG_JUMP_TRACE=3 RG_POS_TRACE=1` by hand) are gone. On 2026-10-22 the
+folder became `debug\` and the launchers took English names like the rest
+of the project: `RogueGalaxy-capture.bat`, `-profile.bat` and
+`-hitches.bat`, whose profiles go to `build/run/play-profile-N.prof` with
+`exe-profile.exe` (the `play-perfil-N.prof` before them stay as they were).
 
 **Texture animations at the console's rate (2026-10-21).** The user saw
 the platform the Monography Shot raises in battle drawn wrong at 60 fps:

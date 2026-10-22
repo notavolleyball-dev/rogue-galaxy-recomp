@@ -16,4 +16,4 @@ set DQ8_GFX_STATS_EVERY=10
 set RG_PROFILE_BEFORE=10
 set RG_PROFILE_SECONDS=5
 set RG_PROFILE_AUTO_MS=50
-call "%~dp0RogueGalaxy-perfil.bat" %*
+call "%~dp0RogueGalaxy-profile.bat" %*

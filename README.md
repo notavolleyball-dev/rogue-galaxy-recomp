@@ -127,16 +127,16 @@ them in the terminal before running it. The batch file also sets
 `VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
 layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
-The launchers in `ferramentas\` are for diagnosis, not for playing.
-`ferramentas\RogueGalaxy-perfil.bat` runs the same game with the profiler ready:
+The launchers in `debug\` are for diagnosis, not for playing.
+`debug\RogueGalaxy-profile.bat` runs the same game with the profiler ready:
 each F9 samples every thread for the next 20 seconds
-(`RG_PROFILE_ON_MARK=1`, into `build/run/play-perfil-1.prof`, `-2`, ...,
+(`RG_PROFILE_ON_MARK=1`, into `build/run/play-profile-1.prof`, `-2`, ...,
 numbered on from the files already there), so a profile holds the moment
 the player marked; report it with `tools/profile/report.py` against
-`build/run/exe-perfil.exe`, the copy of the build it was recorded with,
+`build/run/exe-profile.exe`, the copy of the build it was recorded with,
 which the launcher makes at each start (a report of an older session's
 profile needs that session's build). `RG_PROFILE_BEFORE` makes the windows
-reach back before the F9 (`ferramentas\RogueGalaxy-engasgos.bat`, below); without
+reach back before the F9 (`debug\RogueGalaxy-hitches.bat`, below); without
 `RG_PROFILE_ON_MARK` the window is fixed (`RG_PROFILE_START`,
 `RG_PROFILE_SECONDS`). It also prints a `[gfx]` line a second
 into `build/last-run.log` (`DQ8_GFX_STATS_EVERY=60`; the worker's share
@@ -154,7 +154,7 @@ process can be dumped with `tools\hang\dumpmem.ps1` (its guest RAM and
 thread contexts) and a thread's call chain read from the dump with
 `python tools/hang/stackwalk.py DUMPDIR SP RA`.
 
-`ferramentas\RogueGalaxy-engasgos.bat` is the profile launcher with a stats line every 10 frames, for short hitches: each line also gives the longest frame of its interval (the longest gap between two presents), the longest the main thread was held up ("main stall"), the GPU pipelines created in it and what creating them cost (a first-time state compiles one), and the VU1 pairs that ran on the interpreter (a program the build lacks; the session records it into `build/vu1-profile`, see VU1 programs above). Its profiler samples all the time (`RG_PROFILE_BEFORE=10`; about 9% of the VIF1 thread's time at the boss gate, so it is for hunting hitches, not for playing): it writes a profile by itself at a hitch nobody marked (`RG_PROFILE_AUTO_MS=50`: a frame of 50 ms or more and three times the usual, or the frame rate halved for a few frames), of the hitch and half a second either side, up to 30 a session, and the log says so in a `[profile] window N: a hitch` line; an F9 window holds the 10 seconds before the press and the 5 after. Press F9 at each hitch felt, then read the lines around the `[mark]` (`python tools/bench/hitches.py build/last-run.log`, one row per interval); a profile window still open when the game is closed is cut short and written.
+`debug\RogueGalaxy-hitches.bat` is the profile launcher with a stats line every 10 frames, for short hitches: each line also gives the longest frame of its interval (the longest gap between two presents), the longest the main thread was held up ("main stall"), the GPU pipelines created in it and what creating them cost (a first-time state compiles one), and the VU1 pairs that ran on the interpreter (a program the build lacks; the session records it into `build/vu1-profile`, see VU1 programs above). Its profiler samples all the time (`RG_PROFILE_BEFORE=10`; about 9% of the VIF1 thread's time at the boss gate, so it is for hunting hitches, not for playing): it writes a profile by itself at a hitch nobody marked (`RG_PROFILE_AUTO_MS=50`: a frame of 50 ms or more and three times the usual, or the frame rate halved for a few frames), of the hitch and half a second either side, up to 30 a session, and the log says so in a `[profile] window N: a hitch` line; an F9 window holds the 10 seconds before the press and the 5 after. Press F9 at each hitch felt, then read the lines around the `[mark]` (`python tools/bench/hitches.py build/last-run.log`, one row per interval); a profile window still open when the game is closed is cut short and written.
 
 | Variable | Effect |
 |---|---|
@@ -195,7 +195,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_JUMP_TRACE=1` | Log the party leader's movement updates while off the ground (host time, position, step-scaled velocity, the motion's displacement, the action mode and the gravity flags, one line per `CharaMoveCollideMaybe`; `=2` logs the moves on the ground too, for the speed ramps; `=3` every character's, tagged with address and id, and for enemies every move with what drives it and every move request with its caller; `=4` every character's moves on the ground too, for a party following its leader): compares a jump's arc and timing between the 30 and 60 fps modes |
 | `RG_WIDESCREEN=1` | The game drawn for a wide screen of the window's shape (the menu's "Widescreen"; `src/widescreen.cpp`) |
 | `RG_SKIP_OPENING=1` | The logos at boot give way to the title screen (the menu's "Skip the opening") |
-| `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `ferramentas\RogueGalaxy-captura.bat` sets it to `build\captures`, for a picture that looks wrong |
+| `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |
 | `RG_INSTANT_RECAP=1` | The loading screen's story so far appears whole at once, then Press X (the menu's "Show the loading recap at once") |
 | `RG_STICK_SQUARE=0` | Hand the game the host's round analog stick range as it is. By default `src/stick_response.cpp` reshapes both sticks onto the DualShock 2's square range (the direction and the pushed distance stay, the distance counts as the longer axis, so a full diagonal reads full on both), which the game's run threshold was tuned for: with a round stick the party only runs within about 20 degrees of each of the four directions and walks in between |

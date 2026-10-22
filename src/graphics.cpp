@@ -144,7 +144,7 @@ bool pump(void *userData)
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
     }
-    // F7 logs the next GS frame with RG_GS_CAPTURE (ferramentas\RogueGalaxy-captura.bat).
+    // F7 logs the next GS frame with RG_GS_CAPTURE (debug\RogueGalaxy-capture.bat).
     for (unsigned n = g_f7Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
     {
         std::fprintf(stderr, "[mark] F7: frame capture requested\n");
