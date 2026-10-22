@@ -189,6 +189,22 @@ The "double step" mode (+0x5E00) is never enabled in the main ELF. Our
   reach the target in half the time.
 - NPCs: `NpcObjUpdate_2fc450` per-frame step (section 2) -> **2x walk and
   turn speed**.
+- Texture animations: `TexAnimSeqUpdate_163dd0` (a0 the sequence, f12 the
+  step) gets the scene's step from the map (`MapTickAnims_1e1ac0`,
+  `MapMgrAuxAreaTexAnimUpdate_1e1430`, through `TexGroupUpdateAnim_157ca0`)
+  and a model's update step (`ModelObjUpdate_1adf90`), but a constant 1.0 a
+  call from `DrawListAddTexLoad_1418c0` (nearly all its callers: effects,
+  HUD, chests, damage numbers) and `EffTexResStepAnim_1a8460` -> **2x
+  scrolling and flip-books**. And at any part step: a scrolling layer's
+  position (+0x20/+0x24 of the layer, node+0x10) is wrapped to 0 at its
+  period in frames (+0x1C/+0x1E, the sign the direction), and
+  `TexAnimeTableApplyMaybe_162f50` shifts the layer by position / period of
+  its size (type 1) or by a sine of 2 pi x position / period (type 2). A
+  period of 1 is the data's still axis (the shift divides by it): at whole
+  steps the position is 0 after every update, at half steps 0.5 every other
+  frame, and the layer jumps by half its size and back (the Monography
+  Shot's platform, 2026-10-21). A sine over 2 frames is as still at whole
+  steps (sin 0, sin pi).
 - `MoviePlayModal`: subtitle cues are counted in movie frames
   (`EventCueStep`: `+0x49C++` per call, entries matched by frame number),
   so FMV subtitles are independent of the scale; the 30-frame stall timer at
@@ -283,6 +299,7 @@ button press runs them at once), and the field modes that lock the scale
 | field minimap | `MinimapUpdate` halves GetTimeStep at interval 1 -> 0.25 | **likely broken** (minimap scroll/fade at half speed); `TextEntrySetupState` similar | hook `DrawEnvGetVsyncInterval` is wrong (the game's own menus rely on 1); either hook `MinimapUpdate` to compensate or use strategy B |
 | giant bosses leave small arenas / enemy jumps too far (code cave) | not handled | **broken**, and not the gravity (2026-10-20, the gate fight's boss): the AI counts frames. `AiUpdate_2c05b0` runs once a frame per character, counts its timers in frames, and its script moves the character a step a call (`AiCmdCharaSetPosById_2c9ee0`: position + 29.8 units; `AiCmdMoveByLocalOffset_2c90f0`: a requested move CharaMoveCollideMaybe applies whole), while what ends the charge took as long: 54 steps at 60 fps against 27, out of the arena, held in the air | `ai` in `src/step_fixes.cpp`: AiUpdate on the logic frames as a whole step, the move it made shared half and half with the next frame, and the walk and run it holds (the character's flags, +0x568) held again on the frame in between: without that the party following its leader walked in little steps and stops (2026-10-21) |
 | backwards jump higher/longer | not handled | same | same |
+| texture animations (scrolling layers, flip-books) | `TexAnimSeqUpdate_163dd0` takes a constant 1.0 a draw from most callers; a still axis (period 1) read 0.5 every other frame at half steps | **broken** until 2026-10-21 (2x, and the Monography Shot's platform drawn as tiles instead of circles) | `texture` in `src/step_fixes.cpp`: a 1.0 becomes the frame's share (the scene's per-frame scale), and after a part step the still layers are put back where whole steps leave them |
 | loading screen's story so far at 2x (lines and Press X) | the screen's own thread (`LoadingScreenThread_343510`: `LoadingScreenFrame`, then GfxEndFrame's flip) fades each line by a constant a frame (0x3445B4..0x344628) and its timer by 1/30 a frame | **broken** until 2026-10-20 night (every flip waited one vblank) | `src/loading_screen.cpp`: between `LoadingScreenStart_343240` and `LoadingScreenStop_3431e0` the flip waits two vblanks, as for the movies |
 
 Two consistent ways to treat the interval field:

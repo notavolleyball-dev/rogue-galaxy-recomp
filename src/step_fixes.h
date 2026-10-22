@@ -19,6 +19,12 @@
 //   gravity the launch computations and the stepped integrators ask for is
 //   a whole frame's, and the terminal velocity is clamped to the step's
 //   share of it.
+// - Texture animations mostly step by a constant 1.0 a draw (effects, HUD,
+//   chests) and shift their scrolling layers by position / period: at half
+//   steps they ran twice as fast, and the layers whose period of one frame
+//   means "still" jumped by half their size every other frame. They take the
+//   frame's share of a step, and those layers stay where whole steps leave
+//   them.
 //
 // Addresses, and why each is what it is: docs/sixty-fps-logic.md.
 namespace rg::steps

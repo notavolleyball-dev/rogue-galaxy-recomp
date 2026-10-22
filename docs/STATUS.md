@@ -1119,6 +1119,29 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**Texture animations at the console's rate (2026-10-21).** The user saw
+the platform the Monography Shot raises in battle drawn wrong at 60 fps:
+tiles on dark blue, where a PS2 recording and the 30 fps mode show circles.
+F7 captures in both modes: its 64x64 texture at 0x2B00 is redrawn every
+frame from four layers scrolled across it, each as four sprites split
+where it wraps, and in a 60 fps capture two of them sat half their size
+off, which at 30 never move. TexAnimSeqUpdate (0x163DD0) moves a layer by
+the step and wraps it at its period in frames; the draw shifts it by
+position / period of its size. A period of one frame is how the data keeps
+an axis still (the shift divides by the period): at whole steps the
+position wraps back to 0 at every update, at half steps it read 0.5 every
+other frame, and the layer jumped by half and back. Most callers also pass
+a constant 1.0 a draw (DrawListAddTexLoad from the effects, the HUD, the
+chests; EffTexResStepAnim), so those animations, scrolling and flip-book,
+ran at twice the speed. The new `texture` step fix (`src/step_fixes.cpp`)
+gives such calls the frame's share of a step, and after a call with a part
+step puts the still layers (a period of one frame, or a sine over two:
+sin 0 and sin pi alike) back where whole steps leave them. In the battle
+bench it holds about 14,000 layer positions every 300 updates (about 46 a
+frame, the map's textures among them) and rescales 23 to 202 calls; the
+battle's frame rate is the same with it and without (48.4 both, with
+another game open).
+
 **The EE safe point inline (2026-10-21).** Every inter-function transfer
 and back edge of the generated code charges cycles and asks the scheduler
 whether to unwind: PS2Runtime::eeCheckpointDue -> EeScheduler::checkpointDue

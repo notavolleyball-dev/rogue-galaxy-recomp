@@ -1,5 +1,7 @@
 #include "step_fixes.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
@@ -155,6 +157,32 @@ constexpr float kMaxSharedMove = 100.0f;
 // remarks sequences the skill actions (SkillActionFindPending,
 // SkillTimerStartMaybe, SkillActionEnd, an immediate script) in step with
 // the battle; on logic frames a skill froze the game (2026-10-19).
+// Texture animations. TexAnimSeqUpdate (0x163DD0; a0 the sequence, f12 the
+// step) advances the layers of a texture's animation by the step: a
+// flip-book's frame time, and a scrolling layer's position on each axis
+// (+0x20 and +0x24 of the layer, wrapped at its period in frames, +0x1C and
+// +0x1E, whose sign is the direction). TexAnimeTableApply (0x162F50) draws
+// the layer shifted by position / period of its size (type 1), or by a sine
+// of 2 pi x position / period (type 2). The map's textures get the scene's
+// step (MapTickAnims, MapMgrAuxAreaTexAnimUpdate) and the models their
+// update's, but most of the rest a constant 1.0 a draw (DrawListAddTexLoad
+// from the effects, the HUD, the chests; EffTexResStepAnim): those ran at
+// twice the speed, and take the 60 fps share of a frame. A period of one
+// frame is how the data keeps an axis still (the shift divides by the
+// period): at whole steps the position wraps to 0 at every update, at half
+// steps it was 0.5 every other frame and the layer jumped by half its size
+// and back, which redrew the Monography Shot's platform as tiles instead of
+// circles (2026-10-21). A sine over two frames is as still at whole steps
+// (sin 0, sin pi). Those positions are put back where whole steps leave them.
+constexpr uint32_t kTexAnimSeqUpdate = 0x00163DD0u;
+constexpr uint32_t kSeqColumnCount = 0x0u;
+constexpr uint32_t kSeqActive = 0x4u;
+constexpr uint32_t kSeqHead = 0xC4u;
+constexpr uint32_t kSeqColumns = 48u;
+// In a node, after the link to the next.
+constexpr uint32_t kLayer = 0x10u;
+constexpr uint32_t kLayerPeriod = 0x1Cu;
+constexpr uint32_t kLayerPosition = 0x20u;
 
 PS2Runtime::RecompiledFunction g_taskStepNpc = nullptr;
 PS2Runtime::RecompiledFunction g_angleStepToward = nullptr;
@@ -166,6 +194,7 @@ PS2Runtime::RecompiledFunction g_systemVmUpdate = nullptr;
 PS2Runtime::RecompiledFunction g_mesMgrUpdateAll = nullptr;
 PS2Runtime::RecompiledFunction g_charaMoveCollide = nullptr;
 PS2Runtime::RecompiledFunction g_aiUpdate = nullptr;
+PS2Runtime::RecompiledFunction g_texAnimSeqUpdate = nullptr;
 bool g_trace = false;
 
 struct Counts
@@ -179,6 +208,8 @@ struct Counts
     uint32_t clamps = 0u;
     uint32_t air = 0u;
     uint32_t aiShared = 0u;
+    uint32_t texSteps = 0u;
+    uint32_t stillLayers = 0u;
 };
 Counts g_counts;
 
@@ -669,6 +700,82 @@ void aiUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_aiUpdate, rdram, ctx, runtime, &afterAiUpdate, chara);
 }
 
+// --- Texture animations ---------------------------------------------------
+
+void holdStillLayers(uint8_t *rdram, R5900Context *, PS2Runtime *, uint32_t sequence)
+{
+    uint32_t columns = 0u;
+    if (!readGuest(rdram, sequence + kSeqColumnCount, columns))
+    {
+        return;
+    }
+    columns = std::min(columns, kSeqColumns);
+    for (uint32_t i = 0u; i < columns; ++i)
+    {
+        uint32_t active = 0u;
+        uint32_t node = 0u;
+        if (!readGuest(rdram, sequence + kSeqActive + 4u * i, active) || active == 0u ||
+            !readGuest(rdram, sequence + kSeqHead + 4u * i, node))
+        {
+            continue;
+        }
+        // The chain ends with a null; the bound only guards against garbage.
+        for (unsigned n = 0u; node != 0u && n < 256u; ++n)
+        {
+            const uint32_t layer = node + kLayer;
+            int8_t type = 0;
+            if (readGuest(rdram, layer, type) && (type == 1 || type == 2))
+            {
+                for (uint32_t axis = 0u; axis < 2u; ++axis)
+                {
+                    int16_t period = 0;
+                    if (!readGuest(rdram, layer + kLayerPeriod + 2u * axis, period))
+                    {
+                        continue;
+                    }
+                    const int frames = period < 0 ? -period : period;
+                    if (frames == 1 || (type == 2 && frames == 2))
+                    {
+                        // Wrapped to 0 forwards, to the period backwards.
+                        writeGuest(rdram, layer + kLayerPosition + 4u * axis,
+                                   period > 0 ? 0.0f : static_cast<float>(frames));
+                        ++g_counts.stillLayers;
+                    }
+                }
+            }
+            if (!readGuest(rdram, node, node))
+            {
+                break;
+            }
+        }
+    }
+}
+
+void texAnimSeqUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // The game's own scale (its 60 Hz menus, the movies): the console's
+    // frames.
+    if (rg::timing::logicFrame(rdram, ctx) == rg::timing::LogicFrame::AsIs)
+    {
+        g_texAnimSeqUpdate(rdram, ctx, runtime);
+        return;
+    }
+    if (ctx->f[12] == 1.0f)
+    {
+        // The frame's share, not the scene's step: on the console a slowed
+        // scene does not slow these.
+        ctx->f[12] = rg::timing::sceneScale(rdram, ctx);
+        ++g_counts.texSteps;
+    }
+    const float step = ctx->f[12];
+    if (step == std::floor(step))
+    {
+        g_texAnimSeqUpdate(rdram, ctx, runtime);
+        return;
+    }
+    rg::hooks::callThen(g_texAnimSeqUpdate, rdram, ctx, runtime, &holdStillLayers, getRegU32(ctx, 4));
+}
+
 PS2Runtime::RecompiledFunction g_menuOriginals[std::size(kMenuTaskSteps)] = {};
 
 template <size_t Index>
@@ -696,9 +803,9 @@ void trace()
         return;
     }
     std::printf("[steps] NPC updates %u, turns %u, judge steps %u, gravity %u (held %u), launches %u, terminal "
-                "clamps %u, air moves %u, AI moves shared %u\n",
+                "clamps %u, air moves %u, AI moves shared %u, texture steps %u, still layers %u\n",
                 g_counts.npc, g_counts.turns, g_counts.judge, g_counts.gravity, g_counts.held, g_counts.launches,
-                g_counts.clamps, g_counts.air, g_counts.aiShared);
+                g_counts.clamps, g_counts.air, g_counts.aiShared, g_counts.texSteps, g_counts.stillLayers);
     g_counts = Counts{};
 }
 
@@ -741,6 +848,10 @@ void install(PS2Runtime &runtime)
     if (stepFix(StepFix::Ai))
     {
         complete &= hookFunction(runtime, kAiUpdate, &aiUpdate, g_aiUpdate);
+    }
+    if (stepFix(StepFix::Texture))
+    {
+        complete &= hookFunction(runtime, kTexAnimSeqUpdate, &texAnimSeqUpdate, g_texAnimSeqUpdate);
     }
     if (!complete)
     {
