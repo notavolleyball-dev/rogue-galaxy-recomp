@@ -1119,6 +1119,25 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**8x without paging (2026-10-22).** The user, playing at 8x on purpose
+(scale 8 in settings.ini; 3x before), found a place where the frame rate
+fell hard; two F9 windows came after the dips (35 and 30 fps for a second
+or two, the GS worker past 150% of the wall). The town bench at 8x held
+29.9 frames a second, with frames of up to 1.4 s, against 55.0 at 3x; the
+GPU's memory went from 2.7 to 11.4 GB of 12 as the town loaded, and a
+quarter of the worker was SDL binding memory under `recordSnapshot`. The
+streets take about 110 feedback snapshots a frame (strips of a blur,
+channel shuffles), each copy cycled its texture, and every copy recorded
+ahead of a submission kept a whole texture of the surface's size until
+the GPU was done with it: about 70 MiB each at 8x. The copies overwrite
+the texture in place now (the GPU runs them in order after the draws that
+sampled the last one; `thirdparty/dq8-gfx`, its README,
+`DQ8_GFX_CYCLE_SNAPSHOTS=1` as before): the town at 8x 57.7 frames a
+second with 2.3 GB, a battle at 8x a median of 57.1 against 48.3 (the
+lowest interval 50 against 26), the town at 3x 58.4 against 55.0, the
+worker 66% against 82%; the logged frame byte-identical at 1x and 3x.
+What 8x still costs is the GPU's own drawing, busy most of the time.
+
 **The chests' lid at the console's pace (2026-10-21).** The user saw a
 chest's contents jump out faster at 60 fps. TaskStepTBox (0x338900)
 runs TreasureBoxUpdate (0x3398C0) on the chests in reach once a frame,

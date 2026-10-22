@@ -733,6 +733,9 @@ struct SdlGpuBackend::Impl {
     // DQ8_GFX_NO_GPU_PADDING: a feedback snapshot's padding rows come from
     // local memory, resolving the target that owns them, as before.
     const bool noGpuPadding = std::getenv("DQ8_GFX_NO_GPU_PADDING") != nullptr;
+    // DQ8_GFX_CYCLE_SNAPSHOTS: the copies into a snapshot texture cycle it,
+    // as before, and count against the pending budget (see recordSnapshot).
+    const bool cycleSnapshots = std::getenv("DQ8_GFX_CYCLE_SNAPSHOTS") != nullptr;
     // DQ8_GFX_SUBMIT_DRAWS: a flush of the queued draws records them into the
     // device's pending command buffer and submits it only once this many
     // draws are in it (a readback, a present or the cycled-resource budget
@@ -766,8 +769,8 @@ struct SdlGpuBackend::Impl {
     // Draws recorded into the pending command buffer since it last went out.
     uint32_t recordedDraws = 0u;
     SDL_GPUTexture *dummyTexture = nullptr;
-    // Snapshot textures, one per size. Copies into them cycle, so each draw
-    // keeps the snapshot it sampled while later ones are taken.
+    // Snapshot textures, one per size. A copy into one lands after the draws
+    // recorded before it, which have sampled the last one by then.
     struct FeedbackTexture {
         uint32_t width, height;
         SDL_GPUTexture *texture;
@@ -1404,10 +1407,18 @@ struct SdlGpuBackend::Impl {
             setError(std::move(error));
             return nullptr;
         }
-        // The copy cycles the snapshot, so each one recorded ahead of a
-        // submission keeps its own storage: it counts against the budget, and
-        // the pending work may go out here (the caller is between passes).
-        if (!device.reservePending(uint64_t(copyWidth) * copyHeight * 4u, error)) {
+        // The copy overwrites the snapshot in place: the GPU runs it after
+        // the draws recorded before it, the ones that sampled the last copy
+        // among them (SDL puts a barrier between), and the draw that samples
+        // this one is recorded right after it. Cycled instead, each copy
+        // recorded ahead of a submission kept its own storage, a whole
+        // texture of the surface's size until the GPU was done with it:
+        // about 110 copies a frame in Salgin's streets, so at 8x more than
+        // the GPU's memory, and the frames paged in and out of it for up to
+        // a second and a half (Rogue Galaxy: changed). A cycled copy counts
+        // against the budget, and the pending work may go out here (the
+        // caller is between passes).
+        if (cycleSnapshots && !device.reservePending(uint64_t(copyWidth) * copyHeight * 4u, error)) {
             setError(std::move(error));
             return nullptr;
         }
@@ -1428,7 +1439,7 @@ struct SdlGpuBackend::Impl {
         destination.texture = snapshot;
         destination.x = x;
         destination.y = y;
-        SDL_CopyGPUTextureToTexture(copy, &source, &destination, copyWidth, copyHeight, 1u, true);
+        SDL_CopyGPUTextureToTexture(copy, &source, &destination, copyWidth, copyHeight, 1u, cycleSnapshots);
         SDL_EndGPUCopyPass(copy);
         ++stats.feedbackCopies;
         return snapshot;
@@ -1563,8 +1574,8 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTexture *feedbackTexture = feedbackTextureFor(width, height, error);
         if (!feedbackTexture)
             return nullptr;
-        // The copy below cycles the snapshot (see recordSnapshot).
-        if (!device.reservePending(uint64_t(width) * height * 4u, error))
+        // The copy below overwrites the snapshot in place (see recordSnapshot).
+        if (cycleSnapshots && !device.reservePending(uint64_t(width) * height * 4u, error))
             return nullptr;
         SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
         if (!commands)
@@ -1578,8 +1589,7 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTextureLocation source{}, destination{};
         source.texture = surface.texture;
         destination.texture = feedbackTexture;
-        // Cycle the complete snapshot so submitted draws retain their version.
-        SDL_CopyGPUTextureToTexture(copy, &source, &destination, sourceWidth, sourceHeight, 1u, true);
+        SDL_CopyGPUTextureToTexture(copy, &source, &destination, sourceWidth, sourceHeight, 1u, cycleSnapshots);
         if (padding.rightColumn && sourceHeight > 32u * scale) {
             source.y = 32u * scale;
             destination.x = sourceWidth;

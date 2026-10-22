@@ -135,8 +135,9 @@ commit of this folder is upstream as is, so `git log -p` on it shows them.
   the order they happen, which is the order the GPU runs them, as with
   immediate submissions. A flush records the queued draws after them and
   submits once `DQ8_GFX_SUBMIT_DRAWS` draws (96) are in it; a readback, a
-  present or the budget for resources SDL cycles per use (feedback
-  snapshots and local copies, 96 MiB) sends it sooner. The vertices of
+  present or the budget for resources SDL cycles per use (local copies,
+  and feedback snapshots until they were copied in place, below; 96 MiB)
+  sends it sooner. The vertices of
   one submission's flushes append to one buffer instead of cycling it
   every flush, and the upload transfer buffers (textures, patches,
   vertices) come from pools guarded by submission serials
@@ -287,6 +288,22 @@ Five more fix results:
   (half as bright), and additive sparkles and light shafts at alpha up
   to 0xB4 (clamped at 0x80). The stats line counts `destination reads`;
   `DQ8_GFX_NO_DESTINATION_COPY=1` keeps the approximations.
+- `sdlgpu_backend.cpp`: a snapshot copy overwrites its texture in place
+  instead of cycling it. Cycled, each copy recorded ahead of a submission
+  kept storage of its own, a whole texture of the surface's size, until
+  the GPU was done with it; Salgin's streets take about 110 a frame (the
+  strips of a blur, channel shuffles), and at 8x they outgrew a 12 GB
+  GPU: its memory went from 2.7 to 11.4 GB as the town loaded, the frames
+  paged for up to a second and a half, and SDL binding new memory was a
+  quarter of the worker. In place, the GPU runs a copy after the draws
+  recorded before it (SDL puts a barrier between), the ones that sampled
+  the last copy among them, and the draw that samples it is recorded
+  right after, as before; the copies no longer count against the pending
+  budget. The town bench at 8x went from 29.9 to 57.7 frames a second
+  (GPU memory 2.3 GB), a battle at 8x from a median of 48.3 to 57.1 (the
+  lowest interval 26 to 50), the town at 3x from 55.0 to 58.4 (the worker
+  82% to 66%); the logged frame is byte-identical at 1x and 3x.
+  `DQ8_GFX_CYCLE_SNAPSHOTS=1` cycles them as before.
 
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window
