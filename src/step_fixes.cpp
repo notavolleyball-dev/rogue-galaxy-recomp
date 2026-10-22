@@ -119,6 +119,21 @@ constexpr uint32_t kMenuTaskSteps[] = {
     0x00202DE0u, // TaskStepMenuInsectResultThunk
     0x001FFB90u, // TaskStepMenuWarp: the warp menu's fade
     0x001FFB30u, // TaskStepCaption: the area name
+    // Not a menu, the same kind of count: TaskStepTBox (0x338900, from the
+    // task table only) runs TreasureBoxUpdate (0x3398C0) on the chests in
+    // reach, which lifts an opening chest's lid, drops it in a parabola and
+    // shakes it in a damped sine by a counter of frames (+0x28, 112 of them),
+    // and pulses their glow over 300: at 60 fps the lid jumped at twice the
+    // speed (2026-10-21).
+    0x00338900u, // TaskStepTBox: the chests
+    // Not a task either: EventIconUpdate (0x2789B0), from the Draw Event Icon
+    // task, which draws every frame, moves the item icons a chest's script
+    // bursts out (EvCmdEventIconBurst: up at 5.0, staggered by 10 frames):
+    // each frame adds the velocity, takes gravity off it, bounces it at half
+    // off the floor, and counts 45 frames of life. At 60 fps the items jumped
+    // at twice the speed (2026-10-21, still so after the lid's fix). Its
+    // result goes unused.
+    0x002789B0u, // EventIconUpdate: the icons out of an opened chest
 };
 // The characters' AI. AiUpdate (0x2C05B0) runs once a frame for each
 // character CharaAiHandlePrmtRequestsMaybe thinks for (a0 the AI block at

@@ -1119,6 +1119,19 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The chests' lid at the console's pace (2026-10-21).** The user saw a
+chest's contents jump out faster at 60 fps. TaskStepTBox (0x338900)
+runs TreasureBoxUpdate (0x3398C0) on the chests in reach once a frame,
+and it counts frames: an opening chest's lid rises, drops in a parabola
+and shakes in a damped sine over a counter of 112 (+0x28; the draw turns
+the lid frame by +0x5C), fades over 15, and the glow pulses over 300.
+It joins the `menu` step fix's list, so it runs on the logic frames. The
+user found the items still fast: they are icons the chest's script bursts
+out (EvCmdEventIconBurst, up at 5.0 and staggered by 10 frames), which
+EventIconUpdate (0x2789B0) moves a frame at a time, velocity, gravity, a
+bounce at half and 45 frames of life, from the Draw Event Icon task, which
+runs every frame. It joins the list too.
+
 **Texture animations at the console's rate (2026-10-21).** The user saw
 the platform the Monography Shot raises in battle drawn wrong at 60 fps:
 tiles on dark blue, where a PS2 recording and the 30 fps mode show circles.

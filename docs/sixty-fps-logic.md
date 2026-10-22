@@ -189,6 +189,16 @@ The "double step" mode (+0x5E00) is never enabled in the main ELF. Our
   reach the target in half the time.
 - NPCs: `NpcObjUpdate_2fc450` per-frame step (section 2) -> **2x walk and
   turn speed**.
+- Chests: `TaskStepTBox_338900` -> `TreasureBoxPoolStep_338d40` ->
+  `TreasureBoxUpdate_3398c0` once a frame: the opening lid (+0x5C) follows
+  a counter of frames (+0x28: rise, parabola, damped sine, 112 in all),
+  fades by +0x2C, the glow by +0x2A over 300 -> **2x lid jump**. On the
+  logic frames with the menu tasks (`menu`, 2026-10-21). The items that jump
+  out are icons (`EvCmdEventIconBurst_25e150` -> `EventIconSpawn_278640`,
+  up at 5.0, staggered by 10 frames) moved by `EventIconUpdate_2789b0` a
+  frame at a time (velocity, gravity, a bounce at -0.5, 45 frames of life)
+  from the draw task `DrawEventIconTask_27aac0`, every frame -> **2x**; on
+  the same logic frames.
 - Texture animations: `TexAnimSeqUpdate_163dd0` (a0 the sequence, f12 the
   step) gets the scene's step from the map (`MapTickAnims_1e1ac0`,
   `MapMgrAuxAreaTexAnimUpdate_1e1430`, through `TexGroupUpdateAnim_157ca0`)
