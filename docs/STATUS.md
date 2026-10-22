@@ -1132,6 +1132,17 @@ EventIconUpdate (0x2789B0) moves a frame at a time, velocity, gravity, a
 bounce at half and 45 frames of life, from the Draw Event Icon task, which
 runs every frame. It joins the list too.
 
+**The 60 fps mode a menu switch, the launchers tidied (2026-10-21).**
+Interface > Game > 60 frames per second (on by default; `sixty_fps` in
+settings.ini) decides the mode at the next start: the menu applies the
+saved settings before the hooks go in, and the 60 fps mode's hooks are
+only installed at start-up. `RG_FPS=60` or `RG_FPS=30` still decides
+for a run (the benches set it either way), and `RogueGalaxy.bat` no
+longer sets it. The diagnostic launchers (captura, perfil, engasgos)
+moved to `ferramentas\`; `RogueGalaxy-30fps.bat` (the switch now),
+`-sem-ia.bat` (the `ai` fix confirmed) and `-pulos.bat` (the jump fixed;
+`RG_JUMP_TRACE=3 RG_POS_TRACE=1` by hand) are gone.
+
 **Texture animations at the console's rate (2026-10-21).** The user saw
 the platform the Monography Shot raises in battle drawn wrong at 60 fps:
 tiles on dark blue, where a PS2 recording and the 30 fps mode show circles.

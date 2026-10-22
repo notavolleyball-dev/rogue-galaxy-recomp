@@ -10,8 +10,12 @@ rem (exe-perfil.exe is the copy of the build this was recorded with; the
 rem report needs the symbols of that same build, so it is copied at each
 rem start: a report of an older session's profile needs that session's build).
 setlocal
-if not exist "%~dp0build\run" mkdir "%~dp0build\run"
-if exist "%~dp0build\game\src\roguegalaxy.exe" copy /y "%~dp0build\game\src\roguegalaxy.exe" "%~dp0build\run\exe-perfil.exe" >nul
+rem The repository's folder, above this one.
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
+if not exist "%ROOT%\build\run" mkdir "%ROOT%\build\run"
+if exist "%ROOT%\build\game\src\roguegalaxy.exe" copy /y "%ROOT%\build\game\src\roguegalaxy.exe" "%ROOT%\build\run\exe-perfil.exe" >nul
+rem Relative paths from here on are the repository's: RogueGalaxy.bat starts
+rem the game from there.
 set RG_PROFILE=build\run\play-perfil.prof
 set RG_PROFILE_ON_MARK=1
 if not defined RG_PROFILE_SECONDS set RG_PROFILE_SECONDS=20
@@ -23,4 +27,4 @@ rem VU1 microprograms the build lacks (they run on the interpreter, several
 rem times slower) are recorded into build\vu1-profile, which the next build
 rem compiles in.
 set PS2_VU_PROGRAM_PROFILE=build\vu1-profile
-call "%~dp0RogueGalaxy.bat" %*
+call "%ROOT%\RogueGalaxy.bat" %*

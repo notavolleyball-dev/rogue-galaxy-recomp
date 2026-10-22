@@ -20,9 +20,9 @@ if not exist "disc\SCUS_974.90" (
 rem Options (see "Running" in README.md), for example:
 rem   set RG_SHOW_FPS=1
 rem   set RG_MUTE=1
-rem 60 fps mode (see RG_FPS in README.md): set RG_FPS=30 before this file in
-rem a terminal, or remove the line, for the game's own 30.
-if not defined RG_FPS set RG_FPS=60
+rem 60 fps or the game's own 30: the menu's 60 frames per second (F1,
+rem Interface > Game), from the next start. RG_FPS=30 or RG_FPS=60 set before
+rem this file in a terminal decides for that run instead (see README.md).
 rem One [gfx] line a second in build\last-run.log (the frame rate and the
 rem backend's counters), so an F9 mark can be put next to that second.
 if not defined DQ8_GFX_STATS_EVERY set DQ8_GFX_STATS_EVERY=60

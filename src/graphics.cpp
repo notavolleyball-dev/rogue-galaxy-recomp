@@ -145,7 +145,7 @@ bool pump(void *userData)
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
     }
-    // F7 logs the next GS frame with RG_GS_CAPTURE (RogueGalaxy-captura.bat).
+    // F7 logs the next GS frame with RG_GS_CAPTURE (ferramentas\RogueGalaxy-captura.bat).
     for (unsigned n = g_f7Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
     {
         std::fprintf(stderr, "[mark] F7: frame capture requested\n");
@@ -203,6 +203,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
     // The game's own switches, under Interface > Game.
     host.gameOptions = {
+        {"sixty_fps", "60 frames per second",
+         "The game runs at 60 frames a second instead of its own 30, its logic still at the PS2's pace; movies "
+         "and the loading screen keep 30. Takes effect the next time the game starts.",
+         true},
         {"widescreen", "Widescreen",
          "The game draws a wider view, and the HUD over the scene and the movies fit it; with Display > Aspect "
          "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded. Menus and text "
@@ -220,7 +224,9 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          true},
     };
     host.setGameOption = [](const std::string &key, bool on) {
-        if (key == "widescreen")
+        if (key == "sixty_fps")
+            rg::timing::setSixtyFpsPreferred(on);
+        else if (key == "widescreen")
             rg::widescreen::setEnabled(on);
         else if (key == "skip_opening")
             rg::opening::setSkip(on);

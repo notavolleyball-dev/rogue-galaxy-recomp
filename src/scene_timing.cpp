@@ -85,6 +85,8 @@ PS2Runtime::RecompiledFunction g_intervalOriginal = nullptr;
 bool g_moviePlaying = false;
 bool g_inMovieModal = false;
 bool g_sixty = false;     // RG_FPS=60
+// The menu's switch, for install() (written by the menu's thread).
+std::atomic<bool> g_sixtyPreferred{true};
 bool g_adaptive = false;  // RG_TIME_SCALE=game
 unsigned g_stepFixes = ~0u; // RG_STEP_FIXES: which frame-counted systems take the step
 bool g_trace = false;     // RG_TIME_TRACE=1
@@ -388,6 +390,11 @@ bool sixtyFps()
     return g_sixty;
 }
 
+void setSixtyFpsPreferred(bool on)
+{
+    g_sixtyPreferred.store(on, std::memory_order_relaxed);
+}
+
 bool stepFix(StepFix which)
 {
     return (g_stepFixes & static_cast<unsigned>(which)) != 0u;
@@ -565,7 +572,12 @@ void requestStateReport()
 void install(PS2Runtime &runtime)
 {
     const char *fps = std::getenv("RG_FPS");
-    g_sixty = fps && std::strcmp(fps, "60") == 0;
+    g_sixty = fps && *fps ? std::strcmp(fps, "60") == 0 : g_sixtyPreferred.load(std::memory_order_relaxed);
+    if (!g_sixty)
+    {
+        std::printf("[rg] 30 fps, the game's own (%s)\n",
+                    fps && *fps ? "RG_FPS" : "the menu's 60 frames per second is off");
+    }
     const char *mode = std::getenv("RG_TIME_SCALE");
     // At 60 fps the step follows the frame time unless RG_TIME_SCALE=fixed:
     // a host that only reaches 35 frames a second would otherwise play at

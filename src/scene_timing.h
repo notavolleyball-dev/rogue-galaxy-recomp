@@ -18,10 +18,11 @@
 // (patches/ps2recomp/0003). The first play with the bigger steps back on
 // lost the leader in battle, cause not yet pinned down, so it stays.
 //
-// RG_FPS=60: the flip waits one vblank instead of two (the vsync interval the
-// game sets at boot and keeps outside its own 60 Hz menus), and the scene's
-// time scale follows the measured frame time: 0.5 at full rate, 1.0 when a
-// frame took two vblanks, so the logic advances at the same rate over
+// The 60 fps mode (the menu's "60 frames per second", on by default; RG_FPS
+// for one run): the flip waits one vblank instead of two (the vsync interval
+// the game sets at boot and keeps outside its own 60 Hz menus), and the
+// scene's time scale follows the measured frame time: 0.5 at full rate, 1.0
+// when a frame took two vblanks, so the logic advances at the same rate over
 // however many frames the host manages. RG_TIME_SCALE=fixed makes it 0.5
 // always (slow motion below 60). Movies keep two vblanks. The game's own
 // overlay mode (menus at 60 Hz with the scale locked) is left alone.
@@ -48,6 +49,13 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx);
 
 // RG_FPS=60 is on, with its hooks in place.
 bool sixtyFps();
+
+// The menu's "60 frames per second" switch (Interface > Game), which
+// install() reads: set at start-up as the menu applies the saved settings, so
+// a change takes effect the next time the game starts. RG_FPS, when set,
+// decides instead for the run (60 for the mode, any other value for the
+// game's own 30).
+void setSixtyFpsPreferred(bool on);
 
 // Has the game thread print, at the scene's next update, the state the
 // mode runs in ([timing] state: game mode, intervals, lock, whose step,
