@@ -1119,6 +1119,24 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The larger 2D art set aside; SDL's defragmentation (2026-10-23).** The
+user found the game's letters pixelated at 8x. Edge smoothing in the
+shader did not please them and was undone. A pack of larger versions,
+collected while playing (each sprite's texture rectangle by content) and
+enlarged on the machine, followed: AI upscalers (Real-ESRGAN, then
+Upscayl's models) made icons and faces look like watercolour, so the
+letters went through UltraSharp and the other pictures through xBR, and
+the user did not like it yet either. It waits on the `texture-pack`
+branch for a better way (one idea: drawing each glyph from a similar
+high-resolution typeface instead of enlarging the picture); what the
+user collected stays in `textures\collected`, out of the repository.
+Found with it: in about one item-menu run in twenty, digits came out
+missing or as noise, with the same draws as a good run's. SDL defragments
+memory at a presenting submission and moves textures while the GS
+thread's recorded uploads still name the old ones (dq8-gfx's README);
+the window thread's present now goes out under the backend lock after
+them, which keeps any upload or draw from being lost that way.
+
 **8x without paging (2026-10-22).** The user, playing at 8x on purpose
 (scale 8 in settings.ini; 3x before), found a place where the frame rate
 fell hard; two F9 windows came after the dips (35 and 30 fps for a second

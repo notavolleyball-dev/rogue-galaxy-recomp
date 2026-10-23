@@ -304,6 +304,20 @@ Five more fix results:
   lowest interval 26 to 50), the town at 3x from 55.0 to 58.4 (the worker
   82% to 66%); the logged frame is byte-identical at 1x and 3x.
   `DQ8_GFX_CYCLE_SNAPSHOTS=1` cycles them as before.
+- `sdlgpu_backend.cpp`: the presenting submissions go out under the
+  backend lock, after the pending command buffer (`submitAfterPending`).
+  SDL's Vulkan backend (3.2) defragments at a submission that presents,
+  or at any without a window, once some allocation needed a new memory
+  block: it copies every resource of one allocation to new memory within
+  that submission and points the handles at the copies. Commands the GS
+  thread had recorded and not yet submitted still named the old images,
+  so their writes landed there and the copies kept what came before. A
+  texture pack under test (Rogue Galaxy's `texture-pack` branch) creates
+  about 330 textures as the item menu opens, each uploaded once: in about
+  one run in twenty, digits came out missing ("15" as "1", the tabs'
+  zeros) or as noise ("28"), with the same draws as a good run's. The
+  window thread's present waits for the lock no longer than one GS call;
+  the town at 8x showed no difference beyond noise.
 
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window

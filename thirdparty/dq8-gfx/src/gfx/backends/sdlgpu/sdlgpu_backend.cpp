@@ -3248,6 +3248,24 @@ struct SdlGpuBackend::Impl {
             appliedPresentMode = displayOptions.presentMode;
     }
 
+    // SDL moves resources to defragment memory at a submission that presents
+    // (at any, without a window), once a new memory block was needed: it
+    // copies each one within that submission and points its handle at the
+    // copy. Commands the GS thread has recorded and not yet submitted would
+    // still write the old one, and the copy keep what it held before; a
+    // texture created and uploaded once lost its upload so (a texture pack
+    // under test showed digits missing or as noise in the item menu). Such a
+    // submission from the presenting thread goes out under the backend lock,
+    // after the pending commands (Rogue Galaxy: added).
+    template <typename Submission>
+    auto submitAfterPending(Submission submission) {
+        std::lock_guard lock(mutex);
+        std::string error;
+        if (!device.submitPending(error))
+            std::fprintf(stderr, "[gfx] pending commands: %s\n", error.c_str());
+        return submission();
+    }
+
     // Fits a frame into the window, draws the overlay over it, and serves any
     // pending capture. A null slot shows the overlay over black.
     //
@@ -3285,7 +3303,7 @@ struct SdlGpuBackend::Impl {
         lastShown = std::chrono::steady_clock::now();
         if (!swapchain || swapchainWidth == 0u || swapchainHeight == 0u) {
             // Minimised or otherwise unavailable this frame; nothing to show.
-            if (!SDL_SubmitGPUCommandBuffer(commands))
+            if (!submitAfterPending([&] { return SDL_SubmitGPUCommandBuffer(commands); }))
                 return fail("SDL_SubmitGPUCommandBuffer(minimized): ");
             return true;
         }
@@ -3333,7 +3351,8 @@ struct SdlGpuBackend::Impl {
             blitRegion(commands, target, whole, swapchain, whole, SDL_GPU_FILTER_NEAREST,
                        SDL_GPU_LOADOP_DONT_CARE);
 
-        SDL_GPUFence *displayed = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+        SDL_GPUFence *displayed =
+            submitAfterPending([&] { return SDL_SubmitGPUCommandBufferAndAcquireFence(commands); });
         if (!displayed)
             return fail("SDL_SubmitGPUCommandBufferAndAcquireFence(present): ");
         if (slot)
@@ -3741,7 +3760,8 @@ struct SdlGpuBackend::Impl {
         // A one-shot request keeps readback stalls outside steady FPS measurements.
         std::vector<uint8_t> pixels;
         std::string error;
-        if (device.downloadTexture(slot.texture, slot.width, slot.height, pixels, error)) {
+        const auto download = [&] { return device.downloadTexture(slot.texture, slot.width, slot.height, pixels, error); };
+        if (window ? download() : submitAfterPending(download)) {
             std::unique_ptr<SDL_Surface, decltype(&SDL_DestroySurface)> surface(
                 SDL_CreateSurfaceFrom(slot.width, slot.height, SDL_PIXELFORMAT_RGBA32,
                                       pixels.data(), slot.width * 4u), SDL_DestroySurface);
@@ -4237,7 +4257,11 @@ PresentationFrame SdlGpuBackend::DisplayPreparedPresentation(const GSPresentatio
     PresentationFrame frame = prepared->frame;
     if (prepared->download) {
         std::string error;
-        if (!m_impl->device.downloadTexture(slot.texture, slot.width, slot.height, frame.pixels, error))
+        const auto download = [&] {
+            return m_impl->device.downloadTexture(slot.texture, slot.width, slot.height, frame.pixels, error);
+        };
+        // Without a window this submission may defragment (submitAfterPending).
+        if (!(m_impl->window ? download() : m_impl->submitAfterPending(download)))
             throw std::runtime_error(error);
     }
     if (prepared->haveFrame)

@@ -26,3 +26,6 @@ __pycache__/
 .cache/
 Thumbs.db
 .DS_Store
+
+# Art collected from the disc while playing (the texture-pack branch).
+/textures/
