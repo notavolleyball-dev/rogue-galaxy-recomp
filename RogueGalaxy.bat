@@ -2,6 +2,10 @@
 rem Starts Rogue Galaxy Recompiled on the extracted disc in disc\.
 rem Double-click it, or run it from a terminal; extra arguments go to the game.
 rem The game's log is written to build\last-run.log.
+rem "Rogue Galaxy.exe" beside it, which the build makes, does the same without
+rem this terminal (src\launcher\launcher.c): the one to double-click for
+rem playing. This file stays for the debug\ launchers and terminal runs; a
+rem change to what it sets belongs in the launcher too.
 setlocal
 cd /d "%~dp0"
 

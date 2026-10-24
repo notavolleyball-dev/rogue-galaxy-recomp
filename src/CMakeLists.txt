@@ -135,3 +135,33 @@ if(MINGW)
         endif()
     endforeach()
 endif()
+
+# "Rogue Galaxy.exe", the launcher to double-click: RogueGalaxy.bat's work
+# without its terminal (launcher/launcher.c). It goes to the repository's
+# folder, beside the batch file, which keeps the terminal for the debug\
+# launchers and for runs from a terminal. Plain C linked statically, so it
+# needs no DLL beside it. Its icon and manifest are a .res file that
+# launcher/make_resources.py writes and the linker takes as it is (it says
+# why not windres); without Python the launcher is built without them.
+if(WIN32)
+    set(rg_launcher_sources launcher/launcher.c)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        set(rg_launcher_resources "${CMAKE_CURRENT_BINARY_DIR}/launcher_resources.res")
+        add_custom_command(OUTPUT "${rg_launcher_resources}"
+            COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/launcher/make_resources.py"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/launcher/rogue-galaxy.ico"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/launcher/launcher.manifest" "${rg_launcher_resources}"
+            DEPENDS launcher/make_resources.py launcher/rogue-galaxy.ico launcher/launcher.manifest
+            VERBATIM)
+        set_source_files_properties("${rg_launcher_resources}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+        list(APPEND rg_launcher_sources "${rg_launcher_resources}")
+    endif()
+    add_executable(rg_launcher WIN32 ${rg_launcher_sources})
+    set_target_properties(rg_launcher PROPERTIES
+        OUTPUT_NAME "Rogue Galaxy"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(MINGW)
+        target_link_options(rg_launcher PRIVATE -static)
+    endif()
+endif()

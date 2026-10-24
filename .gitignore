@@ -13,6 +13,8 @@
 /build/
 /out/
 *.log
+# The launcher the build puts beside RogueGalaxy.bat.
+/Rogue Galaxy.exe
 CMakeUserPresets.json
 
 # Python

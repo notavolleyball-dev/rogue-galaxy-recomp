@@ -54,7 +54,7 @@ cmake -S . -B build/game -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build/game
 
-# 4. Run it on your extracted disc
+# 4. Run it on your extracted disc (on Windows, double-click "Rogue Galaxy.exe")
 build/game/src/roguegalaxy disc/SCUS_974.90
 ```
 
@@ -145,12 +145,17 @@ as judder, so 120 Hz or variable refresh looks smoother.
 
 ## Running
 
-On Windows, double-click `RogueGalaxy.bat` (or run it from a terminal): it
-starts the built game on `disc/SCUS_974.90` and writes the game's log to
-`build/last-run.log`. The build copies the FFmpeg and clang runtime DLLs
-next to `roguegalaxy.exe`, so it needs nothing on PATH. To set any of the
-variables below, add a `set` line to the batch file (it has examples) or set
-them in the terminal before running it. The batch file also sets
+On Windows, double-click `Rogue Galaxy.exe`, which the build puts in the
+repository's folder: it starts the built game on `disc/SCUS_974.90`, writes
+the game's log to `build/last-run.log` (the run before survives as
+`build/last-run.prev.log`) and opens no terminal; a game that ends with an
+error shows the log's last lines in a message box. `RogueGalaxy.bat` does the
+same in a terminal, which it keeps open until the game closes (run it from
+one to see the log as it is written). The build copies the FFmpeg and clang
+runtime DLLs next to `roguegalaxy.exe`, so it needs nothing on PATH. To set
+any of the variables below, set them in Windows (they reach the game through
+either launcher), add a `set` line to the batch file (it has examples), or set
+them in the terminal before running it. Both launchers also set
 `VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
 layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
@@ -246,7 +251,7 @@ thread contexts) and a thread's call chain read from the dump with
 | Path | What |
 |---|---|
 | `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile` (and `make-hashes`, `maps` for maintainers) |
-| `CMakeLists.txt`, `src/` | The game executable: build of the generated trees, overlay manager (`src/overlay/`), call tracing (`src/debug/`), `main.cpp` |
+| `CMakeLists.txt`, `src/` | The game executable: build of the generated trees, overlay manager (`src/overlay/`), call tracing (`src/debug/`), `main.cpp`; the Windows launcher, `Rogue Galaxy.exe` (`src/launcher/`) |
 | `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` (VU1 microcode locations) |
 | `tools/disc/iso9660.py` | Read-only ISO9660 reader for dual-layer PS2 DVDs |
 | `tools/mwo3/mwo3.py` | MWo3 overlay header parser, ELF cross-check, overlay-to-ELF wrapper |

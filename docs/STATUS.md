@@ -1119,6 +1119,30 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**A launcher without the terminal (2026-10-23).** The user asked for
+RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
+this one stays the whole game, waiting to keep the log and show an error.
+`Rogue Galaxy.exe` (`src/launcher/launcher.c`, built into the repository's
+folder) does the batch file's work as a Windows program with no window: the
+same variables, the previous log kept, the game started with its output in
+`build\last-run.log` and no console (`CREATE_NO_WINDOW`), and for a game
+that ends with an error a message box with the log's last 15 lines, each cut
+at 150 characters (the `[gfx]` lines run past 300). It is plain C linked
+statically, since the DLLs the build copies sit beside the game and not
+beside it, and a second start while the game is up says so instead of
+starting another. The name has a space so it never answers to the image
+name the bench and hang tools look for (`roguegalaxy.exe`); its icon, a
+ringed planet, is drawn by `src/launcher/make_icon.py`. The batch file
+stays for the `debug\` launchers and terminal runs. Started from Explorer
+the game ran with no console window, closed from its window the launcher
+went with it, and killed it left the message box. Found on the way: the
+machine's Malwarebytes quarantines llvm-mingw's windres the moment it runs
+(three times, once a copy in a scratch folder with `--version`), so the
+icon and manifest are a `.res` that `src/launcher/make_resources.py`
+writes and lld links as it is; CMake's RC language, which an earlier
+subproject had enabled with a `windres.exe` the toolchain no longer has,
+is not used.
+
 **The developers' tools back (2026-10-23).** The user asked what
 RGDecomp would let us change; three read-only sweeps of it found a pile of
 debug code still in the retail executable. Fifteen places ask 0x207FE0,
