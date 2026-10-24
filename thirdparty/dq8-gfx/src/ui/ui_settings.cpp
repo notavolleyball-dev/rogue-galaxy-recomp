@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -133,12 +134,19 @@ void apply(Settings &s, const std::string &section, const std::string &key, cons
         else if (key == "hide_idle_cursor") parseBool(value, s.hideIdleCursor);
     } else if (section == "game") {
         if (key == "fast_forward_speed") parseNumber(value, s.fastForwardSpeed, 0.0f, 16.0f);
-        else if (value == "1" || value == "true" || value == "yes" || value == "0" || value == "false" ||
-                 value == "no") {
-            // Any other key is one of the game's switches (Rogue Galaxy: added).
-            bool on = false;
-            parseBool(value, on);
-            s.gameOptions[key] = on;
+        else {
+            // Any other key is one of the game's switches or numbers (Rogue
+            // Galaxy: added).
+            if (value == "1" || value == "true" || value == "yes" || value == "0" || value == "false" ||
+                value == "no") {
+                bool on = false;
+                parseBool(value, on);
+                s.gameOptions[key] = on;
+            }
+            char *end = nullptr;
+            const long number = std::strtol(value.c_str(), &end, 10);
+            if (end != value.c_str() && *end == '\0' && number >= INT32_MIN && number <= INT32_MAX)
+                s.gameNumbers[key] = static_cast<int>(number);
         }
     }
 }
@@ -183,6 +191,9 @@ std::string serializeSettings(const Settings &s) {
         << "\n[game]\nfast_forward_speed = " << s.fastForwardSpeed << '\n';
     for (const auto &[key, on] : s.gameOptions)
         out << key << " = " << flag(on) << '\n';
+    for (const auto &[key, value] : s.gameNumbers)
+        if (!s.gameOptions.count(key))
+            out << key << " = " << value << '\n';
     return out.str();
 }
 

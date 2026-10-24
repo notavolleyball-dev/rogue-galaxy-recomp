@@ -30,6 +30,11 @@
 #include "movie_audio.h"
 #include "libc_rand.h"
 #include "loading_screen.h"
+#include "battle_rates.h"
+#include "camera_view.h"
+#include "dev_tools.h"
+#include "draw_distance.h"
+#include "instant_text.h"
 #include "opening.h"
 #include "widescreen.h"
 #include "scene_timing.h"
@@ -151,6 +156,11 @@ int run(int argc, char **argv)
     rg::loading::install(runtime);
     rg::widescreen::install(runtime);
     rg::opening::install(runtime);
+    rg::devtools::install(runtime);
+    rg::cameraview::install(runtime);
+    rg::drawdistance::install(runtime);
+    rg::battlerates::install(runtime);
+    rg::instanttext::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);

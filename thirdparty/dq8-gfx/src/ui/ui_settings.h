@@ -49,6 +49,9 @@ struct Settings {
     // file has them; one it does not have takes the option's default (Rogue
     // Galaxy: added).
     std::map<std::string, bool> gameOptions;
+    // And the game's numbers. A key whose value reads as both (0 or 1) is in
+    // both maps until the menu sets one of them.
+    std::map<std::string, int> gameNumbers;
 };
 
 std::string serializeSettings(const Settings &settings);

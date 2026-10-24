@@ -40,6 +40,16 @@ struct GameOption {
     std::string label;
     std::string help;
     bool defaultValue = false;
+    // A number from minimum to maximum instead of a switch, when maximum is
+    // the larger, shown as a slider labelled by `format` (printf, its %d the
+    // value), between - and + buttons that move it by `step`, and a Default
+    // button.
+    int minimum = 0;
+    int maximum = 0;
+    int defaultNumber = 0;
+    std::string format;
+    int step = 1;
+    bool number() const { return maximum > minimum; }
 };
 
 struct HostServices {
@@ -58,6 +68,7 @@ struct HostServices {
     // added).
     std::vector<GameOption> gameOptions;
     std::function<void(const std::string &key, bool on)> setGameOption;
+    std::function<void(const std::string &key, int value)> setGameNumber;
 };
 
 enum class SettingsPage : uint8_t { Display, Sound, Controls, Interface, Count };
@@ -164,6 +175,8 @@ private:
     void applyPause();
     // A game switch's value: the settings file's, or the option's default.
     bool gameOption(const GameOption &option) const;
+    // A game number's value, the same way, within the option's range.
+    int gameNumber(const GameOption &option) const;
     void setFullscreen(bool fullscreen);
     void setPadConfig(const gfx::PadConfig &config);
     // Asks for an internal resolution and saves it. Asking for the active one

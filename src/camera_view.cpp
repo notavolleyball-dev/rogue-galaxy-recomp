@@ -1,0 +1,198 @@
+#include "camera_view.h"
+
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "ps2_runtime.h"
+#include "scene_timing.h"
+
+namespace rg::cameraview
+{
+namespace
+{
+
+constexpr uint32_t kViewSetProjection = 0x00143000u;
+constexpr uint32_t kCameraSetPresetParams = 0x00309100u;
+constexpr uint32_t kCameraSetDefaultParams = 0x00309260u;
+// The block CameraSetDefaultParams writes the distances into, in the camera.
+constexpr uint32_t kDistanceBlock = 0x15Cu;
+constexpr uint32_t kGameMode = 0x004B51A0u;
+constexpr uint32_t kModeField = 6u;
+constexpr uint32_t kModeBattle = 7u;
+constexpr int kGameFieldOfView = 52;
+constexpr float kPi = 3.14159265358979f;
+
+PS2Runtime::RecompiledFunction g_viewSetProjection = nullptr;
+PS2Runtime::RecompiledFunction g_cameraSetPresetParams = nullptr;
+PS2Runtime::RecompiledFunction g_cameraSetDefaultParams = nullptr;
+std::atomic<int> g_fieldOfView{kGameFieldOfView};
+std::atomic<int> g_distance{100};
+
+// A camera's distances as the game last wrote them, and the percentage of
+// them its block holds now. The game keeps two cameras (0x4B5950 and
+// 0x4B6220); the game thread's alone.
+struct Distances
+{
+    uint32_t block = 0u;
+    float base[2] = {};
+    int applied = 100;
+};
+std::array<Distances, 4> g_cameras{};
+size_t g_nextCamera = 0u;
+
+void writeDistances(uint8_t *rdram, Distances &camera, int percent)
+{
+    float distances[2];
+    for (int index = 0; index < 2; ++index)
+    {
+        distances[index] = camera.base[index] * static_cast<float>(percent) / 100.0f;
+    }
+    std::memcpy(rdram + camera.block, distances, sizeof(distances));
+    camera.applied = percent;
+}
+
+// The game has just written a camera's nearest (+0x0) and farthest (+0x4)
+// distances at `block`: they are kept as its base and scaled.
+void distancesWritten(uint8_t *rdram, uint32_t block)
+{
+    block &= 0x1FFFFFFFu;
+    if (block == 0u || block + 8u > PS2_RAM_SIZE)
+    {
+        return;
+    }
+    Distances *camera = nullptr;
+    for (Distances &known : g_cameras)
+    {
+        if (known.block == block)
+        {
+            camera = &known;
+        }
+    }
+    if (!camera)
+    {
+        camera = &g_cameras[g_nextCamera];
+        g_nextCamera = (g_nextCamera + 1u) % g_cameras.size();
+        camera->block = block;
+    }
+    std::memcpy(camera->base, rdram + block, sizeof(camera->base));
+    writeDistances(rdram, *camera, g_distance.load(std::memory_order_relaxed));
+}
+
+// The camera distance moved in the menu: the cameras take it now. A block
+// still holding what was last written says it is the same camera; one the
+// game has let go or set again is forgotten.
+void followDistance(uint8_t *rdram, uint32_t mode)
+{
+    const int percent = g_distance.load(std::memory_order_relaxed);
+    if (mode != kModeField && mode != kModeBattle)
+    {
+        return;
+    }
+    for (Distances &camera : g_cameras)
+    {
+        if (camera.block == 0u || camera.applied == percent)
+        {
+            continue;
+        }
+        float distances[2];
+        std::memcpy(distances, rdram + camera.block, sizeof(distances));
+        bool same = true;
+        for (int index = 0; index < 2; ++index)
+        {
+            const float expected = camera.base[index] * static_cast<float>(camera.applied) / 100.0f;
+            same = same && std::fabs(distances[index] - expected) <= 0.01f;
+        }
+        if (same)
+        {
+            writeDistances(rdram, camera, percent);
+        }
+        else
+        {
+            camera.block = 0u;
+        }
+    }
+}
+
+// FovHorizToVert's: the angle up a 4:3 picture whose width spans `degrees`.
+float vertical(int degrees)
+{
+    return 2.0f * std::atan(std::tan(static_cast<float>(degrees) * kPi / 360.0f) * 0.75f);
+}
+
+void viewSetProjection(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    uint32_t mode = 0u;
+    std::memcpy(&mode, rdram + kGameMode, sizeof(mode));
+    const int degrees = g_fieldOfView.load(std::memory_order_relaxed);
+    if (degrees != kGameFieldOfView)
+    {
+        static const float game = vertical(kGameFieldOfView);
+        if ((mode == kModeField || mode == kModeBattle) && std::fabs(ctx->f[12] - game) < 1e-3f)
+        {
+            ctx->f[12] = vertical(degrees);
+        }
+    }
+    followDistance(rdram, mode);
+    g_viewSetProjection(rdram, ctx, runtime);
+}
+
+// The battle camera's: 150 to 190 up, 120 to 160 down.
+void cameraSetPresetParams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t block = getRegU32(ctx, 4);
+    g_cameraSetPresetParams(rdram, ctx, runtime);
+    distancesWritten(rdram, block);
+}
+
+// Every camera's first, the field's for good: 65 to 120.
+void cameraSetDefaultParams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t camera = getRegU32(ctx, 4);
+    g_cameraSetDefaultParams(rdram, ctx, runtime);
+    distancesWritten(rdram, camera + kDistanceBlock);
+}
+
+} // namespace
+
+void install(PS2Runtime &runtime)
+{
+    if (const char *value = std::getenv("RG_FIELD_OF_VIEW"))
+    {
+        setFieldOfView(std::atoi(value));
+    }
+    if (const char *value = std::getenv("RG_CAMERA_DISTANCE"))
+    {
+        setDistance(std::atoi(value));
+    }
+    if (!rg::timing::hookFunction(runtime, kViewSetProjection, &viewSetProjection, g_viewSetProjection))
+    {
+        std::fprintf(stderr, "[rg] the field of view stays the game's\n");
+    }
+    if (!rg::timing::hookFunction(runtime, kCameraSetPresetParams, &cameraSetPresetParams, g_cameraSetPresetParams) ||
+        !rg::timing::hookFunction(runtime, kCameraSetDefaultParams, &cameraSetDefaultParams, g_cameraSetDefaultParams))
+    {
+        std::fprintf(stderr, "[rg] the camera distance stays the game's\n");
+    }
+}
+
+void setFieldOfView(int degrees)
+{
+    if (degrees > 0)
+    {
+        g_fieldOfView.store(degrees, std::memory_order_relaxed);
+    }
+}
+
+void setDistance(int percent)
+{
+    if (percent > 0)
+    {
+        g_distance.store(percent, std::memory_order_relaxed);
+    }
+}
+
+} // namespace rg::cameraview

@@ -104,14 +104,25 @@ void Overlay::applySettings() {
         SDL_SetWindowFullscreen(m_window, true);
     applyVolume();
     applyPause();
-    if (m_host.setGameOption)
-        for (const GameOption &option : m_host.gameOptions)
+    for (const GameOption &option : m_host.gameOptions) {
+        if (option.number()) {
+            if (m_host.setGameNumber)
+                m_host.setGameNumber(option.key, gameNumber(option));
+        } else if (m_host.setGameOption) {
             m_host.setGameOption(option.key, gameOption(option));
+        }
+    }
 }
 
 bool Overlay::gameOption(const GameOption &option) const {
     const auto found = m_settings.gameOptions.find(option.key);
     return found != m_settings.gameOptions.end() ? found->second : option.defaultValue;
+}
+
+int Overlay::gameNumber(const GameOption &option) const {
+    const auto found = m_settings.gameNumbers.find(option.key);
+    const int value = found != m_settings.gameNumbers.end() ? found->second : option.defaultNumber;
+    return std::clamp(value, option.minimum, option.maximum);
 }
 
 bool Overlay::capturesInput() const { return m_menuOpen || m_capture.active; }

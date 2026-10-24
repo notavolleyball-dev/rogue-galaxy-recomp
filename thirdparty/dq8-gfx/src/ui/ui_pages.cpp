@@ -380,9 +380,44 @@ void Overlay::drawInterfacePage() {
         if (beginSettings("game")) {
             for (const GameOption &option : m_host.gameOptions) {
                 settingRow(option.label.c_str(), option.help.empty() ? nullptr : option.help.c_str());
+                if (option.number()) {
+                    const int value = gameNumber(option);
+                    int next = value;
+                    const ImGuiStyle &style = ImGui::GetStyle();
+                    const float button = ImGui::GetFrameHeight();
+                    const float reset = ImGui::CalcTextSize("Default").x + style.FramePadding.x * 2.0f;
+                    ImGui::PushID(option.key.c_str());
+                    if (ImGui::Button("-", ImVec2(button, 0.0f)))
+                        next = value - option.step;
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(std::max(button * 3.0f, ImGui::GetContentRegionAvail().x - button -
+                                                                        reset - style.ItemSpacing.x * 2.0f));
+                    ImGui::SliderInt("##value", &next, option.minimum, option.maximum,
+                                     option.format.empty() ? "%d" : option.format.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::Button("+", ImVec2(button, 0.0f)))
+                        next = value + option.step;
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(value == option.defaultNumber);
+                    if (ImGui::Button("Default"))
+                        next = option.defaultNumber;
+                    ImGui::EndDisabled();
+                    ImGui::PopID();
+                    next = std::clamp(next, option.minimum, option.maximum);
+                    if (next != value) {
+                        m_settings.gameNumbers[option.key] = next;
+                        // A "0" or "1" in the file reads as a switch too.
+                        m_settings.gameOptions.erase(option.key);
+                        if (m_host.setGameNumber)
+                            m_host.setGameNumber(option.key, next);
+                        markDirty();
+                    }
+                    continue;
+                }
                 bool on = gameOption(option);
                 if (toggle(option.key.c_str(), &on)) {
                     m_settings.gameOptions[option.key] = on;
+                    m_settings.gameNumbers.erase(option.key);
                     if (m_host.setGameOption)
                         m_host.setGameOption(option.key, on);
                     markDirty();

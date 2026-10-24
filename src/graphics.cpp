@@ -14,6 +14,11 @@
 #include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
+#include "battle_rates.h"
+#include "camera_view.h"
+#include "dev_tools.h"
+#include "draw_distance.h"
+#include "instant_text.h"
 #include "loading_screen.h"
 #include "opening.h"
 #include "scene_timing.h"
@@ -217,6 +222,37 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
          "it has loaded.",
          false},
+        {"field_of_view", "Field of view",
+         "How wide the camera sees while exploring and in battle, in degrees across a 4:3 picture (the game's is "
+         "52); a wide picture adds to it. Scenes keep their own camera.",
+         false, 40, 90, 52, "%d degrees", 2},
+        {"camera_distance", "Camera distance",
+         "How far the camera stays from the party, against the game's (100%).",
+         false, 70, 160, 100, "%d%%", 5},
+        {"draw_distance", "Draw distance",
+         "How far away the scenery and the objects are still drawn, against the game's (100%), the fog thinned "
+         "in step. Most of Salgin has no limit to raise; the open areas gain more. From the next map loaded.",
+         false, 100, 400, 100, "%d%%", 25},
+        {"encounter_rate", "Encounter rate",
+         "How often random battles come, against the game's (100%); 0% turns them off. The story's battles stay.",
+         false, 0, 300, 100, "%d%%", 10},
+        {"battle_experience", "Experience from battles",
+         "The experience a won battle gives, against the game's (100%), up to the game's 9999 a battle.",
+         false, 0, 500, 100, "%d%%", 25},
+        {"battle_money", "Money from battles",
+         "The money defeated enemies leave, against the game's (100%). Selling, chests and rewards stay as they are.",
+         false, 0, 500, 100, "%d%%", 25},
+        {"instant_text", "Instant text",
+         "Dialogue and messages appear a page at a time instead of letter by letter, as the game itself does "
+         "where a scene asks for it; the pauses written into the text stay.",
+         false},
+        {"dev_tools", "Developer tools",
+         "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
+         "icon, R1 + R3 a list of them, and Cross gives one of the one picked. Help pages and info list: R1 + "
+         "Select unlocks every entry. Bestiary: Select fills it. Revelation Flow: R2 + Triangle gives one of the "
+         "picked cell's item. Paused in a scene: Triangle + R1 + R2 ends it, also one the game would not let you "
+         "skip, which can leave the story out of order.",
+         false},
     };
     host.setGameOption = [](const std::string &key, bool on) {
         if (key == "sixty_fps")
@@ -227,6 +263,24 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
             rg::opening::setSkip(on);
         else if (key == "instant_loading_recap")
             rg::loading::setInstantRecap(on);
+        else if (key == "instant_text")
+            rg::instanttext::setEnabled(on);
+        else if (key == "dev_tools")
+            rg::devtools::setEnabled(on);
+    };
+    host.setGameNumber = [](const std::string &key, int value) {
+        if (key == "field_of_view")
+            rg::cameraview::setFieldOfView(value);
+        else if (key == "camera_distance")
+            rg::cameraview::setDistance(value);
+        else if (key == "draw_distance")
+            rg::drawdistance::setPercent(value);
+        else if (key == "encounter_rate")
+            rg::battlerates::setEncounterRate(value);
+        else if (key == "battle_experience")
+            rg::battlerates::setExperience(value);
+        else if (key == "battle_money")
+            rg::battlerates::setMoney(value);
     };
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
     std::string error;

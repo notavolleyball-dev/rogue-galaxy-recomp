@@ -28,7 +28,11 @@ preferences folder for `RogueGalaxy/Recompiled`. Its defaults differ where
 this game does: internal resolution 2x, mailbox presentation (vsync holds
 SDL's submission lock while the GS worker waits on it) and the line blend
 left as the game draws it. The host side (pause, speed, volume, the frame
-count the counter uses) is in `src/graphics.cpp`.
+count the counter uses) is in `src/graphics.cpp`. Interface > Game lists
+the game's own options (`HostServices::gameOptions`, kept under `[game]`):
+switches, and numbers shown as sliders (a `GameOption` whose maximum is
+above its minimum, `HostServices::setGameNumber`) between - and + buttons
+that move them by the option's step, with a Default button.
 
 ## Changes for Rogue Galaxy
 

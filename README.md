@@ -93,7 +93,8 @@ DQ8-Recompiled: window and fullscreen, vertical sync, internal resolution,
 aspect and scaling filter, volume, controller and keyboard remapping with
 dead zones, pause (F2), fast-forward (F4), a frame-rate counter (F3),
 screenshots (F12) and renderer statistics, and under Interface > Game the
-game's own switches:
+game's own switches and numbers (a slider between - and + buttons, with a
+Default button):
 - "Widescreen": the game draws a wider view, with the HUD over the
   scene, the compass and the movies fitted to it (events keep their
   letterbox bars, which their text is placed by); with Display > Aspect
@@ -105,6 +106,32 @@ game's own switches:
 - "Show the loading recap at once": the whole story so far on the loading
   screen at once, instead of line by line, and Press X comes as soon as the
   game has loaded.
+- "Field of view": how wide the camera sees while exploring and in
+  battle, in degrees across a 4:3 picture (the game's 52, from 40 to 90; a
+  wide picture adds to it); scenes keep their own camera
+  (`src/camera_view.h`).
+- "Camera distance": how far the camera stays from the party, 70% to 160%
+  of the game's.
+- "Draw distance": how far away the scenery and the objects are still
+  drawn, 100% to 400% of the game's, the fog thinned in step
+  (`src/draw_distance.h`), from the next map loaded. Most of Salgin has no
+  limit to raise; the open areas gain more.
+- "Encounter rate", "Experience from battles", "Money from battles":
+  percentages of the game's (`src/battle_rates.h`). Encounters from 0%
+  (no random battles; the story's stay) to 300%; a won battle's
+  experience, up to the game's 9999, and the defeated enemies' money, from
+  0% to 500%. Selling, chests and the story's rewards stay as they are.
+- "Instant text": dialogue and messages a page at a time instead of
+  letter by letter, the game's own instant mode, which some scenes ask for
+  (`src/instant_text.h`); the pauses written into the text stay.
+- "Developer tools": what the developers left in the game, switched off
+  for release (`src/dev_tools.h`). In the main menu R3 shows every item's
+  icon and R1 + R3 a list of them, and Cross gives one of the one picked;
+  R1 + Select unlocks every help page and info entry; Select fills the
+  bestiary; R2 + Triangle on the Revelation Flow gives one of each item a
+  cell asks for;
+  paused in a scene, Triangle + R1 + R2 ends it, also one the game would
+  not let you skip, which can leave the story out of order.
 
 F11 or Alt+Enter toggles fullscreen. The settings live in
 `%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
@@ -195,6 +222,14 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_JUMP_TRACE=1` | Log the party leader's movement updates while off the ground (host time, position, step-scaled velocity, the motion's displacement, the action mode and the gravity flags, one line per `CharaMoveCollideMaybe`; `=2` logs the moves on the ground too, for the speed ramps; `=3` every character's, tagged with address and id, and for enemies every move with what drives it and every move request with its caller; `=4` every character's moves on the ground too, for a party following its leader): compares a jump's arc and timing between the 30 and 60 fps modes |
 | `RG_WIDESCREEN=1` | The game drawn for a wide screen of the window's shape (the menu's "Widescreen"; `src/widescreen.cpp`) |
 | `RG_SKIP_OPENING=1` | The logos at boot give way to the title screen (the menu's "Skip the opening") |
+| `RG_FIELD_OF_VIEW=N` | The camera's field of view in the field and in battle, degrees across a 4:3 picture (the menu's "Field of view"; the game's is 52) |
+| `RG_CAMERA_DISTANCE=N` | The camera's distance from the party, percent of the game's (the menu's "Camera distance") |
+| `RG_DRAW_DISTANCE=N` | How far the scenery and objects are drawn, percent of the game's (the menu's "Draw distance") |
+| `RG_ENCOUNTER_RATE=N` | Random battles, percent of the game's rate; 0 turns them off (the menu's "Encounter rate") |
+| `RG_BATTLE_EXPERIENCE=N` | A won battle's experience, percent of the game's (the menu's "Experience from battles") |
+| `RG_BATTLE_MONEY=N` | The defeated enemies' money, percent of the game's (the menu's "Money from battles") |
+| `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
+| `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |
 | `RG_INSTANT_RECAP=1` | The loading screen's story so far appears whole at once, then Press X (the menu's "Show the loading recap at once") |

@@ -1119,6 +1119,82 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The developers' tools back (2026-10-23).** The user asked what
+RGDecomp would let us change; three read-only sweeps of it found a pile of
+debug code still in the retail executable. Fifteen places ask 0x207FE0,
+a function that returns 0, before they act: the main menu's item giver
+(R3 shows every item's icon with its number, name and text, R1 + R3 a
+list; Cross gives one), unlocking every help page and info entry, filling
+the bestiary, one of each item a Revelation Flow cell asks for (the 10 in
+those calls, InvAddItemCore's, is the item's kind; the user saw one come),
+and ending any scene
+while paused. The menu's "Developer tools" makes it answer 1
+(`src/dev_tools.cpp`); the File 03 town run with R3 in the main menu
+showed the grid. The other findings (a free camera, the game's own
+performance meter, the field of view fixed at 52 degrees, two camera
+distance presets, per-map draw distance and fog, an instant text flag,
+encounters as a distance to walk, the battle rewards in one function)
+wait for the mods the user picked next, in order: instant text, the field
+of view and a farther camera, a longer draw distance, then multipliers.
+
+"Instant text" came next (`src/instant_text.cpp`). A message window types
+its text out in MesWinAdvanceTypeout (0x275F00), which reads the window's
+instant flag (+0xB4) through MesWinGetInstant (0x277600) and nowhere
+else; scripts turn it on with a text speed of 0. The option makes the
+getter answer 1: the game's own instant mode, which still stops at the
+pauses and waits written into the text and at each page. In the File 03
+load and item menu six windows went through it; their text (the menus'
+descriptions, the battle log) comes up whole either way, so a dialogue
+typed letter by letter was not seen in a scripted run.
+
+Then the camera (`src/camera_view.cpp`). The scene's projection is set
+again every frame by ViewSetProjection (0x143000, f12 the vertical angle
+in radians, from ViewSetAspect, ViewSetDepthRange and
+ViewReapplyCameraRec): 40.2 degrees high, the 52 across a 4:3 picture
+that CameraObjInit gives the field camera, in the field (game mode 6), in
+battle (7) and in the transporter's menu (20) alike. "Field of view"
+replaces that angle in modes 6 and 7; an event's camera sets its own
+(CameraTrackUpdate) and keeps it. The camera keeps between a nearest and
+a farthest distance, pushed back or pulled in past them: 65 to 120 in the
+field (CameraSetDefaultParams 0x309260), 150 to 190 up or 120 to 160 down
+in battle (the two settings its button switches between,
+CameraSetPresetParams 0x309100). "Camera distance" scales both as they
+are written, and when it moves, the cameras take it at the next
+projection if their blocks still hold what was last written there. The
+first version scaled the battle's alone, and the user saw no change
+moving the slider end to end in the field; a trace of the block showed
+65 and 120 there, and CameraSetPresetParams called only as a battle
+began. The menu's Interface > Game
+has sliders for numbers now. In the town at 2x, 75 degrees and 140%
+showed the whole stair and the transporter where 52 and 100% showed part.
+
+"Draw distance" (`src/draw_distance.cpp`) scales the maps' far clips and
+fog as their configuration is read. A far clip record (FarClipRecParseArgs
+0x18C850 for nodes and the map, MapModelCfgFarClip 0x195DC0 for models)
+holds a far distance past which a thing is hidden and a near one inside
+which it is, 0 or -1 for none. Salgin's streets have far ones of 4000 and
+near ones of 38, 300 and 360 with no far one to pair with: things that
+hide as the camera comes close, so only the far ones are scaled, with the
+fog's start and end (MapSceneCfgFog 0x192BB0, from 5 to 10000 or 4500).
+At 100% the 30 fps walk's logged frame is byte-identical to before; at
+300% the fog is a little thinner, mostly far off, and nothing comes or
+goes near the camera.
+
+Last, the battles' rates (`src/battle_rates.cpp`). Encounters come by
+distance: TaskAddEncountDist (0x1F6D90) hands the leader's step to
+CharaSysEncounterDistTick (0x3A5890, f12), which takes it off a countdown
+and queues a battle at 0; "Encounter rate" scales the step, 0 for none.
+BattleCalcResults (0x3A2100) totals the enemies' experience in its results
+block (capped at 9999, 0x465C90), adds each enemy's money with
+PartyAddMoney (from 0x3A2944), then gives every member the total
+(CharaAddExp, from 0x3A2D38). "Experience from battles" scales the total at
+the first of those money calls, before anyone gets it, so the results
+screen shows what was given; "Money from battles" scales each enemy's
+money, and selling, chests and rewards (PartyAddMoney's other callers)
+stay. In the battle bench at 300% every member got 27 instead of 9, the
+three enemies 72, 63 and 69 (draws of 21 to 26 tripled); at 0% the forced
+encounter never came.
+
 **The larger 2D art set aside; SDL's defragmentation (2026-10-23).** The
 user found the game's letters pixelated at 8x. Edge smoothing in the
 shader did not please them and was undone. A pack of larger versions,

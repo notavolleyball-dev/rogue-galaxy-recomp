@@ -68,11 +68,16 @@ endforeach()
 add_executable(roguegalaxy
     main.cpp
     graphics.cpp
+    battle_rates.cpp
+    camera_view.cpp
     depth_reads.cpp
+    dev_tools.cpp
+    draw_distance.cpp
     ee_fpu.cpp
     flip_pacing.cpp
     movie_audio.cpp
     return_hook.cpp
+    instant_text.cpp
     libc_rand.cpp
     loading_screen.cpp
     opening.cpp
