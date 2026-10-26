@@ -1,5 +1,6 @@
 #include "free_camera.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +44,9 @@ PS2Runtime::RecompiledFunction g_cameraModeUpdate = nullptr;
 PS2Runtime::RecompiledFunction g_cameraModeDebugFreeUpdate = nullptr;
 PS2Runtime::RecompiledFunction g_scePadRead = nullptr;
 std::atomic<bool> g_enabled{false};
-// The camera whose override is ours, and whether it held 13 at its last
-// update while exploring or fighting; then whether pad 1 stays untouched
+// The camera whose override is ours (one at a time: the live one when it
+// was last updated while exploring or fighting), and whether it held 13 at
+// its last update; then whether pad 1 stays untouched
 // until the controller lets go of every button, so what ended the free
 // camera does not reach the game, and Start's state at the last read (the
 // game thread's alone).
@@ -65,6 +67,16 @@ int8_t modeOverride(const uint8_t *rdram, uint32_t camera)
     return static_cast<int8_t>(rdram[camera + kModeOverride]);
 }
 
+// The camera's own mode back, if its override is still the 13 we wrote.
+void release(uint8_t *rdram, uint32_t camera)
+{
+    camera &= 0x1FFFFFFFu;
+    if (modeOverride(rdram, camera) == kFreeMode)
+    {
+        rdram[camera + kModeOverride] = static_cast<uint8_t>(kNoOverride);
+    }
+}
+
 void cameraModeUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t camera = getRegU32(ctx, 4) & 0x1FFFFFFFu;
@@ -72,25 +84,34 @@ void cameraModeUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     uint32_t gameMode = 0u;
     std::memcpy(&gameMode, rdram + kGameMode, sizeof(gameMode));
     const bool playing = gameMode == kModeField || gameMode == kModeBattle;
+    // The game updates the live camera alone, and makes another one live
+    // while exploring or fighting: R3's first-person view (camera 3), and
+    // the follow camera again when it ends, by R3 or, in battle, by itself
+    // (a hit, the battle won). So with the switch off ours gets its own mode
+    // back at whichever camera's update comes next, and with it on, the one
+    // before gets its own back when another is taken: nothing of the game's
+    // would clear the 13, and CameraModeSetTop, which applies a mode only to
+    // a camera without an override, could not set one on it again (the
+    // first-person view would stay the free camera, on the real pad 1).
+    if (!on && g_camera != 0u)
+    {
+        release(rdram, g_camera);
+        g_camera = 0u;
+    }
     int8_t mode = modeOverride(rdram, camera);
-    if (camera != 0u && camera + kModeOverride < PS2_RAM_SIZE)
+    if (on && playing && mode != kFreeMode && camera != 0u && camera + kModeOverride < PS2_RAM_SIZE)
     {
         // The override written as CameraSetModeOverride writes it, without
         // the setup it runs then: mode 13's only snaps the camera where it
         // is, and the follow camera, back, catches up with the party on its
         // own.
-        if (on && playing && mode != kFreeMode)
+        if (camera != g_camera)
         {
-            mode = kFreeMode;
-            g_camera = camera;
-            rdram[camera + kModeOverride] = static_cast<uint8_t>(mode);
+            release(rdram, g_camera);
         }
-        else if (!on && camera == g_camera && mode == kFreeMode)
-        {
-            mode = kNoOverride;
-            g_camera = 0u;
-            rdram[camera + kModeOverride] = static_cast<uint8_t>(mode);
-        }
+        mode = kFreeMode;
+        g_camera = camera;
+        rdram[camera + kModeOverride] = static_cast<uint8_t>(mode);
     }
     const bool wasActive = g_active;
     g_active = on && playing && camera == g_camera && mode == kFreeMode;
@@ -130,14 +151,21 @@ void cameraModeDebugFreeUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *ru
     }
     std::memcpy(g_pad1, rdram + kPad1 + kPadState, kPadStateSize);
     std::memcpy(rdram + kPad1 + kPadState, rdram + kPad2 + kPadState, kPadStateSize);
-    if (rg::timing::sixtyFps())
+    // The frame's share of a step (half at 60 frames a second, more when
+    // the host is slower), as the camera's turn by the stick takes it (step
+    // fix "camera"); not the game's slow motion, which the console's free
+    // camera does not follow either.
+    const float share = rg::timing::sixtyFps() && rg::timing::stepFix(rg::timing::StepFix::Camera)
+                            ? std::min(rg::timing::sceneScale(rdram, ctx), 1.0f)
+                            : 1.0f;
+    if (share > 0.0f && share < 1.0f)
     {
         for (uint32_t stick = 0u; stick < 4u; ++stick)
         {
             int32_t raw = 0;
             uint8_t *at = rdram + kPad1 + kPadSticks + stick * 4u;
             std::memcpy(&raw, at, sizeof(raw));
-            raw = scaleStick(raw, 0.5f);
+            raw = scaleStick(raw, share);
             std::memcpy(at, &raw, sizeof(raw));
         }
     }

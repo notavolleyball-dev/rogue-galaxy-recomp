@@ -112,8 +112,9 @@ Default button):
   (`src/camera_view.h`).
 - "Camera distance": how far the camera stays from the party, 70% to 160%
   of the game's.
-- "Faster camera rotation": the right stick turns the camera twice as
-  fast, exploring and in battle. Otherwise it turns at the game's speed:
+- "Faster camera rotation": the stick turns the camera twice as fast,
+  exploring, in battle and in the first-person view (both sticks there).
+  Otherwise it turns at the game's speed:
   the game adds a frame's turn each frame, which the 60 frames a second
   mode halves (`src/camera_view.h`).
 - "Draw distance": how far away the scenery and the objects are still
@@ -154,7 +155,8 @@ Default button):
 The game's own Settings screen (System > Settings in the main menu) has
 these too: L1 and R1 turn to a page of the switches (On / Off), one of the
 numbers (Low takes a step off, High adds one) and one of the quick scenes,
-each change kept as the menu's own are (`src/settings_pages.h`).
+each change kept as the menu's own are (`src/settings_pages.h`). Without
+the F1 menu (`RG_GS=sw`, `RG_GS_NO_WINDOW=1`) the screen stays the game's.
 
 F11 or Alt+Enter toggles fullscreen. The settings live in
 `%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
@@ -224,7 +226,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_PRESENT=vblank` | Present at host vblanks instead of on the game's flips |
 | `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
 | `RG_GIF_THREAD=0` | Run the GS packets of the VIF1 lists on the VIF1 thread instead of a GIF stage of their own |
-| `RG_FPS=60` | The 60 fps mode for this run whatever the menu's 60 frames per second says (on by default; `RG_FPS=30`, or any other value, the game's own 30): the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies and the loading screen keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity and the jump's flight, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity`, `event`, `menu`, `ai`, `texture`, `camera` picks which take the step (`event`: the scripts, the event player and the message windows count frames, so they run on the frames that complete a whole step, and at once when a button is pressed; the field modes that hold the scale for a scripted sequence, chests, talks and warps, take the half steps too; `menu`: the field's menus and HUD windows, the battle results among them, and the chests' opening count frames as well and run on the same frames; `ai`: the characters' AI, enemies' and allies', counts its timers in frames and moves them by a step a run, so it runs on those frames too, each move shared with the next frame; `texture`: the texture animations, most of them stepped a whole frame a draw, take the frame's share, and the layers the data holds still stay still; `camera`: the camera's turn by the right stick, a frame's worth each frame, takes the frame's share) |
+| `RG_FPS=60` | The 60 fps mode for this run whatever the menu's 60 frames per second says (on by default; `RG_FPS=30`, or any other value, the game's own 30): the game flips every vblank and the scene's step follows the measured frame time (half at 60, whole at 30), so it plays at its normal speed at whatever rate the host reaches (movies and the loading screen keep 30); `RG_TIME_SCALE=fixed` keeps half steps regardless, `RG_TIME_TRACE=1` logs the frame times and the play clock, `RG_STEP_FIXES=0` leaves the systems that count frames (play clock, minimap, NPCs, projectiles, gravity and the jump's flight, movie fades) as the game has them, or a comma list of `clock`, `movie`, `npc`, `judge`, `gravity`, `event`, `menu`, `ai`, `texture`, `camera` picks which take the step (`event`: the scripts, the event player and the message windows count frames, so they run on the frames that complete a whole step, and at once when a button is pressed; the field modes that hold the scale for a scripted sequence, chests, talks and warps, take the half steps too; `menu`: the field's menus and HUD windows, the battle results among them, the chests' opening and the doors' orange triangles count frames as well and run on the same frames; `ai`: the characters' AI, enemies' and allies', counts its timers in frames and moves them by a step a run, so it runs on those frames too, each move shared with the next frame; `texture`: the texture animations, most of them stepped a whole frame a draw, take the frame's share, and the layers the data holds still stay still; `camera`: the camera's turn by the right stick (by both sticks in the first-person view), a frame's worth each frame, takes the frame's share, and so does the free camera's move) |
 | `RG_TIME_SCALE=game` | Let the game take bigger logic steps after frames the host was too slow for, as on the console (off by default: slow frames play in slow motion, as in an emulator) |
 | `RG_EE_CVT=round` | Diagnostic: float-to-int conversions round, as the runtime used to, instead of truncating as the EE does |
 | `RG_MOVIE_AUDIO=game` | The game's own movie PCM callback, which drops packets the runtime's demux delivers too early (noise) |
@@ -259,7 +261,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_BATTLE_MONEY=N` | The defeated enemies' money, percent of the game's (the menu's "Money from battles") |
 | `RG_ACTION_GAUGE=N` | How fast the party's action gauge fills, percent of the game's (the menu's "Action gauge speed") |
 | `RG_FREE_CAMERA=1` | Starts with the free camera on (the menu's "Free camera"; `src/free_camera.h`) |
-| `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase (`[scene]` lines), which the quick scenes go by |
+| `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase, the main menu's state and the Revelation Flow's placing step (`[scene]` lines; the quick scenes go by the mode, the warp's script and the placing step) |
 | `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
 | `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |

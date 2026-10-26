@@ -10,7 +10,8 @@ class PS2Runtime;
 // and sounds do not change).
 //
 // What the game is doing is its mode (u32 at 0x4B51A0, the index into the
-// mode table GameModeDispatch runs) and the mode's phase (s32 at 0x4B51E0):
+// mode table GameModeDispatch runs), and where that is not enough the
+// warp's script or the board's step:
 // - a chest opening: mode 13 (TreasureBoxModeUpdate runs the chest's script:
 //   the lid, the items flying out, the message);
 // - a transporter's warp: mode 11 (TransporterWarpModeUpdate, which runs the
@@ -21,8 +22,9 @@ class PS2Runtime;
 //   them (+0x76E of the board RevelationBoardUpdate, 0x34C290, takes each
 //   frame), the zoom, the items flying in, the glow and the ability won,
 //   but not while it waits for the player.
-// RG_SCENE_TRACE=1 prints each change of mode or phase, and of the main
-// menu's state (the id of the entry its machine at 0x48235C runs).
+// RG_SCENE_TRACE=1 prints each change of mode or of the mode's phase (s32
+// at 0x4B51E0, which no scene goes by), of the main menu's state (the id of
+// the entry its machine at 0x48235C runs) and of the board's placing step.
 namespace rg::quickscenes
 {
 

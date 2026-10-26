@@ -1,11 +1,14 @@
 #include "camera_view.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <utility>
 
 #include "ps2_runtime.h"
 #include "scene_timing.h"
@@ -19,16 +22,26 @@ constexpr uint32_t kViewSetProjection = 0x00143000u;
 constexpr uint32_t kCameraSetPresetParams = 0x00309100u;
 constexpr uint32_t kCameraSetDefaultParams = 0x00309260u;
 constexpr uint32_t kCameraOrbitControl = 0x00161260u;
-// The right stick, left and right and up and down (PadGetAnalogRXNorm and
-// RYNorm), and the battle cameras' calls to them: the one locked on a target
-// (CameraModeLockTargetUpdate, which turns by the stick each frame; its up
-// and down zooms past a threshold and stays as it is) and the one following
-// it (CameraTargetFollowUpdate, turn and tilt).
-constexpr uint32_t kPadRightX = 0x00183C30u;
-constexpr uint32_t kPadRightY = 0x00183B90u;
-constexpr uint32_t kLockTargetTurnReturn = 0x003065E0u;
-constexpr uint32_t kTargetFollowTurnReturn = 0x003073ACu;
-constexpr uint32_t kTargetFollowTiltReturn = 0x003073C4u;
+// The sticks, left and right and up and down (PadGetAnalogLXNorm, LYNorm,
+// RXNorm and RYNorm), and the calls to them of the cameras that turn by a
+// stick a frame's worth each frame, by where they return to. The battle
+// camera locked on a target (CameraModeLockTargetUpdate) turns by the right
+// stick's left and right; its up and down zooms past a threshold and stays
+// as it is. The one following it (CameraTargetFollowUpdate) turns by the
+// same; its tilt eases toward the right stick's up and down times 15
+// degrees (+0x40 of its parameters), a tilt the stick holds whatever the
+// frame rate, so it stays as it is too. The first-person view
+// (CameraFirstPersonUpdate, camera mode 1, R3 exploring or in battle)
+// turns and tilts by both sticks added.
+constexpr uint32_t kPadReads[] = {0x00183AF0u, 0x00183A50u, 0x00183C30u, 0x00183B90u};
+constexpr uint32_t kTurnReturns[] = {
+    0x003065E0u, // CameraModeLockTargetUpdate: the right stick's left and right
+    0x003073ACu, // CameraTargetFollowUpdate: the same
+    0x00307F98u, // CameraFirstPersonUpdate: the left stick's left and right,
+    0x00307FA8u, // the right stick's,
+    0x00307FB8u, // the left stick's up and down
+    0x00307FC8u, // and the right stick's
+};
 // The block CameraSetDefaultParams writes the distances into, in the camera.
 constexpr uint32_t kDistanceBlock = 0x15Cu;
 constexpr uint32_t kGameMode = 0x004B51A0u;
@@ -41,8 +54,7 @@ PS2Runtime::RecompiledFunction g_viewSetProjection = nullptr;
 PS2Runtime::RecompiledFunction g_cameraSetPresetParams = nullptr;
 PS2Runtime::RecompiledFunction g_cameraSetDefaultParams = nullptr;
 PS2Runtime::RecompiledFunction g_cameraOrbitControl = nullptr;
-PS2Runtime::RecompiledFunction g_padRightX = nullptr;
-PS2Runtime::RecompiledFunction g_padRightY = nullptr;
+PS2Runtime::RecompiledFunction g_padReads[std::size(kPadReads)] = {};
 std::atomic<int> g_fieldOfView{kGameFieldOfView};
 std::atomic<int> g_distance{100};
 std::atomic<bool> g_fasterTurn{false};
@@ -171,15 +183,17 @@ void cameraSetDefaultParams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
     distancesWritten(rdram, camera + kDistanceBlock);
 }
 
-// What a frame's turn by the stick is multiplied by: the scene's step in
-// the 60 fps mode (a half at full rate), so the camera turns at the
+// What a frame's turn by the stick is multiplied by: the frame's share of a
+// step in the 60 fps mode (a half at full rate), so the camera turns at the
 // console's speed, and twice that with "Faster camera rotation".
 float turnFactor(const uint8_t *rdram, const R5900Context *ctx)
 {
     float factor = g_fasterTurn.load(std::memory_order_relaxed) ? 2.0f : 1.0f;
     if (rg::timing::sixtyFps() && rg::timing::stepFix(rg::timing::StepFix::Camera))
     {
-        factor *= rg::timing::sceneStep(rdram, ctx);
+        // The frame's share alone, as the free camera takes it: the game's
+        // slow motion (the step's base) never slowed the camera's turn.
+        factor *= std::min(rg::timing::sceneScale(rdram, ctx), 1.0f);
     }
     return factor;
 }
@@ -203,29 +217,29 @@ void cameraOrbitControl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_cameraOrbitControl(rdram, ctx, runtime);
 }
 
-// The stick's push (f0) as a battle camera reads it to turn.
-void scaleBattleTurn(const uint8_t *rdram, R5900Context *ctx, uint32_t returnPc, bool tilt)
+// A stick's push (f0), when a camera reads it to turn: the reads are leaves
+// and return to the hook.
+template <size_t Index>
+void padRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const bool turning = tilt ? returnPc == kTargetFollowTiltReturn
-                              : returnPc == kLockTargetTurnReturn || returnPc == kTargetFollowTurnReturn;
-    if (turning)
+    const uint32_t returnPc = getRegU32(ctx, 31);
+    g_padReads[Index](rdram, ctx, runtime);
+    for (uint32_t site : kTurnReturns)
     {
-        ctx->f[0] *= turnFactor(rdram, ctx);
+        if (returnPc == site)
+        {
+            ctx->f[0] *= turnFactor(rdram, ctx);
+            break;
+        }
     }
 }
 
-void padRightX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+template <size_t... Index>
+bool installPadReads(PS2Runtime &runtime, std::index_sequence<Index...>)
 {
-    const uint32_t returnPc = getRegU32(ctx, 31);
-    g_padRightX(rdram, ctx, runtime);
-    scaleBattleTurn(rdram, ctx, returnPc, false);
-}
-
-void padRightY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    const uint32_t returnPc = getRegU32(ctx, 31);
-    g_padRightY(rdram, ctx, runtime);
-    scaleBattleTurn(rdram, ctx, returnPc, true);
+    bool complete = true;
+    ((complete &= rg::timing::hookFunction(runtime, kPadReads[Index], &padRead<Index>, g_padReads[Index])), ...);
+    return complete;
 }
 
 } // namespace
@@ -254,8 +268,7 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[rg] the camera distance stays the game's\n");
     }
     if (!rg::timing::hookFunction(runtime, kCameraOrbitControl, &cameraOrbitControl, g_cameraOrbitControl) ||
-        !rg::timing::hookFunction(runtime, kPadRightX, &padRightX, g_padRightX) ||
-        !rg::timing::hookFunction(runtime, kPadRightY, &padRightY, g_padRightY))
+        !installPadReads(runtime, std::make_index_sequence<std::size(kPadReads)>{}))
     {
         std::fprintf(stderr, "[rg] the camera turns at the game's speed\n");
     }

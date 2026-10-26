@@ -135,6 +135,28 @@ constexpr uint32_t kMenuTaskSteps[] = {
     // result goes unused.
     0x002789B0u, // EventIconUpdate: the icons out of an opened chest
 };
+// The orange triangles over the doors and exits, also under "menu".
+// TaskStepObjectCursor (0x2CEE70, from the task table only) runs
+// EventObjMgrUpdateDoorCursors (0x2E8060) once a frame: it fades out
+// (DoorCursorFadeOut, state 7) the cursor of each door farther than 45 m or
+// off screen, then EvDoorObjUpdateCursor has DoorCursorFadePulseUpdate
+// (0x305120, by jal; a0 the cursor) step it, which fades it in and pulses
+// it by fixed steps a call and a 30-frame pause: at 60 fps they pulsed at
+// twice the speed (the user, 2026-10-25). The step runs on the logic
+// frames, the task every frame: Step Object2, before it in each frame,
+// shows (state 1, its count +0x22 at 0) the cursor of every door with a side
+// point, however far, and on the console this task fades one out of reach
+// in the same frame and the step puts it to rest (7, its alpha at +0x84
+// still 0, becomes 0) before the Draw Object Cursor task, which draws every
+// cursor not at rest (0 or 6) with the triangles it last had: with the task
+// skipped every other frame, those doors were drawn then. So between the
+// logic frames the step still runs where it takes no time: a cursor
+// fading out with no alpha left (states 5 and 7), and one just shown,
+// which it resets (and steps, a frame early).
+constexpr uint32_t kDoorCursorFadePulseUpdate = 0x00305120u;
+constexpr uint32_t kCursorState = 0x1Eu;
+constexpr uint32_t kCursorCount = 0x22u;
+constexpr uint32_t kCursorAlpha = 0x84u;
 // The characters' AI. AiUpdate (0x2C05B0) runs once a frame for each
 // character CharaAiHandlePrmtRequestsMaybe thinks for (a0 the AI block at
 // chara+0x590, a1 a stack slot holding the character; its result unused):
@@ -210,6 +232,7 @@ PS2Runtime::RecompiledFunction g_mesMgrUpdateAll = nullptr;
 PS2Runtime::RecompiledFunction g_charaMoveCollide = nullptr;
 PS2Runtime::RecompiledFunction g_aiUpdate = nullptr;
 PS2Runtime::RecompiledFunction g_texAnimSeqUpdate = nullptr;
+PS2Runtime::RecompiledFunction g_doorCursorFadePulseUpdate = nullptr;
 bool g_trace = false;
 
 struct Counts
@@ -791,6 +814,31 @@ void texAnimSeqUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_texAnimSeqUpdate, rdram, ctx, runtime, &holdStillLayers, getRegU32(ctx, 4));
 }
 
+// --- The doors' triangles ---------------------------------------------------
+
+void doorCursorFadePulseUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    // It takes no step: a whole one is the call itself.
+    if (rg::timing::logicFrame(rdram, ctx) != rg::timing::LogicFrame::Skip)
+    {
+        g_doorCursorFadePulseUpdate(rdram, ctx, runtime);
+        return;
+    }
+    const uint32_t cursor = getRegU32(ctx, 4);
+    int16_t state = 0;
+    int16_t count = 0;
+    float alpha = 0.0f;
+    if (readGuest(rdram, cursor + kCursorState, state) && readGuest(rdram, cursor + kCursorCount, count) &&
+        readGuest(rdram, cursor + kCursorAlpha, alpha) &&
+        (((state == 5 || state == 7) && alpha <= 0.0f) || (state == 1 && count == 0)))
+    {
+        g_doorCursorFadePulseUpdate(rdram, ctx, runtime);
+        return;
+    }
+    // Nothing returned; the host stands in for `jr ra`.
+    ctx->pc = getRegU32(ctx, 31);
+}
+
 PS2Runtime::RecompiledFunction g_menuOriginals[std::size(kMenuTaskSteps)] = {};
 
 template <size_t Index>
@@ -859,6 +907,8 @@ void install(PS2Runtime &runtime)
     if (stepFix(StepFix::Menu))
     {
         complete &= installMenuHooks(runtime, std::make_index_sequence<std::size(kMenuTaskSteps)>{});
+        complete &= hookFunction(runtime, kDoorCursorFadePulseUpdate, &doorCursorFadePulseUpdate,
+                                 g_doorCursorFadePulseUpdate);
     }
     if (stepFix(StepFix::Ai))
     {

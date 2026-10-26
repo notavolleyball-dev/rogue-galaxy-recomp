@@ -199,6 +199,29 @@ The "double step" mode (+0x5E00) is never enabled in the main ELF. Our
   frame at a time (velocity, gravity, a bounce at -0.5, 45 frames of life)
   from the draw task `DrawEventIconTask_27aac0`, every frame -> **2x**; on
   the same logic frames.
+- The doors' and exits' orange triangles: `TaskStepObjectCursor_2cee70` ->
+  `EventObjMgrUpdateDoorCursors_2e8060` fades out (`DoorCursorFadeOut_304a10`,
+  state 7) every cursor beyond 45 m or off screen, then
+  `EvDoorObjUpdateCursor_303b70` -> `DoorCursorFadePulseUpdate_305120` steps
+  each by fixed amounts a call (alpha +0x84 by 8.53, triangles +0x14 by 0.2,
+  rings +0x24 by 15, a 30-call pause) -> **2x pulse**. The step on the
+  logic frames (`menu`, 2026-10-25), the task every frame: the object step
+  (`TaskStepObject2_2cf580` -> `EvDoorObjUpdate_303110`) shows every door's
+  cursor each frame however far (`DoorCursorShow_304a40`), the console's
+  task puts the ones out of reach back to rest (7 -> 0) in the same frame,
+  and `DoorCursorDraw_304aa0` draws every cursor not at 0 or 6; between the
+  logic frames the step still runs where it takes no time (5 or 7 with no
+  alpha, a cursor just shown).
+- The camera's turn by a stick: `CameraObjOrbitControlMaybe_161260` (the
+  field's orbit, a1 the turn and tilt), `CameraModeLockTargetUpdateMaybe_3062e0` and
+  `CameraTargetFollowUpdate_307340` (battle, the right stick's left and
+  right), `CameraFirstPersonUpdate_307f00` (R3, both sticks added, times
+  `D_0047D614`) add a frame's worth each frame -> **2x turn**; scaled by the
+  step (`camera`, 2026-10-25). `CameraTargetFollowUpdate`'s tilt eases
+  toward the stick's push times 15 degrees (+0x40 of its parameters, by
+  +0x28 = 0.2 a frame): a held angle, left alone. `CameraDebugFreeUpdate_305c60`,
+  the developers' free camera, moves 8 units a frame by the left stick and
+  turns by the right: its sticks take the frame's share (`camera`).
 - Texture animations: `TexAnimSeqUpdate_163dd0` (a0 the sequence, f12 the
   step) gets the scene's step from the map (`MapTickAnims_1e1ac0`,
   `MapMgrAuxAreaTexAnimUpdate_1e1430`, through `TexGroupUpdateAnim_157ca0`)

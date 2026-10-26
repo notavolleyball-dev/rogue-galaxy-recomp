@@ -27,10 +27,12 @@ constexpr const char *kQuitShortcut = "Alt+F4";
 constexpr const char *kProjectUrl = "https://github.com/victor-takai/rogue-galaxy-recomp";
 constexpr const char *kIssuesUrl = "https://github.com/victor-takai/rogue-galaxy-recomp/issues";
 
-// Function keys the menu owns; binding one would fight the shortcut.
+// Function keys the menu owns, and F6, the game's free camera (Rogue Galaxy:
+// added); binding one would fight the shortcut.
 bool reservedKey(SDL_Scancode scancode) {
     return scancode == SDL_SCANCODE_F1 || scancode == SDL_SCANCODE_F2 || scancode == SDL_SCANCODE_F3 ||
-           scancode == SDL_SCANCODE_F4 || scancode == SDL_SCANCODE_F11 || scancode == SDL_SCANCODE_F12;
+           scancode == SDL_SCANCODE_F4 || scancode == SDL_SCANCODE_F6 || scancode == SDL_SCANCODE_F11 ||
+           scancode == SDL_SCANCODE_F12;
 }
 
 std::string timestamp() {

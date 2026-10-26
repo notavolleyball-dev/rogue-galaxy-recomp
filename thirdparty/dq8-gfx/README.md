@@ -37,7 +37,10 @@ is not `remembered` stays out of the file and shows what
 `HostServices::gameOptionState` says; `Overlay::setGameOptionValue` and
 `setGameNumberValue` take a change made outside the menu (the game's own
 Settings screen) and keep it as the menu's own. A `restart` switch changed
-since the run started says in red that it waits for the next start.
+since the run started says in red that it waits for the next start. F6,
+the game's free camera, cannot be bound to a pad input, as the menu's own
+keys cannot, and `Overlay::capturingBinding` tells the host when the menu
+is waiting for a key to bind.
 
 ## Changes for Rogue Galaxy
 

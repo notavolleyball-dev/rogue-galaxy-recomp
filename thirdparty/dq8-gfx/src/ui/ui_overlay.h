@@ -34,7 +34,8 @@ inline bool saveImage(SDL_Surface *surface, const char *path) { return SDL_SaveB
 // What the menu can ask of the game around it. A control whose function is
 // empty is not shown.
 // A switch of the game's own, shown under Interface > Game and kept in the
-// settings file's [game] section under `key` (Rogue Galaxy: added).
+// settings file's [game] section under `key`, unless not `remembered`
+// (Rogue Galaxy: added).
 struct GameOption {
     std::string key;
     std::string label;
@@ -90,7 +91,9 @@ public:
 
     // `format` is the texture format render() draws into.
     bool initialize(SDL_Window *window, SDL_GPUTextureFormat format, std::string &error);
-    // Pushes every setting to the backend, the window and the host.
+    // Pushes every setting to the backend, the window and the host (a game
+    // switch not `remembered` is the host's own and is not pushed), and the
+    // first time notes the switches this run starts with.
     void applySettings();
 
     bool handleEvent(const SDL_Event &event) override;
@@ -118,6 +121,9 @@ public:
     void setFastForward(bool on);
     // Waits for the next key or controller input and binds it.
     void beginBindingCapture(gfx::PadInput input, bool keyboard, int slot);
+    // Waiting for one, so a key of the host's own is not taken for it too
+    // (Rogue Galaxy: added).
+    bool capturingBinding() const { return m_capture.active; }
     void takeScreenshot(bool withMenu);
     std::string screenshotFolder() const;
 
@@ -186,7 +192,8 @@ private:
     void saveIfDirty(bool force);
     void applyVolume();
     void applyPause();
-    // A game switch's value: the settings file's, or the option's default.
+    // A game switch's value: the settings file's, or the option's default;
+    // for one not `remembered`, what HostServices::gameOptionState says.
     bool gameOption(const GameOption &option) const;
     // A `restart` switch changed since this run started.
     bool waitsForRestart(const GameOption &option) const;

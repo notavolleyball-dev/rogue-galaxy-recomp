@@ -1168,7 +1168,8 @@ that only make you wait played faster.
   bench at 300%: the step 1.73 against 0.58). The camera's turn by the
   right stick (CameraObjOrbitControl's input in the field, the battle
   cameras' reads of the stick) is added a frame's worth each frame, so the
-  60 fps mode multiplies it by the scene's step (step fix `camera`), and
+  60 fps mode multiplies it by the frame's share of a step (step fix
+  `camera`), and
   "Faster camera rotation" doubles it at either rate: the right stick for
   0.4 s turned the camera about 90 degrees at 30 fps, about 180 with the
   switch, and about 90 at 60 fps. The user first had a percentage, then
@@ -1176,6 +1177,22 @@ that only make you wait played faster.
   F1 menu says in red when 60 frames per second waits for a restart
   (`GameOption::restart`). The Revelation Flow's giver stays at one, as
   the user preferred.
+- The doors' and exits' orange triangles pulsed at twice the speed at 60
+  fps (the user): DoorCursorFadePulseUpdate steps them a call at a time,
+  so it runs on the logic frames (`menu`). Not their task: Step Object2
+  shows every door's cursor each frame however far, and the task fades
+  those out of reach to rest within the frame, which a skipped task left
+  drawn every other frame.
+- A review of the day's change found, and it was fixed: the following
+  battle camera's tilt eases toward the stick's push (15 degrees at most,
+  whatever the rate), so it is no longer scaled; the first-person view
+  (R3) turns by both sticks a frame's worth each frame and now takes the
+  step too; the free camera left its 13 on a camera the game stopped using
+  (the first-person view's, when a hit in battle ends it), where nothing
+  cleared it, and it now gives it back, and its sticks take the frame's
+  share instead of a fixed half; F6 cannot be bound to a pad input; the
+  Settings screen's pages are there with the F1 menu alone.
+
 With every option at its default the 30 fps walk's frame is byte-identical
 to the one of 2026-10-23 (`mods30c`). `RG_INPUT` takes the right stick
 too (`RUP` ...).

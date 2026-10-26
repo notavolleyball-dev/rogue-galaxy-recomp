@@ -174,8 +174,10 @@ bool SDLCALL countMarkKeys(void *, SDL_Event *event)
         {
             g_f7Presses.fetch_add(1u, std::memory_order_relaxed);
         }
-        else if (event->key.scancode == SDL_SCANCODE_F6)
+        else if (event->key.scancode == SDL_SCANCODE_F6 && !(g_menu && g_menu->capturingBinding()))
         {
+            // Not while the menu waits for a key to bind, which F6 is not
+            // (ui_overlay.cpp's reservedKey).
             g_f6Presses.fetch_add(1u, std::memory_order_relaxed);
         }
     }
@@ -254,17 +256,14 @@ bool pump(void *userData)
     {
         rg::freecamera::setEnabled(!rg::freecamera::enabled());
     }
-    // Changes made on the game's Settings screen, kept as the menu's own.
-    for (rg::settingspages::Change change; rg::settingspages::takeChange(change);)
+    // Changes made on the game's Settings screen (its pages are there with
+    // the menu alone), kept as the menu's own.
+    for (rg::settingspages::Change change; g_menu && rg::settingspages::takeChange(change);)
     {
-        if (g_menu && change.number)
+        if (change.number)
             g_menu->setGameNumberValue(change.key, change.value);
-        else if (g_menu)
-            g_menu->setGameOptionValue(change.key, change.value != 0);
-        else if (change.number)
-            applyGameNumber(change.key, change.value);
         else
-            applyGameOption(change.key, change.value != 0);
+            g_menu->setGameOptionValue(change.key, change.value != 0);
     }
     followQuickScenes();
     // The free camera turned on or off, by F6, either menu or Start: a toast.
@@ -349,8 +348,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "How far the camera stays from the party, against the game's (100%).",
          false, 70, 160, 100, "%d%%", 5},
         {"faster_camera", "Faster camera rotation",
-         "The right stick turns the camera twice as fast, exploring and in battle. Otherwise it turns at the "
-         "game's speed, at 60 frames a second as at 30.",
+         "The stick turns the camera twice as fast, exploring, in battle and in the first-person view. Otherwise "
+         "it turns at the game's speed, at 60 frames a second as at 30.",
          false},
         {"draw_distance", "Draw distance",
          "How far away the scenery and the objects are still drawn, against the game's (100%), the fog thinned "
@@ -504,6 +503,8 @@ Setup::Setup(PS2Runtime &runtime)
                 m_menu = createMenu(runtime, *sdl, settings, settingsPath);
                 g_hasMenu = m_menu != nullptr;
                 g_menu = m_menu.get();
+                // The game's Settings screen shows the menu's options.
+                rg::settingspages::setEnabled(g_hasMenu);
                 // After the menu applied the saved options: this run's.
                 sdl->setDisplayOptions(runDisplay);
                 m_window = sdl.get();

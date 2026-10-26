@@ -21,14 +21,17 @@ class PS2Runtime;
 // without the mode's setup (which only snaps the camera where it is; a call
 // into the guest from a hook would come back early at the first virtual
 // call, which the generated code leaves to the run loop), and -1 again when
-// the switch goes off, the follow camera catching up with the party. While
+// the switch goes off, the follow camera catching up with the party, or
+// when the game makes another camera the live one (the first-person view's,
+// and back), which then takes the 13. While
 // it is 13 the game finds pad 1 untouched (scePadRead for port 0 answers no
 // buttons and the sticks centred), so the party stands, and the free camera
 // reads the controller: the runtime gives port 1 the same pad as port 0,
 // and pad 2's object (0x4B27E0) is copied over pad 1's for the camera's
 // update alone. Start ends it, and pad 1 stays untouched until every button
-// is let go. It moves a step a frame, so at 60 frames a second the sticks
-// count half past their dead zone.
+// is let go. It moves a step a frame, so in the 60 fps mode the sticks count
+// the frame's share of a step past their dead zone (half at 60 frames a
+// second; step fix "camera").
 namespace rg::freecamera
 {
 

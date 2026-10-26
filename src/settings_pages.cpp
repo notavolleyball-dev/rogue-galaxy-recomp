@@ -1,6 +1,7 @@
 #include "settings_pages.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -134,6 +135,8 @@ PS2Runtime::RecompiledFunction g_selectState = nullptr;
 PS2Runtime::RecompiledFunction g_openState = nullptr;
 PS2Runtime::RecompiledFunction g_loadValue = nullptr;
 
+// The F1 menu is up: what the pages show and keep is its.
+std::atomic<bool> g_enabled{false};
 std::mutex g_valuesMutex;
 std::map<std::string, int> g_values;
 std::map<std::string, Range> g_ranges;
@@ -535,7 +538,9 @@ void selectState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     readGuest(rdram, kPad1 + kPadButtons, buttons);
     readGuest(rdram, kPad1 + kPadLastButtons, last);
     readGuest(rdram, kPad1 + kPadLock, locked);
-    const uint32_t pressed = locked != 0u ? 0u : buttons & ~last;
+    // Without the F1 menu the screen stays the game's: nothing would read
+    // the options' values in, or take a change out.
+    const uint32_t pressed = locked != 0u || !g_enabled.load(std::memory_order_relaxed) ? 0u : buttons & ~last;
     if (pressed & kButtonR1)
     {
         turnPage(rdram, 1);
@@ -652,6 +657,11 @@ void install(PS2Runtime &runtime)
     {
         std::fprintf(stderr, "[rg] settings pages: some hooks are missing, see above\n");
     }
+}
+
+void setEnabled(bool on)
+{
+    g_enabled.store(on, std::memory_order_relaxed);
 }
 
 void noteOption(const std::string &key, bool on)

@@ -2,7 +2,8 @@
 
 class PS2Runtime;
 
-// The field and battle camera's field of view and distance.
+// The field and battle camera's field of view, distance and turn by the
+// stick.
 //
 // The scene's projection is set again every frame by ViewSetProjection
 // (0x143000, f12 the vertical field of view in radians), from ViewSetAspect,
@@ -30,10 +31,14 @@ class PS2Runtime;
 // the stick times the camera's speeds, which it adds whole, a frame's worth
 // each frame, so at 60 frames a second the camera turned twice as fast as
 // at 30; the battle cameras' turn by the stick (CameraModeLockTargetUpdate's
-// and CameraTargetFollowUpdate's reads of it) alike. Both are multiplied by
-// the scene's step in the 60 fps mode (step fix "camera"), the console's
+// and CameraTargetFollowUpdate's reads of it) alike, and the first-person
+// view's (CameraFirstPersonUpdate, R3), by both sticks. All are multiplied
+// by the frame's share of a step in the 60 fps mode (step fix "camera",
+// the scene's time scale without the game's slow motion), the console's
 // speed again, and by two with `faster_camera` ("Faster camera rotation"),
-// at either frame rate.
+// at either frame rate. The following battle camera's tilt is not a turn:
+// the stick sets how far it tilts, which it eases toward, so it stays as
+// the game has it.
 namespace rg::cameraview
 {
 
@@ -44,7 +49,7 @@ void install(PS2Runtime &runtime);
 void setFieldOfView(int degrees);
 // Percent of the game's distances.
 void setDistance(int percent);
-// The right stick turns the camera twice as fast.
+// The stick turns the camera twice as fast (both in the first-person view).
 void setFasterTurn(bool on);
 
 } // namespace rg::cameraview

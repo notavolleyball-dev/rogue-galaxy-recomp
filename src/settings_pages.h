@@ -33,6 +33,10 @@ namespace rg::settingspages
 
 // After loadELF().
 void install(PS2Runtime &runtime);
+// The pages turn only while this is on: graphics.cpp turns it on with the F1
+// menu, whose options they show and keep (not with RG_GS=sw or
+// RG_GS_NO_WINDOW=1, nor without the SDL GPU backend).
+void setEnabled(bool on);
 
 // What the F1 menu set, for the pages to show (any thread).
 void noteOption(const std::string &key, bool on);
