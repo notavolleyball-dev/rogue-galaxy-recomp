@@ -49,6 +49,13 @@ struct GameOption {
     int defaultNumber = 0;
     std::string format;
     int step = 1;
+    // A switch the file does not keep: it is off at every start, and the
+    // menu shows what HostServices::gameOptionState says, as something
+    // besides the menu (a key) can turn it on or off.
+    bool remembered = true;
+    // Takes effect at the next start: once it differs from what this run
+    // started with, the menu says so in red.
+    bool restart = false;
     bool number() const { return maximum > minimum; }
 };
 
@@ -69,6 +76,7 @@ struct HostServices {
     std::vector<GameOption> gameOptions;
     std::function<void(const std::string &key, bool on)> setGameOption;
     std::function<void(const std::string &key, int value)> setGameNumber;
+    std::function<bool(const std::string &key)> gameOptionState;
 };
 
 enum class SettingsPage : uint8_t { Display, Sound, Controls, Interface, Count };
@@ -92,6 +100,11 @@ public:
     bool capturesInput() const override;
 
     const Settings &settings() const { return m_settings; }
+    // A game option changed elsewhere, such as the game's own settings
+    // screen (Rogue Galaxy: added): passed to the host and kept as the
+    // menu's own changes are.
+    void setGameOptionValue(const std::string &key, bool on);
+    void setGameNumberValue(const std::string &key, int value);
     void setMenuOpen(bool open);
     void openSettings(SettingsPage page);
     // Opens one of the menu bar's menus at the next frame, by its label.
@@ -175,6 +188,8 @@ private:
     void applyPause();
     // A game switch's value: the settings file's, or the option's default.
     bool gameOption(const GameOption &option) const;
+    // A `restart` switch changed since this run started.
+    bool waitsForRestart(const GameOption &option) const;
     // A game number's value, the same way, within the option's range.
     int gameNumber(const GameOption &option) const;
     void setFullscreen(bool fullscreen);
@@ -193,6 +208,10 @@ private:
     Settings m_settings;
     std::string m_settingsPath;
     HostServices m_host;
+    // The switches as this run started with them, for those that wait for a
+    // restart (Rogue Galaxy: added).
+    std::map<std::string, bool> m_startOptions;
+    bool m_startCaptured = false;
     SDL_Window *m_window = nullptr;
     ImGuiContext *m_context = nullptr;
     bool m_platformReady = false;

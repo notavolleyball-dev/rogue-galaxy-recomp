@@ -24,6 +24,8 @@ struct Step
     unsigned ms;
     uint8_t lx = 0x80; // left stick, 0x80 = centred
     uint8_t ly = 0x80;
+    uint8_t rx = 0x80; // right stick
+    uint8_t ry = 0x80;
 };
 
 // Bit order of the PS2 pad's button word (active-low on the wire).
@@ -45,6 +47,14 @@ bool parseButtons(const std::string &text, Step &step)
         {
             (name == "LUP" || name == "LDOWN" ? step.ly : step.lx) =
                 (name == "LUP" || name == "LLEFT") ? 0x00 : 0xFF;
+            any = true;
+            continue;
+        }
+        // The right one: RUP RDOWN RLEFT RRIGHT.
+        if (name == "RUP" || name == "RDOWN" || name == "RLEFT" || name == "RRIGHT")
+        {
+            (name == "RUP" || name == "RDOWN" ? step.ry : step.rx) =
+                (name == "RUP" || name == "RLEFT") ? 0x00 : 0xFF;
             any = true;
             continue;
         }
@@ -127,7 +137,7 @@ void startInputScript()
             std::printf("[input] %.1fs, pad read %u: buttons 0x%04X for %u %s\n", elapsed, pressedAt, step.mask,
                         step.ms, padClock ? "reads" : "ms");
             std::fflush(stdout);
-            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~step.mask), step.lx, step.ly, kCenter, kCenter);
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(~step.mask), step.lx, step.ly, step.rx, step.ry);
             if (padClock)
             {
                 waitForReads(pressedAt + step.ms);

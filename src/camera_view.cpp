@@ -18,6 +18,17 @@ namespace
 constexpr uint32_t kViewSetProjection = 0x00143000u;
 constexpr uint32_t kCameraSetPresetParams = 0x00309100u;
 constexpr uint32_t kCameraSetDefaultParams = 0x00309260u;
+constexpr uint32_t kCameraOrbitControl = 0x00161260u;
+// The right stick, left and right and up and down (PadGetAnalogRXNorm and
+// RYNorm), and the battle cameras' calls to them: the one locked on a target
+// (CameraModeLockTargetUpdate, which turns by the stick each frame; its up
+// and down zooms past a threshold and stays as it is) and the one following
+// it (CameraTargetFollowUpdate, turn and tilt).
+constexpr uint32_t kPadRightX = 0x00183C30u;
+constexpr uint32_t kPadRightY = 0x00183B90u;
+constexpr uint32_t kLockTargetTurnReturn = 0x003065E0u;
+constexpr uint32_t kTargetFollowTurnReturn = 0x003073ACu;
+constexpr uint32_t kTargetFollowTiltReturn = 0x003073C4u;
 // The block CameraSetDefaultParams writes the distances into, in the camera.
 constexpr uint32_t kDistanceBlock = 0x15Cu;
 constexpr uint32_t kGameMode = 0x004B51A0u;
@@ -29,8 +40,12 @@ constexpr float kPi = 3.14159265358979f;
 PS2Runtime::RecompiledFunction g_viewSetProjection = nullptr;
 PS2Runtime::RecompiledFunction g_cameraSetPresetParams = nullptr;
 PS2Runtime::RecompiledFunction g_cameraSetDefaultParams = nullptr;
+PS2Runtime::RecompiledFunction g_cameraOrbitControl = nullptr;
+PS2Runtime::RecompiledFunction g_padRightX = nullptr;
+PS2Runtime::RecompiledFunction g_padRightY = nullptr;
 std::atomic<int> g_fieldOfView{kGameFieldOfView};
 std::atomic<int> g_distance{100};
+std::atomic<bool> g_fasterTurn{false};
 
 // A camera's distances as the game last wrote them, and the percentage of
 // them its block holds now. The game keeps two cameras (0x4B5950 and
@@ -156,6 +171,63 @@ void cameraSetDefaultParams(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
     distancesWritten(rdram, camera + kDistanceBlock);
 }
 
+// What a frame's turn by the stick is multiplied by: the scene's step in
+// the 60 fps mode (a half at full rate), so the camera turns at the
+// console's speed, and twice that with "Faster camera rotation".
+float turnFactor(const uint8_t *rdram, const R5900Context *ctx)
+{
+    float factor = g_fasterTurn.load(std::memory_order_relaxed) ? 2.0f : 1.0f;
+    if (rg::timing::sixtyFps() && rg::timing::stepFix(rg::timing::StepFix::Camera))
+    {
+        factor *= rg::timing::sceneStep(rdram, ctx);
+    }
+    return factor;
+}
+
+// The field camera's turn this frame: a1 points at the stick's turn and
+// tilt (two floats), which it adds as they are.
+void cameraOrbitControl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const float factor = turnFactor(rdram, ctx);
+    const uint32_t input = getRegU32(ctx, 5) & 0x1FFFFFFFu;
+    if (factor != 1.0f && input != 0u && input + 8u <= PS2_RAM_SIZE)
+    {
+        float turn[2];
+        std::memcpy(turn, rdram + input, sizeof(turn));
+        for (float &value : turn)
+        {
+            value *= factor;
+        }
+        std::memcpy(rdram + input, turn, sizeof(turn));
+    }
+    g_cameraOrbitControl(rdram, ctx, runtime);
+}
+
+// The stick's push (f0) as a battle camera reads it to turn.
+void scaleBattleTurn(const uint8_t *rdram, R5900Context *ctx, uint32_t returnPc, bool tilt)
+{
+    const bool turning = tilt ? returnPc == kTargetFollowTiltReturn
+                              : returnPc == kLockTargetTurnReturn || returnPc == kTargetFollowTurnReturn;
+    if (turning)
+    {
+        ctx->f[0] *= turnFactor(rdram, ctx);
+    }
+}
+
+void padRightX(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t returnPc = getRegU32(ctx, 31);
+    g_padRightX(rdram, ctx, runtime);
+    scaleBattleTurn(rdram, ctx, returnPc, false);
+}
+
+void padRightY(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t returnPc = getRegU32(ctx, 31);
+    g_padRightY(rdram, ctx, runtime);
+    scaleBattleTurn(rdram, ctx, returnPc, true);
+}
+
 } // namespace
 
 void install(PS2Runtime &runtime)
@@ -168,6 +240,10 @@ void install(PS2Runtime &runtime)
     {
         setDistance(std::atoi(value));
     }
+    if (const char *value = std::getenv("RG_FASTER_CAMERA"))
+    {
+        setFasterTurn(*value && *value != '0');
+    }
     if (!rg::timing::hookFunction(runtime, kViewSetProjection, &viewSetProjection, g_viewSetProjection))
     {
         std::fprintf(stderr, "[rg] the field of view stays the game's\n");
@@ -176,6 +252,12 @@ void install(PS2Runtime &runtime)
         !rg::timing::hookFunction(runtime, kCameraSetDefaultParams, &cameraSetDefaultParams, g_cameraSetDefaultParams))
     {
         std::fprintf(stderr, "[rg] the camera distance stays the game's\n");
+    }
+    if (!rg::timing::hookFunction(runtime, kCameraOrbitControl, &cameraOrbitControl, g_cameraOrbitControl) ||
+        !rg::timing::hookFunction(runtime, kPadRightX, &padRightX, g_padRightX) ||
+        !rg::timing::hookFunction(runtime, kPadRightY, &padRightY, g_padRightY))
+    {
+        std::fprintf(stderr, "[rg] the camera turns at the game's speed\n");
     }
 }
 
@@ -193,6 +275,11 @@ void setDistance(int percent)
     {
         g_distance.store(percent, std::memory_order_relaxed);
     }
+}
+
+void setFasterTurn(bool on)
+{
+    g_fasterTurn.store(on, std::memory_order_relaxed);
 }
 
 } // namespace rg::cameraview

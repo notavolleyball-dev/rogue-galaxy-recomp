@@ -77,6 +77,7 @@ enum class StepFix : unsigned
     Menu = 1u << 6,    // "menu": the field's menus and HUD windows (the battle results among them), the chests
     Ai = 1u << 7,      // "ai": the characters' AI (its scripts and timers) at the console's rate
     Texture = 1u << 8, // "texture": texture animations (scrolling layers, flip-books) at the console's rate
+    Camera = 1u << 9,  // "camera": the camera's turn by the right stick at the console's rate (camera_view.cpp)
 };
 bool stepFix(StepFix which);
 // Any of them.

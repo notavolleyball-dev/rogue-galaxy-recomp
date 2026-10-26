@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -18,10 +19,13 @@
 #include "camera_view.h"
 #include "dev_tools.h"
 #include "draw_distance.h"
+#include "free_camera.h"
 #include "instant_text.h"
 #include "loading_screen.h"
 #include "opening.h"
+#include "quick_scenes.h"
 #include "scene_timing.h"
+#include "settings_pages.h"
 #include "vif1_thread.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
@@ -53,6 +57,83 @@ std::string env(const char *name, const char *fallback)
 
 #if defined(RG_HAS_SDLGPU)
 bool g_hasMenu = false;
+dq8::ui::Overlay *g_menu = nullptr;
+PS2Runtime *g_runtime = nullptr;
+
+// The game's speed: the menu's (fast-forward, 0 unpaced) times a quick
+// scene's (src/quick_scenes.h); the main thread's alone.
+double g_menuSpeed = 1.0;
+double g_sceneSpeed = 1.0;
+
+void applySpeed()
+{
+    if (g_runtime)
+    {
+        g_runtime->eeScheduler().setHostSpeed(g_menuSpeed > 0.0 ? g_menuSpeed * g_sceneSpeed : 0.0);
+    }
+}
+
+void followQuickScenes()
+{
+    if (!g_runtime)
+    {
+        return;
+    }
+    const double scene = rg::quickscenes::speed(g_runtime->memory().getRDRAM());
+    if (scene != g_sceneSpeed)
+    {
+        g_sceneSpeed = scene;
+        applySpeed();
+    }
+}
+
+// What the menu's game options switch, and the game's Settings screen's
+// pages of them too.
+void applyGameOption(const std::string &key, bool on)
+{
+    rg::settingspages::noteOption(key, on);
+    if (key == "sixty_fps")
+        rg::timing::setSixtyFpsPreferred(on);
+    else if (key == "widescreen")
+        rg::widescreen::setEnabled(on);
+    else if (key == "skip_opening")
+        rg::opening::setSkip(on);
+    else if (key == "instant_loading_recap")
+        rg::loading::setInstantRecap(on);
+    else if (key == "instant_text")
+        rg::instanttext::setEnabled(on);
+    else if (key == "dev_tools")
+        rg::devtools::setEnabled(on);
+    else if (key == "free_camera")
+        rg::freecamera::setEnabled(on);
+    else if (key == "faster_camera")
+        rg::cameraview::setFasterTurn(on);
+    else if (key == "fast_chests")
+        rg::quickscenes::setEnabled(rg::quickscenes::Scene::Chests, on);
+    else if (key == "fast_transporter")
+        rg::quickscenes::setEnabled(rg::quickscenes::Scene::Transporter, on);
+    else if (key == "fast_revelation")
+        rg::quickscenes::setEnabled(rg::quickscenes::Scene::Revelation, on);
+}
+
+void applyGameNumber(const std::string &key, int value)
+{
+    rg::settingspages::noteNumber(key, value);
+    if (key == "field_of_view")
+        rg::cameraview::setFieldOfView(value);
+    else if (key == "camera_distance")
+        rg::cameraview::setDistance(value);
+    else if (key == "draw_distance")
+        rg::drawdistance::setPercent(value);
+    else if (key == "encounter_rate")
+        rg::battlerates::setEncounterRate(value);
+    else if (key == "battle_experience")
+        rg::battlerates::setExperience(value);
+    else if (key == "battle_money")
+        rg::battlerates::setMoney(value);
+    else if (key == "action_gauge")
+        rg::battlerates::setActionGauge(value);
+}
 
 // F9 and F10 presses, counted as SDL queues their key-down events. pump()
 // read the keyboard state once a presented frame, and a quick tap between two
@@ -61,6 +142,8 @@ bool g_hasMenu = false;
 std::atomic<unsigned> g_f9Presses{0u};
 std::atomic<unsigned> g_f10Presses{0u};
 std::atomic<unsigned> g_f7Presses{0u};
+// F6 turns the free camera on or off.
+std::atomic<unsigned> g_f6Presses{0u};
 // The longest gap between two pump() calls since the stats line last printed
 // it. The presenter loop calls pump several times a frame, so this is not the
 // frame time (the backend's "longest frame" is) but the longest the main
@@ -90,6 +173,10 @@ bool SDLCALL countMarkKeys(void *, SDL_Event *event)
         else if (event->key.scancode == SDL_SCANCODE_F7)
         {
             g_f7Presses.fetch_add(1u, std::memory_order_relaxed);
+        }
+        else if (event->key.scancode == SDL_SCANCODE_F6)
+        {
+            g_f6Presses.fetch_add(1u, std::memory_order_relaxed);
         }
     }
     return true;
@@ -163,6 +250,34 @@ bool pump(void *userData)
         std::fprintf(stderr, "[mark] F10: stall report requested\n");
         debug::requestStallReport();
     }
+    if (g_f6Presses.exchange(0u, std::memory_order_relaxed) % 2u != 0u)
+    {
+        rg::freecamera::setEnabled(!rg::freecamera::enabled());
+    }
+    // Changes made on the game's Settings screen, kept as the menu's own.
+    for (rg::settingspages::Change change; rg::settingspages::takeChange(change);)
+    {
+        if (g_menu && change.number)
+            g_menu->setGameNumberValue(change.key, change.value);
+        else if (g_menu)
+            g_menu->setGameOptionValue(change.key, change.value != 0);
+        else if (change.number)
+            applyGameNumber(change.key, change.value);
+        else
+            applyGameOption(change.key, change.value != 0);
+    }
+    followQuickScenes();
+    // The free camera turned on or off, by F6, either menu or Start: a toast.
+    static bool freeCameraWas = false;
+    if (const bool freeCamera = rg::freecamera::enabled(); freeCamera != freeCameraWas)
+    {
+        freeCameraWas = freeCamera;
+        if (g_menu)
+        {
+            g_menu->notify(freeCamera ? "Free camera on: Start or F6 to leave" : "Free camera off",
+                           dq8::ui::Icon::Camera);
+        }
+    }
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
     backend->hostPadState(held, pressed, sticks);
     ps2PadPublishHostState(held, pressed, rg::pad::shapeSticks(sticks));
@@ -200,7 +315,11 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         runtime.eeScheduler().setHostPaused(paused);
         ps2_native_iop::setPaused(paused);
     };
-    host.setSpeed = [&runtime](double speed) { runtime.eeScheduler().setHostSpeed(speed); };
+    g_runtime = &runtime;
+    host.setSpeed = [](double speed) {
+        g_menuSpeed = speed;
+        applySpeed();
+    };
     // The game's flips: frames it finished, not presents, which go on while
     // it is paused.
     host.completedRenders = [] { return guestFlips(); };
@@ -210,7 +329,7 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"sixty_fps", "60 frames per second",
          "The game runs at 60 frames a second instead of its own 30, its logic still at the PS2's pace; movies "
          "and the loading screen keep 30. Takes effect the next time the game starts.",
-         true},
+         true, 0, 0, 0, "", 1, true, true},
         {"widescreen", "Widescreen",
          "The game draws a wider view, and the HUD over the scene and the movies fit it; with Display > Aspect "
          "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded. Menus and text "
@@ -229,6 +348,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"camera_distance", "Camera distance",
          "How far the camera stays from the party, against the game's (100%).",
          false, 70, 160, 100, "%d%%", 5},
+        {"faster_camera", "Faster camera rotation",
+         "The right stick turns the camera twice as fast, exploring and in battle. Otherwise it turns at the "
+         "game's speed, at 60 frames a second as at 30.",
+         false},
         {"draw_distance", "Draw distance",
          "How far away the scenery and the objects are still drawn, against the game's (100%), the fog thinned "
          "in step. Most of Salgin has no limit to raise; the open areas gain more. From the next map loaded.",
@@ -242,6 +365,25 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"battle_money", "Money from battles",
          "The money defeated enemies leave, against the game's (100%). Selling, chests and rewards stay as they are.",
          false, 0, 500, 100, "%d%%", 25},
+        {"action_gauge", "Action gauge speed",
+         "How fast the party's action gauge fills again in battle, against the game's (100%).",
+         false, 25, 400, 100, "%d%%", 25},
+        {"fast_chests", "Fast chests",
+         "Opening a chest plays at up to three times the speed: the lid, the items flying out and the message's "
+         "text. The music and the sounds keep their pace.",
+         false},
+        {"fast_transporter", "Fast transporters",
+         "A transporter's warp plays at up to three times the speed.", false},
+        {"fast_revelation", "Fast Revelation Flow",
+         "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to three "
+         "times the speed.",
+         false},
+        {"free_camera", "Free camera (F6)",
+         "The camera leaves the party, which stands still, and the controller moves it: the left stick moves the "
+         "point it looks at (Square held, faster; L2 held, up and down), the right stick turns it around that "
+         "point and tilts it (R2 held, nearer and farther). Turn it off, or press F6, to play again. Off at every "
+         "start.",
+         false, 0, 0, 0, "", 1, false},
         {"instant_text", "Instant text",
          "Dialogue and messages appear a page at a time instead of letter by letter, as the game itself does "
          "where a scene asks for it; the pauses written into the text stay.",
@@ -249,39 +391,23 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
          "icon, R1 + R3 a list of them, and Cross gives one of the one picked. Help pages and info list: R1 + "
-         "Select unlocks every entry. Bestiary: Select fills it. Revelation Flow: R2 + Triangle gives one of the "
-         "picked cell's item. Paused in a scene: Triangle + R1 + R2 ends it, also one the game would not let you "
-         "skip, which can leave the story out of order.",
+         "Select unlocks every entry. Bestiary: Select fills it. Revelation Flow: R2 + Triangle gives one of each "
+         "item the picked cell asks for. Paused in a scene: Triangle + R1 + R2 ends it, also one the game would "
+         "not let you skip, which can leave the story out of order.",
          false},
     };
-    host.setGameOption = [](const std::string &key, bool on) {
-        if (key == "sixty_fps")
-            rg::timing::setSixtyFpsPreferred(on);
-        else if (key == "widescreen")
-            rg::widescreen::setEnabled(on);
-        else if (key == "skip_opening")
-            rg::opening::setSkip(on);
-        else if (key == "instant_loading_recap")
-            rg::loading::setInstantRecap(on);
-        else if (key == "instant_text")
-            rg::instanttext::setEnabled(on);
-        else if (key == "dev_tools")
-            rg::devtools::setEnabled(on);
-    };
-    host.setGameNumber = [](const std::string &key, int value) {
-        if (key == "field_of_view")
-            rg::cameraview::setFieldOfView(value);
-        else if (key == "camera_distance")
-            rg::cameraview::setDistance(value);
-        else if (key == "draw_distance")
-            rg::drawdistance::setPercent(value);
-        else if (key == "encounter_rate")
-            rg::battlerates::setEncounterRate(value);
-        else if (key == "battle_experience")
-            rg::battlerates::setExperience(value);
-        else if (key == "battle_money")
-            rg::battlerates::setMoney(value);
-    };
+    // The game's own Settings screen shows them on pages of its own.
+    for (const dq8::ui::GameOption &option : host.gameOptions)
+    {
+        if (option.number())
+        {
+            rg::settingspages::setRange(option.key, option.minimum, option.maximum, option.step,
+                                        option.defaultNumber);
+        }
+    }
+    host.setGameOption = &applyGameOption;
+    host.gameOptionState = [](const std::string &key) { return key == "free_camera" && rg::freecamera::enabled(); };
+    host.setGameNumber = &applyGameNumber;
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
     std::string error;
     if (!menu->initialize(backend.window(), backend.windowTextureFormat(), error))
@@ -377,6 +503,7 @@ Setup::Setup(PS2Runtime &runtime)
                 }
                 m_menu = createMenu(runtime, *sdl, settings, settingsPath);
                 g_hasMenu = m_menu != nullptr;
+                g_menu = m_menu.get();
                 // After the menu applied the saved options: this run's.
                 sdl->setDisplayOptions(runDisplay);
                 m_window = sdl.get();
@@ -406,6 +533,7 @@ Setup::~Setup()
     {
         m_window->setOverlay(nullptr);
     }
+    g_menu = nullptr;
     m_menu.reset();
 #endif
 }

@@ -23,6 +23,17 @@ class PS2Runtime;
 // both as they are written, and when it moves the cameras (the game keeps
 // two, 0x4B5950 and 0x4B6220) take it at the next projection, each whose
 // block still holds what was last written there.
+//
+// The field camera turns by the right stick in
+// CameraObjOrbitControl (0x161260, from CameraObjApplyInput in mode 0's
+// CameraFollowLeaderStep): its a1 points at the turn and the tilt this frame,
+// the stick times the camera's speeds, which it adds whole, a frame's worth
+// each frame, so at 60 frames a second the camera turned twice as fast as
+// at 30; the battle cameras' turn by the stick (CameraModeLockTargetUpdate's
+// and CameraTargetFollowUpdate's reads of it) alike. Both are multiplied by
+// the scene's step in the 60 fps mode (step fix "camera"), the console's
+// speed again, and by two with `faster_camera` ("Faster camera rotation"),
+// at either frame rate.
 namespace rg::cameraview
 {
 
@@ -33,5 +44,7 @@ void install(PS2Runtime &runtime);
 void setFieldOfView(int degrees);
 // Percent of the game's distances.
 void setDistance(int percent);
+// The right stick turns the camera twice as fast.
+void setFasterTurn(bool on);
 
 } // namespace rg::cameraview

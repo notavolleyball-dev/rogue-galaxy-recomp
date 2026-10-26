@@ -32,7 +32,12 @@ count the counter uses) is in `src/graphics.cpp`. Interface > Game lists
 the game's own options (`HostServices::gameOptions`, kept under `[game]`):
 switches, and numbers shown as sliders (a `GameOption` whose maximum is
 above its minimum, `HostServices::setGameNumber`) between - and + buttons
-that move them by the option's step, with a Default button.
+that move them by the option's step, with a Default button. A switch that
+is not `remembered` stays out of the file and shows what
+`HostServices::gameOptionState` says; `Overlay::setGameOptionValue` and
+`setGameNumberValue` take a change made outside the menu (the game's own
+Settings screen) and keep it as the menu's own. A `restart` switch changed
+since the run started says in red that it waits for the next start.
 
 ## Changes for Rogue Galaxy
 

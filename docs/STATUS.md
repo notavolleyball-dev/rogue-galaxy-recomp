@@ -1119,6 +1119,67 @@ nearest pass so the bilinear one reads nothing outside); `src/graphics.cpp`
 sets 2 (`RG_CROP`). In the town at 3x and 16:9 the picture now runs clean
 to all four edges.
 
+**The game's own Settings screen, a free camera, quick scenes
+(2026-10-25).** The user asked for the menu's options inside the game,
+the developers' free camera, the action gauge's speed, a faster camera
+turn (at 60 fps it turned twice as fast and they liked it) and scenes
+that only make you wait played faster.
+- System > Settings gained three pages, turned with L1 and R1
+  (`src/settings_pages.cpp`): the switches, the numbers (Low a step off,
+  High one more) and the quick scenes, every change kept in settings.ini
+  through dq8-gfx's new `Overlay::setGameOptionValue`/`setGameNumberValue`
+  (written at once: the menu, closed, draws no frame to save in). A RAM
+  dump of the screen (the old build, scripted into it, dumped with
+  `tools/hang/dumpmem.ps1`) gave its layout: ten names in one text widget,
+  each choice a widget of two sprites, a button picture shared by all and
+  a word cut from one picture (On at 72,38, Low at 60,56, ...), and a
+  cursor grid with its last row. A page writes those fields and nothing of
+  the guest's runs for it. The first try changed a texture id found before
+  the sprites and nothing changed; the words are the second sprite.
+- The free camera (`src/free_camera.cpp`, F6 or the menu, not kept): the
+  scene camera's override written 13 before its update, pad 1 read as idle
+  by the game and pad 2 copied over it for the camera's update alone,
+  Start leaving it, a notice in the menu's corner when it turns on or off.
+  Two traps on the way: a call into the guest from a
+  hook comes back early at the first virtual call (the generated code
+  leaves every indirect call to the run loop), so CameraSetModeOverride
+  could not be called; and CameraModeDebugFreeUpdate reaches
+  CameraDebugFreeUpdate with a `j`, which the generated code makes a direct
+  call past the table, so a hook on the latter never ran. In the walk the
+  camera flew off over the town while the party stood on the transporter;
+  Start brought it back and the party walked on, no pause.
+- Quick scenes (`src/quick_scenes.cpp`): the host's pace at up to three
+  times while the game's mode says a chest or a transporter's warp script
+  is on screen, or while items go into a Revelation Flow cell (the board's
+  placing step, read where RevelationBoardUpdate takes the board, the step
+  that waits for the player left out). Mode 11 also runs the doors' and
+  lifts' scripts (0x226) and story scripts, so only the transporter's
+  (0x320, 0x321) count. A Revelation
+  Flow placement (scripted with the developers' giver) went from 1.03 s to
+  0.35 s. A battle's start (phase 101) and end (phases 500 to 1001) were
+  quick scenes too for a while (battle bench: 1.50 s to 0.76 s, 4.98 s to
+  2.59 s), and so were the map changes (mode 5's fades, the doors'
+  scripts); the user did not like them and they were taken out.
+  `RG_SCENE_TRACE=1` prints the mode, phase, main menu state and placing
+  step changes with times. The Factory runs in its own overlay and is not
+  reached by the test saves; the weapon combine reads the cursor during
+  its animation, so it is left alone.
+- "Action gauge speed" scales CharaActionGaugeRegen's step (the battle
+  bench at 300%: the step 1.73 against 0.58). The camera's turn by the
+  right stick (CameraObjOrbitControl's input in the field, the battle
+  cameras' reads of the stick) is added a frame's worth each frame, so the
+  60 fps mode multiplies it by the scene's step (step fix `camera`), and
+  "Faster camera rotation" doubles it at either rate: the right stick for
+  0.4 s turned the camera about 90 degrees at 30 fps, about 180 with the
+  switch, and about 90 at 60 fps. The user first had a percentage, then
+  asked for the console's speed at 60 and a "faster" switch instead. The
+  F1 menu says in red when 60 frames per second waits for a restart
+  (`GameOption::restart`). The Revelation Flow's giver stays at one, as
+  the user preferred.
+With every option at its default the 30 fps walk's frame is byte-identical
+to the one of 2026-10-23 (`mods30c`). `RG_INPUT` takes the right stick
+too (`RUP` ...).
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.

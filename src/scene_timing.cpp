@@ -428,7 +428,8 @@ unsigned parseStepFixes(const char *value)
                                  {"event", StepFix::Event},
                                  {"menu", StepFix::Menu},
                                  {"ai", StepFix::Ai},
-                                 {"texture", StepFix::Texture}};
+                                 {"texture", StepFix::Texture},
+                                 {"camera", StepFix::Camera}};
     unsigned fixes = 0u;
     const char *p = value;
     while (*p)
@@ -447,7 +448,7 @@ unsigned parseStepFixes(const char *value)
         if (!known && length > 0u)
         {
             std::fprintf(stderr,
-                         "[rg] RG_STEP_FIXES: unknown name \"%.*s\" (clock, movie, npc, judge, gravity, event, menu, ai)\n",
+                         "[rg] RG_STEP_FIXES: unknown name \"%.*s\" (clock, movie, npc, judge, gravity, event, menu, ai, texture, camera)\n",
                          static_cast<int>(length), p);
         }
         p = end ? end + 1 : p + length;
@@ -617,13 +618,14 @@ void install(PS2Runtime &runtime)
         {
             std::fprintf(stderr, "[rg] 60 fps: the game's own menus may take half steps\n");
         }
-        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s%s%s%s%s\n",
+        std::printf("[rg] 60 fps: the flip waits one vblank and the scene takes %s; step fixes:%s%s%s%s%s%s%s%s%s%s%s\n",
                     g_adaptive ? "steps sized by the frame time, half at full rate" : "half steps",
                     g_stepFixes == 0u ? " none" : "", stepFix(StepFix::Clock) ? " clock" : "",
                     stepFix(StepFix::Movie) ? " movie" : "", stepFix(StepFix::Npc) ? " npc" : "",
                     stepFix(StepFix::Judge) ? " judge" : "", stepFix(StepFix::Gravity) ? " gravity" : "",
                     stepFix(StepFix::Event) ? " event" : "", stepFix(StepFix::Menu) ? " menu" : "",
-                    stepFix(StepFix::Ai) ? " ai" : "", stepFix(StepFix::Texture) ? " texture" : "");
+                    stepFix(StepFix::Ai) ? " ai" : "", stepFix(StepFix::Texture) ? " texture" : "",
+                    stepFix(StepFix::Camera) ? " camera" : "");
     }
 }
 

@@ -415,6 +415,11 @@ void Overlay::drawInterfacePage() {
                     continue;
                 }
                 bool on = gameOption(option);
+                if (!option.remembered) {
+                    if (toggle(option.key.c_str(), &on) && m_host.setGameOption)
+                        m_host.setGameOption(option.key, on);
+                    continue;
+                }
                 if (toggle(option.key.c_str(), &on)) {
                     m_settings.gameOptions[option.key] = on;
                     m_settings.gameNumbers.erase(option.key);
@@ -422,6 +427,8 @@ void Overlay::drawInterfacePage() {
                         m_host.setGameOption(option.key, on);
                     markDirty();
                 }
+                if (waitsForRestart(option))
+                    ImGui::TextColored(color(palette::kBad), "Restart the game for this to take effect.");
             }
             endSettings();
         }

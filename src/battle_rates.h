@@ -21,6 +21,12 @@ class PS2Runtime;
 // those money calls, before anyone gets it, so the results screen shows what
 // was given, and `battle_money` each enemy's money. Shops, chests and the
 // story's rewards stay as they are.
+//
+// A character's action gauge refills in CharaActionGaugeRegen (0x3B6490, a
+// virtual UnitBaseUpdate calls each frame with the time step, f12): a rate
+// for what the character is doing times the step. `action_gauge` scales the
+// step for the members of the party fighting (in the battle bench, the only
+// ones it ran for).
 namespace rg::battlerates
 {
 
@@ -31,5 +37,6 @@ void install(PS2Runtime &runtime);
 void setEncounterRate(int percent);
 void setExperience(int percent);
 void setMoney(int percent);
+void setActionGauge(int percent);
 
 } // namespace rg::battlerates

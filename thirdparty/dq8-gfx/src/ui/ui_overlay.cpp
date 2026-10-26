@@ -108,15 +108,55 @@ void Overlay::applySettings() {
         if (option.number()) {
             if (m_host.setGameNumber)
                 m_host.setGameNumber(option.key, gameNumber(option));
-        } else if (m_host.setGameOption) {
+        } else if (m_host.setGameOption && option.remembered) {
             m_host.setGameOption(option.key, gameOption(option));
         }
+        if (!m_startCaptured && !option.number())
+            m_startOptions[option.key] = gameOption(option);
     }
+    m_startCaptured = true;
+}
+
+bool Overlay::waitsForRestart(const GameOption &option) const {
+    const auto found = m_startOptions.find(option.key);
+    return option.restart && found != m_startOptions.end() && found->second != gameOption(option);
 }
 
 bool Overlay::gameOption(const GameOption &option) const {
+    if (!option.remembered)
+        return m_host.gameOptionState ? m_host.gameOptionState(option.key) : option.defaultValue;
     const auto found = m_settings.gameOptions.find(option.key);
     return found != m_settings.gameOptions.end() ? found->second : option.defaultValue;
+}
+
+void Overlay::setGameOptionValue(const std::string &key, bool on) {
+    for (const GameOption &option : m_host.gameOptions) {
+        if (option.key != key || option.number())
+            continue;
+        if (option.remembered) {
+            m_settings.gameOptions[key] = on;
+            m_settings.gameNumbers.erase(key);
+            // Saved now: the menu, closed, draws no frame to save it in.
+            markDirty();
+            saveIfDirty(true);
+        }
+        if (m_host.setGameOption)
+            m_host.setGameOption(key, on);
+    }
+}
+
+void Overlay::setGameNumberValue(const std::string &key, int value) {
+    for (const GameOption &option : m_host.gameOptions) {
+        if (option.key != key || !option.number())
+            continue;
+        value = std::clamp(value, option.minimum, option.maximum);
+        m_settings.gameNumbers[key] = value;
+        m_settings.gameOptions.erase(key);
+        markDirty();
+        saveIfDirty(true);
+        if (m_host.setGameNumber)
+            m_host.setGameNumber(key, value);
+    }
 }
 
 int Overlay::gameNumber(const GameOption &option) const {

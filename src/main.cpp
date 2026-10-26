@@ -34,10 +34,13 @@
 #include "camera_view.h"
 #include "dev_tools.h"
 #include "draw_distance.h"
+#include "free_camera.h"
 #include "instant_text.h"
 #include "opening.h"
 #include "widescreen.h"
+#include "quick_scenes.h"
 #include "scene_timing.h"
+#include "settings_pages.h"
 #include "step_fixes.h"
 #include "vif1_thread.h"
 #include "vu0_flags.h"
@@ -161,6 +164,9 @@ int run(int argc, char **argv)
     rg::drawdistance::install(runtime);
     rg::battlerates::install(runtime);
     rg::instanttext::install(runtime);
+    rg::freecamera::install(runtime);
+    rg::settingspages::install(runtime);
+    rg::quickscenes::install(runtime);
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);

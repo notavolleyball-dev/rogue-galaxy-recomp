@@ -75,7 +75,9 @@ add_executable(roguegalaxy
     draw_distance.cpp
     ee_fpu.cpp
     flip_pacing.cpp
+    free_camera.cpp
     movie_audio.cpp
+    quick_scenes.cpp
     return_hook.cpp
     instant_text.cpp
     libc_rand.cpp
@@ -83,6 +85,7 @@ add_executable(roguegalaxy
     opening.cpp
     widescreen.cpp
     scene_timing.cpp
+    settings_pages.cpp
     step_fixes.cpp
     stick_response.cpp
     vif1_thread.cpp
