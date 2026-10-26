@@ -1197,6 +1197,36 @@ With every option at its default the 30 fps walk's frame is byte-identical
 to the one of 2026-10-23 (`mods30c`). `RG_INPUT` takes the right stick
 too (`RUP` ...).
 
+**The window as it was left; item drops and shop prices (2026-10-26).**
+- The user found the window opening at the same size every time. dq8-gfx
+  kept a plain window's size alone, from its resize events: a maximized
+  window kept nothing, and the place was never kept. The settings now
+  hold the place (`x`, `y`) and `maximized` too, and the window is
+  created with them (`SdlGpuWindowPlacement`, through
+  SDL_CreateWindowWithProperties); a place whose top edge is on no
+  display opens centred, and a hidden window (the benches') remembers
+  nothing. A scripted run moved the window, maximized it and closed it;
+  the next opened maximized, and restored, it went back to the moved
+  place.
+- "Item drops" (`src/battle_rates.h`): an enemy's item drops when 100
+  times a RandFloat (the call returning to 0x3A2990) is under its chance,
+  and the draw is divided by the percentage, 0% to 1000%. The battle
+  bench's enemies have chances of 2 to 10%: at 100% none of 22 draws
+  dropped, at 500% 11 of 40 did.
+- "Shop prices" (`src/shop_prices.h`): ItemGetBuyPrice (0x3D4340) is
+  behind both the price a shop shows and charges (ShopRowGetPrice, with
+  the members' cards' 0.8 or 0.9) and the one before the card, so it is
+  scaled there, 10% to 200%, held to the game's 32767. Below 100% an item
+  never sells (ItemGetSellPrice, 0x3D4320) for more than it costs with
+  the best card. No test save is beside a shop; the user tried it in
+  one, and "Item drops" in their battles, and both worked.
+- The quick scenes went from three times the pace to twice: a chest at
+  three was too fast for the user, who had asked for the pace the 60 fps
+  mode once played them at.
+
+At their defaults the 30 fps walk's frame is still byte-identical to
+`mods30c`.
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.

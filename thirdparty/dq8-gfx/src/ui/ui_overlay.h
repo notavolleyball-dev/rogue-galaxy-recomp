@@ -190,6 +190,7 @@ private:
     // Settings side.
     void markDirty();
     void saveIfDirty(bool force);
+    void rememberWindow(const SDL_WindowEvent &event);
     void applyVolume();
     void applyPause();
     // A game switch's value: the settings file's, or the option's default;

@@ -22,6 +22,13 @@ class PS2Runtime;
 // was given, and `battle_money` each enemy's money. Shops, chests and the
 // story's rewards stay as they are.
 //
+// Each enemy then drops each of the items its data lists when 100 times a
+// RandFloat (0x13C010, the call returning to 0x3A2990) is under the item's
+// chance in percent (2 to 10 for the enemies of Salgin's battle bench).
+// `item_drops` divides that draw, multiplying every chance (an item at 10%
+// drops at 30% with 300%), 0 for none. The results hold three kinds of
+// items: past them the game gives no more, as it does.
+//
 // A character's action gauge refills in CharaActionGaugeRegen (0x3B6490, a
 // virtual UnitBaseUpdate calls each frame with the time step, f12): a rate
 // for what the character is doing times the step. `action_gauge` scales the
@@ -38,5 +45,6 @@ void setEncounterRate(int percent);
 void setExperience(int percent);
 void setMoney(int percent);
 void setActionGauge(int percent);
+void setItemDrops(int percent);
 
 } // namespace rg::battlerates

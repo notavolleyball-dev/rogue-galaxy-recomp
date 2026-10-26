@@ -41,6 +41,7 @@
 #include "quick_scenes.h"
 #include "scene_timing.h"
 #include "settings_pages.h"
+#include "shop_prices.h"
 #include "step_fixes.h"
 #include "vif1_thread.h"
 #include "vu0_flags.h"
@@ -163,6 +164,7 @@ int run(int argc, char **argv)
     rg::cameraview::install(runtime);
     rg::drawdistance::install(runtime);
     rg::battlerates::install(runtime);
+    rg::shopprices::install(runtime);
     rg::instanttext::install(runtime);
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);

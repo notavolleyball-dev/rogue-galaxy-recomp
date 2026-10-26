@@ -300,14 +300,11 @@ bool Overlay::handleEvent(const SDL_Event &event) {
         applyPause();
         break;
     case SDL_EVENT_WINDOW_RESIZED:
-        // Only a plain window's size is worth restoring next time.
-        if (m_window && event.window.windowID == SDL_GetWindowID(m_window) &&
-            (SDL_GetWindowFlags(m_window) &
-             (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0) {
-            m_settings.windowWidth = event.window.data1;
-            m_settings.windowHeight = event.window.data2;
-            markDirty();
-        }
+    case SDL_EVENT_WINDOW_MOVED:
+    case SDL_EVENT_WINDOW_MAXIMIZED:
+    case SDL_EVENT_WINDOW_RESTORED:
+        if (m_window && event.window.windowID == SDL_GetWindowID(m_window))
+            rememberWindow(event.window);
         break;
     case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
     case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: {
@@ -1010,6 +1007,33 @@ void Overlay::collectSavedScreenshots() {
 void Overlay::markDirty() {
     m_dirty = true;
     m_dirtyAt = now();
+}
+
+// What the window will open as next time: whether it is maximized, and a
+// plain window's size and place, a maximized one keeping those it will be
+// restored to. A fullscreen, minimized or hidden window says nothing new.
+void Overlay::rememberWindow(const SDL_WindowEvent &event) {
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(m_window);
+    if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN))
+        return;
+    Settings &s = m_settings;
+    const bool maximized = (flags & SDL_WINDOW_MAXIMIZED) != 0;
+    bool changed = s.maximized != maximized;
+    s.maximized = maximized;
+    if (!maximized && event.type == SDL_EVENT_WINDOW_RESIZED &&
+        (s.windowWidth != event.data1 || s.windowHeight != event.data2)) {
+        s.windowWidth = event.data1;
+        s.windowHeight = event.data2;
+        changed = true;
+    } else if (!maximized && event.type == SDL_EVENT_WINDOW_MOVED &&
+               (!s.windowPlaced || s.windowX != event.data1 || s.windowY != event.data2)) {
+        s.windowPlaced = true;
+        s.windowX = event.data1;
+        s.windowY = event.data2;
+        changed = true;
+    }
+    if (changed)
+        markDirty();
 }
 
 void Overlay::saveIfDirty(bool force) {

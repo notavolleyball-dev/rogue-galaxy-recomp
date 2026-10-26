@@ -17,6 +17,12 @@ struct Settings {
     bool fullscreen = false;
     int windowWidth = 0; // points; 0 picks a size from the display
     int windowHeight = 0;
+    // Where the plain window was on the desktop, and whether it was
+    // maximized (Rogue Galaxy: added); without a place it opens centred.
+    bool windowPlaced = false;
+    int windowX = 0;
+    int windowY = 0;
+    bool maximized = false;
 
     // Picture
     // Mailbox: vsync makes each present wait for the refresh while holding

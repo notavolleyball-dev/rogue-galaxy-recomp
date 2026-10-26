@@ -24,6 +24,11 @@ constexpr uint32_t kEnemyMoneyReturn = 0x003A2944u;
 constexpr uint32_t kResultsBlock = 0x248u;
 constexpr uint32_t kExperienceCap = 0x00465C90u;
 constexpr uint32_t kActionGaugeRegen = 0x003B6490u;
+// RandFloat, and its call for each of an enemy's items in
+// BattleCalcResults: the item drops when 100 times the draw is under its
+// chance in percent.
+constexpr uint32_t kRandFloat = 0x0013C010u;
+constexpr uint32_t kItemDropReturn = 0x003A2990u;
 // The party (PartyHasMember, 0x3C1E70): its pointer, and in it the number
 // of members fighting and their ids, which a character keeps at +0xC.
 constexpr uint32_t kParty = 0x00483820u;
@@ -35,10 +40,12 @@ PS2Runtime::RecompiledFunction g_encounterDistTick = nullptr;
 PS2Runtime::RecompiledFunction g_battleCalcResults = nullptr;
 PS2Runtime::RecompiledFunction g_partyAddMoney = nullptr;
 PS2Runtime::RecompiledFunction g_actionGaugeRegen = nullptr;
+PS2Runtime::RecompiledFunction g_randFloat = nullptr;
 std::atomic<int> g_encounterRate{100};
 std::atomic<int> g_experience{100};
 std::atomic<int> g_money{100};
 std::atomic<int> g_actionGauge{100};
+std::atomic<int> g_itemDrops{100};
 // BattleCalcResults's argument while it runs, and whether its experience
 // has been scaled yet (the game thread's alone).
 uint32_t g_results = 0u;
@@ -108,6 +115,19 @@ void partyAddMoney(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_partyAddMoney(rdram, ctx, runtime);
 }
 
+// A draw in [0, 1) (f0); the item drop's divided by the percentage, which
+// multiplies the item's chance, 1 for none at 0%.
+void randFloat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t returnPc = getRegU32(ctx, 31);
+    g_randFloat(rdram, ctx, runtime);
+    const int percent = g_itemDrops.load(std::memory_order_relaxed);
+    if (returnPc == kItemDropReturn && percent != 100)
+    {
+        ctx->f[0] = percent > 0 ? ctx->f[0] * 100.0f / static_cast<float>(percent) : 1.0f;
+    }
+}
+
 bool inParty(const uint8_t *rdram, uint32_t chara)
 {
     uint32_t party = 0u;
@@ -155,11 +175,13 @@ void install(PS2Runtime &runtime)
     setFrom("RG_BATTLE_EXPERIENCE", &setExperience);
     setFrom("RG_BATTLE_MONEY", &setMoney);
     setFrom("RG_ACTION_GAUGE", &setActionGauge);
+    setFrom("RG_ITEM_DROPS", &setItemDrops);
     const bool complete =
         rg::timing::hookFunction(runtime, kEncounterDistTick, &encounterDistTick, g_encounterDistTick) &&
         rg::timing::hookFunction(runtime, kBattleCalcResults, &battleCalcResults, g_battleCalcResults) &&
         rg::timing::hookFunction(runtime, kPartyAddMoney, &partyAddMoney, g_partyAddMoney) &&
-        rg::timing::hookFunction(runtime, kActionGaugeRegen, &actionGaugeRegen, g_actionGaugeRegen);
+        rg::timing::hookFunction(runtime, kActionGaugeRegen, &actionGaugeRegen, g_actionGaugeRegen) &&
+        rg::timing::hookFunction(runtime, kRandFloat, &randFloat, g_randFloat);
     if (!complete)
     {
         std::fprintf(stderr, "[rg] battle rates: some hooks are missing, see above\n");
@@ -184,6 +206,11 @@ void setMoney(int percent)
 void setActionGauge(int percent)
 {
     g_actionGauge.store(std::max(percent, 0), std::memory_order_relaxed);
+}
+
+void setItemDrops(int percent)
+{
+    g_itemDrops.store(std::max(percent, 0), std::memory_order_relaxed);
 }
 
 } // namespace rg::battlerates

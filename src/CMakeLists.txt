@@ -86,6 +86,7 @@ add_executable(roguegalaxy
     widescreen.cpp
     scene_timing.cpp
     settings_pages.cpp
+    shop_prices.cpp
     step_fixes.cpp
     stick_response.cpp
     vif1_thread.cpp

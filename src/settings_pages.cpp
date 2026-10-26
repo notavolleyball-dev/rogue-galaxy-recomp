@@ -98,6 +98,8 @@ constexpr Row kNumbers[] = {
     {"encounter_rate", "Encounters", Kind::Number, "%"},
     {"battle_experience", "Experience", Kind::Number, "%"},
     {"battle_money", "Money", Kind::Number, "%"},
+    {"item_drops", "Item Drops", Kind::Number, "%"},
+    {"shop_prices", "Shop Prices", Kind::Number, "%"},
     {"action_gauge", "Action Gauge", Kind::Number, "%"},
 };
 

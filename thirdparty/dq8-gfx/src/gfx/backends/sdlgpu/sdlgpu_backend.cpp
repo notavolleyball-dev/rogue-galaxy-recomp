@@ -4433,7 +4433,7 @@ void SdlGpuBackend::requestCapture(bool withOverlay, SdlGpuCaptureCallback done)
 }
 
 bool SdlGpuBackend::openWindow(const char *title, uint32_t width, uint32_t height,
-                               std::string &error) {
+                               std::string &error, const SdlGpuWindowPlacement &placement) {
     std::lock_guard lock(m_impl->mutex);
     if (!m_impl->device.valid()) {
         error = "SDL GPU device is not available";
@@ -4461,9 +4461,20 @@ bool SdlGpuBackend::openWindow(const char *title, uint32_t width, uint32_t heigh
     // same, and frames reach DQ8_GFX_SCREENSHOT_DIR (Rogue Galaxy: added).
     const char *hiddenWindow = std::getenv("DQ8_GFX_HIDDEN_WINDOW");
     const bool hidden = hiddenWindow && *hiddenWindow && *hiddenWindow != '0';
-    m_impl->window = SDL_CreateWindow(title, static_cast<int>(width), static_cast<int>(height),
-                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                          (hidden ? SDL_WINDOW_HIDDEN : 0u));
+    const SDL_PropertiesID properties = SDL_CreateProperties();
+    SDL_SetStringProperty(properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_X_NUMBER,
+                          placement.placed ? placement.x : SDL_WINDOWPOS_CENTERED);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
+                          placement.placed ? placement.y : SDL_WINDOWPOS_CENTERED);
+    SDL_SetNumberProperty(properties, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER,
+                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                              (hidden ? SDL_WINDOW_HIDDEN : 0u) |
+                              (placement.maximized && !hidden ? SDL_WINDOW_MAXIMIZED : 0u));
+    m_impl->window = SDL_CreateWindowWithProperties(properties);
+    SDL_DestroyProperties(properties);
     if (!m_impl->window) {
         error = std::string("SDL_CreateWindow: ") + SDL_GetError();
         return false;

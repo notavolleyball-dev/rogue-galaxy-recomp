@@ -93,6 +93,11 @@ void apply(Settings &s, const std::string &section, const std::string &key, cons
         if (key == "fullscreen") parseBool(value, s.fullscreen);
         else if (key == "width") parseNumber(value, s.windowWidth, 0, 16384);
         else if (key == "height") parseNumber(value, s.windowHeight, 0, 16384);
+        else if (key == "maximized") parseBool(value, s.maximized);
+        else if (key == "x" || key == "y") {
+            parseNumber(value, key == "x" ? s.windowX : s.windowY, -65536, 65536);
+            s.windowPlaced = true;
+        }
     } else if (section == "display") {
         if (key == "scale") parseNumber(value, s.resolutionScale, 1u, 8u);
         else if (key == "aspect") parseNamed(kAspects, value, s.display.aspect);
@@ -156,9 +161,11 @@ std::string serializeSettings(const Settings &s) {
     std::ostringstream out;
     const auto flag = [](bool value) { return value ? "1" : "0"; };
     out << "; Rogue Galaxy Recompiled settings, written by the in-game menu (F1).\n\n"
-        << "[window]\nfullscreen = " << flag(s.fullscreen) << "\nwidth = " << s.windowWidth
-        << "\nheight = " << s.windowHeight << "\n\n"
-        << "[display]\nscale = " << s.resolutionScale << "\naspect = " << nameOf(kAspects, s.display.aspect)
+        << "[window]\nfullscreen = " << flag(s.fullscreen) << "\nmaximized = " << flag(s.maximized)
+        << "\nwidth = " << s.windowWidth << "\nheight = " << s.windowHeight << "\n";
+    if (s.windowPlaced)
+        out << "x = " << s.windowX << "\ny = " << s.windowY << "\n";
+    out << "\n[display]\nscale = " << s.resolutionScale << "\naspect = " << nameOf(kAspects, s.display.aspect)
         << "\nfilter = " << nameOf(kFilters, s.display.filter)
         << "\ninteger_scale = " << flag(s.display.integerScale)
         << "\nremove_line_blend = " << flag(s.display.removeLineBlend)

@@ -19,7 +19,9 @@ constexpr uint32_t kGameMode = 0x004B51A0u;
 constexpr uint32_t kGamePhase = 0x004B51E0u;
 constexpr uint32_t kModeTransporterWarp = 11u;
 constexpr uint32_t kModeTreasureBox = 13u;
-constexpr double kFast = 3.0;
+// Twice: the pace the 60 fps mode played such scenes at before its step
+// fixes, which the user liked; three times was too fast for a chest.
+constexpr double kFast = 2.0;
 // Mode 11 runs the area script its warp request named (s32 at 0x4821E0):
 // the transporter's on leaving (0x320) and arriving (0x321); the doors' and
 // lifts' (0x226) and story scripts too, which keep their pace.

@@ -26,6 +26,7 @@
 #include "quick_scenes.h"
 #include "scene_timing.h"
 #include "settings_pages.h"
+#include "shop_prices.h"
 #include "vif1_thread.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
@@ -131,6 +132,10 @@ void applyGameNumber(const std::string &key, int value)
         rg::battlerates::setExperience(value);
     else if (key == "battle_money")
         rg::battlerates::setMoney(value);
+    else if (key == "item_drops")
+        rg::battlerates::setItemDrops(value);
+    else if (key == "shop_prices")
+        rg::shopprices::setPercent(value);
     else if (key == "action_gauge")
         rg::battlerates::setActionGauge(value);
 }
@@ -297,6 +302,32 @@ std::pair<uint32_t, uint32_t> initialWindowSize(const dq8::ui::Settings &setting
     return {height * 4u / 3u, height};
 }
 
+// The saved place and maximized state. A place whose top edge is on no
+// display now (one unplugged since) opens centred instead.
+dq8::gfx::SdlGpuWindowPlacement initialWindowPlacement(const dq8::ui::Settings &settings)
+{
+    dq8::gfx::SdlGpuWindowPlacement placement;
+    placement.maximized = settings.maximized;
+    if (!settings.windowPlaced)
+    {
+        return placement;
+    }
+    const SDL_Point titleBar{settings.windowX + 64, settings.windowY};
+    int count = 0;
+    if (SDL_DisplayID *displays = SDL_GetDisplays(&count))
+    {
+        for (int index = 0; index < count && !placement.placed; ++index)
+        {
+            SDL_Rect bounds{};
+            placement.placed = SDL_GetDisplayBounds(displays[index], &bounds) && SDL_PointInRect(&titleBar, &bounds);
+        }
+        SDL_free(displays);
+    }
+    placement.x = settings.windowX;
+    placement.y = settings.windowY;
+    return placement;
+}
+
 // DQ8-Recompiled's in-game menu over the window: display, sound, controls
 // and the frame-rate counter (thirdparty/dq8-gfx/src/ui). What it asks of
 // the game goes through HostServices.
@@ -364,18 +395,27 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"battle_money", "Money from battles",
          "The money defeated enemies leave, against the game's (100%). Selling, chests and rewards stay as they are.",
          false, 0, 500, 100, "%d%%", 25},
+        {"item_drops", "Item drops",
+         "How likely defeated enemies are to leave each of their items, against the game's (100%): most have a 2 "
+         "to 10% chance, which 1000% makes 20 to 100%; 0% for none. A battle still gives three kinds of items at "
+         "most, as the game does.",
+         false, 0, 1000, 100, "%d%%", 50},
+        {"shop_prices", "Shop prices",
+         "What shops ask for their items, against the game's (100%). Below 100% nothing sells for more than it "
+         "costs, so buying and selling back makes no money.",
+         false, 10, 200, 100, "%d%%", 10},
         {"action_gauge", "Action gauge speed",
          "How fast the party's action gauge fills again in battle, against the game's (100%).",
          false, 25, 400, 100, "%d%%", 25},
         {"fast_chests", "Fast chests",
-         "Opening a chest plays at up to three times the speed: the lid, the items flying out and the message's "
+         "Opening a chest plays at up to twice the speed: the lid, the items flying out and the message's "
          "text. The music and the sounds keep their pace.",
          false},
         {"fast_transporter", "Fast transporters",
-         "A transporter's warp plays at up to three times the speed.", false},
+         "A transporter's warp plays at up to twice the speed.", false},
         {"fast_revelation", "Fast Revelation Flow",
-         "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to three "
-         "times the speed.",
+         "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to twice "
+         "the speed.",
          false},
         {"free_camera", "Free camera (F6)",
          "The camera leaves the party, which stands still, and the controller moves it: the left stick moves the "
@@ -489,7 +529,8 @@ Setup::Setup(PS2Runtime &runtime)
         {
             const auto [width, height] = initialWindowSize(settings);
             std::string windowError;
-            if (sdl->openWindow("Rogue Galaxy Recompiled", width, height, windowError))
+            if (sdl->openWindow("Rogue Galaxy Recompiled", width, height, windowError,
+                                initialWindowPlacement(settings)))
             {
                 runtime.setExternalPresenter(&pump, sdl.get());
                 if (!sdl->supportsPresentMode(settings.display.presentMode))

@@ -5,7 +5,7 @@
 class PS2Runtime;
 
 // Scenes that only make the player wait, played faster: the whole game at up
-// to three times the speed while one is on screen (the host's pace, as the
+// to twice the speed while one is on screen (the host's pace, as the
 // menu's fast-forward; the sound driver keeps the audio device's, so music
 // and sounds do not change).
 //

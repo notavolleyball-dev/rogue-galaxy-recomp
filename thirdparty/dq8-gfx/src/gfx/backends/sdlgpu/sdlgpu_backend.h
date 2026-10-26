@@ -141,6 +141,15 @@ struct SdlGpuStats {
     }
 };
 
+// Where openWindow puts the window (Rogue Galaxy: added): its top left on the
+// desktop when placed, centred otherwise, and maximized.
+struct SdlGpuWindowPlacement {
+    bool placed = false;
+    int x = 0;
+    int y = 0;
+    bool maximized = false;
+};
+
 class SdlGpuBackend final : public GSRasterBackend {
 public:
     SdlGpuBackend();
@@ -187,7 +196,8 @@ public:
     // Opens a window and claims it for the GPU device. Present() then composes
     // straight into the swapchain and reports BackendNative, so the frame never
     // makes a round trip through host memory.
-    bool openWindow(const char *title, uint32_t width, uint32_t height, std::string &error);
+    bool openWindow(const char *title, uint32_t width, uint32_t height, std::string &error,
+                    const SdlGpuWindowPlacement &placement = {});
     bool hasWindow() const;
     // Install before execution. The callback reads a thread-safe game counter.
     using CompletedRenderCounter = uint64_t (*)();

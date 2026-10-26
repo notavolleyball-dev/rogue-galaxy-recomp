@@ -126,10 +126,16 @@ Default button):
   (no random battles; the story's stay) to 300%; a won battle's
   experience, up to the game's 9999, and the defeated enemies' money, from
   0% to 500%. Selling, chests and the story's rewards stay as they are.
+- "Item drops": how likely defeated enemies are to leave each of their
+  items, 0% to 1000% of the game's (most have a 2 to 10% chance); a
+  battle still gives three kinds of items at most, as the game does.
+- "Shop prices": what shops ask, 10% to 200% of the game's
+  (`src/shop_prices.h`). Below 100% nothing sells for more than it costs.
 - "Action gauge speed": how fast the party's action gauge fills again in
   battle, 25% to 400% of the game's.
 - "Fast chests", "Fast transporters", "Fast Revelation Flow": scenes
-  that only make you wait play at up to three times the speed
+  that only make you wait play at up to twice the speed (the pace the 60
+  fps mode once played them at)
   (`src/quick_scenes.h`): a chest opening (the lid, the items flying out,
   the message's text), a transporter's warp, and items going into a
   Revelation Flow cell. The music and the sounds keep their pace.
@@ -158,7 +164,9 @@ numbers (Low takes a step off, High adds one) and one of the quick scenes,
 each change kept as the menu's own are (`src/settings_pages.h`). Without
 the F1 menu (`RG_GS=sw`, `RG_GS_NO_WINDOW=1`) the screen stays the game's.
 
-F11 or Alt+Enter toggles fullscreen. The settings live in
+F11 or Alt+Enter toggles fullscreen. The window opens as it was left: its
+size and place, maximized or not, fullscreen or not (a place on a display
+unplugged since opens centred). The settings live in
 `%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
 another file).
 
@@ -259,6 +267,8 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_ENCOUNTER_RATE=N` | Random battles, percent of the game's rate; 0 turns them off (the menu's "Encounter rate") |
 | `RG_BATTLE_EXPERIENCE=N` | A won battle's experience, percent of the game's (the menu's "Experience from battles") |
 | `RG_BATTLE_MONEY=N` | The defeated enemies' money, percent of the game's (the menu's "Money from battles") |
+| `RG_ITEM_DROPS=N` | The chance of each item defeated enemies leave, percent of the game's (the menu's "Item drops") |
+| `RG_SHOP_PRICES=N` | What shops ask for their items, percent of the game's (the menu's "Shop prices") |
 | `RG_ACTION_GAUGE=N` | How fast the party's action gauge fills, percent of the game's (the menu's "Action gauge speed") |
 | `RG_FREE_CAMERA=1` | Starts with the free camera on (the menu's "Free camera"; `src/free_camera.h`) |
 | `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase, the main menu's state and the Revelation Flow's placing step (`[scene]` lines; the quick scenes go by the mode, the warp's script and the placing step) |
