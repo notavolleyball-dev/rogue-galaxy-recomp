@@ -82,6 +82,7 @@ add_executable(roguegalaxy
     instant_text.cpp
     libc_rand.cpp
     loading_screen.cpp
+    map_chests.cpp
     opening.cpp
     widescreen.cpp
     scene_timing.cpp

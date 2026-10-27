@@ -31,3 +31,7 @@ Thumbs.db
 
 # Art collected from the disc while playing (the texture-pack branch).
 /textures/
+
+# The player's own images for the window's sides; only the note is kept.
+/borders/*
+!/borders/README.txt

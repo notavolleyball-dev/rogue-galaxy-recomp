@@ -207,6 +207,9 @@ public:
     // 4:3, -1 unknown.
     using GameWidescreenQuery = int (*)();
     void setGameWidescreenQuery(GameWidescreenQuery query);
+    // The image SdlGpuSides::Image shows; before the window presents (Rogue
+    // Galaxy: added).
+    void setSideImageLoader(SdlGpuSideImageLoader loader);
     int gameWidescreen() const;
     // Pumps SDL events into the overlay and the pad, and redraws the overlay
     // over the last frame while the game shows none. Returns false when the

@@ -19,8 +19,8 @@ namespace {
 using gfx::PadInput;
 
 constexpr const char *kTimes = "\xC3\x97"; // U+00D7, spelled out for compilers without /utf-8
-constexpr const char *kPageNames[] = {"Display", "Sound", "Controls", "Interface"};
-constexpr Icon kPageIcons[] = {Icon::Display, Icon::Sound, Icon::Controls, Icon::Interface};
+constexpr const char *kPageNames[] = {"Display", "Sound", "Controls", "Game", "Interface"};
+constexpr Icon kPageIcons[] = {Icon::Display, Icon::Sound, Icon::Controls, Icon::Disc, Icon::Interface};
 constexpr const char *kProjectUrl = "https://github.com/victor-takai/rogue-galaxy-recomp";
 constexpr const char *kIssuesUrl = "https://github.com/victor-takai/rogue-galaxy-recomp/issues";
 
@@ -153,6 +153,7 @@ void Overlay::drawSettingsWindow() {
         case SettingsPage::Display: drawDisplayPage(); break;
         case SettingsPage::Sound: drawSoundPage(); break;
         case SettingsPage::Controls: drawControlsPage(); break;
+        case SettingsPage::Game: drawGamePage(); break;
         case SettingsPage::Interface: drawInterfacePage(); break;
         case SettingsPage::Count: break;
         }
@@ -224,10 +225,10 @@ void Overlay::drawDisplayPage() {
         const char *aspectHelp = "";
         switch (m_settings.display.aspect) {
         case gfx::SdlGpuAspect::Auto: {
-            // Rogue Galaxy's is under Interface > Game.
+            // Rogue Galaxy's is on the Game page.
             const int wide = m_backend.gameWidescreen();
-            aspectHelp = wide == 1   ? "Follows Interface > Game > Widescreen: the window's shape."
-                         : wide == 0 ? "Follows Interface > Game > Widescreen: 4:3."
+            aspectHelp = wide == 1   ? "Follows Game > Widescreen: the window's shape."
+                         : wide == 0 ? "Follows Game > Widescreen: 4:3."
                                      : "4:3, the shape the game draws for; it has no wide-screen option.";
             break;
         }
@@ -256,6 +257,21 @@ void Overlay::drawDisplayPage() {
         int filter = static_cast<int>(m_settings.display.filter);
         if (segmented("filter", &filter, kFilters, 3)) {
             m_settings.display.filter = static_cast<gfx::SdlGpuFilter>(filter);
+            m_backend.setDisplayOptions(m_settings.display);
+            markDirty();
+        }
+
+        // Rogue Galaxy: added (`sides` in the file).
+        static constexpr const char *kSidesHelp[] = {
+            "What fills the window beside a 4:3 picture: black bars.",
+            "What fills the window beside a 4:3 picture: the picture itself, softly blurred and a little darker.",
+            "What fills the window beside a 4:3 picture: your image, the first PNG or JPG in the game's "
+            "\"borders\" folder (the blurred picture without one)."};
+        settingRow("Borders", kSidesHelp[static_cast<int>(m_settings.display.sides)]);
+        static constexpr const char *kSides[] = {"Black", "Blurred", "Image"};
+        int sides = static_cast<int>(m_settings.display.sides);
+        if (segmented("sides", &sides, kSides, 3)) {
+            m_settings.display.sides = static_cast<gfx::SdlGpuSides>(sides);
             m_backend.setDisplayOptions(m_settings.display);
             markDirty();
         }
@@ -373,66 +389,80 @@ void Overlay::drawInterfacePage() {
         }
         endSettings();
     }
+}
 
-    // The game's own switches (Rogue Galaxy: added).
-    if (!m_host.gameOptions.empty()) {
-        sectionHeader("Game");
-        if (beginSettings("game")) {
-            for (const GameOption &option : m_host.gameOptions) {
-                settingRow(option.label.c_str(), option.help.empty() ? nullptr : option.help.c_str());
-                if (option.number()) {
-                    const int value = gameNumber(option);
-                    int next = value;
-                    const ImGuiStyle &style = ImGui::GetStyle();
-                    const float button = ImGui::GetFrameHeight();
-                    const float reset = ImGui::CalcTextSize("Default").x + style.FramePadding.x * 2.0f;
-                    ImGui::PushID(option.key.c_str());
-                    if (ImGui::Button("-", ImVec2(button, 0.0f)))
-                        next = value - option.step;
-                    ImGui::SameLine();
-                    ImGui::SetNextItemWidth(std::max(button * 3.0f, ImGui::GetContentRegionAvail().x - button -
-                                                                        reset - style.ItemSpacing.x * 2.0f));
-                    ImGui::SliderInt("##value", &next, option.minimum, option.maximum,
-                                     option.format.empty() ? "%d" : option.format.c_str());
-                    ImGui::SameLine();
-                    if (ImGui::Button("+", ImVec2(button, 0.0f)))
-                        next = value + option.step;
-                    ImGui::SameLine();
-                    ImGui::BeginDisabled(value == option.defaultNumber);
-                    if (ImGui::Button("Default"))
-                        next = option.defaultNumber;
-                    ImGui::EndDisabled();
-                    ImGui::PopID();
-                    next = std::clamp(next, option.minimum, option.maximum);
-                    if (next != value) {
-                        m_settings.gameNumbers[option.key] = next;
-                        // A "0" or "1" in the file reads as a switch too.
-                        m_settings.gameOptions.erase(option.key);
-                        if (m_host.setGameNumber)
-                            m_host.setGameNumber(option.key, next);
-                        markDirty();
-                    }
-                    continue;
-                }
-                bool on = gameOption(option);
-                if (!option.remembered) {
-                    if (toggle(option.key.c_str(), &on) && m_host.setGameOption)
-                        m_host.setGameOption(option.key, on);
-                    continue;
-                }
-                if (toggle(option.key.c_str(), &on)) {
-                    m_settings.gameOptions[option.key] = on;
-                    m_settings.gameNumbers.erase(option.key);
-                    if (m_host.setGameOption)
-                        m_host.setGameOption(option.key, on);
-                    markDirty();
-                }
-                if (waitsForRestart(option))
-                    ImGui::TextColored(color(palette::kBad), "Restart the game for this to take effect.");
-            }
-            endSettings();
-        }
+// The game's own switches, in the host's sections (Rogue Galaxy: added).
+void Overlay::drawGamePage() {
+    if (m_host.gameOptions.empty()) {
+        mutedText("The game has no options of its own.");
+        return;
     }
+    bool started = false, table = false;
+    for (const GameOption &option : m_host.gameOptions) {
+        const auto section = std::find_if(m_host.gameSections.begin(), m_host.gameSections.end(),
+                                          [&](const auto &entry) { return entry.first == option.key; });
+        if (!started || section != m_host.gameSections.end()) {
+            if (table)
+                endSettings();
+            sectionHeader(section != m_host.gameSections.end() ? section->second.c_str() : "Game");
+            table = beginSettings(("game." + option.key).c_str());
+            started = true;
+        }
+        if (!table)
+            continue;
+        settingRow(option.label.c_str(), option.help.empty() ? nullptr : option.help.c_str());
+        if (option.number()) {
+            const int value = gameNumber(option);
+            int next = value;
+            const ImGuiStyle &style = ImGui::GetStyle();
+            const float button = ImGui::GetFrameHeight();
+            const float reset = ImGui::CalcTextSize("Default").x + style.FramePadding.x * 2.0f;
+            ImGui::PushID(option.key.c_str());
+            if (ImGui::Button("-", ImVec2(button, 0.0f)))
+                next = value - option.step;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::max(button * 3.0f, ImGui::GetContentRegionAvail().x - button -
+                                                                reset - style.ItemSpacing.x * 2.0f));
+            ImGui::SliderInt("##value", &next, option.minimum, option.maximum,
+                             option.format.empty() ? "%d" : option.format.c_str());
+            ImGui::SameLine();
+            if (ImGui::Button("+", ImVec2(button, 0.0f)))
+                next = value + option.step;
+            ImGui::SameLine();
+            ImGui::BeginDisabled(value == option.defaultNumber);
+            if (ImGui::Button("Default"))
+                next = option.defaultNumber;
+            ImGui::EndDisabled();
+            ImGui::PopID();
+            next = std::clamp(next, option.minimum, option.maximum);
+            if (next != value) {
+                m_settings.gameNumbers[option.key] = next;
+                // A "0" or "1" in the file reads as a switch too.
+                m_settings.gameOptions.erase(option.key);
+                if (m_host.setGameNumber)
+                    m_host.setGameNumber(option.key, next);
+                markDirty();
+            }
+            continue;
+        }
+        bool on = gameOption(option);
+        if (!option.remembered) {
+            if (toggle(option.key.c_str(), &on) && m_host.setGameOption)
+                m_host.setGameOption(option.key, on);
+            continue;
+        }
+        if (toggle(option.key.c_str(), &on)) {
+            m_settings.gameOptions[option.key] = on;
+            m_settings.gameNumbers.erase(option.key);
+            if (m_host.setGameOption)
+                m_host.setGameOption(option.key, on);
+            markDirty();
+        }
+        if (waitsForRestart(option))
+            ImGui::TextColored(color(palette::kBad), "Restart the game for this to take effect.");
+    }
+    if (table)
+        endSettings();
 }
 
 void Overlay::drawControlsPage() {

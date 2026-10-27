@@ -90,11 +90,14 @@ The game window takes a keyboard or a gamepad (PlayStation layout).
 
 **F1** (or the Guide button, or Back+Start) opens the in-game menu, from
 DQ8-Recompiled: window and fullscreen, vertical sync, internal resolution,
-aspect and scaling filter, volume, controller and keyboard remapping with
+aspect and scaling filter, what fills the sides beside a 4:3 picture
+(Display > Borders: black, the picture blurred, or your image from the
+`borders` folder, see `borders\README.txt`), volume, controller and keyboard remapping with
 dead zones, pause (F2), fast-forward (F4), a frame-rate counter (F3),
-screenshots (F12) and renderer statistics, and under Interface > Game the
-game's own switches and numbers (a slider between - and + buttons, with a
-Default button):
+screenshots (F12) and renderer statistics, and on the Game page the game's
+own switches and numbers (a slider between - and + buttons, with a Default
+button), in four groups: Camera and view, Convenience, Battles and rewards,
+Developers:
 - "Widescreen": the game draws a wider view, with the HUD over the
   scene, the compass and the movies fitted to it (events keep their
   letterbox bars, which their text is placed by); with Display > Aspect
@@ -133,12 +136,11 @@ Default button):
   (`src/shop_prices.h`). Below 100% nothing sells for more than it costs.
 - "Action gauge speed": how fast the party's action gauge fills again in
   battle, 25% to 400% of the game's.
-- "Fast chests", "Fast transporters", "Fast Revelation Flow": scenes
-  that only make you wait play at up to twice the speed (the pace the 60
-  fps mode once played them at)
-  (`src/quick_scenes.h`): a chest opening (the lid, the items flying out,
-  the message's text), a transporter's warp, and items going into a
-  Revelation Flow cell. The music and the sounds keep their pace.
+- "Fast transporters", "Fast Revelation Flow": scenes that only make
+  you wait play at up to twice the speed (the pace the 60 fps mode once
+  played them at) (`src/quick_scenes.h`): a transporter's warp, and items
+  going into a Revelation Flow cell. The music and the sounds keep their
+  pace.
 - "Free camera (F6)": the developers' free camera (`src/free_camera.h`),
   exploring or in battle. The party stands still and the controller moves
   the camera: the left stick moves the point it looks at (Square held,
@@ -149,6 +151,10 @@ Default button):
 - "Instant text": dialogue and messages a page at a time instead of
   letter by letter, the game's own instant mode, which some scenes ask for
   (`src/instant_text.h`); the pauses written into the text stay.
+- "Chests on the map": the chests not yet opened show on the maps (the
+  corner one, the full one, the transporter's) in the parts explored, as
+  the game shows them once every save point of a planet is activated
+  (`src/map_chests.h`). Nothing is written to the save.
 - "Developer tools": what the developers left in the game, switched off
   for release (`src/dev_tools.h`). In the main menu R3 shows every item's
   icon and R1 + R3 a list of them, and Cross gives one of the one picked;
@@ -160,8 +166,9 @@ Default button):
 
 The game's own Settings screen (System > Settings in the main menu) has
 these too: L1 and R1 turn to a page of the switches (On / Off), one of the
-numbers (Low takes a step off, High adds one) and one of the quick scenes,
-each change kept as the menu's own are (`src/settings_pages.h`). Without
+numbers (Low takes a step off, High adds one; Display > Borders is there too,
+Low and High going through Black, Blurred and Image) and one of the quick
+scenes, each change kept as the menu's own are (`src/settings_pages.h`). Without
 the F1 menu (`RG_GS=sw`, `RG_GS_NO_WINDOW=1`) the screen stays the game's.
 
 F11 or Alt+Enter toggles fullscreen. The window opens as it was left: its
@@ -170,8 +177,8 @@ unplugged since opens centred). The settings live in
 `%APPDATA%\RogueGalaxy\Recompiled\settings.ini` (`RG_SETTINGS_FILE` names
 another file).
 
-The game runs at 60 frames per second unless the menu's Interface > Game >
-60 frames per second is off (the game's own 30; a change takes effect at the
+The game runs at 60 frames per second unless the menu's Game > 60 frames
+per second is off (the game's own 30; a change takes effect at the
 next start; `RG_FPS=30` or `RG_FPS=60` decides for one run). On a 144 Hz
 monitor a frame lasts 2 or 3 refreshes at 60 and 4 or 5 at 30, which reads
 as judder, so 120 Hz or variable refresh looks smoother.
@@ -273,6 +280,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_FREE_CAMERA=1` | Starts with the free camera on (the menu's "Free camera"; `src/free_camera.h`) |
 | `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase, the main menu's state and the Revelation Flow's placing step (`[scene]` lines; the quick scenes go by the mode, the warp's script and the placing step) |
 | `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
+| `RG_MAP_CHESTS=1` | The chests not yet opened on the maps before a planet is complete (the menu's "Chests on the map"; `src/map_chests.h`) |
 | `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |

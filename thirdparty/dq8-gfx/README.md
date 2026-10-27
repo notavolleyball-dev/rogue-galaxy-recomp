@@ -28,19 +28,29 @@ preferences folder for `RogueGalaxy/Recompiled`. Its defaults differ where
 this game does: internal resolution 2x, mailbox presentation (vsync holds
 SDL's submission lock while the GS worker waits on it) and the line blend
 left as the game draws it. The host side (pause, speed, volume, the frame
-count the counter uses) is in `src/graphics.cpp`. Interface > Game lists
-the game's own options (`HostServices::gameOptions`, kept under `[game]`):
+count the counter uses) is in `src/graphics.cpp`. The Game page lists the
+game's own options (`HostServices::gameOptions`, kept under `[game]`, in
+the sections `HostServices::gameSections` names):
 switches, and numbers shown as sliders (a `GameOption` whose maximum is
 above its minimum, `HostServices::setGameNumber`) between - and + buttons
 that move them by the option's step, with a Default button. A switch that
 is not `remembered` stays out of the file and shows what
-`HostServices::gameOptionState` says; `Overlay::setGameOptionValue` and
-`setGameNumberValue` take a change made outside the menu (the game's own
-Settings screen) and keep it as the menu's own. A `restart` switch changed
+`HostServices::gameOptionState` says; `Overlay::setGameOptionValue`,
+`setGameNumberValue` and `setSides` take a change made outside the menu
+(the game's own Settings screen) and keep it as the menu's own. A `restart` switch changed
 since the run started says in red that it waits for the next start. F6,
 the game's free camera, cannot be bound to a pad input, as the menu's own
 keys cannot, and `Overlay::capturingBinding` tells the host when the menu
-is waiting for a key to bind.
+is waiting for a key to bind. The window opens with its last size, place
+and maximized state (`[window]` `x`, `y`, `maximized`;
+`SdlGpuWindowPlacement`). Display > Borders fills the window beside a
+picture that leaves it uncovered (`SdlGpuSides`, `sides =` under
+`[display]`): black, the picture blurred and at three quarters of its
+brightness (halved by bilinear blits to 256 texels wide, then nine taps in
+`present_sides.frag`), or an
+image the host loads (`SdlGpuBackend::setSideImageLoader`), each scaled to
+cover the window and drawn before the picture, which then loads instead
+of clearing; the script's `sides black|blurred|image` sets it.
 
 ## Changes for Rogue Galaxy
 

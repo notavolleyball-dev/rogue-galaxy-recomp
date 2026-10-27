@@ -177,6 +177,13 @@ public:
     bool downloadTexture(SDL_GPUTexture *texture, uint32_t width, uint32_t height,
                          std::vector<uint8_t> &pixels, std::string &error) const;
 
+    // Fills `target` (of `format`, width by height) with `source` scaled to
+    // cover it, bilinear, blurred or not and times `brightness`, in a pass
+    // recorded into `commands` (present_sides.frag; Rogue Galaxy: added).
+    bool drawSides(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *target, SDL_GPUTextureFormat format,
+                   uint32_t width, uint32_t height, SDL_GPUTexture *source, uint32_t sourceWidth,
+                   uint32_t sourceHeight, bool blur, float brightness, std::string &error);
+
     // Work recorded ahead of the next submission (Rogue Galaxy: added). A
     // texture upload, a target's patches, a page import, an 8-bit expansion,
     // a reinterpretation or a clear was each a command buffer submission of
@@ -236,6 +243,10 @@ private:
     SDL_GPUGraphicsPipeline *m_reinterpretPipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_localCopyPipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_displayPipeline = nullptr;
+    // drawSides': its pipeline for the window's format, and a bilinear sampler.
+    SDL_GPUGraphicsPipeline *m_sidesPipeline = nullptr;
+    SDL_GPUTextureFormat m_sidesFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUSampler *m_linearSampler = nullptr;
     SDL_GPUGraphicsPipeline *m_index8Pipeline = nullptr;
     SDL_GPUTexture *m_index8Palette = nullptr;
     SDL_GPUTexture *m_index8Placement = nullptr;

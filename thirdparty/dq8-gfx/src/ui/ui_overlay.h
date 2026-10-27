@@ -33,7 +33,7 @@ inline bool saveImage(SDL_Surface *surface, const char *path) { return SDL_SaveB
 
 // What the menu can ask of the game around it. A control whose function is
 // empty is not shown.
-// A switch of the game's own, shown under Interface > Game and kept in the
+// A switch of the game's own, shown on the Game page and kept in the
 // settings file's [game] section under `key`, unless not `remembered`
 // (Rogue Galaxy: added).
 struct GameOption {
@@ -75,12 +75,15 @@ struct HostServices {
     // The game's own switches, and what turns one on or off (Rogue Galaxy:
     // added).
     std::vector<GameOption> gameOptions;
+    // The Game page's sections: a title each, before the option of its key.
+    std::vector<std::pair<std::string, std::string>> gameSections;
     std::function<void(const std::string &key, bool on)> setGameOption;
     std::function<void(const std::string &key, int value)> setGameNumber;
     std::function<bool(const std::string &key)> gameOptionState;
 };
 
-enum class SettingsPage : uint8_t { Display, Sound, Controls, Interface, Count };
+// Game: Rogue Galaxy's own switches (added).
+enum class SettingsPage : uint8_t { Display, Sound, Controls, Game, Interface, Count };
 
 class Overlay final : public gfx::SdlGpuOverlay {
 public:
@@ -108,6 +111,8 @@ public:
     // menu's own changes are.
     void setGameOptionValue(const std::string &key, bool on);
     void setGameNumberValue(const std::string &key, int value);
+    // Display > Borders, changed there too (Rogue Galaxy: added).
+    void setSides(gfx::SdlGpuSides sides);
     void setMenuOpen(bool open);
     void openSettings(SettingsPage page);
     // Opens one of the menu bar's menus at the next frame, by its label.
@@ -173,6 +178,7 @@ private:
     void drawSoundPage();
     void drawControlsPage();
     void drawBindingTable(bool keyboard);
+    void drawGamePage();
     void drawInterfacePage();
     void drawCapturePrompt();
     void drawAbout();

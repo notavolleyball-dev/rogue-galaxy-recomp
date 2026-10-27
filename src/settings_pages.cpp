@@ -79,13 +79,19 @@ struct Row
     const char *label;
     Kind kind;
     const char *suffix;
+    // A number that names a choice: its value's name in the label.
+    const char *const *names = nullptr;
 };
+
+// The F1 menu's Display > Borders, in its order.
+constexpr const char *kSidesNames[] = {"Black", "Blurred", "Image"};
 
 constexpr Row kSwitches[] = {
     {"widescreen", "Widescreen", Kind::Switch, ""},
     {"skip_opening", "Skip the Opening", Kind::Switch, ""},
     {"instant_loading_recap", "Quick Loading Recap", Kind::Switch, ""},
     {"instant_text", "Instant Text", Kind::Switch, ""},
+    {"map_chests", "Chests on Map", Kind::Switch, ""},
     {"faster_camera", "Faster Camera", Kind::Switch, ""},
     {"free_camera", "Free Camera", Kind::Switch, ""},
     {"dev_tools", "Developer Tools", Kind::Switch, ""},
@@ -95,6 +101,7 @@ constexpr Row kNumbers[] = {
     {"field_of_view", "Field of View", Kind::Number, ""},
     {"camera_distance", "Camera Distance", Kind::Number, "%"},
     {"draw_distance", "Draw Distance", Kind::Number, "%"},
+    {"sides", "Borders", Kind::Number, "", kSidesNames},
     {"encounter_rate", "Encounters", Kind::Number, "%"},
     {"battle_experience", "Experience", Kind::Number, "%"},
     {"battle_money", "Money", Kind::Number, "%"},
@@ -104,7 +111,6 @@ constexpr Row kNumbers[] = {
 };
 
 constexpr Row kScenes[] = {
-    {"fast_chests", "Fast Chests", Kind::Switch, ""},
     {"fast_transporter", "Fast Transporters", Kind::Switch, ""},
     {"fast_revelation", "Fast Revelation", Kind::Switch, ""},
 };
@@ -320,7 +326,11 @@ void writeLabel(uint8_t *rdram, const Screen &screen, int index, const Row &row)
 {
     const uint32_t string = g_text + static_cast<uint32_t>(index) * kTextBytes;
     char text[kTextBytes];
-    if (row.kind == Kind::Number)
+    if (row.names)
+    {
+        std::snprintf(text, sizeof(text), "%s: %s", row.label, row.names[value(row)]);
+    }
+    else if (row.kind == Kind::Number)
     {
         std::snprintf(text, sizeof(text), "%s: %d%s", row.label, value(row), row.suffix);
     }

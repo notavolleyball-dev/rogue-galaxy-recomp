@@ -36,6 +36,7 @@
 #include "draw_distance.h"
 #include "free_camera.h"
 #include "instant_text.h"
+#include "map_chests.h"
 #include "opening.h"
 #include "widescreen.h"
 #include "quick_scenes.h"
@@ -166,6 +167,7 @@ int run(int argc, char **argv)
     rg::battlerates::install(runtime);
     rg::shopprices::install(runtime);
     rg::instanttext::install(runtime);
+    rg::mapchests::install(runtime);
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);
     rg::quickscenes::install(runtime);

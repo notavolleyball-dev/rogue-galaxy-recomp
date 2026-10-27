@@ -50,7 +50,7 @@ void beforeFlip(uint8_t *rdram, R5900Context *ctx);
 // RG_FPS=60 is on, with its hooks in place.
 bool sixtyFps();
 
-// The menu's "60 frames per second" switch (Interface > Game), which
+// The menu's "60 frames per second" switch (on its Game page), which
 // install() reads: set at start-up as the menu applies the saved settings, so
 // a change takes effect the next time the game starts. RG_FPS, when set,
 // decides instead for the run (60 for the mode, any other value for the

@@ -18,9 +18,8 @@ namespace
 constexpr uint32_t kGameMode = 0x004B51A0u;
 constexpr uint32_t kGamePhase = 0x004B51E0u;
 constexpr uint32_t kModeTransporterWarp = 11u;
-constexpr uint32_t kModeTreasureBox = 13u;
 // Twice: the pace the 60 fps mode played such scenes at before its step
-// fixes, which the user liked; three times was too fast for a chest.
+// fixes, which the user liked; three times was too fast.
 constexpr double kFast = 2.0;
 // Mode 11 runs the area script its warp request named (s32 at 0x4821E0):
 // the transporter's on leaving (0x320) and arriving (0x321); the doors' and
@@ -40,7 +39,7 @@ constexpr uint32_t kRevelationBoardUpdate = 0x0034C290u;
 constexpr uint32_t kBoardPlacing = 0x76Eu;
 constexpr int16_t kPlacingWaits = 6;
 
-std::array<std::atomic<bool>, 3> g_enabled{};
+std::array<std::atomic<bool>, 2> g_enabled{};
 PS2Runtime::RecompiledFunction g_revelationBoardUpdate = nullptr;
 // When the board last ran with items going in, on the steady clock (the
 // game thread writes, the main thread reads).
@@ -151,21 +150,15 @@ double speed(const uint8_t *rdram)
         traceMenu(rdram);
     }
     bool hurry = false;
-    switch (mode)
-    {
-    case kModeTreasureBox:
-        hurry = on(Scene::Chests);
-        break;
-    case kModeTransporterWarp:
+    if (mode == kModeTransporterWarp)
     {
         int32_t script = 0;
         std::memcpy(&script, rdram + kWarpScript, sizeof(script));
         hurry = (script == kScriptTransporterLeave || script == kScriptTransporterArrive) && on(Scene::Transporter);
-        break;
     }
-    default:
+    else
+    {
         hurry = placingItems() && on(Scene::Revelation);
-        break;
     }
     return hurry ? kFast : 1.0;
 }

@@ -21,6 +21,7 @@
 #include "draw_distance.h"
 #include "free_camera.h"
 #include "instant_text.h"
+#include "map_chests.h"
 #include "loading_screen.h"
 #include "opening.h"
 #include "quick_scenes.h"
@@ -43,6 +44,14 @@
 #include "runtime/ps2_native_iop.h"
 #include "runtime/ps2_pad_host.h"
 #include "ui/ui_overlay.h"
+
+#include <cctype>
+#include <filesystem>
+#include <vector>
+
+// stb_image, as the runtime's raylib builds it.
+extern "C" unsigned char *stbi_load(const char *filename, int *x, int *y, int *comp, int req_comp);
+extern "C" void stbi_image_free(void *retval_from_stbi_load);
 #endif
 
 namespace rg::graphics
@@ -103,14 +112,14 @@ void applyGameOption(const std::string &key, bool on)
         rg::loading::setInstantRecap(on);
     else if (key == "instant_text")
         rg::instanttext::setEnabled(on);
+    else if (key == "map_chests")
+        rg::mapchests::setEnabled(on);
     else if (key == "dev_tools")
         rg::devtools::setEnabled(on);
     else if (key == "free_camera")
         rg::freecamera::setEnabled(on);
     else if (key == "faster_camera")
         rg::cameraview::setFasterTurn(on);
-    else if (key == "fast_chests")
-        rg::quickscenes::setEnabled(rg::quickscenes::Scene::Chests, on);
     else if (key == "fast_transporter")
         rg::quickscenes::setEnabled(rg::quickscenes::Scene::Transporter, on);
     else if (key == "fast_revelation")
@@ -265,10 +274,22 @@ bool pump(void *userData)
     // the menu alone), kept as the menu's own.
     for (rg::settingspages::Change change; g_menu && rg::settingspages::takeChange(change);)
     {
-        if (change.number)
+        if (change.key == "sides")
+            g_menu->setSides(static_cast<dq8::gfx::SdlGpuSides>(change.value));
+        else if (change.number)
             g_menu->setGameNumberValue(change.key, change.value);
         else
             g_menu->setGameOptionValue(change.key, change.value != 0);
+    }
+    // Display > Borders, which the pages show too, as the menu has it.
+    if (g_menu)
+    {
+        static int sidesWas = -1;
+        if (const int sides = static_cast<int>(g_menu->settings().display.sides); sides != sidesWas)
+        {
+            sidesWas = sides;
+            rg::settingspages::noteNumber("sides", sides);
+        }
     }
     followQuickScenes();
     // The free camera turned on or off, by F6, either menu or Start: a toast.
@@ -300,6 +321,45 @@ std::pair<uint32_t, uint32_t> initialWindowSize(const dq8::ui::Settings &setting
     SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable);
     const uint32_t height = static_cast<uint32_t>(std::max(448.0f, static_cast<float>(usable.h) * 0.8f));
     return {height * 4u / 3u, height};
+}
+
+// The image the menu's Display > Borders > Image shows beside a 4:3 picture:
+// the first PNG, JPG, BMP or TGA by name in borders\ (beside the disc
+// folder, in the game's working directory). It is read each time that
+// choice is made, so an image put there while the game runs is taken by
+// choosing it again.
+bool loadBorderImage(uint32_t &width, uint32_t &height, std::vector<uint8_t> &rgba)
+{
+    std::vector<std::filesystem::path> images;
+    std::error_code error;
+    for (const auto &entry : std::filesystem::directory_iterator("borders", error))
+    {
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (entry.is_regular_file(error) && (extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+                                             extension == ".bmp" || extension == ".tga"))
+        {
+            images.push_back(entry.path());
+        }
+    }
+    std::sort(images.begin(), images.end());
+    for (const std::filesystem::path &path : images)
+    {
+        int w = 0, h = 0, channels = 0;
+        if (unsigned char *pixels = stbi_load(path.string().c_str(), &w, &h, &channels, 4))
+        {
+            width = static_cast<uint32_t>(w);
+            height = static_cast<uint32_t>(h);
+            rgba.assign(pixels, pixels + static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+            stbi_image_free(pixels);
+            std::printf("[rg] sides: %s, %dx%d\n", path.string().c_str(), w, h);
+            return true;
+        }
+        std::fprintf(stderr, "[rg] sides: could not read %s\n", path.string().c_str());
+    }
+    std::fprintf(stderr, "[rg] sides: no image in borders\\, the blurred picture instead\n");
+    return false;
 }
 
 // The saved place and maximized state. A place whose top edge is on no
@@ -354,7 +414,7 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     // it is paused.
     host.completedRenders = [] { return guestFlips(); };
     host.guestFrame = [] { return ps2PadCurrentGuestFrame(); };
-    // The game's own switches, under Interface > Game.
+    // The game's own switches, on the menu's Game page, in its sections.
     host.gameOptions = {
         {"sixty_fps", "60 frames per second",
          "The game runs at 60 frames a second instead of its own 30, its logic still at the PS2's pace; movies "
@@ -364,12 +424,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "The game draws a wider view, and the HUD over the scene and the movies fit it; with Display > Aspect "
          "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded. Menus and text "
          "are drawn for 4:3 and come out stretched.",
-         false},
-        {"skip_opening", "Skip the opening",
-         "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
-        {"instant_loading_recap", "Show the loading recap at once",
-         "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
-         "it has loaded.",
          false},
         {"field_of_view", "Field of view",
          "How wide the camera sees while exploring and in battle, in degrees across a 4:3 picture (the game's is "
@@ -386,6 +440,32 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "How far away the scenery and the objects are still drawn, against the game's (100%), the fog thinned "
          "in step. Most of Salgin has no limit to raise; the open areas gain more. From the next map loaded.",
          false, 100, 400, 100, "%d%%", 25},
+        {"free_camera", "Free camera (F6)",
+         "The camera leaves the party, which stands still, and the controller moves it: the left stick moves the "
+         "point it looks at (Square held, faster; L2 held, up and down), the right stick turns it around that "
+         "point and tilts it (R2 held, nearer and farther). Turn it off, or press F6, to play again. Off at every "
+         "start.",
+         false, 0, 0, 0, "", 1, false},
+        {"skip_opening", "Skip the opening",
+         "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
+        {"instant_loading_recap", "Show the loading recap at once",
+         "When a game loads, the story so far appears whole instead of line by line, and Press X comes as soon as "
+         "it has loaded.",
+         false},
+        {"instant_text", "Instant text",
+         "Dialogue and messages appear a page at a time instead of letter by letter, as the game itself does "
+         "where a scene asks for it; the pauses written into the text stay.",
+         false},
+        {"map_chests", "Chests on the map",
+         "The chests not yet opened show on the maps in the parts you have explored, as the game shows them once "
+         "every save point of a planet is activated. Nothing is saved: the planet's own completion still comes.",
+         false},
+        {"fast_transporter", "Fast transporters",
+         "A transporter's warp plays at up to twice the speed. The music and the sounds keep their pace.", false},
+        {"fast_revelation", "Fast Revelation Flow",
+         "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to twice "
+         "the speed.",
+         false},
         {"encounter_rate", "Encounter rate",
          "How often random battles come, against the game's (100%); 0% turns them off. The story's battles stay.",
          false, 0, 300, 100, "%d%%", 10},
@@ -407,26 +487,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"action_gauge", "Action gauge speed",
          "How fast the party's action gauge fills again in battle, against the game's (100%).",
          false, 25, 400, 100, "%d%%", 25},
-        {"fast_chests", "Fast chests",
-         "Opening a chest plays at up to twice the speed: the lid, the items flying out and the message's "
-         "text. The music and the sounds keep their pace.",
-         false},
-        {"fast_transporter", "Fast transporters",
-         "A transporter's warp plays at up to twice the speed.", false},
-        {"fast_revelation", "Fast Revelation Flow",
-         "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to twice "
-         "the speed.",
-         false},
-        {"free_camera", "Free camera (F6)",
-         "The camera leaves the party, which stands still, and the controller moves it: the left stick moves the "
-         "point it looks at (Square held, faster; L2 held, up and down), the right stick turns it around that "
-         "point and tilts it (R2 held, nearer and farther). Turn it off, or press F6, to play again. Off at every "
-         "start.",
-         false, 0, 0, 0, "", 1, false},
-        {"instant_text", "Instant text",
-         "Dialogue and messages appear a page at a time instead of letter by letter, as the game itself does "
-         "where a scene asks for it; the pauses written into the text stay.",
-         false},
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
          "icon, R1 + R3 a list of them, and Cross gives one of the one picked. Help pages and info list: R1 + "
@@ -434,6 +494,12 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "item the picked cell asks for. Paused in a scene: Triangle + R1 + R2 ends it, also one the game would "
          "not let you skip, which can leave the story out of order.",
          false},
+    };
+    host.gameSections = {
+        {"sixty_fps", "Camera and view"},
+        {"skip_opening", "Convenience"},
+        {"encounter_rate", "Battles and rewards"},
+        {"dev_tools", "Developers"},
     };
     // The game's own Settings screen shows them on pages of its own.
     for (const dq8::ui::GameOption &option : host.gameOptions)
@@ -444,6 +510,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
                                         option.defaultNumber);
         }
     }
+    // And Display > Borders: Black, Blurred, Image.
+    rg::settingspages::setRange("sides", 0, 2, 1, 0);
     host.setGameOption = &applyGameOption;
     host.gameOptionState = [](const std::string &key) { return key == "free_camera" && rg::freecamera::enabled(); };
     host.setGameNumber = &applyGameNumber;
@@ -521,6 +589,7 @@ Setup::Setup(PS2Runtime &runtime)
         dq8::gfx::setPresentObserver(&debug::noteFrameTime);
         // Aspect ratio Auto follows the Widescreen option.
         sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
+        sdl->setSideImageLoader(&loadBorderImage);
         if (noWindow)
         {
             std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");

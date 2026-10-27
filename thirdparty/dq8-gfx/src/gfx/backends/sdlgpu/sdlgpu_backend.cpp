@@ -845,6 +845,15 @@ struct SdlGpuBackend::Impl {
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
     };
     ScratchTexture sharpTexture, compositeTexture, captureTexture;
+    // What fills the window beside the picture (Rogue Galaxy: added): the
+    // picture halved down to a small copy for the blurred sides, and the
+    // player's image, loaded each time that choice is made.
+    std::array<ScratchTexture, 8> blurLevels;
+    SdlGpuSideImageLoader sideImageLoader;
+    SDL_GPUTexture *sideImage = nullptr;
+    uint32_t sideImageWidth = 0u, sideImageHeight = 0u;
+    SdlGpuSides lastSides = SdlGpuSides::Black;
+    bool sidesFailed = false;
     // A frame read back to the host and sent back unchanged (Rogue Galaxy:
     // added). The game's screen captures (ScreenFadeCaptureFrame: the
     // frozen frame of an event under an item's message, the fades) go
@@ -3184,8 +3193,9 @@ struct SdlGpuBackend::Impl {
         return {trim, trim, slot.width - 2u * trim, slot.height - 2u * trim};
     }
 
+    // CLEAR paints the bars black; LOAD keeps the sides drawn under it.
     void drawPicture(SDL_GPUCommandBuffer *commands, const PresentationSlot &slot,
-                     SDL_GPUTexture *target, SdlGpuRect rect) {
+                     SDL_GPUTexture *target, SdlGpuRect rect, SDL_GPULoadOp loadOp) {
         SDL_GPUTexture *source = slot.texture;
         SdlGpuRect from = pictureRegion(slot);
         uint32_t width = from.width;
@@ -3223,7 +3233,125 @@ struct SdlGpuBackend::Impl {
                 }
             }
         }
-        blitRegion(commands, source, from, target, rect, filter, SDL_GPU_LOADOP_CLEAR);
+        blitRegion(commands, source, from, target, rect, filter, loadOp);
+    }
+
+    // The picture blurred for SdlGpuSides::Blurred: halved by bilinear
+    // blits, each averaging four texels, until it is at most 256 wide (64
+    // and 128 were too blurred for the user).
+    SDL_GPUTexture *blurredPicture(SDL_GPUCommandBuffer *commands, const PresentationSlot &slot,
+                                   uint32_t &width, uint32_t &height) {
+        SDL_GPUTexture *source = slot.texture;
+        SdlGpuRect from = pictureRegion(slot);
+        for (ScratchTexture &level : blurLevels) {
+            if (from.width <= 256u || from.height < 2u)
+                break;
+            const SdlGpuRect to{0u, 0u, from.width / 2u, from.height / 2u};
+            if (!ensureScratch(level, to.width, to.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM))
+                return nullptr;
+            blitRegion(commands, source, from, level.texture, to, SDL_GPU_FILTER_LINEAR, SDL_GPU_LOADOP_DONT_CARE);
+            source = level.texture;
+            from = to;
+        }
+        if (source == slot.texture)
+            return nullptr;
+        width = from.width;
+        height = from.height;
+        return source;
+    }
+
+    void releaseSideImage() {
+        if (sideImage)
+            SDL_ReleaseGPUTexture(device.handle(), sideImage);
+        sideImage = nullptr;
+        sideImageWidth = sideImageHeight = 0u;
+    }
+
+    // The player's image, through the loader, uploaded in a copy pass ahead
+    // of the frame's drawing.
+    void loadSideImage(SDL_GPUCommandBuffer *commands) {
+        releaseSideImage();
+        uint32_t width = 0u, height = 0u;
+        std::vector<uint8_t> rgba;
+        if (!sideImageLoader || !sideImageLoader(width, height, rgba) || width == 0u || height == 0u ||
+            width > 16384u || height > 16384u || rgba.size() < size_t(width) * height * 4u)
+            return;
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        SDL_GPUTexture *texture = SDL_CreateGPUTexture(device.handle(), &info);
+        SDL_GPUTransferBufferCreateInfo transferInfo{};
+        transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transferInfo.size = width * height * 4u;
+        SDL_GPUTransferBuffer *transfer =
+            texture ? SDL_CreateGPUTransferBuffer(device.handle(), &transferInfo) : nullptr;
+        void *mapped = transfer ? SDL_MapGPUTransferBuffer(device.handle(), transfer, false) : nullptr;
+        SDL_GPUCopyPass *copy = nullptr;
+        if (mapped) {
+            std::memcpy(mapped, rgba.data(), transferInfo.size);
+            SDL_UnmapGPUTransferBuffer(device.handle(), transfer);
+            copy = SDL_BeginGPUCopyPass(commands);
+        }
+        if (copy) {
+            SDL_GPUTextureTransferInfo from{};
+            from.transfer_buffer = transfer;
+            SDL_GPUTextureRegion to{};
+            to.texture = texture;
+            to.w = width;
+            to.h = height;
+            to.d = 1u;
+            SDL_UploadToGPUTexture(copy, &from, &to, false);
+            SDL_EndGPUCopyPass(copy);
+            sideImage = texture;
+            sideImageWidth = width;
+            sideImageHeight = height;
+        } else {
+            std::fprintf(stderr, "[gfx] the side image could not be uploaded: %s\n", SDL_GetError());
+            if (texture)
+                SDL_ReleaseGPUTexture(device.handle(), texture);
+        }
+        // Released once the copy has run.
+        if (transfer)
+            SDL_ReleaseGPUTransferBuffer(device.handle(), transfer);
+    }
+
+    // The window beside a picture that leaves it uncovered, before the
+    // picture is drawn over it; false leaves the bars to drawPicture's black.
+    bool drawSides(SDL_GPUCommandBuffer *commands, const PresentationSlot &slot, SDL_GPUTexture *target,
+                   uint32_t width, uint32_t height, SdlGpuRect rect) {
+        const SdlGpuSides sides = displayOptions.sides;
+        if (sides == SdlGpuSides::Image && lastSides != SdlGpuSides::Image)
+            loadSideImage(commands);
+        lastSides = sides;
+        if (sides == SdlGpuSides::Black || (rect.width >= width && rect.height >= height))
+            return false;
+        SDL_GPUTexture *source = sideImage;
+        uint32_t sourceWidth = sideImageWidth, sourceHeight = sideImageHeight;
+        bool blur = false;
+        float brightness = 1.0f;
+        if (sides == SdlGpuSides::Blurred || !source) {
+            source = blurredPicture(commands, slot, sourceWidth, sourceHeight);
+            blur = true;
+            // Half was too dark to make out anything.
+            brightness = 0.75f;
+        }
+        std::string error;
+        if (!source || !device.drawSides(commands, target, SDL_GetGPUSwapchainTextureFormat(device.handle(), window),
+                                         width, height, source, sourceWidth, sourceHeight, blur, brightness,
+                                         error)) {
+            if (!error.empty() && !sidesFailed) {
+                std::fprintf(stderr, "[gfx] the sides stay black: %s\n", error.c_str());
+                sidesFailed = true;
+            }
+            return false;
+        }
+        return true;
     }
 
     void clearTarget(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *target) {
@@ -3326,7 +3454,8 @@ struct SdlGpuBackend::Impl {
             const SdlGpuRect picture = pictureRegion(*slot);
             rect = sdlGpuDisplayRect(displayOptions, picture.width, picture.height, swapchainWidth,
                                      swapchainHeight, gameWidescreen());
-            drawPicture(commands, *slot, target, rect);
+            const bool sides = drawSides(commands, *slot, target, swapchainWidth, swapchainHeight, rect);
+            drawPicture(commands, *slot, target, rect, sides ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR);
         } else {
             clearTarget(commands, target);
         }
@@ -3936,6 +4065,9 @@ SdlGpuBackend::~SdlGpuBackend() {
         for (auto *scratch : {&m_impl->sharpTexture, &m_impl->compositeTexture, &m_impl->captureTexture,
                               &m_impl->roundTrip.copy})
             m_impl->releaseScratch(*scratch);
+        for (auto &level : m_impl->blurLevels)
+            m_impl->releaseScratch(level);
+        m_impl->releaseSideImage();
         if (m_impl->window) {
             SDL_ReleaseWindowFromGPUDevice(m_impl->device.handle(), m_impl->window);
             SDL_DestroyWindow(m_impl->window);
@@ -4378,6 +4510,10 @@ void SdlGpuBackend::requestResolutionScale(uint32_t scale) {
 
 uint32_t SdlGpuBackend::activeResolutionScale() const {
     return m_impl->activeScale.load(std::memory_order_acquire);
+}
+
+void SdlGpuBackend::setSideImageLoader(SdlGpuSideImageLoader loader) {
+    m_impl->sideImageLoader = std::move(loader);
 }
 
 void SdlGpuBackend::setGameWidescreenQuery(GameWidescreenQuery query) {

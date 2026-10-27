@@ -1223,6 +1223,55 @@ too (`RUP` ...).
 - The quick scenes went from three times the pace to twice: a chest at
   three was too fast for the user, who had asked for the pace the 60 fps
   mode once played them at.
+- The user asked what could replace the black bars beside the 4:3
+  screens (the title overlay's, the 4:3 movies, or the whole game with
+  Widescreen off on a wide window), as ports of older games do. Display >
+  Sides: black, the picture itself blurred and darkened, or an image of
+  the player's from `borders\` (the first PNG, JPG, BMP or TGA by name,
+  read with the runtime's stb_image each time that choice is made; the
+  folder's images are ignored by git). The presenter draws the side first
+  with `present_sides.frag`, the source scaled to cover the window, and
+  the picture over it. A visible scripted run at the title (1280x720,
+  Widescreen on) captured all three.
+- The user asked whether the map could show the chests. An agent read
+  RGDecomp and the generated code: MinimapDrawEntry (0x325720), behind the
+  corner map, the full map and the transporter menu's, already has a pass
+  that draws the zones' chest records (an 8x8 icon; opened ones, by the
+  bitset StateFlag2Test reads at the record's +8, left out), gated on
+  SavePointAreaCompleteTest (0x3EC7A0, its only caller the jal at
+  0x3267A8): the planet's flag, 460 to 466, set once every save point there
+  is activated. "Chests on the map" answers yes for that call alone and
+  writes nothing, so the save and the planet's own completion (the whole
+  map revealed) are untouched; cells not explored still hide them. In the
+  30 fps walk three chest icons came out on Salgin's corner map, the frame
+  otherwise identical (212 bytes of the display differ); off, it is
+  byte-identical to `mods30c`.
+- The user found the chests too quick still at twice the pace, and of
+  little worth: "Fast chests" was taken out, as the battles' starts and
+  ends were. The transporters and the Revelation Flow stay.
+- Sides is on the game's Settings screen too, on the numbers' page under
+  Draw Distance ("Sides: Black"), Low and High going through Black,
+  Blurred and Image; a change goes to the F1 menu (`Overlay::setSides`,
+  kept in settings.ini), and the menu's own changes come back to the page
+  (`noteNumber`, from `pump()`). In a hidden walk High twice on the row
+  read "Sides: Image" and wrote `sides = image`; the next start's page
+  read the same. The walks' scripts reach the screen with the cursor on
+  row 8, where the save's cursor memory leaves it, not row 0.
+- The user found Interface crowded: the menu's own settings and the
+  game's twenty options in one list. The game's went to a page of their
+  own, Game (between Controls and Interface; `SettingsPage::Game`, the
+  script's `settings game`), in four sections the host names
+  (`HostServices::gameSections`, each a title before an option's key):
+  Camera and view, Convenience, Battles and rewards, Developers.
+  Interface keeps the menu, the pause and speed, and the frame counter.
+  The settings file is unchanged.
+- The user found the blurred sides too blurred and too dark to make out,
+  and the name "Sides" odd. The menus call it Borders now, the name of the
+  images' folder (still `sides` in the file and the script). The blurred
+  copy is drawn at 0.75 of its brightness instead of half, and stops at
+  256 texels wide instead of 64: 128 was tried first (a simulation from a
+  window capture of Salgin put 64, 128 and 256 side by side), and was
+  still too blurred for the user.
 
 At their defaults the 30 fps walk's frame is still byte-identical to
 `mods30c`.

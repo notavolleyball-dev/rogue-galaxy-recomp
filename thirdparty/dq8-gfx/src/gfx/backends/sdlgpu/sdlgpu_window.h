@@ -24,6 +24,20 @@ enum class SdlGpuFilter : uint8_t {
     Nearest, // nearest neighbour
 };
 
+// What fills the window beside a picture that does not reach its edges
+// (Rogue Galaxy: added).
+enum class SdlGpuSides : uint8_t {
+    Black,
+    Blurred, // the picture itself, blurred and darkened, covering the window
+    Image,   // the player's image (SdlGpuSideImageLoader), covering the window
+};
+
+// The image for SdlGpuSides::Image, as RGBA8 rows: called on the presenting
+// thread each time that choice is made; false when there is none, which
+// leaves the blurred picture (Rogue Galaxy: added).
+using SdlGpuSideImageLoader =
+    std::function<bool(uint32_t &width, uint32_t &height, std::vector<uint8_t> &rgba)>;
+
 struct SdlGpuDisplayOptions {
     SdlGpuAspect aspect = SdlGpuAspect::Auto;
     SdlGpuFilter filter = SdlGpuFilter::Sharp;
@@ -36,6 +50,7 @@ struct SdlGpuDisplayOptions {
     // GS pixels left off each edge of the picture: the border a game leaves
     // undrawn or half drawn, which a television's overscan hid.
     uint32_t crop = 0u;
+    SdlGpuSides sides = SdlGpuSides::Black;
     bool operator==(const SdlGpuDisplayOptions &) const = default;
 };
 

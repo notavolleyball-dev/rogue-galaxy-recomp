@@ -51,7 +51,8 @@ foreach(shader IN ITEMS
         "gs_reinterpret.frag;frag;kGsReinterpretFragSpirv"
         "gs_display.frag;frag;kGsDisplayFragSpirv"
         "gs_index8.frag;frag;kGsIndex8FragSpirv"
-        "gs_local_copy.frag;frag;kGsLocalCopyFragSpirv")
+        "gs_local_copy.frag;frag;kGsLocalCopyFragSpirv"
+        "present_sides.frag;frag;kPresentSidesFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)
     list(GET shader 2 symbol)

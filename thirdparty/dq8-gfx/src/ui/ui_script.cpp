@@ -83,9 +83,9 @@ void Overlay::runStep(const ScriptStep &step, uint64_t frame) {
     const bool on = first != "off";
     std::fprintf(stderr, "[ui] script frame %llu, %.1f s: %s %s\n", static_cast<unsigned long long>(frame),
                  now() - m_scriptStart, command.c_str(), joined(step.arguments).c_str());
-    static constexpr const char *kPages[] = {"display", "sound", "controls", "interface"};
+    static constexpr const char *kPages[] = {"display", "sound", "controls", "game", "interface"};
     static constexpr SettingsPage kPageValues[] = {SettingsPage::Display, SettingsPage::Sound, SettingsPage::Controls,
-                                                   SettingsPage::Interface};
+                                                   SettingsPage::Game, SettingsPage::Interface};
     static constexpr const char *kAspects[] = {"auto", "4:3", "16:9", "native", "stretch"};
     static constexpr gfx::SdlGpuAspect kAspectValues[] = {gfx::SdlGpuAspect::Auto, gfx::SdlGpuAspect::Standard,
                                                           gfx::SdlGpuAspect::Wide, gfx::SdlGpuAspect::Native,
@@ -93,9 +93,12 @@ void Overlay::runStep(const ScriptStep &step, uint64_t frame) {
     static constexpr const char *kFilters[] = {"sharp", "smooth", "nearest"};
     static constexpr gfx::SdlGpuFilter kFilterValues[] = {gfx::SdlGpuFilter::Sharp, gfx::SdlGpuFilter::Smooth,
                                                           gfx::SdlGpuFilter::Nearest};
+    static constexpr const char *kSides[] = {"black", "blurred", "image"};
+    static constexpr gfx::SdlGpuSides kSidesValues[] = {gfx::SdlGpuSides::Black, gfx::SdlGpuSides::Blurred,
+                                                        gfx::SdlGpuSides::Image};
     SettingsPage page{};
     // Settings the script changes are saved as the menu's own changes are.
-    static constexpr const char *kSaved[] = {"aspect", "filter", "integer", "scale", "fps", "speed"};
+    static constexpr const char *kSaved[] = {"aspect", "filter", "sides", "integer", "scale", "fps", "speed"};
     if (std::find(std::begin(kSaved), std::end(kSaved), command) != std::end(kSaved))
         markDirty();
     if (command == "menu") {
@@ -120,6 +123,8 @@ void Overlay::runStep(const ScriptStep &step, uint64_t frame) {
     } else if (command == "aspect" && pick(first, kAspects, kAspectValues, m_settings.display.aspect)) {
         m_backend.setDisplayOptions(m_settings.display);
     } else if (command == "filter" && pick(first, kFilters, kFilterValues, m_settings.display.filter)) {
+        m_backend.setDisplayOptions(m_settings.display);
+    } else if (command == "sides" && pick(first, kSides, kSidesValues, m_settings.display.sides)) {
         m_backend.setDisplayOptions(m_settings.display);
     } else if (command == "integer") {
         m_settings.display.integerScale = on;

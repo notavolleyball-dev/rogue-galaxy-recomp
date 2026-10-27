@@ -161,6 +161,15 @@ void Overlay::setGameNumberValue(const std::string &key, int value) {
     }
 }
 
+void Overlay::setSides(gfx::SdlGpuSides sides) {
+    if (m_settings.display.sides == sides)
+        return;
+    m_settings.display.sides = sides;
+    m_backend.setDisplayOptions(m_settings.display);
+    markDirty();
+    saveIfDirty(true);
+}
+
 int Overlay::gameNumber(const GameOption &option) const {
     const auto found = m_settings.gameNumbers.find(option.key);
     const int value = found != m_settings.gameNumbers.end() ? found->second : option.defaultNumber;
@@ -634,7 +643,7 @@ void Overlay::drawMenuBar() {
             ImGui::EndMenu();
         }
         if (beginMenu("Settings")) {
-            static constexpr const char *kPages[] = {"Display", "Sound", "Controls", "Interface"};
+            static constexpr const char *kPages[] = {"Display", "Sound", "Controls", "Game", "Interface"};
             for (int page = 0; page < static_cast<int>(SettingsPage::Count); ++page)
                 if (menuItem(kPages[page], nullptr, m_settingsOpen && m_page == static_cast<SettingsPage>(page)))
                     openSettings(static_cast<SettingsPage>(page));
