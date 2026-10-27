@@ -109,13 +109,29 @@ add_executable(roguegalaxy
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
-target_compile_definitions(roguegalaxy PRIVATE RG_VERSION="${RG_VERSION}")
+target_compile_definitions(roguegalaxy PRIVATE RG_APP_VERSION="${PROJECT_VERSION}")
 # The commit this build is from, for the menu's About window (as of the last
-# configure).
-execute_process(COMMAND git describe --always --dirty
-                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-                OUTPUT_VARIABLE RG_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
-                ERROR_QUIET RESULT_VARIABLE RG_REVISION_RESULT)
+# configure): the REVISION file of a release's source archive, which is no
+# git checkout (tools/release/source_zip.py), or else git. Changed files make
+# it "-dirty", but not the framework's checkout, which configure always
+# changes with patches/ps2recomp (`git describe --dirty` counts that too).
+if(EXISTS "${CMAKE_SOURCE_DIR}/REVISION")
+    file(STRINGS "${CMAKE_SOURCE_DIR}/REVISION" RG_REVISION LIMIT_COUNT 1)
+    set(RG_REVISION_RESULT 0)
+else()
+    execute_process(COMMAND "${GIT_EXECUTABLE}" describe --tags --always
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE RG_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET RESULT_VARIABLE RG_REVISION_RESULT)
+    if(RG_REVISION_RESULT EQUAL 0 AND NOT RG_REVISION STREQUAL "")
+        execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no --ignore-submodules=dirty
+                        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                        OUTPUT_VARIABLE rg_changed OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(NOT rg_changed STREQUAL "")
+            string(APPEND RG_REVISION "-dirty")
+        endif()
+    endif()
+endif()
 if(NOT RG_REVISION_RESULT EQUAL 0 OR RG_REVISION STREQUAL "")
     set(RG_REVISION "unknown")
 endif()

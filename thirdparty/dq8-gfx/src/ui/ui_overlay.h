@@ -62,6 +62,9 @@ struct GameOption {
 
 struct HostServices {
     std::string version;
+    // The commit it was built from, beside the version in the About window
+    // (Rogue Galaxy: added).
+    std::string revision;
     std::function<void(float)> setVolume; // 0 to 1
     std::function<void(bool)> setPaused;
     // The game's speed against real time; 0 runs it as fast as it can go.

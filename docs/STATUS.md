@@ -1276,6 +1276,103 @@ too (`RUP` ...).
 At their defaults the 30 fps walk's frame is still byte-identical to
 `mods30c`.
 
+**Toward a 0.1.0: a build from a fresh clone (2026-10-26, night).** The
+user asked how a first pre-release would go and chose the source with an
+installer that builds the game on the player's machine from their own
+disc (nothing of the game distributed). A clone of the pushed repository
+(b198448), built by the README's steps, found:
+- A deep folder breaks the toml11 download (one of its test submodules
+  passes Windows' 260-character path limit): the installer needs a short
+  path or long paths on. Built again in `F:\rgclean`.
+- The README built the recompiler before anything applied
+  patches/ps2recomp (the game's configure did), so patch 0017 was missing
+  from it: three generated functions (the VU0 box tests) came out without
+  their flags. The patch loop moved to `cmake/framework_patches.cmake`,
+  which the configure includes and `python setup.py tools` runs on its own
+  (`cmake -P`) before it builds the recompiler.
+- A fresh game build stopped at once: the runtime's FFmpeg download goes
+  to `ThirdParty/ffmpeg-prefix` under the build folder, which already had a
+  `thirdparty/` (the framework's and dq8-gfx's binary folders); CMake wrote
+  the download's outputs with one case and the link inputs with the other,
+  and Ninja found no rule for the libraries. An existing build had them
+  from before. The two subprojects build in `ps2recomp/` and `dq8-gfx/` now.
+- `setup.py` has `tools`, `build` and `install` (verify, extract unless
+  `disc/` holds the game, tools, recompile, build). In the fresh clone,
+  `install` from the ISO took 11 minutes after the extraction; the
+  generated code is identical to this tree's, and its walk's frame is
+  byte-identical to `mods30c`.
+- Not reproducible from the repository: the VU0 blocks of
+  `build/vu-blocks` (a recording, microcode included, never committed),
+  so a fresh install interprets the VU0 micro programs (the battle's game
+  thread was 94% busy that way against 86%). Needs a manifest like VU1's.
+- The version is 0.1.0 (`project(VERSION)`, `RG_APP_VERSION`): the window
+  title and the menu say it, the About window adds the commit. The
+  commit was always "-dirty" (`git describe --dirty` counts the
+  framework's checkout, which configure patches); the changed files are
+  read with `git status --ignore-submodules=dirty` instead.
+- The user chose the installer that downloads its tools into the folder
+  (no Windows install, no administrator). `Install.bat` runs
+  `tools/install/install.ps1` (Windows PowerShell 5.1): it refuses a folder
+  whose path is over 60 characters (the build's deepest path is 185 below
+  it), has spaces, accents or symbols, or is in OneDrive or on a share, and
+  offers a copy at `<drive>:\RogueGalaxy`; checks the free space; asks for
+  the image (or takes it dropped onto the batch file) and checks its size;
+  downloads MinGit 2.56.0.2, Python 3.12.13 (python-build-standalone),
+  CMake 3.31.12, Ninja 1.13.2 and llvm-mingw 20260616 into `toolchain\`,
+  the versions this tree builds with, each against a SHA-256 read from
+  GitHub's asset digest and, where the project publishes one, its own list;
+  then runs `setup.py install` with only those tools and Windows on PATH,
+  its output also in `install.log`, and offers a desktop shortcut. A run
+  again skips what is done. The downloads themselves are for the user to
+  try (I do not fetch executables); the rest ran end to end with the local
+  tools (`-UseToolsOnPath`, PATH cut to them and Windows): the archive
+  unpacked at a 66-character path, copied itself to `F:\RogueGalaxy` and
+  went from the ISO to the game in 11 minutes, extraction included; its
+  walk `inst1` is byte-identical to `mods30c`.
+- `setup.py install` stopped ignoring a failed recompile, and redoes an
+  interrupted extraction over itself (`extract` refused a non-empty
+  `disc/`; the memory cards in it are not the disc's files and stay). Into
+  a pipe the extraction prints a line every 5%: the line rewritten in place
+  reached the installer only at the end.
+- GitHub's "Source code" archives leave the submodules out (PS2Recomp,
+  imgui), so the release carries `RogueGalaxy-<version>.zip` from
+  `tools/release/source_zip.py`: HEAD (or the working tree with
+  `--worktree`), each submodule at its recorded commit, and `REVISION`,
+  which the About window reads when there is no git checkout. 7.4 MiB.
+- A review of these changes (the user asked for one) found, all fixed and
+  tried: the archive took the framework with this machine's line endings
+  (`core.autocrlf=true` made it CRLF, having no .gitattributes), and
+  outside a repository `git apply` with autocrlf=false rejected patch
+  0001, so a MinGit that does not convert would have stopped the install
+  at the patches; it is archived with autocrlf=false now (LF, and all 18
+  patches apply under true, false and input). A failed configure leaves
+  CMakeCache.txt, which `setup.py` took for "configured", so a run again
+  never configured: it looks for build.ninja. `extract` wrote the manifest
+  even with problems (a large file's hash mismatch, which the quick
+  verify does not hash), and the next install took the disc as extracted:
+  the manifest is removed first and written only when nothing is wrong.
+  The patch stamp survived a framework reset and skipped every patch: when
+  the first stamped patch applies again, all are applied again (the last
+  one cannot tell, it applies only over the others). Smaller: a missing
+  tool ends in "failed: STEP: cannot run" instead of a traceback, an
+  `--iso` that is not used says so, `-UseToolsOnPath` checks Python 3.11,
+  and the unused `RG_VERSION` define went. Left: the revision rule is in
+  both CMake and `source_zip.py`, and the FFmpeg case fix renames our
+  binary folders instead of patching the framework's `ThirdParty` name.
+  The main tree's walk `def11` is byte-identical to `mods30c`.
+- The user's first install with the real downloads (from Downloads, 54
+  characters, so in place) downloaded and checked MinGit, then stopped:
+  Windows refused to rename the folder it was unpacked into ("access
+  denied"). Not reproduced afterwards, by me or there: an antivirus looking
+  at programs just written holds them, Windows renames no folder with a
+  file open inside, and a scanner does not look at the same files twice.
+  Tools are unpacked in place now (`tar --strip-components` when the whole
+  archive is in one folder, read from its listing), and deleting or
+  renaming a download tries again for half a minute (`Invoke-Patiently`),
+  which a test with a file held by another process passed (3 s: waits and
+  goes on; 40 s: says why and stops, or goes on when the step can wait).
+  The real MinGit archive unpacks in place to `cmd\git.exe`.
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.

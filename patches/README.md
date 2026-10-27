@@ -1,8 +1,10 @@
 # Patches to pinned dependencies
 
 `ps2recomp/` holds changes to the framework in `thirdparty/PS2Recomp`. The
-submodule stays at its upstream commit; configuring the game applies each
-patch here to its checkout, in name order, and skips one that is already
+submodule stays at its upstream commit; `cmake/framework_patches.cmake`
+applies each patch here to its checkout, in name order, when the game is
+configured and before `python setup.py tools` builds the recompiler (some
+patches change the code it generates), and skips one that is already
 applied (listed in `thirdparty/PS2Recomp/.rg-patches-applied`, or
 `git apply --reverse --check` for one not listed yet). To undo them, run
 `git -C thirdparty/PS2Recomp checkout -- .` and delete that stamp.

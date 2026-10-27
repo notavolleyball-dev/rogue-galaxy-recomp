@@ -686,7 +686,10 @@ void Overlay::drawAbout() {
         ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.6f);
         ImGui::TextUnformatted("Rogue Galaxy Recompiled");
         ImGui::PopFont();
-        mutedText("Version %s", m_host.version.c_str());
+        if (m_host.revision.empty())
+            mutedText("Version %s", m_host.version.c_str());
+        else
+            mutedText("Version %s (%s)", m_host.version.c_str(), m_host.revision.c_str());
         ImGui::EndGroup();
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::GetFrameHeight());

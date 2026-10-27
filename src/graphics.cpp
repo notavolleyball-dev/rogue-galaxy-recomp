@@ -395,7 +395,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
                                              dq8::ui::Settings settings, const std::string &settingsPath)
 {
     dq8::ui::HostServices host;
-    host.version = RG_REVISION;
+    host.version = RG_APP_VERSION;
+    host.revision = RG_REVISION;
     // RG_MUTE=1 keeps the game silent whatever the menu's volume says.
     const bool mute = env("RG_MUTE", "0") != "0";
     host.setVolume = [mute](float volume) { ps2_native_iop::setVolume(mute ? 0.0f : volume); };

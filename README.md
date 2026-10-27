@@ -9,11 +9,41 @@ native PC executable, built on [PS2Recomp](https://github.com/ran-j/PS2Recomp).
 | Framework | [Sinan-Karakaya/PS2Recomp](https://github.com/Sinan-Karakaya/PS2Recomp) fork, pinned in `thirdparty/PS2Recomp` |
 | State | **Runs**: title screen, opening, field and battles at 60 fps by default (the menu's 60 frames per second; the scene's step follows the frame time, so a slow frame does not play in slow motion), 50 to 60 at a boss gate, the heaviest field scene measured, where the VU1 programs are the limit; GS on the GPU, VU1 compiled ahead of time and on its own thread, music and sound. See [`docs/STATUS.md`](docs/STATUS.md). |
 
+## Install (Windows)
+
+You need Windows 10 or 11 (64-bit), about 16 GB free, an internet connection
+the first time, and your own image of the disc: Rogue Galaxy, USA,
+SCUS-97490 ([`docs/DISC.md`](docs/DISC.md)). Nothing of the game is
+downloaded: its code is translated from your disc, on your PC.
+
+1. Download `RogueGalaxy-<version>.zip` from the [releases](../../releases)
+   page; not GitHub's "Source code" archives, which lack two of its parts.
+2. Extract it to a short folder, such as `C:\RogueGalaxy`. (When the folder's
+   path is too long, has spaces or accents, or is inside OneDrive,
+   `Install.bat` offers to copy itself to one.)
+3. Double-click `Install.bat`, or drop your `.iso` onto it, and choose the
+   disc image. Windows may ask before running it, since it came from the
+   internet.
+4. Wait, from 15 minutes to an hour. It downloads the build tools into
+   `toolchain\` (Git, Python, CMake, Ninja and LLVM, about 300 MB, each
+   checked against a pinned SHA-256; nothing is installed in Windows),
+   checks your image, extracts it into `disc\` and builds the game.
+5. Play with `Rogue Galaxy.exe`; the installer offers a desktop shortcut.
+
+If it stops, `install.log` has the details, and running `Install.bat` again
+continues where it stopped. An antivirus may quarantine a compiler (clang)
+partway: restore it, or allow the `toolchain` folder, and run it again.
+Everything stays in the folder; to uninstall, delete it (your saves are in
+`disc\mc0`).
+
 ## Setup
 
-Requirements: Git, Python 3.11+, CMake 3.24+ with Ninja, clang with C++20,
-and your own dump of the game ([`docs/DISC.md`](docs/DISC.md) lists the one
-that works).
+By hand, for developers or other systems (`Install.bat` runs the same
+steps). Requirements: Git, Python 3.11+, CMake 3.24+ with Ninja, clang with
+C++20, and your own dump of the game ([`docs/DISC.md`](docs/DISC.md) lists
+the one that works). The versions tested are the ones `Install.bat`
+downloads, pinned in [`tools/install/install.ps1`](tools/install/install.ps1):
+llvm-mingw 20260616 (LLVM 22.1.8), CMake 3.31.12, Ninja 1.13.2, Python 3.12.
 
 ```bash
 git clone --recurse-submodules <this repo>
@@ -40,23 +70,25 @@ downloads raylib, SDL3 and glslang (for the GPU backend's shaders) and, on
 Windows, a prebuilt LGPL FFmpeg whose hash the framework pins.
 
 ```bash
-# 1. The recompiler, from the pinned framework (once)
-cmake -S thirdparty/PS2Recomp -B build/tools -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF
-cmake --build build/tools --target ps2_recomp ps2_analyzer
+# 1. The recompiler: applies patches/ps2recomp to the pinned framework, then
+#    builds ps2_recomp and ps2_analyzer in build/tools (Ninja, clang)
+python setup.py tools
 
 # 2. Recompile your disc's code to C++ in build/generated/<image>/ (about a
 #    minute): runs `check`, wraps the overlays, runs ps2_recomp on all six images
 python setup.py recompile
 
-# 3. Build the game against the framework runtime
-cmake -S . -B build/game -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-cmake --build build/game
+# 3. Build the game against the framework runtime in build/game
+python setup.py build
 
 # 4. Run it on your extracted disc (on Windows, double-click "Rogue Galaxy.exe")
 build/game/src/roguegalaxy disc/SCUS_974.90
 ```
+
+`python setup.py install --iso "/path/to/Rogue Galaxy (USA).iso"` does it
+all in one go: verify, extract (skipped once `disc/` holds the game), tools,
+recompile and build. The patches must be in before the recompiler is built:
+some change the code it generates, and `tools` applies them first.
 
 Run `setup.py recompile` again after changing a map or config, then rebuild.
 

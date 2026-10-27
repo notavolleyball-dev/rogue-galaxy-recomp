@@ -10,6 +10,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(RogueGalaxyRecomp
+    VERSION 0.1.0
     DESCRIPTION "Rogue Galaxy (PS2) static recompilation"
     LANGUAGES C CXX)
 
@@ -66,44 +67,19 @@ set(PS2X_VU_AOT_COMPILE_JOBS "1" CACHE STRING
     "Maximum concurrent runtime compilations with VU AOT (Ninja)" FORCE)
 message(STATUS "VU blocks: ${rg_vu_blocks}")
 
-# Local changes to the pinned framework, carried as patches so the submodule
-# stays at its upstream commit: each is applied to the checkout once, on
-# configure, and skipped when it already is. See patches/README.md.
+# Local changes to the pinned framework (patches/ps2recomp), applied to the
+# checkout once; `python setup.py tools` applies them too, before it builds
+# the recompiler.
 find_package(Git REQUIRED)
-file(GLOB rg_framework_patches CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/patches/ps2recomp/*.patch")
-list(SORT rg_framework_patches)
-# The patches applied so far are listed in a stamp inside the checkout: a
-# later patch may change lines an earlier one added, after which the earlier
-# one no longer reverse-applies, so that check alone cannot tell "applied"
-# from "not yet" (it failed configure twice). Undoing the patches
-# (`git -C thirdparty/PS2Recomp checkout -- .`) must remove the stamp too.
-set(rg_patch_stamp "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/PS2Recomp/.rg-patches-applied")
-set(rg_patches_applied "")
-if(EXISTS "${rg_patch_stamp}")
-    file(STRINGS "${rg_patch_stamp}" rg_patches_applied)
-endif()
-foreach(patch IN LISTS rg_framework_patches)
-    get_filename_component(rg_patch_name "${patch}" NAME)
-    if(rg_patch_name IN_LIST rg_patches_applied)
-        continue()
-    endif()
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${patch}"
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/PS2Recomp"
-        RESULT_VARIABLE rg_patch_present OUTPUT_QUIET ERROR_QUIET)
-    if(NOT rg_patch_present EQUAL 0)
-        execute_process(COMMAND "${GIT_EXECUTABLE}" apply "${patch}"
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/PS2Recomp"
-            RESULT_VARIABLE rg_patch_result)
-        if(NOT rg_patch_result EQUAL 0)
-            message(FATAL_ERROR "Could not apply ${patch} to thirdparty/PS2Recomp")
-        endif()
-        message(STATUS "Applied ${patch}")
-    endif()
-    file(APPEND "${rg_patch_stamp}" "${rg_patch_name}
-")
-endforeach()
+include(cmake/framework_patches.cmake)
 
-add_subdirectory(thirdparty/PS2Recomp EXCLUDE_FROM_ALL)
+# Binary folders not named thirdparty/: the runtime's FFmpeg download goes to
+# ThirdParty/ffmpeg-prefix under the build folder, and with a thirdparty/
+# there already CMake wrote the download's outputs with the folder's case
+# and the game's link inputs with the other; Ninja, matching them by case,
+# had no rule for the libraries, and a fresh build stopped at once
+# (2026-10-26; an existing build had them from before).
+add_subdirectory(thirdparty/PS2Recomp "${CMAKE_BINARY_DIR}/ps2recomp" EXCLUDE_FROM_ALL)
 
 # The runtime asks for link-time optimization in Release. With clang on
 # MinGW (COFF) that loses the TLS initialization routine of an inline
@@ -115,7 +91,7 @@ set_property(TARGET ps2_runtime PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE OF
 # downloads and builds SDL3, and glslang when no GLSL compiler is installed.
 option(RG_GS_SDLGPU "Build the SDL3 GPU GS backend" ON)
 if(RG_GS_SDLGPU)
-    add_subdirectory(thirdparty/dq8-gfx)
+    add_subdirectory(thirdparty/dq8-gfx "${CMAKE_BINARY_DIR}/dq8-gfx")
 endif()
 
 add_subdirectory(src)

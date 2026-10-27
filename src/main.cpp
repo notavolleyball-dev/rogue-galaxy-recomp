@@ -112,7 +112,7 @@ int run(int argc, char **argv)
 
     PS2Runtime runtime;
     rg::graphics::Setup graphics(runtime);
-    if (!runtime.initialize("Rogue Galaxy Recompiled (" RG_VERSION ")"))
+    if (!runtime.initialize("Rogue Galaxy Recompiled " RG_APP_VERSION))
     {
         std::fprintf(stderr, "[rg] PS2Runtime::initialize() failed\n");
         return 1;

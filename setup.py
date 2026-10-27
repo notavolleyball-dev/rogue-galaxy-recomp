@@ -152,6 +152,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
     out = Path(args.out)
     if out.exists() and any(out.iterdir()) and not args.force:
         sys.exit(f"{out} is not empty; pass --force to overwrite")
+    # The manifest says the folder holds the disc (install skips extracting
+    # then): written last, and only when nothing is wrong.
+    (out / "manifest.json").unlink(missing_ok=True)
     problems = []
     manifest = {"version": args.version, "image": str(Path(args.iso).resolve()), "files": {}}
     with IsoImage(args.iso) as iso:
@@ -159,6 +162,10 @@ def cmd_extract(args: argparse.Namespace) -> int:
         files = unique_files(iso)
         total = sum(c[0].size for c in files.values())
         done = 0
+        # Into a pipe (the installer's log) a line every 5% instead of one
+        # line rewritten in place, which a pipe gets only at the end.
+        tty = sys.stdout.isatty()
+        shown = -1
         for path, copies in sorted(files.items(), key=lambda kv: kv[1][0].lba):
             first = copies[0]
             dest = out / path
@@ -180,21 +187,31 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 "copies": [{"layer": c.layer, "lba": c.lba, "layer_lba": c.layer_lba} for c in copies],
             }
             done += first.size
-            print(f"\r{done * 100 // max(total, 1):3d}%  {path:<40.40}", end="", flush=True)
-        print()
+            percent = done * 100 // max(total, 1)
+            if tty:
+                print(f"\r{percent:3d}%  {path:<40.40}", end="", flush=True)
+            elif percent // 5 != shown:
+                shown = percent // 5
+                print(f"{percent:3d}%", flush=True)
+        if tty:
+            print()
         manifest["volumes"] = [
             {"layer": v.layer, "base": v.base, "blocks": v.blocks, "volume_id": v.volume_id} for v in iso.volumes
         ]
     for path in sorted(set(known["files"]) - set(manifest["files"])):
         problems.append(f"missing from image: {path}")
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"extracted {len(manifest['files'])} files ({total / 2**30:.2f} GiB) to {out}")
-    _, ovl_problems = overlay_table(out, known["elf"], quiet=True)
-    problems += ovl_problems
+    if (out / known["elf"]).is_file():
+        _, ovl_problems = overlay_table(out, known["elf"], quiet=True)
+        problems += ovl_problems
     for p in problems:
         print("PROBLEM:", p)
-    print("OK" if not problems else f"{len(problems)} problem(s)")
-    return 1 if problems else 0
+    if problems:
+        print(f"{len(problems)} problem(s); {out / 'manifest.json'} not written")
+        return 1
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print("OK")
+    return 0
 
 
 def overlay_table(disc: Path, elf_name: str, quiet: bool = False):
@@ -480,6 +497,75 @@ def sync_tree(src: Path, dst: Path) -> tuple[int, int]:
     return changed, removed
 
 
+TOOLS_BUILD = ROOT / "build" / "tools"
+GAME_BUILD = ROOT / "build" / "game"
+COMPILERS = ["-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"]
+
+
+def run_step(what: str, command: list[str]) -> None:
+    print(f"== {what}", flush=True)
+    try:
+        rc = subprocess.run(command, cwd=ROOT).returncode
+    except OSError as e:  # the tool is missing (an antivirus took it, say)
+        sys.exit(f"failed: {what}: cannot run {command[0]}: {e}")
+    if rc:
+        sys.exit(f"failed: {what}")
+
+
+# A configure that failed leaves CMakeCache.txt but no build.ninja; the next
+# run must configure again.
+def configured(build: Path) -> bool:
+    return (build / "build.ninja").is_file()
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    # The patches first: some change the recompiler, and one built before
+    # them generates code without them.
+    run_step("patches/ps2recomp", ["cmake", "-P", str(ROOT / "cmake" / "framework_patches.cmake")])
+    if not configured(TOOLS_BUILD):
+        run_step("configure build/tools", [
+            "cmake", "-S", str(FRAMEWORK), "-B", str(TOOLS_BUILD), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+            "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF", *COMPILERS])
+    run_step("build ps2_recomp and ps2_analyzer",
+             ["cmake", "--build", str(TOOLS_BUILD), "--target", "ps2_recomp", "ps2_analyzer"])
+    return 0
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    if not configured(GAME_BUILD):
+        run_step("configure build/game", [
+            "cmake", "-S", str(ROOT), "-B", str(GAME_BUILD), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", *COMPILERS])
+    run_step("build the game", ["cmake", "--build", str(GAME_BUILD)])
+    print(f"built {GAME_BUILD / 'src' / 'roguegalaxy.exe'}; start it with \"Rogue Galaxy.exe\"")
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Everything from a dump to a game: verify, extract, tools, recompile, build."""
+    disc = ROOT / "disc"
+    if (disc / "manifest.json").is_file() and (disc / load_hashes(args.version)["elf"]).is_file():
+        print(f"== {disc} already holds the extracted disc; not extracting again")
+        if args.iso:
+            print(f"   (so {args.iso} is not used; delete {disc / 'manifest.json'} to extract it instead)")
+    else:
+        if not args.iso:
+            sys.exit("pass --iso with your dump of the game (docs/DISC.md)")
+        print("== verify the dump", flush=True)
+        if cmd_verify(argparse.Namespace(version=args.version, iso=args.iso, full=False)):
+            sys.exit("the dump is not the one this project supports (docs/DISC.md)")
+        print("== extract it into disc/ (about 6.3 GiB)", flush=True)
+        # Over whatever an interrupted or failed extraction left (the
+        # manifest is written last, when nothing was wrong); files that are
+        # not the disc's, the memory cards, stay as they are.
+        if cmd_extract(argparse.Namespace(version=args.version, iso=args.iso, out=str(disc), force=True)):
+            sys.exit("the extraction found problems; see above")
+    cmd_tools(args)
+    print("== recompile", flush=True)
+    if cmd_recompile(argparse.Namespace(version=args.version, disc=str(disc), recomp=None)):
+        sys.exit("the recompile failed; see build/logs")
+    return cmd_build(args)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Rogue Galaxy Recompiled: disc and recompiler-input tooling")
     ap.add_argument("--version", default=DEFAULT_VERSION, help=f"config/<version> to use (default {DEFAULT_VERSION})")
@@ -513,6 +599,16 @@ def main() -> int:
     p.add_argument("--disc", default=str(ROOT / "disc"))
     p.add_argument("--recomp", help="ps2_recomp executable (default: build/tools/ps2xRecomp/)")
     p.set_defaults(func=cmd_recompile)
+
+    p = sub.add_parser("tools", help="apply patches/ps2recomp, then build the recompiler in build/tools")
+    p.set_defaults(func=cmd_tools)
+
+    p = sub.add_parser("build", help="configure (once) and build the game in build/game")
+    p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("install", help="from a dump to the game: verify, extract, tools, recompile, build")
+    p.add_argument("--iso", help="your dump of the game (not needed once disc/ is extracted)")
+    p.set_defaults(func=cmd_install)
 
     p = sub.add_parser("make-hashes", help="(maintainers) regenerate hashes.json from a known-good dump")
     p.add_argument("--iso", required=True)
