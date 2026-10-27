@@ -28,7 +28,7 @@ $ToolDir = Join-Path $Root "toolchain"
 $Downloads = Join-Path $ToolDir "downloads"
 $System32 = Join-Path $env:SystemRoot "System32"
 
-# The tools the build was tested with (README, "Building"). A new pin needs
+# The tools the build was tested with (docs/BUILDING.md). A new pin needs
 # its archive's SHA-256 from the release page: GitHub shows each asset's.
 $Tools = @(
     @{ Name = "git"; Label = "Git 2.56.0 (MinGit)"; Exe = "cmd\git.exe"; Ext = ".zip"; MB = 38

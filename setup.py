@@ -365,7 +365,7 @@ def find_recompiler(given: str | None) -> Path:
     for c in candidates:
         if c.is_file():
             return c
-    sys.exit("ps2_recomp not found; build it first (README, 'Build the recompiler tools') or pass --recomp")
+    sys.exit("ps2_recomp not found; build it first (python setup.py tools, docs/BUILDING.md) or pass --recomp")
 
 
 def overlay_info_header(name: str, h: mwo3.Header, source: str) -> str:

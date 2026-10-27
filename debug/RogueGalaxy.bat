@@ -12,7 +12,7 @@ cd /d "%~dp0.."
 
 set "GAME=build\game\src\roguegalaxy.exe"
 if not exist "%GAME%" (
-    echo The game is not built yet: see "Build" in README.md.
+    echo The game is not built yet: run Install.bat, or see docs\BUILDING.md.
     pause
     exit /b 1
 )
@@ -22,7 +22,7 @@ if not exist "disc\SCUS_974.90" (
     exit /b 1
 )
 
-rem Options (see "Running" in README.md), for example:
+rem Options (see docs\DEVELOPMENT.md), for example:
 rem   set RG_SHOW_FPS=1
 rem   set RG_MUTE=1
 rem 60 fps or the game's own 30: the menu's 60 frames per second (F1,

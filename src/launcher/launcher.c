@@ -176,7 +176,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 
     if (GetFileAttributesW(kGame) == INVALID_FILE_ATTRIBUTES)
     {
-        stop(L"The game is not built yet: see \"Build\" in README.md.");
+        stop(L"The game is not built yet: run Install.bat, or see docs\\BUILDING.md.");
         return 1;
     }
     if (GetFileAttributesW(kDisc) == INVALID_FILE_ATTRIBUTES)
