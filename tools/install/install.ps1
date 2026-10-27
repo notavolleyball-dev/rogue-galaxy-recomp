@@ -346,7 +346,7 @@ function Main {
     }
 
     Write-Step "Building the game"
-    Write-Host "This takes from 15 minutes to an hour, depending on the PC; it can be left alone."
+    Write-Host "This takes about 20 minutes on a fast PC, up to an hour on a slower one; it can be left alone."
     Write-Host "Clicking inside this window pauses it (the title then starts with ""Select""); press Esc to go on."
     Write-Host "Everything shown here also goes to install.log."
     $log = Join-Path $Root "install.log"

@@ -13,7 +13,8 @@ of Rogue Galaxy (USA, SCUS-97490).
 1. Download **RogueGalaxy-0.1.0.zip** (not "Source code").
 2. Extract it to a short folder, such as `C:\RogueGalaxy`.
 3. Run `Install.bat` and pick your disc image.
-4. Wait 15 to 60 minutes, then play with `Rogue Galaxy.exe`.
+4. Wait about 20 minutes on a fast PC (up to an hour on a slower one), then
+   play with `Rogue Galaxy.exe`.
 
 ### Highlights
 

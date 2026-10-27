@@ -5,6 +5,11 @@ static recompilation of the USA release (SCUS-97490), built on
 [PS2Recomp](https://github.com/ran-j/PS2Recomp). You build it from your own
 disc image; nothing of the game is distributed.
 
+<p align="center">
+  <img src="docs/images/salgin-plaza.jpg" width="49%" alt="Salgin in widescreen">
+  <img src="docs/images/battle.jpg" width="49%" alt="A battle in Salgin">
+</p>
+
 - 60 fps, or the original 30
 - Widescreen, up to 32:9
 - Up to 8x internal resolution
@@ -23,9 +28,9 @@ and your own image of the disc: Rogue Galaxy, USA, SCUS-97490
    page (not "Source code").
 2. Extract it to a short folder, such as `C:\RogueGalaxy`.
 3. Double-click `Install.bat` and choose your disc image.
-4. Wait 15 to 60 minutes: it downloads the build tools (about 300 MB) into
-   the folder, extracts your disc and builds the game. Nothing is installed
-   in Windows.
+4. Wait about 20 minutes on a fast PC, up to an hour on a slower one: it
+   downloads the build tools (about 300 MB) into the folder, extracts your
+   disc and builds the game. Nothing is installed in Windows.
 5. Play with `Rogue Galaxy.exe`.
 
 If it stops, `install.log` says why; running `Install.bat` again continues
@@ -50,6 +55,8 @@ controls, and the Game page with the options above. F11 or Alt+Enter
 toggles fullscreen, F12 takes a screenshot. The options are also on the
 game's own Settings screen (System > Settings, L1 and R1 to turn the page).
 See [docs/OPTIONS.md](docs/OPTIONS.md) for each one.
+
+<p align="center"><img src="docs/images/menu-game.jpg" width="70%" alt="The F1 menu's Game page"></p>
 
 ## More
 
