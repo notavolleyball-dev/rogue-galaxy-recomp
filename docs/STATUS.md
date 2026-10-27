@@ -1399,6 +1399,18 @@ disc (nothing of the game distributed). A clone of the pushed repository
   and a fresh install's whole game build took 14.9 minutes with four here
   (32 GB, 16 threads; the compilers held 7.1 GB at most, 9.9 GB stayed
   free).
+- Published as a Pre-release on a new public repository (the old one
+  renamed `rogue-galaxy-recomp-old`, private, since a force push leaves
+  the old commits linked from GitHub's activity view). Hours later a look
+  at the upstreams found DQ8-Recompiled's #36 in our archive: zip times
+  have no time zone and Explorer reads them as local, so 0.1.0's files,
+  stamped 16:09 Brasília, were hours in the future west of it, and a CMake
+  input dated after now keeps build.ninja stale: ninja regenerates it 100
+  times (some 40 minutes) and fails. `source_zip.py` now stamps a day
+  before, in UTC, and `--ref` makes a tag's archive again: 0.1.0's was
+  remade from its tag (the 814 files byte-identical, only the times) and
+  replaced on the release before any download. `setup.py tools` and
+  `build` also give any source file dated after now now's time first.
 
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and

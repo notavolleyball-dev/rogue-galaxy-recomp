@@ -30,10 +30,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 import zlib
 from datetime import date
@@ -632,7 +634,38 @@ def configured(build: Path) -> bool:
     return (build / "build.ninja").is_file()
 
 
+# Ninja regenerates build.ninja while a CMake input is dated after it, and an
+# input dated after now keeps it so: 100 tries, some 40 minutes, then a
+# failure (DQ8-Recompiled #36). A clock set back leaves such files, and so
+# does a zip extracted west of where it was made, its times having no time
+# zone (0.1.0's first archive, 2026-10-27). The sources get now's time first.
+OWN_TIME = {"build", "disc", "toolchain", "textures"}
+
+
+def reset_future_times() -> None:
+    now = time.time()
+    reset, failed = 0, []
+    for folder, dirs, files in os.walk(ROOT):
+        dirs[:] = [d for d in dirs if d != ".git" and not (Path(folder) == ROOT and d in OWN_TIME)]
+        for name in files:
+            if name == ".git":  # a submodule's, which names its repository
+                continue
+            path = Path(folder) / name
+            try:
+                if path.stat().st_mtime > now + 60:
+                    os.utime(path, (now, now))
+                    reset += 1
+            except OSError:
+                failed.append(path)
+    if reset:
+        print(f"   {reset} source files were dated in the future (an archive from another time zone, "
+              "or the clock); they have now's time")
+    if failed:
+        print(f"   the time of {len(failed)} files could not be checked or set, {failed[0]} first")
+
+
 def cmd_tools(args: argparse.Namespace) -> int:
+    reset_future_times()
     # The patches first: some change the recompiler, and one built before
     # them generates code without them.
     run_step("patches/ps2recomp", ["cmake", "-P", str(ROOT / "cmake" / "framework_patches.cmake")])
@@ -646,6 +679,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    reset_future_times()
     if not configured(GAME_BUILD):
         run_step("configure build/game", [
             "cmake", "-S", str(ROOT), "-B", str(GAME_BUILD), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", *COMPILERS])

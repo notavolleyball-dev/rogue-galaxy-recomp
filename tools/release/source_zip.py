@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """The release's source archive: the repository and its submodules in one zip.
 
-    python tools/release/source_zip.py [--out build/release] [--worktree]
+    python tools/release/source_zip.py [--out build/release] [--ref REF | --worktree]
 
 GitHub's own "Source code" archives leave the submodules out
 (thirdparty/PS2Recomp, thirdparty/imgui), and Install.bat cannot build
 without them, so a release carries this archive instead:
 RogueGalaxy-<version>.zip, one folder RogueGalaxy/ holding the committed
 files, each submodule at its recorded commit, and REVISION, the commit the
-About window names (no .git comes along). With --worktree it takes the
+About window names (no .git comes along). --ref archives another commit
+than HEAD (a release's tag, to make its archive again). With --worktree it takes the
 working tree's tracked and new files instead of the commit, to try an
 install before committing. Only source: never disc data or a build.
 """
@@ -48,9 +49,9 @@ def archive(commit: str, cwd: Path = ROOT) -> bytes:
     return git("-c", "core.autocrlf=false", "archive", "--format=tar", commit, cwd=cwd)
 
 
-def gitlinks(worktree: bool) -> list[tuple[str, str]]:
-    """The submodules as (path, recorded commit), from the index or HEAD."""
-    text = git("ls-files", "-s") if worktree else git("ls-tree", "-r", "HEAD")
+def gitlinks(worktree: bool, ref: str) -> list[tuple[str, str]]:
+    """The submodules as (path, recorded commit), from the index or a commit."""
+    text = git("ls-files", "-s") if worktree else git("ls-tree", "-r", ref)
     links = []
     for line in text.decode().splitlines():
         meta, path = line.split("\t", 1)
@@ -63,7 +64,12 @@ def gitlinks(worktree: bool) -> list[tuple[str, str]]:
 def add(zf: zipfile.ZipFile, name: str, data: bytes, mtime: float) -> None:
     if name.startswith(NEVER) or len(data) > LARGEST:
         sys.exit(f"refusing {name} ({len(data)} bytes): game data or a build has no place in the source archive")
-    info = zipfile.ZipInfo(f"{FOLDER}/{name}", time.localtime(max(mtime, 315532800))[:6])
+    # A zip's times have no time zone, and Explorer reads them as local: the
+    # packager's local time came out hours ahead west of it, and a CMake
+    # input dated after now keeps build.ninja stale, so ninja regenerates it
+    # 100 times and fails (DQ8-Recompiled #36; 0.1.0's first archive, 2026-10-27).
+    # A day before, in UTC, is in the past in every time zone.
+    info = zipfile.ZipInfo(f"{FOLDER}/{name}", time.gmtime(max(mtime - 86400, 315532800))[:6])
     info.compress_type = zipfile.ZIP_DEFLATED
     info.external_attr = 0o644 << 16
     zf.writestr(info, data, compresslevel=9)
@@ -82,17 +88,20 @@ def add_archive(zf: zipfile.ZipFile, tar_bytes: bytes, prefix: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default=str(ROOT / "build" / "release"))
-    ap.add_argument("--worktree", action="store_true", help="the working tree's files instead of HEAD's")
+    ap.add_argument("--ref", default="HEAD", help="the commit to archive (default HEAD)")
+    ap.add_argument("--worktree", action="store_true", help="the working tree's files instead of a commit's")
     args = ap.parse_args()
+    if args.worktree and args.ref != "HEAD":
+        ap.error("--ref and --worktree exclude each other")
 
     if args.worktree:
         project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     else:
-        project = git("show", "HEAD:CMakeLists.txt").decode()
+        project = git("show", f"{args.ref}:CMakeLists.txt").decode()
     version = re.search(r"project\(RogueGalaxyRecomp\s+VERSION\s+(\d+\.\d+\.\d+)", project).group(1)
-    revision = git("describe", "--tags", "--always", "HEAD").decode().strip()
+    revision = git("describe", "--tags", "--always", args.ref).decode().strip()
     dirty = git("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=dirty").strip()
-    if dirty and not args.worktree:
+    if dirty and not args.worktree and args.ref == "HEAD":
         print("note: the working tree has changes this archive leaves out (HEAD only; --worktree takes them)")
     if args.worktree and dirty:
         revision += "-dirty"
@@ -100,7 +109,7 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     target = out / f"RogueGalaxy-{version}.zip"
-    links = gitlinks(args.worktree)
+    links = gitlinks(args.worktree, args.ref)
     count = 0
     with zipfile.ZipFile(target, "w") as zf:
         if args.worktree:
@@ -112,7 +121,7 @@ def main() -> int:
                     add(zf, name, path.read_bytes(), path.stat().st_mtime)
                     count += 1
         else:
-            count += add_archive(zf, archive("HEAD"), "")
+            count += add_archive(zf, archive(args.ref), "")
         for path, commit in links:
             count += add_archive(zf, archive(commit, ROOT / path), path + "/")
         add(zf, "REVISION", (revision + "\n").encode(), time.time())
