@@ -3,14 +3,15 @@
 **The game runs.** `roguegalaxy` boots to the title screen, starts a new
 game, plays the opening movie and the real-time cutscenes in Salgin, and
 fights battles (HUD, damage, allies, results screen) at 60 frames per
-second with `RogueGalaxy.bat` (the scene's step follows the frame time, so
+second with `Rogue Galaxy.exe` (the scene's step follows the frame time, so
 a slow frame does not play in slow motion; the game's own 30 without
 `RG_FPS=60`), with the GS on the GPU, VU1 compiled ahead of time and on a
 thread of its own, music and sound effects, keyboard or gamepad. The
 heaviest field scene measured, a boss gate, holds 50 to 60, limited by the
 VU1 programs.
-Known gaps: a rare hang after the Story loading screen (below), and the
-remaining phase 5 work (self-contained packaging).
+Known gaps: a rare hang after the Story loading screen (below). Release
+0.1.0 is the source with an installer that builds the game from the
+player's disc (`Install.bat`; [`CHANGELOG.md`](../CHANGELOG.md)).
 
 | Phase | Goal | State |
 |---|---|---|
@@ -19,7 +20,7 @@ remaining phase 5 work (self-contained packaging).
 | 2 | Build ELF + overlays into one executable; overlay-aware dispatch | done |
 | 3 | Boot to the title screen | done |
 | 4 | Field, battle, movies, sound | done |
-| 5 | Performance, widescreen, 60 fps, launcher | 60 fps mode by default (50-60 in the heaviest scenes), launcher, in-game menu, widescreen option; packaging next |
+| 5 | Performance, widescreen, 60 fps, launcher | 60 fps mode by default (50-60 in the heaviest scenes), launcher, in-game menu, widescreen option, installer (0.1.0) |
 
 ## Phase 1 in short
 
@@ -1280,7 +1281,7 @@ At their defaults the 30 fps walk's frame is still byte-identical to
 user asked how a first pre-release would go and chose the source with an
 installer that builds the game on the player's machine from their own
 disc (nothing of the game distributed). A clone of the pushed repository
-(b198448), built by the README's steps, found:
+(d59ebcf), built by the README's steps, found:
 - A deep folder breaks the toml11 download (one of its test submodules
   passes Windows' 260-character path limit): the installer needs a short
   path or long paths on. Built again in `F:\rgclean`.
@@ -1371,7 +1372,33 @@ disc (nothing of the game distributed). A clone of the pushed repository
   renaming a download tries again for half a minute (`Invoke-Patiently`),
   which a test with a file held by another process passed (3 s: waits and
   goes on; 40 s: says why and stops, or goes on when the step can wait).
-  The real MinGit archive unpacks in place to `cmd\git.exe`.
+  The real MinGit archive unpacks in place to `cmd\git.exe`. Run again,
+  the user's install built and ran (11 minutes from the tools to the game).
+- Before the repository goes public, the user chose to keep their email
+  out of it: every commit's author and committer is GitHub's no-reply
+  address now (`git filter-branch --env-filter`, the trees unchanged), so
+  every commit id before this changed (b198448 became d59ebcf; memory notes
+  and old messages quote the old ones). `RogueGalaxy.bat` moved to `debug\`,
+  so a player's folder shows `Install.bat` and `Rogue Galaxy.exe` only; the
+  other debug launchers call it beside them.
+- The VU0 blocks have a manifest now, as VU1's programs do:
+  `setup.py vu-blocks-manifest` writes `config/SCUS_974.90/vu-blocks.txt`
+  from `build/vu-blocks` (each block as its longest pieces found in the
+  ELF and the overlays, `file:offset:pairs`, and one FNV-64 over all), and
+  `recompile` rebuilds `build/vu-blocks-manifest/blocks.txt` from the
+  player's disc, which CMake compiles with the local recordings. All 109
+  recorded blocks are in the ELF (107 whole, 2 in two pieces); the
+  expansion is the recording's set exactly. A fresh install built so ran
+  the battle bench with the interpreter off the game thread
+  (`execUpper`, `run` and the pair scheduler 16.7% of it before, the
+  compiled blocks now; the thread 74% inside the executable against 85%;
+  the lowest heavy interval 52.6 fps against 46.2), and its 30 fps walk
+  `inst2` is byte-identical to `mods30c`. The 32 shards took 19 minutes
+  one at a time (2.2 GB and about a minute each; the generated game code
+  0.1-0.2 GB a unit): CMake now runs one per 7.5 GB of memory, up to four,
+  and a fresh install's whole game build took 14.9 minutes with four here
+  (32 GB, 16 threads; the compilers held 7.1 GB at most, 9.9 GB stayed
+  free).
 
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and

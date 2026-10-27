@@ -21,7 +21,8 @@ Maintainers: `make-hashes` regenerates hashes.json from a known-good dump;
 `maps --rgdecomp <checkout>` regenerates the function maps; `vu1-manifest`
 describes a VU1 program recording (build/vu1-profile) as
 config/<version>/vu1-programs.txt, which `recompile` expands from the user's
-disc.
+disc; `vu-blocks-manifest` does the same for the VU block recordings
+(build/vu-blocks) as config/<version>/vu-blocks.txt.
 """
 
 from __future__ import annotations
@@ -389,6 +390,8 @@ def cmd_recompile(args: argparse.Namespace) -> int:
     write_overlay_elfs(args.version, Path(args.disc), ROOT / "build" / "overlays")
     print("== VU1 programs")
     expand_vu1_manifest(args.version, Path(args.disc))
+    print("== VU blocks")
+    expand_vu_blocks_manifest(args.version, Path(args.disc))
 
     spec = load_toml(config_dir(args.version) / "funcmap.toml")
     logs = ROOT / "build" / "logs"
@@ -476,6 +479,117 @@ def cmd_vu1_manifest(args: argparse.Namespace) -> int:
         cmd += ["--game", str(disc / f)]
     cmd.append(str(Path(args.profile)))
     return subprocess.run(cmd).returncode
+
+
+# VU blocks: the micro program blocks the interpreter ran, recorded with
+# PS2_VU_AOT_PROFILE into build/vu-blocks/*.txt (VU0's above all, which the
+# whole VU1 programs above do not cover) and compiled into the runtime. A
+# recording is microcode, so it stays local; the manifest
+# (config/<version>/vu-blocks.txt) says where each block's pairs sit in the
+# game's files instead, with one checksum over all the blocks (one per block
+# would give the shortest pieces' code away), and recompile rebuilds the
+# blocks from the player's disc into build/vu-blocks-manifest. Without it a
+# fresh install ran VU0 on the interpreter: the battle's game thread was 94%
+# busy against 86% (2026-10-27).
+VU_BLOCKS_PROFILE = ROOT / "build" / "vu-blocks"
+VU_BLOCKS_OUT = ROOT / "build" / "vu-blocks-manifest"
+VU_BLOCKS_HEADERS = {b"VU-BLOCKS 1", b"VU-BLOCKS 2", b"VU-BLOCKS 3"}
+
+
+def fnv64(data: bytes) -> int:
+    value = 14695981039346656037
+    for byte in data:
+        value = ((value ^ byte) * 1099511628211) & (2**64 - 1)
+    return value
+
+
+def vu_block_bytes(words: tuple[int, ...]) -> bytes:
+    # A pair is one 64-bit word, the lower instruction in its low half: as it
+    # sits in micro memory and in the files that upload it.
+    return b"".join(w.to_bytes(8, "little") for w in words)
+
+
+def read_vu_block_recording(path: Path) -> set[tuple[int, tuple[int, ...]]]:
+    lines = path.read_bytes().splitlines()
+    if not lines or lines[0].rstrip(b"\r") not in VU_BLOCKS_HEADERS:
+        sys.exit(f"{path}: not a VU block recording (code images cannot be described)")
+    blocks = set()
+    for line in lines[1:]:
+        fields = line.split()
+        if fields:
+            blocks.add((int(fields[0]), tuple(int(w, 16) for w in fields[1:])))
+    return blocks
+
+
+def cmd_vu_blocks_manifest(args: argparse.Namespace) -> int:
+    disc = Path(args.disc)
+    names = vu1_game_files(args.version)
+    files = [(disc / n).read_bytes() for n in names]
+    recordings = sorted(Path(args.profile).glob("*.txt"))
+    if not recordings:
+        sys.exit(f"no recordings in {args.profile}")
+    blocks = sorted(set().union(*(read_vu_block_recording(p) for p in recordings)))
+    lines = []
+    for unit, words in blocks:
+        # Each block as the longest pieces found in the files, first file first.
+        pieces, start = [], 0
+        while start < len(words):
+            for end in range(len(words), start, -1):
+                chunk = vu_block_bytes(words[start:end])
+                found = next(((i, data.find(chunk)) for i, data in enumerate(files) if chunk in data), None)
+                if found:
+                    pieces.append(f"{found[0]}:{found[1]}:{end - start}")
+                    start = end
+                    break
+            else:
+                print(f"block not in the game files: unit {unit}, pair {start} of {len(words)}")
+                return 1
+        lines.append(f"block {unit} " + " ".join(pieces))
+    checksum = fnv64(b"".join(vu_block_bytes(words) for _, words in blocks))
+    out = config_dir(args.version) / "vu-blocks.txt"
+    out.write_text(
+        "# VU micro program blocks compiled into the runtime, located in the game's\n"
+        "# files (setup.py vu-blocks-manifest; recompile expands it).\n"
+        "# file <index> <name>; block <unit> <file>:<offset>:<pairs>...; fnv64 of all blocks\n"
+        + "".join(f"file {i} {n}\n" for i, n in enumerate(names))
+        + "".join(line + "\n" for line in lines)
+        + f"fnv64 {checksum:016x}\n", newline="\n")
+    print(f"wrote {out.relative_to(ROOT)}: {len(blocks)} blocks from {len(recordings)} recording(s)")
+    return 0
+
+
+def expand_vu_blocks_manifest(version: str, disc: Path) -> None:
+    manifest = config_dir(version) / "vu-blocks.txt"
+    shutil.rmtree(VU_BLOCKS_OUT, ignore_errors=True)
+    if not manifest.is_file():
+        print("   no manifest; VU blocks come only from local recordings")
+        return
+    files: dict[str, bytes] = {}
+    blocks, checksum = [], None
+    for line in manifest.read_text().splitlines():
+        fields = line.split()
+        if not fields or fields[0].startswith("#"):
+            continue
+        if fields[0] == "file":
+            files[fields[1]] = (disc / fields[2]).read_bytes()
+        elif fields[0] == "block":
+            raw = b""
+            for piece in fields[2:]:
+                index, offset, pairs = piece.split(":")
+                raw += files[index][int(offset):int(offset) + int(pairs) * 8]
+            blocks.append((int(fields[1]), raw))
+        elif fields[0] == "fnv64":
+            checksum = int(fields[1], 16)
+    if checksum is None or fnv64(b"".join(raw for _, raw in blocks)) != checksum:
+        sys.exit(f"{manifest.relative_to(ROOT)} does not match this disc's files")
+    lengths = {len(raw) // 8 for _, raw in blocks}
+    header = "VU-BLOCKS 1" if lengths == {4} else "VU-BLOCKS 2" if lengths <= {4, 8, 12, 16} else "VU-BLOCKS 3"
+    VU_BLOCKS_OUT.mkdir(parents=True)
+    (VU_BLOCKS_OUT / "blocks.txt").write_text(
+        header + "\n" + "".join(
+            f"{unit} " + " ".join(f"{int.from_bytes(raw[i:i + 8], 'little'):x}" for i in range(0, len(raw), 8)) + "\n"
+            for unit, raw in blocks), newline="\n")
+    print(f"   wrote {VU_BLOCKS_OUT.relative_to(ROOT)} ({len(blocks)} blocks)")
 
 
 def sync_tree(src: Path, dst: Path) -> tuple[int, int]:
@@ -618,6 +732,11 @@ def main() -> int:
     p.add_argument("--disc", default=str(ROOT / "disc"))
     p.add_argument("--profile", default=str(VU1_PROFILE), help="PS2_VU_PROGRAM_PROFILE directory")
     p.set_defaults(func=cmd_vu1_manifest)
+
+    p = sub.add_parser("vu-blocks-manifest", help="(maintainers) describe the VU block recordings as a manifest")
+    p.add_argument("--disc", default=str(ROOT / "disc"))
+    p.add_argument("--profile", default=str(VU_BLOCKS_PROFILE), help="directory of PS2_VU_AOT_PROFILE recordings")
+    p.set_defaults(func=cmd_vu_blocks_manifest)
 
     p = sub.add_parser("maps", help="(maintainers) regenerate functions_*.csv from an RGDecomp checkout")
     p.add_argument("--rgdecomp", required=True, help="RGDecomp checkout at the commit pinned in funcmap.toml")

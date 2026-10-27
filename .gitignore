@@ -15,7 +15,7 @@
 *.log
 # The build tools Install.bat downloads.
 /toolchain/
-# The launcher the build puts beside RogueGalaxy.bat.
+# The launcher the build puts in the repository's folder.
 /Rogue Galaxy.exe
 CMakeUserPresets.json
 

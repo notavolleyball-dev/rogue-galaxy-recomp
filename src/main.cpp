@@ -202,7 +202,7 @@ int run(int argc, char **argv)
 int main(int argc, char **argv)
 {
     int status = 1;
-    // Redirected to a file (RogueGalaxy.bat), stdout is fully buffered, and
+    // Redirected to a file (the launchers), stdout is fully buffered, and
     // a crash or a killed process loses its last lines.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     rg::debug::installCrashReport();

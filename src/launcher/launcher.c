@@ -1,4 +1,4 @@
-// "Rogue Galaxy.exe": RogueGalaxy.bat's work without its terminal.
+// "Rogue Galaxy.exe": debug\RogueGalaxy.bat's work without its terminal.
 //
 // A batch file always opens a terminal, and RogueGalaxy.bat's stays the whole
 // game: it waits for the game to keep its log and show an error. This does
@@ -9,7 +9,8 @@
 // build\last-run.log and no console, and waits; a game that ends with an
 // error shows the log's last lines in a message box, as the batch file does
 // in its terminal. Arguments go to the game after the disc, as the batch
-// file's do. The debug\ launchers keep the batch file and its terminal.
+// file's do. The debug\ launchers keep the batch file and its terminal
+// (it was beside this one until the first release, 0.1.0).
 //
 // Plain C linked statically: it starts from the repository's folder, away
 // from the DLLs the build puts beside the game.

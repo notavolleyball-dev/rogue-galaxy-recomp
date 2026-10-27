@@ -190,7 +190,7 @@ AFTER=${AFTER_OVERRIDE:-$AFTER}
 # diverged until this).
 cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1
 start=$(date +%s)
-# A forward-slash disc path marks this instance; RogueGalaxy.bat passes a
+# A forward-slash disc path marks this instance; the launchers pass a
 # backslash one, so the user's game is never the one stopped below.
 ${EXE:-build/game/src/roguegalaxy.exe} disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
 # AFFINITY=HEX: the instance's processor mask (5555: one logical processor

@@ -101,11 +101,15 @@ Programs the manifest lacks run on the interpreter; record them with
 `PS2_VU_PROGRAM_PROFILE=build/vu1-profile` (CMake compiles that folder too),
 then configure and build again (maintainers: `python setup.py vu1-manifest`
 folds a recording into the manifest). The VU0 micro programs, which run on
-the game thread, are compiled as blocks instead: a run with
+the game thread, are compiled as blocks instead, the same way:
+`setup.py recompile` rebuilds them from
+[`config/SCUS_974.90/vu-blocks.txt`](config/SCUS_974.90/vu-blocks.txt) and
+your disc into `build/vu-blocks-manifest`. A run with
 `PS2_VU_AOT_PROFILE=build/vu-blocks/NAME.txt` records the blocks the
 interpreter executes (both units; keep the lines starting with `0` for
-VU0 alone), and CMake compiles every `build/vu-blocks/*.txt` it finds
-(one shard at a time: each takes gigabytes to compile).
+VU0 alone), and CMake compiles every `build/vu-blocks/*.txt` it finds too
+(one shard at a time: each takes gigabytes to compile); maintainers:
+`python setup.py vu-blocks-manifest` folds the recordings into the manifest.
 
 ## Controls
 
@@ -221,9 +225,9 @@ On Windows, double-click `Rogue Galaxy.exe`, which the build puts in the
 repository's folder: it starts the built game on `disc/SCUS_974.90`, writes
 the game's log to `build/last-run.log` (the run before survives as
 `build/last-run.prev.log`) and opens no terminal; a game that ends with an
-error shows the log's last lines in a message box. `RogueGalaxy.bat` does the
-same in a terminal, which it keeps open until the game closes (run it from
-one to see the log as it is written). The build copies the FFmpeg and clang
+error shows the log's last lines in a message box. `debug\RogueGalaxy.bat`
+does the same in a terminal, which it keeps open until the game closes (run
+it from one to see the log as it is written). The build copies the FFmpeg and clang
 runtime DLLs next to `roguegalaxy.exe`, so it needs nothing on PATH. To set
 any of the variables below, set them in Windows (they reach the game through
 either launcher), add a `set` line to the batch file (it has examples), or set
@@ -329,9 +333,11 @@ thread contexts) and a thread's call chain read from the dump with
 
 | Path | What |
 |---|---|
-| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile` (and `make-hashes`, `maps` for maintainers) |
+| `Install.bat`, `tools/install/` | The Windows installer: build tools into `toolchain\`, then `setup.py install` |
+| `CHANGELOG.md` | What each release brings, and its known issues |
+| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile`, `tools`, `build`, `install` (and `make-hashes`, `maps`, `vu1-manifest`, `vu-blocks-manifest` for maintainers) |
 | `CMakeLists.txt`, `src/` | The game executable: build of the generated trees, overlay manager (`src/overlay/`), call tracing (`src/debug/`), `main.cpp`; the Windows launcher, `Rogue Galaxy.exe` (`src/launcher/`) |
-| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` (VU1 microcode locations) |
+| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` and `vu-blocks.txt` (VU1 and VU0 microcode locations) |
 | `tools/disc/iso9660.py` | Read-only ISO9660 reader for dual-layer PS2 DVDs |
 | `tools/mwo3/mwo3.py` | MWo3 overlay header parser, ELF cross-check, overlay-to-ELF wrapper |
 | `tools/funcmap/` | Function-map builder and the checks behind `setup.py check` |

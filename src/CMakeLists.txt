@@ -144,7 +144,7 @@ endif()
 ps2x_stage_ffmpeg_runtime_dlls(roguegalaxy)
 
 # So do clang's MinGW C++ runtime DLLs, so the game starts without the
-# toolchain on PATH (from Explorer or RogueGalaxy.bat).
+# toolchain on PATH (from Explorer or a launcher).
 if(MINGW)
     get_filename_component(rg_toolchain_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
     foreach(dll libc++.dll libunwind.dll libwinpthread-1.dll)
@@ -157,10 +157,10 @@ if(MINGW)
     endforeach()
 endif()
 
-# "Rogue Galaxy.exe", the launcher to double-click: RogueGalaxy.bat's work
-# without its terminal (launcher/launcher.c). It goes to the repository's
-# folder, beside the batch file, which keeps the terminal for the debug\
-# launchers and for runs from a terminal. Plain C linked statically, so it
+# "Rogue Galaxy.exe", the launcher to double-click: debug\RogueGalaxy.bat's
+# work without its terminal (launcher/launcher.c). It goes to the
+# repository's folder; the batch file keeps the terminal for the other
+# debug\ launchers and for runs from a terminal. Plain C linked statically, so it
 # needs no DLL beside it. Its icon and manifest are a .res file that
 # launcher/make_resources.py writes and the linker takes as it is (it says
 # why not windres); without Python the launcher is built without them.

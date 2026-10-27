@@ -56,16 +56,31 @@ message(STATUS "VU1 programs: ${rg_vu1_found}")
 
 # VU blocks: what the interpreter still ran, recorded with
 # PS2_VU_AOT_PROFILE=FILE (VU0 micro programs above all, which the whole-
-# program compile above does not cover) and kept in build/vu-blocks/*.txt,
-# compiled as blocks (PS2X_VU_AOT_IMAGES). Game code too: never committed.
-# One block compilation at a time: each shard takes gigabytes to compile.
-file(GLOB rg_vu_blocks CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-blocks/*.txt")
+# program compile above does not cover), compiled as blocks
+# (PS2X_VU_AOT_IMAGES), from build/vu-blocks-manifest, which setup.py
+# recompile rebuilds from config/<version>/vu-blocks.txt and the user's
+# disc, and build/vu-blocks/*.txt, local recordings. Game code too: never
+# committed. A shard takes 2.2 GB and a minute to compile, the battle's 109
+# blocks 32 of them, 19 minutes one at a time; the rest of the build takes
+# 0.1-0.2 GB a job (2026-10-27). So one shard at a time per 7.5 GB of
+# memory, up to four (two at a time beside the rest of the build were once
+# killed for memory, 2026-10-19, with what else ran then unknown).
+file(GLOB rg_vu_blocks CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-blocks-manifest/*.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/build/vu-blocks/*.txt")
 list(SORT rg_vu_blocks)
 set(PS2X_VU_AOT_IMAGES "${rg_vu_blocks}" CACHE STRING
     "Local VU code images or block profiles to compile; never distributed" FORCE)
-set(PS2X_VU_AOT_COMPILE_JOBS "1" CACHE STRING
+cmake_host_system_information(RESULT rg_memory_mib QUERY TOTAL_PHYSICAL_MEMORY)
+math(EXPR rg_vu_jobs "${rg_memory_mib} / 7680")
+if(rg_vu_jobs LESS 1)
+    set(rg_vu_jobs 1)
+elseif(rg_vu_jobs GREATER 4)
+    set(rg_vu_jobs 4)
+endif()
+set(PS2X_VU_AOT_COMPILE_JOBS "${rg_vu_jobs}" CACHE STRING
     "Maximum concurrent runtime compilations with VU AOT (Ninja)" FORCE)
-message(STATUS "VU blocks: ${rg_vu_blocks}")
+message(STATUS "VU blocks: ${rg_vu_blocks} (${rg_vu_jobs} shards at a time)")
 
 # Local changes to the pinned framework (patches/ps2recomp), applied to the
 # checkout once; `python setup.py tools` applies them too, before it builds

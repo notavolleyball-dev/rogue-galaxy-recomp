@@ -9,4 +9,4 @@ rem The repository's folder, above this one.
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 if not exist "%ROOT%\build\captures" mkdir "%ROOT%\build\captures"
 set "RG_GS_CAPTURE=%ROOT%\build\captures"
-call "%ROOT%\RogueGalaxy.bat" %*
+call "%~dp0RogueGalaxy.bat" %*

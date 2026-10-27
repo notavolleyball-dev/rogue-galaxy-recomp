@@ -27,4 +27,4 @@ rem VU1 microprograms the build lacks (they run on the interpreter, several
 rem times slower) are recorded into build\vu1-profile, which the next build
 rem compiles in.
 set PS2_VU_PROGRAM_PROFILE=build\vu1-profile
-call "%ROOT%\RogueGalaxy.bat" %*
+call "%~dp0RogueGalaxy.bat" %*
