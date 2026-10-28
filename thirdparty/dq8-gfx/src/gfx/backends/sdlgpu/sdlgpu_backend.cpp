@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -110,6 +111,17 @@ constexpr float kClipYDirection = -1.0f;
 // channel-shuffle passes which reinterpret framebuffer pixels as CT16.
 constexpr float kSampleOffset = 0.5f;
 
+// The n-th (from 1) term of the Halton sequence in `base`, in [0, 1).
+float halton(uint32_t n, uint32_t base) {
+    float result = 0.0f;
+    float fraction = 1.0f / static_cast<float>(base);
+    for (; n > 0u; n /= base) {
+        result += fraction * static_cast<float>(n % base);
+        fraction /= static_cast<float>(base);
+    }
+    return result;
+}
+
 uint32_t depthMaximumForPsm(uint32_t psm) {
     switch (psm & 0x3fu) {
     case GS_PSM_Z16:
@@ -170,6 +182,9 @@ struct DrawBatch {
     // before it, bound as the second texture, and blends in the shader
     // (Rogue Galaxy: added). Always with a snapshot of its own.
     bool destination = false;
+    // The camera its VU1 program ran under (GSPrimitiveBatch::sourceCamera,
+    // ps2_gs_detail::CameraRegistry; 0 without one) (Rogue Galaxy: added).
+    uint32_t camera = 0u;
 
     // Everything except the vertex range; two consecutive primitives with the
     // same answer here can share one draw call. One that needs a snapshot of
@@ -1006,6 +1021,25 @@ struct SdlGpuBackend::Impl {
         b.y += down - outV * perV;
         return true;
     }
+    // RG_JITTER=1 (Rogue Galaxy: added): draws from VU1 programs that test
+    // depth, the 3D scene, move by a Halton(2,3) offset of up to half a host
+    // pixel each frame, the first step of a temporal upscaler. RG_JITTER_SCALE
+    // multiplies it (4 makes it easy to see). The game tags those draws only
+    // when RG_JITTER or DQ8_GFX_PROFILE_CYCLE is set (src/vif1_thread.cpp).
+    const bool jitterScene = std::getenv("RG_JITTER") != nullptr;
+    // RG_CAMERA_LOG=N (Rogue Galaxy: added): every N presents, the cameras the
+    // scene's draws ran under since the last line, busiest first, with the
+    // projection read back from them. Needs RG_JITTER or the profile cycle
+    // so the draws carry a camera.
+    const uint32_t cameraLogEvery = [] {
+        const char *value = std::getenv("RG_CAMERA_LOG");
+        return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+    }();
+    std::map<uint32_t, uint32_t> cameraDraws;
+    const float jitterScale = [] {
+        const char *value = std::getenv("RG_JITTER_SCALE");
+        return value ? std::strtof(value, nullptr) : 1.0f;
+    }();
     // DQ8_GFX_SUBMIT_DRAWS: a flush of the queued draws records them into the
     // device's pending command buffer and submits it only once this many
     // draws are in it (a readback, a present or the cycled-resource budget
@@ -2169,6 +2203,10 @@ struct SdlGpuBackend::Impl {
         }
 
         DrawBatch draw{};
+        draw.camera = batch.sourceCamera;
+        if (cameraLogEvery != 0u && batch.sourceTag != 0u && wantsDepth) {
+            ++cameraDraws[batch.sourceCamera];
+        }
         draw.color = color;
         draw.depth = depth;
         draw.written = written;
@@ -2284,6 +2322,14 @@ struct SdlGpuBackend::Impl {
         const float sampleOffset = kSampleOffset / static_cast<float>(std::max(color->scale, 1u));
         draw.vertexUniforms.adjust[0] = sampleOffset;
         draw.vertexUniforms.adjust[1] = sampleOffset;
+        if (jitterScene && batch.sourceTag != 0u && wantsDepth) {
+            // In GS pixels, like the sample offset: a host pixel is 1/scale of
+            // one. Eight steps, the same every cycle.
+            const uint32_t step = static_cast<uint32_t>(stats.presents % 8u) + 1u;
+            const float host = jitterScale / static_cast<float>(std::max(color->scale, 1u));
+            draw.vertexUniforms.adjust[0] += (halton(step, 2u) - 0.5f) * host;
+            draw.vertexUniforms.adjust[1] += (halton(step, 3u) - 0.5f) * host;
+        }
         draw.vertexUniforms.adjust[2] = kClipYDirection;
 
         uint32_t control = 0u;
@@ -4120,9 +4166,36 @@ struct SdlGpuBackend::Impl {
         return true;
     }
 
+    void logCameras() {
+        std::vector<std::pair<uint32_t, uint32_t>> busiest(cameraDraws.begin(), cameraDraws.end());
+        cameraDraws.clear();
+        std::sort(busiest.begin(), busiest.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+        std::fprintf(stderr, "[camera] present %llu: %zu cameras\n", static_cast<unsigned long long>(stats.presents),
+                     busiest.size());
+        for (size_t i = 0; i < busiest.size() && i < 3u; ++i) {
+            ps2_gs_detail::SceneCamera camera;
+            if (!ps2_gs_detail::CameraRegistry::get(busiest[i].first, camera)) {
+                std::fprintf(stderr, "[camera]   #%u: %u draws, gone from the registry\n", busiest[i].first,
+                             busiest[i].second);
+                continue;
+            }
+            // Row-vector projection with w = -z: z' = A z + B.
+            const float a = camera.projection[10], b = camera.projection[14];
+            std::fprintf(stderr,
+                         "[camera]   #%u: %u draws | focal %.4f %.4f | near %.3f far %.1f | view translation %.1f %.1f %.1f"
+                         " | viewport scale %.1f %.1f\n",
+                         busiest[i].first, busiest[i].second, camera.projection[0], camera.projection[5],
+                         b / (a - 1.0f), b / (a + 1.0f), camera.view[12], camera.view[13], camera.view[14],
+                         camera.viewport[0], camera.viewport[5]);
+        }
+    }
+
     void acquirePresentation(const GSPresentationRequest &request, PresentStage &stage) {
         PresentationFrame &frame = stage.frame;
         ++stats.presents;
+        if (cameraLogEvery != 0u && stats.presents % cameraLogEvery == 0u) {
+            logCameras();
+        }
         tracedBatch = 0u;
         if (gsTargetTraceEnabled())
             std::fprintf(stderr, "[target] present #%llu\n", static_cast<unsigned long long>(stats.presents));

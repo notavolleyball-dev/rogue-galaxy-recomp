@@ -36,10 +36,13 @@ std::atomic<uint64_t> g_gifBusyNanos{0u};
 // Set on the VIF1 thread: its GS packets go to the GIF stage.
 thread_local bool t_onVif1Thread = false;
 // The VU1 program the VIF1 thread is running, as DQ8_GFX_PROFILE_CYCLE names
-// it for the draw tables (0 outside one, and unless the cycle is armed):
+// it for the draw tables (0 outside one, and unless the cycle is armed or
+// RG_JITTER is set):
 // 0x80000000 | its entry (a pair index) << 16 | a hash of the microcode there.
 thread_local uint32_t t_vu1Tag = 0;
-const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr;
+// And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
+thread_local uint32_t t_vu1Camera = 0;
+const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
 // RG_VU1_CAPTURE=<file> records the VU1 data memory each program starts with
 // (16 KiB a start), for tools/vu1/capture_report.py; RG_VU1_CAPTURE_MAX caps
 // the starts kept.
@@ -327,7 +330,7 @@ private:
         Packet,
         Image,
     };
-    // Sixteen bytes, so the data after it stays quadword aligned.
+    // A multiple of sixteen bytes, so the data after it stays quadword aligned.
     struct Header
     {
         Kind kind;
@@ -340,8 +343,11 @@ private:
         uint32_t mxcsr;
         // t_vu1Tag when the VIF1 thread handed the packet over.
         uint32_t tag;
+        // t_vu1Camera likewise.
+        uint32_t camera;
+        uint32_t reserved[3];
     };
-    static_assert(sizeof(Header) == 16u);
+    static_assert(sizeof(Header) == 32u);
 
     void append(Kind kind, const uint8_t *data, uint32_t size)
     {
@@ -349,7 +355,7 @@ private:
         {
             return;
         }
-        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag};
+        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag, t_vu1Camera, {}};
         const auto *raw = reinterpret_cast<const uint8_t *>(&header);
         m_staged.insert(m_staged.end(), raw, raw + sizeof(header));
         m_staged.insert(m_staged.end(), data, data + size);
@@ -390,6 +396,7 @@ private:
                     mxcsr = header.mxcsr;
                 }
                 ps2_gs_detail::t_sourceTag = header.tag;
+                ps2_gs_detail::t_sourceCamera = header.camera;
                 try
                 {
                     if (header.kind == Kind::Packet)
@@ -619,6 +626,14 @@ public:
                 m_programTag = programTag(memory, startPC);
             }
             t_vu1Tag = m_programTag;
+            // The matrices this program transforms with: viewport (4-7),
+            // projection (8-11) and view (24-27). Quads are 16-byte rows.
+            ps2_gs_detail::SceneCamera camera;
+            const uint8_t *data = memory.getVU1Data();
+            std::memcpy(camera.viewport, data + 4u * 16u, sizeof(camera.viewport));
+            std::memcpy(camera.projection, data + 8u * 16u, sizeof(camera.projection));
+            std::memcpy(camera.view, data + 24u * 16u, sizeof(camera.view));
+            t_vu1Camera = ps2_gs_detail::CameraRegistry::add(camera);
         }
         if (resume)
         {
@@ -631,6 +646,7 @@ public:
                         m_runtime.gs(), &memory, startPC, top, itop, 65536);
         }
         t_vu1Tag = 0u;
+        t_vu1Camera = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
     }
@@ -979,6 +995,7 @@ void install(PS2Runtime &runtime)
             g_thread->drain();
         }
         ps2_gs_detail::t_sourceTag = t_onVif1Thread ? t_vu1Tag : 0u;
+        ps2_gs_detail::t_sourceCamera = t_onVif1Thread ? t_vu1Camera : 0u;
         gs.processGIFPacket(data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
