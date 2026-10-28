@@ -200,18 +200,23 @@ def matching_report(starts):
                 if i not in used_i and j not in used_j:
                     used_i.add(i)
                     used_j.add(j)
-                    best[i] = d
+                    best[i] = (d, j)
             for i, p in enumerate(prev):
                 if i not in best:
                     r[1] += 1
                     continue
-                d = best[i]
+                d, j = best[i]
                 if d < 0.01:
                     r[2] += 1
                     continue
-                ds = sorted(pose_distance(p, q) for q in cand)
-                second = ds[1] if len(ds) > 1 else 1e9
-                r[3 if d <= 0.5 * second or d < 2.0 else 4] += 1
+                others = [(pose_distance(p, q), k) for k, q in enumerate(cand) if k != j]
+                if not others:
+                    r[3] += 1
+                    continue
+                second, k = min(others)
+                # a rival at the same pose gives the same motion whichever is picked
+                same = pose_distance(cand[j], cand[k]) < 2.0
+                r[3 if d <= 0.5 * second or d < 2.0 or same else 4] += 1
     if not res:
         print("\nno light records to match (record with RG_VU1_CAPTURE_LISTS)")
         return
@@ -224,8 +229,8 @@ def matching_report(starts):
     for r in res.values():
         total = [x + y for x, y in zip(total, r)]
     print("  %-9s %9d %7.0f%% %7.0f%% %9.0f%% %9.1f%%" % ("all", total[0], *[100.0 * x / total[0] for x in total[1:]]))
-    print("  exact: the matrix is unchanged; confident: the best pose is clearly nearer than the next "
-          "or moved under 2 units; uncertain: another draw was about as close")
+    print("  exact: the matrix is unchanged; confident: the best pose is clearly nearer than the next, "
+          "moved under 2 units, or the rival is at the same pose; uncertain: a rival at a different pose was about as close")
 
 
 def main():
