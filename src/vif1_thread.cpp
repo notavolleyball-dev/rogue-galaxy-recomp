@@ -14,6 +14,7 @@
 #include <iterator>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,29 @@ std::atomic<uint64_t> g_busyNanos{0u};
 std::atomic<uint64_t> g_gifBusyNanos{0u};
 // Set on the VIF1 thread: its GS packets go to the GIF stage.
 thread_local bool t_onVif1Thread = false;
+// The VU1 program the VIF1 thread is running, as DQ8_GFX_PROFILE_CYCLE names
+// it for the draw tables (0 outside one, and unless the cycle is armed):
+// 0x80000000 | its entry (a pair index) << 16 | a hash of the microcode there.
+thread_local uint32_t t_vu1Tag = 0;
+const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr;
+// RG_VU1_CAPTURE=<file> records the VU1 data memory each program starts with
+// (16 KiB a start), for tools/vu1/capture_report.py; RG_VU1_CAPTURE_MAX caps
+// the starts kept.
+FILE *const g_capture = [] {
+    const char *path = std::getenv("RG_VU1_CAPTURE");
+    return path ? std::fopen(path, "wb") : nullptr;
+}();
+// After those, starts keep only the matrices (16 quads) for this many more
+// DMA lists, to follow objects from one list to the next.
+uint32_t g_captureLightLists = [] {
+    const char *lists = std::getenv("RG_VU1_CAPTURE_LISTS");
+    return lists ? static_cast<uint32_t>(std::strtoul(lists, nullptr, 10)) : 1500u;
+}();
+uint32_t g_captureLightFrom = 0u;
+uint32_t g_captureLeft = [] {
+    const char *max = std::getenv("RG_VU1_CAPTURE_MAX");
+    return max ? static_cast<uint32_t>(std::strtoul(max, nullptr, 10)) : 4000u;
+}();
 } // namespace
 namespace
 {
@@ -166,7 +190,8 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 // vector through them copied most of that twice, while a second walk for
 // the size alone read every tag again (thousands a frame, 2% of the game
 // thread in a battle).
-void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out)
+void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out,
+                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr)
 {
     out.clear();
     // (address, bytes) of each piece, in order. send() runs on the game
@@ -195,6 +220,10 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vect
         out.reserve(total);
         for (const auto &[address, bytes] : spans)
         {
+            if (origins)
+            {
+                origins->emplace_back(static_cast<uint32_t>(out.size()), address);
+            }
             appendBytes(memory, out, address, bytes);
         }
     }
@@ -309,7 +338,8 @@ private:
         // toward zero, and under this thread's default the logged frames
         // differed in the last bit of those values.
         uint32_t mxcsr;
-        uint32_t unused;
+        // t_vu1Tag when the VIF1 thread handed the packet over.
+        uint32_t tag;
     };
     static_assert(sizeof(Header) == 16u);
 
@@ -319,7 +349,7 @@ private:
         {
             return;
         }
-        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, 0u};
+        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag};
         const auto *raw = reinterpret_cast<const uint8_t *>(&header);
         m_staged.insert(m_staged.end(), raw, raw + sizeof(header));
         m_staged.insert(m_staged.end(), data, data + size);
@@ -359,6 +389,7 @@ private:
                     _mm_setcsr(header.mxcsr);
                     mxcsr = header.mxcsr;
                 }
+                ps2_gs_detail::t_sourceTag = header.tag;
                 try
                 {
                     if (header.kind == Kind::Packet)
@@ -429,6 +460,10 @@ struct List
     std::vector<uint8_t> data;
     bool dBit = false;
     bool tBit = false;
+    // With RG_VU1_CAPTURE: where each piece of `data` came from, as
+    // (offset in data, EE address), and the list's number.
+    std::vector<std::pair<uint32_t, uint32_t>> origins;
+    uint32_t number = 0u;
 };
 
 class Vif1Thread
@@ -491,6 +526,100 @@ public:
         VU1Interpreter &vu1 = m_runtime.vu1();
         vu1.state().dBitEnabled = m_current.dBit;
         vu1.state().tBitEnabled = m_current.tBit;
+        if (g_capture && !resume && (g_captureLeft || g_captureLightLists))
+        {
+            const bool full = g_captureLeft != 0u;
+            if (full)
+            {
+                --g_captureLeft;
+            }
+            else if (!g_captureLightFrom)
+            {
+                g_captureLightFrom = m_current.number;
+            }
+            else if (m_current.number - g_captureLightFrom >= g_captureLightLists)
+            {
+                g_captureLightLists = 0u;
+                std::fflush(g_capture);
+                goto captured;
+            }
+            const uint32_t tag = programTag(memory, startPC);
+            const uint8_t *data = memory.getVU1Data();
+            // Where the model matrix (quads 60-63) came from: found in the
+            // list's bytes, its piece names the EE address. 0 if not found.
+            uint32_t source = 0u;
+            const auto &bytes = m_current.data;
+            // (The search reads the whole list: full records only.)
+            const uint8_t *found = full ? std::search(bytes.data(), bytes.data() + bytes.size(),
+                                                      data + 60u * 16u, data + 64u * 16u)
+                                        : bytes.data() + bytes.size();
+            if (found != bytes.data() + bytes.size())
+            {
+                const uint32_t offset = static_cast<uint32_t>(found - bytes.data());
+                for (const auto &[start, address] : m_current.origins)
+                {
+                    if (start > offset)
+                    {
+                        break;
+                    }
+                    source = address + (offset - start);
+                }
+            }
+            const uint32_t header[7] = {full ? 0x44315556u : 0x4C315556u, tag, startPC, top, itop,
+                                        m_current.number, source};
+            std::fwrite(header, sizeof(header), 1, g_capture);
+            if (full)
+            {
+                std::fwrite(data, 1, PS2_VU1_DATA_SIZE, g_capture);
+            }
+            else
+            {
+                // A hash of the mesh's shape, which does not move with the
+                // buffer or the pose: the vertex count (quad 104 x) and the
+                // distances between the four section pointers (quad 103). And
+                // one of the first 64 quads at TOP.
+                auto fnv = [&](uint64_t hash, const uint8_t *at, size_t count) {
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        hash = (hash ^ at[i]) * 1099511628211ull;
+                    }
+                    return hash;
+                };
+                const bool inside = (top + 64u) * 16u <= PS2_VU1_DATA_SIZE;
+                uint32_t section[4];
+                uint32_t count;
+                std::memcpy(section, data + 103u * 16u, sizeof(section));
+                std::memcpy(&count, data + 104u * 16u, sizeof(count));
+                const uint32_t relative[4] = {count, section[1] - section[0], section[2] - section[1],
+                                              section[3] - section[2]};
+                const uint64_t shape = fnv(1469598103934665603ull, reinterpret_cast<const uint8_t *>(relative),
+                                           sizeof(relative));
+                uint64_t whole = 1469598103934665603ull;
+                if (inside)
+                {
+                    whole = fnv(whole, data + top * 16u, 64u * 16u);
+                }
+                const uint32_t hashes[2] = {static_cast<uint32_t>(shape ^ (shape >> 32)),
+                                            static_cast<uint32_t>(whole ^ (whole >> 32))};
+                std::fwrite(hashes, sizeof(hashes), 1, g_capture);
+                // Projection, view, model, and the clip-space product.
+                for (const uint32_t quad : {8u, 24u, 60u, 72u})
+                {
+                    std::fwrite(data + quad * 16u, 16u, 4u, g_capture);
+                }
+            }
+        }
+    captured:
+        if (g_tagPrograms)
+        {
+            // A continuation (MSCNT) is the same program; a DIRECT packet
+            // after the program ends carries no tag.
+            if (!resume)
+            {
+                m_programTag = programTag(memory, startPC);
+            }
+            t_vu1Tag = m_programTag;
+        }
         if (resume)
         {
             vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
@@ -501,8 +630,42 @@ public:
             vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                         m_runtime.gs(), &memory, startPC, top, itop, 65536);
         }
+        t_vu1Tag = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
+    }
+
+    // The tag of the program starting at pair `startPC`: the entry and a hash
+    // of the 1 KiB of microcode from it, which names the program whatever else
+    // the code memory holds. Kept until the code memory is next written.
+    uint32_t programTag(PS2Memory &memory, uint32_t startPC)
+    {
+        const uint64_t generation = memory.getVU1CodeGeneration();
+        if (generation != m_tagGeneration)
+        {
+            m_tagCache.clear();
+            m_tagGeneration = generation;
+        }
+        const auto [entry, inserted] = m_tagCache.try_emplace(startPC, 0u);
+        if (inserted)
+        {
+            const uint32_t first = std::min<uint32_t>(startPC * 8u, PS2_VU1_CODE_SIZE);
+            const uint32_t last = std::min<uint32_t>(first + 1024u, PS2_VU1_CODE_SIZE);
+            const uint8_t *code = memory.getVU1Code();
+            uint64_t hash = 1469598103934665603ull;
+            for (uint32_t at = first; at < last; ++at)
+            {
+                hash = (hash ^ code[at]) * 1099511628211ull;
+            }
+            const uint32_t folded = static_cast<uint16_t>(hash ^ (hash >> 16) ^ (hash >> 32) ^ (hash >> 48));
+            entry->second = 0x80000000u | ((startPC & 0x7FFu) << 16) | folded;
+            static std::atomic<uint32_t> logged{0u};
+            if (logged.fetch_add(1u, std::memory_order_relaxed) < 6u)
+            {
+                std::fprintf(stderr, "[profile] VU1 program: pc 0x%03x, tag %08x\n", startPC & 0x7FFu, entry->second);
+            }
+        }
+        return entry->second;
     }
 
     // VPU_STAT's VU1 D/T stop bits after the last MSCAL/MSCNT.
@@ -616,6 +779,11 @@ private:
     static constexpr size_t kPoolSize = 8u;
     std::vector<std::vector<uint8_t>> m_pool; // guarded by m_mutex
     std::atomic<uint32_t> m_vpuStat{0u};
+    // The VIF1 thread's: the running program's tag, and the tags by entry for
+    // the current contents of the code memory (programTag).
+    uint32_t m_programTag = 0u;
+    uint64_t m_tagGeneration = 0u;
+    std::unordered_map<uint32_t, uint32_t> m_tagCache;
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
     uint64_t m_reported = 0u;
@@ -704,7 +872,10 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     }
     else
     {
-        gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data);
+        static uint32_t listNumber = 0u;
+        list.number = ++listNumber;
+        gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
+                    g_capture ? &list.origins : nullptr);
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
@@ -807,6 +978,7 @@ void install(PS2Runtime &runtime)
             // every DMA start drains them already, this keeps it so.
             g_thread->drain();
         }
+        ps2_gs_detail::t_sourceTag = t_onVif1Thread ? t_vu1Tag : 0u;
         gs.processGIFPacket(data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
