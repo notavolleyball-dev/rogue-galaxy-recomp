@@ -2,9 +2,14 @@
 // through VU1 without the game, and checks what each candidate draws against
 // what the game's own runs kicked.
 //
-//   rg_vu1_oracle FILE [--candidate compiled|interpreter|all] [--runs N]
+//   rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]
 //                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]
 //                      [--tol-rgba N] [--tol-uv N] [--tol-stq F]
+//                      [--program HASH:PC --coverage FILE]
+//
+// --coverage single-steps the interpreter through the program's runs (with
+// --program) and writes how often each instruction pair ran, `pc hits` in
+// bytes, for tools/vu1/vudis.py; it prints how many distinct paths they took.
 //
 // --show prints one run's events beside the recorded ones, from its first
 // difference; `--show diff` does so for the first differing run of each
@@ -13,7 +18,9 @@
 // A candidate turns a run into GS events (gif_events.h): the VU1 engines run
 // the recorded program from the registers and data memory the game had and
 // decode what it kicks; a native replacement of a program family (phase 1 of
-// docs/NATIVE-RENDERER.md) computes the events itself. Runs are replayed in
+// docs/NATIVE-RENDERER.md) computes the events itself: `native` is the
+// field's strip program (native_strip.cpp), which lists the runs it left to
+// the VU1 and why. Runs are replayed in
 // the file's order on one VU1, since an MSCNT continues the run before it.
 //
 // A run's program is its code image and the entry of the MSCAL that began it;
@@ -35,6 +42,7 @@
 #include <xmmintrin.h>
 
 #include "gif_events.h"
+#include "oracle.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
@@ -49,25 +57,6 @@ namespace replay = rg::vu1replay;
 // VU1 micro memory as the EE addresses it: a write here bumps the code
 // generation the VU1 caches its decoding and compiled routines by.
 constexpr uint32_t kVu1CodeAddress = 0x11008000u;
-
-struct Run
-{
-    replay::RunHeader header{};
-    VU1State state{};
-    std::vector<uint8_t> data;
-    std::vector<std::vector<uint8_t>> kicks;
-    VU1State endState{};
-    bool ended = false;
-    // The program it belongs to: the MSCAL's code image and entry.
-    uint64_t programHash = 0u;
-    uint32_t programPC = 0u;
-};
-
-struct Recording
-{
-    std::unordered_map<uint64_t, std::vector<uint8_t>> codes;
-    std::vector<Run> runs;
-};
 
 bool readRecording(const char *path, uint32_t maxRuns, Recording &out)
 {
@@ -179,20 +168,6 @@ std::vector<GifEvent> eventsOf(const std::vector<std::vector<uint8_t>> &packets)
     return events;
 }
 
-class Candidate
-{
-public:
-    virtual ~Candidate() = default;
-    virtual const char *name() const = 0;
-    // Whether it draws runs of this program (the others are not counted).
-    virtual bool accepts(const Run &run) const = 0;
-    // The events of `run`, every run of the file in order whether accepted or
-    // not (a VU1 engine has to keep its state).
-    virtual void run(const Recording &recording, const Run &run, std::vector<GifEvent> &events) = 0;
-    // The registers the last run ended with, where the candidate has them.
-    virtual const VU1State *endState() const { return nullptr; }
-};
-
 // The recorded program on PS2Recomp's VU1: its compiled routines, or its
 // interpreter alone.
 class Vu1Engine final : public Candidate
@@ -220,6 +195,14 @@ public:
     const char *name() const override { return m_compiled ? "compiled" : "interpreter"; }
     bool accepts(const Run &) const override { return true; }
     const VU1State *endState() const override { return &m_vu.state(); }
+
+    // Single-steps the runs while set, counting each pair that ran, and
+    // hashing the run's path into `path`.
+    void setCoverage(std::map<uint32_t, uint64_t> *hits, uint64_t *path)
+    {
+        m_hits = hits;
+        m_path = path;
+    }
 
     void run(const Recording &recording, const Run &run, std::vector<GifEvent> &events) override
     {
@@ -251,7 +234,11 @@ public:
         m_packets = &packets;
         const uint32_t mxcsr = _mm_getcsr();
         _mm_setcsr(run.header.mxcsr);
-        if (run.header.flags & replay::kRunResume)
+        if (m_hits)
+        {
+            step(run);
+        }
+        else if (run.header.flags & replay::kRunResume)
         {
             m_vu.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(), PS2_VU1_DATA_SIZE, m_gs,
                         &m_memory, run.header.top, run.header.itop, 65536);
@@ -267,6 +254,38 @@ public:
     }
 
 private:
+    // One cycle at a time: a pair ran when the PC moved on, or the run ended.
+    void step(const Run &run)
+    {
+        bool first = !(run.header.flags & replay::kRunResume);
+        for (uint32_t cycles = 0; cycles < 65536u; ++cycles)
+        {
+            const uint32_t pc = first ? run.header.startPC : m_vu.state().pc;
+            if (first)
+            {
+                m_vu.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                             m_gs, &m_memory, run.header.startPC, run.header.top, run.header.itop, 1);
+                first = false;
+            }
+            else
+            {
+                m_vu.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                            m_gs, &m_memory, run.header.top, run.header.itop, 1);
+            }
+            if (m_vu.state().pc != pc || m_vu.lastRunEnded())
+            {
+                ++(*m_hits)[pc];
+                *m_path = (*m_path ^ pc) * 1099511628211ull;
+            }
+            if (m_vu.lastRunEnded())
+            {
+                return;
+            }
+        }
+    }
+
+    std::map<uint32_t, uint64_t> *m_hits = nullptr;
+    uint64_t *m_path = nullptr;
     bool m_compiled;
     PS2Memory m_memory;
     std::vector<uint8_t> m_vram;
@@ -307,13 +326,14 @@ struct Options
     uint64_t programHash = 0u;
     uint32_t programPC = 0u;
     int64_t show = -1;
+    const char *coverage = nullptr;
     Tolerance tolerance;
 };
 
 void usage()
 {
     std::fprintf(stderr,
-                 "usage: rg_vu1_oracle FILE [--candidate compiled|interpreter|all] [--runs N]\n"
+                 "usage: rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]\n"
                  "                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]\n"
                  "                      [--tol-rgba N] [--tol-uv N] [--tol-stq F]\n");
 }
@@ -342,6 +362,8 @@ bool parse(int argc, char **argv, Options &options)
             const std::string value = argv[++i];
             options.show = value == "diff" ? kShowFirstDifferences : std::strtoll(value.c_str(), nullptr, 0);
         }
+        else if (arg == "--coverage" && hasValue)
+            options.coverage = argv[++i];
         else if (arg == "--tol-xy" && hasValue)
             options.tolerance.xy = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
         else if (arg == "--tol-z" && hasValue)
@@ -357,7 +379,7 @@ bool parse(int argc, char **argv, Options &options)
         else
             return false;
     }
-    return options.path != nullptr;
+    return options.path != nullptr && (!options.coverage || options.filtered);
 }
 
 void showRun(const Run &run, const std::vector<GifEvent> &reference, const std::vector<GifEvent> &candidate,
@@ -404,10 +426,23 @@ int main(int argc, char **argv)
                 recording.runs.empty() ? 0u : recording.runs.back().header.list);
 
     std::vector<std::unique_ptr<Candidate>> candidates;
+    std::map<uint32_t, uint64_t> hits;
+    std::map<uint64_t, uint32_t> paths;
+    uint64_t path = 0u;
+    Vu1Engine *stepper = nullptr;
+    if (options.coverage)
+    {
+        options.candidate = "interpreter";
+    }
     if (options.candidate == "compiled" || options.candidate == "all")
         candidates.push_back(std::make_unique<Vu1Engine>(true));
     if (options.candidate == "interpreter" || options.candidate == "all")
+    {
         candidates.push_back(std::make_unique<Vu1Engine>(false));
+        stepper = options.coverage ? static_cast<Vu1Engine *>(candidates.back().get()) : nullptr;
+    }
+    if (options.candidate == "native")
+        candidates.push_back(makeNativeStrip());
     if (candidates.empty())
     {
         usage();
@@ -421,9 +456,18 @@ int main(int argc, char **argv)
         for (const Run &run : recording.runs)
         {
             std::vector<GifEvent> events;
-            candidate->run(recording, run, events);
             const bool wanted = !options.filtered ||
                                 (run.programHash == options.programHash && run.programPC == options.programPC);
+            if (stepper)
+            {
+                if (!(run.header.flags & replay::kRunResume) && path != 0u)
+                {
+                    ++paths[path];
+                    path = 0u;
+                }
+                stepper->setCoverage(wanted ? &hits : nullptr, &path);
+            }
+            candidate->run(recording, run, events);
             if (!wanted || !candidate->accepts(run))
             {
                 continue;
@@ -470,7 +514,42 @@ int main(int argc, char **argv)
                     total.runs - total.identical, total.registers, total.comparison.maxXy / 16.0,
                     total.comparison.maxZ, total.comparison.maxRgba, total.comparison.maxUv,
                     total.comparison.maxStq);
+        for (const auto &[reason, count] : candidate->declined())
+        {
+            std::printf("left to the VU1: %u runs, %s\n", count, reason.c_str());
+        }
         allMatch = allMatch && total.identical == total.runs;
+    }
+    if (stepper)
+    {
+        if (path != 0u)
+        {
+            ++paths[path];
+        }
+        std::FILE *out = std::fopen(options.coverage, "w");
+        if (!out)
+        {
+            std::fprintf(stderr, "cannot write %s\n", options.coverage);
+            return 2;
+        }
+        for (const auto &[pc, count] : hits)
+        {
+            std::fprintf(out, "%x %" PRIu64 "\n", pc, count);
+        }
+        std::fclose(out);
+        std::vector<uint32_t> counts;
+        for (const auto &[hash, count] : paths)
+        {
+            counts.push_back(count);
+        }
+        std::sort(counts.rbegin(), counts.rend());
+        std::printf("\ncoverage: %zu pairs ran, into %s; %zu distinct paths (an MSCAL and its MSCNTs), the "
+                    "commonest taken by", hits.size(), options.coverage, paths.size());
+        for (size_t i = 0; i < std::min<size_t>(counts.size(), 8u); ++i)
+        {
+            std::printf(" %u", counts[i]);
+        }
+        std::printf("\n");
     }
     return allMatch ? 0 : 1;
 }

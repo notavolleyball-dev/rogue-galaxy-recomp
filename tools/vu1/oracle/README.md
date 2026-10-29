@@ -75,3 +75,41 @@ programs it replaces (by `Run::programHash` and `programPC`), `run()` turns
 a run's recorded inputs (`Run::data`, `Run::state`, `RunHeader`) into
 `GifEvent`s. Register it beside the two VU1 engines. Its runs are compared
 with the recording and the others are left out of its table.
+
+## Reading a program
+
+`--coverage FILE` (with `--program`) single-steps the interpreter through the
+program's runs and writes how often each instruction pair ran; the replay
+still has to match, so the coverage is the game's. `tools/vu1/vudis.py CODE
+--coverage FILE` disassembles the code image with operands, only what ran,
+each pair with its count. A code image comes out of a recording's CODE record.
+
+## The first native program (2026-10-28)
+
+`native_strip.cpp` (`--candidate native`) is `9f727028f73861c3:320`, the
+heaviest program of the recording, read from its 886 pairs that ran: the
+MSCAL only ends, each chunk runs as an MSCNT through slots A (header, GIF
+header), B (int16 positions, normals, UVs to floats), C (vertex colors), D
+(transform, fog, ST, guard band and backface into ADC) and, with quad
+81.x & 2, E (clipping). It takes slots A, B, C, D and F as they are in that
+image and leaves E, triangle lists, scrolling UVs and three flag branches the
+field never took to the VU1.
+
+On the recording: all 17,800 runs it takes (12,840 chunks, 469,400 vertices)
+match within 1/16 pixel, 1 Z unit and 4.4e-7 of STQ, every ADC bit and
+register write exact; the 2,920 chunks that clip are left to the VU1. Without
+tolerances the differences are the float rounding (the VU truncates).
+
+Of the other heavy programs, none has the same A, B, C, D and F; all have
+the same E and F, most the same A, and they differ in B, C and D:
+
+| Program | A | B | C | D |
+|---|---|---|---|---|
+| `3dd4ba5d80f01760` | x | x | x | x |
+| `cfb586576df9c3d2` | = | = | = | x |
+| `30da21d7b6d089bf` | = | x | x | x |
+| `0f44ab11d3953380` | x | x | x | x |
+| `3856a013e86478a4` | = | = | = | x |
+| `a953fc53a82da5ff` | = | = | x | = |
+
+So the native side is per slot piece, composed, as the code is.

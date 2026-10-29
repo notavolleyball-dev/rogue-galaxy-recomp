@@ -128,7 +128,8 @@ target_compile_definitions(roguegalaxy PRIVATE RG_APP_VERSION="${PROJECT_VERSION
 # default: cmake --build build/game --target rg_vu1_oracle
 add_executable(rg_vu1_oracle EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/rg_vu1_oracle.cpp"
-    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/gif_events.cpp")
+    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/gif_events.cpp"
+    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/native_strip.cpp")
 target_include_directories(rg_vu1_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/debug")
 target_link_libraries(rg_vu1_oracle PRIVATE ps2_runtime)
 # The commit this build is from, for the menu's About window (as of the last
