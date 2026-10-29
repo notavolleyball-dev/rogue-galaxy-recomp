@@ -21,6 +21,7 @@
 #include <xmmintrin.h>
 
 #include "ThreadNaming.h"
+#include "debug/draw_origins.h"
 #include "debug/vu1_replay.h"
 #include "vu1_native.h"
 #include "ps2_runtime.h"
@@ -44,6 +45,9 @@ thread_local bool t_onVif1Thread = false;
 thread_local uint32_t t_vu1Tag = 0;
 // And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
 thread_local uint32_t t_vu1Camera = 0;
+// RG_DRAW_ORIGINS (debug/draw_origins.h): the program's name, when
+// src/vu1_native.cpp knows it (in any RG_VU1_NATIVE mode), null otherwise.
+thread_local const char *t_vu1Name = nullptr;
 // RG_VU1_NATIVE (src/vu1_native.h): while a chunk done natively runs on the
 // VU1, its packets are collected (check) or dropped (replace).
 thread_local std::vector<std::vector<uint8_t>> *t_vu1Packets = nullptr;
@@ -56,7 +60,9 @@ const uint32_t g_checkEvery = [] {
     const unsigned long every = value ? std::strtoul(value, nullptr, 10) : 1ul;
     return static_cast<uint32_t>(every == 0ul ? 1ul : every);
 }();
-const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
+const bool g_drawOrigins = rg::debug::drawOriginsEnabled();
+const bool g_tagPrograms =
+    std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr || g_drawOrigins;
 // RG_VU1_CAPTURE=<file> records the VU1 data memory each program starts with
 // (16 KiB a start), for tools/vu1/capture_report.py; RG_VU1_CAPTURE_MAX caps
 // the starts kept.
@@ -512,8 +518,8 @@ struct List
     std::vector<uint8_t> data;
     bool dBit = false;
     bool tBit = false;
-    // With RG_VU1_CAPTURE: where each piece of `data` came from, as
-    // (offset in data, EE address), and the list's number.
+    // With RG_VU1_CAPTURE or RG_DRAW_ORIGINS: where each piece of `data`
+    // came from, as (offset in data, EE address); and the list's number.
     std::vector<std::pair<uint32_t, uint32_t>> origins;
     uint32_t number = 0u;
 };
@@ -669,8 +675,15 @@ public:
             if (!resume)
             {
                 m_programTag = programTag(memory, startPC);
+                if (g_drawOrigins)
+                {
+                    const rg::vu1native::Program *program =
+                        rg::vu1native::identify(memory.getVU1Code(), startPC);
+                    m_programName = program ? program->name : nullptr;
+                }
             }
             t_vu1Tag = m_programTag;
+            t_vu1Name = m_programName;
             // The matrices this program transforms with: viewport (4-7),
             // projection (8-11) and view (24-27). Quads are 16-byte rows.
             ps2_gs_detail::SceneCamera camera;
@@ -805,6 +818,7 @@ public:
         }
         t_vu1Tag = 0u;
         t_vu1Camera = 0u;
+        t_vu1Name = nullptr;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
     }
@@ -906,6 +920,10 @@ private:
             const auto started = std::chrono::steady_clock::now();
             try
             {
+                if (g_drawOrigins)
+                {
+                    rg::debug::drawOriginsList(m_current.data.data(), m_current.data.size(), &m_current.origins);
+                }
                 if (!m_current.data.empty())
                 {
                     memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
@@ -956,6 +974,7 @@ private:
     // The VIF1 thread's: the running program's tag, and the tags by entry for
     // the current contents of the code memory (programTag).
     uint32_t m_programTag = 0u;
+    const char *m_programName = nullptr;
     // RG_VU1_NATIVE: the program the last MSCAL started, for its MSCNTs, the
     // code image it was found in, and the packets of a chunk.
     const rg::vu1native::Program *m_nativeProgram = nullptr;
@@ -980,6 +999,10 @@ Vif1Thread *g_thread = nullptr;
 
 void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 {
+    if (g_drawOrigins)
+    {
+        rg::debug::drawOriginsPacket(data, size, t_onVif1Thread ? t_vu1Tag : 0u, t_onVif1Thread ? t_vu1Name : nullptr);
+    }
     if (g_stage && t_onVif1Thread)
     {
         g_stage->packet(data, size);
@@ -998,6 +1021,10 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 
 void deliverMesh(GS &gs, const GSNativeMesh &mesh)
 {
+    if (g_drawOrigins)
+    {
+        rg::debug::drawOriginsMesh(static_cast<uint32_t>(mesh.vertices.size()), t_vu1Tag, t_vu1Name);
+    }
     if (g_stage && t_onVif1Thread)
     {
         g_stage->mesh(mesh);
@@ -1082,6 +1109,10 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         {
             list.data.reserve(qwc * 16u);
             appendBytes(memory, list.data, address, qwc * 16u);
+            if (g_drawOrigins)
+            {
+                list.origins.emplace_back(0u, address);
+            }
         }
         catch (const std::exception &)
         {
@@ -1093,7 +1124,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         static uint32_t listNumber = 0u;
         list.number = ++listNumber;
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
-                    g_capture ? &list.origins : nullptr);
+                    (g_capture || g_drawOrigins) ? &list.origins : nullptr);
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));

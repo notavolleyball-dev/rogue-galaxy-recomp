@@ -104,6 +104,7 @@ add_executable(roguegalaxy
     overlay/overlay_manager.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
+    debug/draw_origins.cpp
     debug/gs_census.cpp
     debug/gs_timing.cpp
     debug/host_stacks.cpp

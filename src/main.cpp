@@ -16,6 +16,7 @@
 
 #include "debug/call_trace.h"
 #include "debug/crash_report.h"
+#include "debug/draw_origins.h"
 #include "debug/hw_watch.h"
 #include "debug/input_script.h"
 #include "debug/pos_trace.h"
@@ -185,6 +186,7 @@ int run(int argc, char **argv)
     if (rg::nativerenderer::enabled())
         std::fprintf(stderr, "[rg] native renderer on\n");
     rg::debug::installCallTrace(runtime);
+    rg::debug::installDrawOrigins(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);
     rg::debug::installJumpTrace(runtime);
