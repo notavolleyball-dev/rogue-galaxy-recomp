@@ -210,6 +210,32 @@ vec4 sampleTexture() {
         const vec2 physical = texel * float(sourceScale) - 0.5;
         const ivec2 first = ivec2(floor(physical));
         const vec2 weight = physical - vec2(first);
+        // A plain CT32 target clamped in both axes, all four taps inside the
+        // clamp (Rogue Galaxy: added): each tap's physical texel is itself,
+        // as the general path below works out the long way, so the taps are
+        // read directly. Textured draws were a few times an untextured one's
+        // cost a pixel at 8x, most of it this arithmetic.
+        const uint wrapU = params.control.w & 3u;
+        const uint wrapV = (params.control.w >> 2u) & 3u;
+        if ((wrapU == WRAP_CLAMP || wrapU == WRAP_REGION_CLAMP) &&
+            (wrapV == WRAP_CLAMP || wrapV == WRAP_REGION_CLAMP) && uint(params.misc.z) == 0u) {
+            const ivec2 size = ivec2(params.textureSize.xy);
+            const ivec4 region = ivec4(params.region);
+            const ivec2 low = clamp(ivec2(wrapU == WRAP_CLAMP ? 0 : region.x, wrapV == WRAP_CLAMP ? 0 : region.z),
+                                    ivec2(0), size - 1);
+            const ivec2 high = clamp(ivec2(wrapU == WRAP_CLAMP ? size.x - 1 : region.y,
+                                           wrapV == WRAP_CLAMP ? size.y - 1 : region.w),
+                                     ivec2(0), size - 1);
+            if (all(greaterThanEqual(first, low * sourceScale)) &&
+                all(lessThan(first + 1, (high + 1) * sourceScale))) {
+                const ivec2 bound = min(size * sourceScale, textureSize(gsTexture, 0)) - 1;
+                const vec4 c00 = texelFetch(gsTexture, clamp(first, ivec2(0), bound), 0);
+                const vec4 c10 = texelFetch(gsTexture, clamp(first + ivec2(1, 0), ivec2(0), bound), 0);
+                const vec4 c01 = texelFetch(gsTexture, clamp(first + ivec2(0, 1), ivec2(0), bound), 0);
+                const vec4 c11 = texelFetch(gsTexture, clamp(first + ivec2(1, 1), ivec2(0), bound), 0);
+                return mix(mix(c00, c10, weight.x), mix(c01, c11, weight.x), weight.y);
+            }
+        }
         const float inverse = 1.0 / float(sourceScale);
         vec4 taps[4];
         for (int i = 0; i < 4; ++i) {
