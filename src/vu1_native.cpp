@@ -150,6 +150,8 @@ constexpr Finish kFinishes[] = {
     {{0x1900u, 0x1bc0u, 0x4b7b81f2fe1beeefull}, Cull::None, false},
     // No culling; z times 87.z, at most 1.y; the bounds into 98 and 99.
     {{0x1900u, 0x1b98u, 0xb8ea8ed53805b0c4ull}, Cull::None, true},
+    // The guard band (its z before the scale), and that depth and bounds.
+    {{0x1900u, 0x1cb8u, 0x634107b0f8a88c88ull}, Cull::GuardBand, true},
 };
 
 // The program of these pieces, made once and kept: its name says what each
@@ -932,7 +934,8 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     {
         if (matches(code, candidate.d))
         {
-            finish = candidate.depthBounds                        ? "D:depth and bounds"
+            finish = candidate.depthBounds && candidate.cull == Cull::GuardBand ? "D:guard band, depth and bounds"
+                     : candidate.depthBounds                        ? "D:depth and bounds"
                      : candidate.cull == Cull::GuardBandAndBackface ? "D:guard band and backfaces"
                      : candidate.cull == Cull::GuardBand            ? "D:guard band"
                                                                     : "D:no culling";

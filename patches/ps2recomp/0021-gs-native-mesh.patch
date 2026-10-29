@@ -59,7 +59,7 @@ index ccfadf6..27c0456 100644
      void UploadImage(const uint8_t *data, uint32_t size) override;
      void Flush() override;
 diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
-index 4014e39..3986306 100644
+index 4014e39..f175e0d 100644
 --- a/ps2xRuntime/include/runtime/gs/gs_types.h
 +++ b/ps2xRuntime/include/runtime/gs/gs_types.h
 @@ -2,6 +2,7 @@
@@ -70,7 +70,7 @@ index 4014e39..3986306 100644
  #include <cstdint>
  #include <cstring>
  #include <limits>
-@@ -327,6 +328,180 @@ struct GSPrimitiveBatch
+@@ -327,6 +328,185 @@ struct GSPrimitiveBatch
      uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
  };
  
@@ -105,8 +105,9 @@ index 4014e39..3986306 100644
 +        float depthScale = 1.0f;
 +        float depthMax = std::numeric_limits<float>::max();
 +        float colorMax[4] = {};
-+        // A vertex is outside the guard band when |(p + bandOffset) * bandScale|
-+        // passes 1 in x, y or z, p the projected point.
++        // A vertex is outside the guard band when p * bandScale + bandOffset *
++        // bandScale passes 1 in x, y or z, p the projected point (its z
++        // before depthScale), as the program sums it.
 +        float bandScale[4] = {};
 +        float bandOffset[4] = {};
 +        // The first triangle's winding sign; it flips from one to the next.
@@ -157,7 +158,8 @@ index 4014e39..3986306 100644
 +    p.q = 1.0f / clip[3];
 +    p.px = clip[0] * p.q;
 +    p.py = clip[1] * p.q;
-+    p.pz = std::fmin(clip[2] * p.q * h.depthScale, h.depthMax);
++    const float z = clip[2] * p.q;
++    p.pz = std::fmin(z * h.depthScale, h.depthMax);
 +    const float f = std::fmax(std::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2]);
 +    p.pf = f;
 +    p.x16 = gsNativeFtoi(p.px, 16.0f);
@@ -169,9 +171,12 @@ index 4014e39..3986306 100644
 +        p.rgba[i] = gsNativeFtoi(std::fmin(color[i], h.colorMax[i]), 1.0f);
 +    p.s = v.u * p.q;
 +    p.t = v.v * p.q;
-+    p.outside = std::fabs((p.px + h.bandOffset[0]) * h.bandScale[0]) > 1.0f ||
-+                std::fabs((p.py + h.bandOffset[1]) * h.bandScale[1]) > 1.0f ||
-+                std::fabs((p.pz + h.bandOffset[2]) * h.bandScale[2]) > 1.0f;
++    const float projected[3] = {p.px, p.py, z};
++    for (int i = 0; i < 3; ++i)
++    {
++        const float g = projected[i] * h.bandScale[i] + h.bandOffset[i] * h.bandScale[i];
++        p.outside = p.outside || g > 1.0f || g < -1.0f;
++    }
 +    return p;
 +}
 +
