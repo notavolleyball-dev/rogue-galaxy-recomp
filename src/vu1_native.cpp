@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -128,6 +129,11 @@ constexpr Piece kBase = {0x0000u, 0x02c0u, 0x12ad73d26e1badecull};
 // The overlay sprites: B 6e42dac6 entered by an MSCAL at its start.
 constexpr Piece kOverlayB = {0x0960u, 0x0b38u, 0x6e42dac662887054ull};
 
+// The particle program's A (header with PRIM 4; calls D only) and D
+// (8ecadb3a).
+constexpr Piece kParticleA = {0x0320u, 0x04a8u, 0x0b1031aeb003ccb0ull};
+constexpr Piece kParticleD = {0x1900u, 0x2890u, 0x8ecadb3a83d5e584ull};
+
 // The shadow volume program's A (header with PRIM 5, fans; calls B, then C)
 // and C (dc8dbfe4).
 constexpr Piece kShadowA = {0x0320u, 0x0500u, 0x821b638f42fcaa6eull};
@@ -194,6 +200,7 @@ const Program *intern(const Program &shape)
                                            : shape.kind == Kind::Shadow ? "shadow volume"
                                            : shape.kind == Kind::Overlay ? "overlay sprites"
                                            : shape.kind == Kind::Base    ? "object setup"
+                                           : shape.kind == Kind::Particles ? "particles"
                                                                         : "strip");
     name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
             : shape.cull == Cull::GuardBand          ? ", guard band"
@@ -939,6 +946,170 @@ void runBase(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     std::memcpy(data + 111u * 16u + 8u, &sign, 4u);
 }
 
+// The particle D (8ecadb3a). Per particle: a position (two quads: xyz, then
+// x and y scales and an angle), a color (floats, times 128, within 0-128),
+// two corner offsets and two UVs (xy of two quads each). The quad faces the
+// eye (quad 28): its axes are e x (0, 1, 0) and e x that, normalized (e
+// from the particle to the eye), scaled, and turned by the angle, whose
+// cosine and sine come from a polynomial in a triangle wave of the angle /
+// 2 pi. Its corners (offset x, offset y) go through the window matrix
+// (quads 12-15 times 8-11 times 24-27) and the divide, and through clip
+// space (8-11 times 24-27, x and y times 16.xy): one corner outside its w
+// sets ADC on all four, else the XYZF2 word w is 0x7fff (fog 0xff). Out:
+// the FOGCOL packet, then the header and per particle PRIM 4 (its low word
+// only: the rest of the quad is the buffer's) and four vertices of ST,
+// RGBA, XYZF2.
+float particleCosine(float angle)
+{
+    const float p = std::fabs(angle) * fromBits(0xbe22f987u); // -1 / 2 pi
+    const float magic = fromBits(0x4b400000u);               // 1.5 * 2^23
+    const float fraction = ((p - magic) + magic) - p;
+    const float t = std::fabs(fraction - 0.5f) - 0.25f;
+    const float t2 = t * t, t4 = t2 * t2, t8 = t4 * t4;
+    const float a3 = t * fromBits(0xc2255de0u) * t2;
+    const float a7 = t * fromBits(0xc2992661u) * t2 * t4;
+    const float a5 = t * fromBits(0x42a33457u) * t4;
+    const float a1 = t * fromBits(0x40c90fdau);
+    const float a9 = t * fromBits(0x421ed7b7u) * t8;
+    return a3 + a7 + a5 + a1 + a9;
+}
+
+// 1 / sqrt(|x|), as the runtime's RSQRT gives it (the most float at 0).
+float vuReciprocalRoot(float x)
+{
+    const float root = std::sqrt(std::fabs(x));
+    return root != 0.0f ? 1.0f / root : std::numeric_limits<float>::max();
+}
+
+// 1 / x, as the runtime's DIV gives it.
+float vuReciprocal(float x)
+{
+    if (x != 0.0f)
+    {
+        return 1.0f / x;
+    }
+    return std::signbit(x) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+}
+
+void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets)
+{
+    packets.clear();
+    std::vector<uint8_t> &fog = packets.emplace_back();
+    uint32_t fogTag[4];
+    std::memcpy(fogTag, vu.bytes(19), sizeof(fogTag));
+    putWords(fog, 0x8001u, fogTag[1], fogTag[2], fogTag[3]);
+    putQuad(fog, vu.bytes(41));
+    if (vu.half(87, 1) & 0x10u)
+    {
+        std::memset(fog.data() + 16u, 0, 4u);
+    }
+
+    const uint32_t count = vu.half(top, 1);
+    const uint32_t positions = top + 2u;
+    const uint32_t offsets = positions + vu.half(top, 3);
+    const uint32_t uvs = positions + vu.half(top + 1u, 0);
+    const uint32_t colors = positions + vu.half(top + 1u, 1);
+    // Where A puts the output (TOP + 76.x), the vertices 4 quads on.
+    const uint32_t output = top + vu.half(76, 0) + 4u;
+    std::vector<uint8_t> &packet = packets.emplace_back();
+    packet.reserve(64u + count * 208u);
+    putQuad(packet, vu.bytes(0));
+    putWords(packet, 4u, 0u, 0u, 0u);
+    putWords(packet, vu.half(87, 0), 0u, 27u, 0u);
+    uint32_t tag[4];
+    std::memcpy(tag, vu.bytes(86), sizeof(tag));
+    tag[0] = vu.half(top, 2);
+    putQuad(packet, tag);
+
+    Vec4 camera[4], window[4], clip[4], model[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        camera[i] = vu.quad(8u + i);
+        model[i] = vu.quad(60u + i);
+    }
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        window[i] = vu.quad(12u + i);
+    }
+    const Vec4 viewport = vu.quad(16);
+    Vec4 rows[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        clip[i] = transform(camera, vu.quad(24u + i));
+        rows[i] = transform(window, clip[i]);
+        clip[i].x *= viewport.x;
+        clip[i].y *= viewport.y;
+    }
+    const Vec4 eye = vu.quad(28);
+    const float halfPi = fromBits(0x3fc90fd8u);
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const Vec4 p = vu.quad(positions + 2u * i), shape = vu.quad(positions + 2u * i + 1u);
+        const Vec4 world = transform(model, {p.x, p.y, p.z, 1.0f});
+        const float ex = eye.x - world.x, ey = eye.y - world.y, ez = eye.z - world.z;
+        const float rx = 0.0f + ez, ry = 0.0f, rz = 0.0f - ex;
+        const float rr = rx * rx + ry * ry + rz * rz;
+        const float ux = ey * rz - ry * ez, uy = ez * rx - rz * ex, uz = ex * ry - rx * ey;
+        const float uu = ux * ux + uy * uy + uz * uz;
+        const float rq = vuReciprocalRoot(rr), uq = vuReciprocalRoot(uu);
+        const float rs[3] = {rx * rq * shape.x, ry * rq * shape.x, rz * rq * shape.x};
+        const float us[3] = {ux * uq * shape.y, uy * uq * shape.y, uz * uq * shape.y};
+        const float c = 0.0f - particleCosine(shape.z - halfPi), s = particleCosine(shape.z);
+        float a[3], b[3];
+        for (int l = 0; l < 3; ++l)
+        {
+            a[l] = rs[l] * s - us[l] * c;
+            b[l] = rs[l] * c + us[l] * s;
+        }
+        const Vec4 o0 = vu.quad(offsets + 2u * i), o1 = vu.quad(offsets + 2u * i + 1u);
+        const Vec4 uv0 = vu.quad(uvs + 2u * i), uv1 = vu.quad(uvs + 2u * i + 1u);
+        const float corners[4][2] = {{o0.x, o0.y}, {o1.x, o0.y}, {o0.x, o1.y}, {o1.x, o1.y}};
+        const float texels[4][2] = {{uv0.x, uv0.y}, {uv1.x, uv0.y}, {uv0.x, uv1.y}, {uv1.x, uv1.y}};
+
+        const Vec4 color = vu.quad(colors + i);
+        const float lanes[4] = {color.x, color.y, color.z, color.w};
+        uint32_t rgba[4];
+        for (int l = 0; l < 4; ++l)
+        {
+            rgba[l] = static_cast<uint32_t>(
+                gsNativeFtoi(std::fmax(std::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
+        }
+        uint32_t st[4][4], xyz[4][4];
+        bool outside = false;
+        for (uint32_t v = 0; v < 4u; ++v)
+        {
+            float k[3];
+            for (int l = 0; l < 3; ++l)
+            {
+                k[l] = b[l] * corners[v][1] + (&world.x)[l] + a[l] * corners[v][0];
+            }
+            const Vec4 corner{k[0], k[1], k[2], 1.0f};
+            const Vec4 screen = transform(rows, corner);
+            outside = outside || clipsOwnW(transform(clip, corner));
+            const float q = vuReciprocal(screen.w);
+            const float stq[4] = {texels[v][0] * q, texels[v][1] * q, 1.0f * q, 1.0f * q};
+            std::memcpy(st[v], stq, sizeof(stq));
+            xyz[v][0] = static_cast<uint32_t>(gsNativeFtoi(screen.x * q, 16.0f));
+            xyz[v][1] = static_cast<uint32_t>(gsNativeFtoi(screen.y * q, 16.0f));
+            xyz[v][2] = static_cast<uint32_t>(gsNativeFtoi(screen.z * q, 16.0f));
+        }
+        const uint32_t adc = outside ? 0x8000u : 0x7fffu;
+        // PRIM: ISW writes the low word only; the rest is what the buffer held.
+        uint32_t prim[4];
+        std::memcpy(prim, vu.bytes(output + 13u * i), sizeof(prim));
+        prim[0] = 4u;
+        putQuad(packet, prim);
+        for (uint32_t v = 0; v < 4u; ++v)
+        {
+            xyz[v][3] = adc;
+            putQuad(packet, st[v]);
+            putQuad(packet, rgba);
+            putQuad(packet, xyz[v]);
+        }
+    }
+}
+
 // The overlay B (6e42dac6), run by its own MSCAL: screen sprites over the
 // bounds the last depth-and-bounds program left in quads 98 and 99, one
 // pixel wider each way, within the rectangle of quads 140 and 141, in
@@ -1019,6 +1190,11 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     if (startPC != kEntry)
     {
         return nullptr;
+    }
+    if (matches(code, kParticleA) && matches(code, kParticleD))
+    {
+        Program shape{nullptr, Cull::None, Color::Material, false, Decode::Plain, 0, Kind::Particles};
+        return intern(shape);
     }
     // The programs whose C draws by itself, by their A and C.
     constexpr struct
@@ -1133,6 +1309,8 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
             return "a shadow chunk not of whole triangles";
         return nullptr;
     }
+    if (program.kind == Kind::Particles)
+        return vu.half(top, 1) == 0u ? "no particles" : nullptr;
     if ((vu.half(81, 0) & 2u) && !clips)
         return "clipping (slot E)";
     // PRIM from the chunk header. Only the backface piece reads it, with a
@@ -1282,6 +1460,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     {
         packets.clear();
         packets.push_back(gifPacket(VuData(data), 19));
+        return;
+    }
+    if (program.kind == Kind::Particles)
+    {
+        buildParticles(VuData(data), top, packets);
         return;
     }
     Chunk chunk;
