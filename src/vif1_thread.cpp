@@ -781,7 +781,7 @@ public:
                 {
                     deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
                 }
-                if (g_nativeMode == rg::vu1native::Mode::Gpu)
+                if (g_nativeMode == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
                 {
                     deliverMesh(m_runtime.gs(), m_nativeMesh);
                 }

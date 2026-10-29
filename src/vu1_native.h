@@ -46,6 +46,13 @@ enum class Color : uint8_t
     Material,  // the material color alone
 };
 
+// What the program draws: the A piece decides (it calls the others).
+enum class Kind : uint8_t
+{
+    Strip,   // triangle strips and lists: A, B, C, D, F (E clips)
+    Outline, // the toon outlines: A, B, then C draws the silhouette edges as lines
+};
+
 // How the B piece decodes a vertex's position.
 enum class Decode : uint8_t
 {
@@ -64,7 +71,17 @@ struct Program
     // vertices' bounds kept in quads 98 (least) and 99 (most).
     bool depthBounds = false;
     Decode decode = Decode::Plain;
+    // The most bones the B piece has an entry for (Skinned).
+    uint8_t maxBones = 0;
+    Kind kind = Kind::Strip;
 };
+
+// Whether buildMesh can make the program's chunks a GSNativeMesh; if not,
+// the GPU path sends buildChunk's packets.
+inline bool hasMesh(const Program &program)
+{
+    return program.kind == Kind::Strip;
+}
 
 // The program whose MSCAL enters at `startPC` (in bytes) with `code` (all of
 // micro memory) in place, or null. Hashes about 6 KiB: callers cache it per

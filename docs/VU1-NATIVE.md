@@ -151,6 +151,10 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | C | 0x10e0-0x1328 | `70362be426b17f94` | Vertex colors (87.y & 0x100 and 0x200 declined) |
 | C | 0x10e0-0x11b0 | `780d503e649c9116` | One material color for every vertex (with 87.y & 0x200: 82 * 43, no ambient) |
 | F | 0x39d0-0x3a68 | `d3f6f6312a13ff1c` | UV scroll (declined when active) |
+| B | 0x0960-0x1020 | `26a933a58f99a9da` | Skinning: entries for 1, 2 and 4 bones (A enters at 0x960 plus TOP+1.w pairs with 76.z set); per bone the position (w 1) times weight / 255 times the matrix at quads 900 + 2 * index |
+| B | 0x0960-0x0f30 | `542b235c4775a710` | The outlines' skinning: 1 bone (positions only) and 2 bones |
+| A | 0x0320-0x04e8 | `3f6df595be6e31b7` | The outline driver: header with PRIM 1 (lines), calls B and C, no D, E or F |
+| C | 0x10e0-0x1e70 | `3689bac97cae3c73` | The toon outlines (`buildOutline`): edges as four offset lines; with TOP.x 19 a silhouette test from the two adjacent triangles. Packets only: `gpu` mode sends them as `skip` does |
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |

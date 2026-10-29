@@ -85,15 +85,24 @@ constexpr const char *kCommonNames[] = {"A", "F"};
 // The B pieces. A calls B at 0x960, or with quad 76.z set at 0x960 plus
 // the chunk's TOP+1.w pairs: af62ff64 has the one entry; 26a933a5 has three,
 // 0 one bone, 2 two bones, 4 four (skin()).
+// 542b235c (the outlines') has the first two, its one-bone path positions
+// only.
 struct DecodePiece
 {
     Piece b;
     Decode decode;
+    uint8_t maxBones;
 };
 constexpr DecodePiece kDecodes[] = {
-    {{0x0960u, 0x0a38u, 0xaf62ff64ac67b45full}, Decode::Plain},
-    {{0x0960u, 0x1020u, 0x26a933a58f99a9daull}, Decode::Skinned},
+    {{0x0960u, 0x0a38u, 0xaf62ff64ac67b45full}, Decode::Plain, 0},
+    {{0x0960u, 0x1020u, 0x26a933a58f99a9daull}, Decode::Skinned, 4},
+    {{0x0960u, 0x0f30u, 0x542b235c4775a710ull}, Decode::Skinned, 2},
 };
+
+// The outline program's A (header with PRIM 1, lines; calls B, then C) and
+// C (3689bac9, which also fills slot D's space).
+constexpr Piece kOutlineA = {0x0320u, 0x04e8u, 0x3f6df595be6e31b7ull};
+constexpr Piece kOutlineC = {0x10e0u, 0x1e70u, 0x3689bac97cae3c73ull};
 
 // The C pieces: both build the material color, quad 82 * 42 + 83 * 128
 // (82.w scaled by 81.w); 70362be4 multiplies it by each vertex's int16
@@ -137,17 +146,17 @@ const Program *intern(const Program &shape)
     for (const Program &program : programs)
     {
         if (program.cull == shape.cull && program.color == shape.color && program.depthBounds == shape.depthBounds &&
-            program.decode == shape.decode)
+            program.decode == shape.decode && program.maxBones == shape.maxBones && program.kind == shape.kind)
         {
             return &program;
         }
     }
-    std::string &name = names.emplace_back("strip");
+    std::string &name = names.emplace_back(shape.kind == Kind::Outline ? "outline" : "strip");
     name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
             : shape.cull == Cull::GuardBand          ? ", guard band"
                                                      : "";
     name += shape.depthBounds ? ", depth and bounds" : "";
-    name += shape.color == Color::Material ? ", one color" : "";
+    name += shape.color == Color::Material && shape.kind == Kind::Strip ? ", one color" : "";
     name += shape.decode == Decode::Skinned ? ", skinned" : "";
     Program &program = programs.emplace_back(shape);
     program.name = name.c_str();
@@ -218,12 +227,20 @@ float itof15(int32_t v)
     return static_cast<float>(v) / 32768.0f;
 }
 
+float fromBits(uint32_t bits)
+{
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 // How many bones the skinning B's entry sums (A enters B at 0x960 plus
 // TOP+1.w pairs when quad 76.z is set): 1, 2 or 4, or 0 for another entry.
-uint32_t bonesOf(const VuData &vu, uint32_t top)
+uint32_t bonesOf(const Program &program, const VuData &vu, uint32_t top)
 {
     const uint32_t entry = vu.half(76, 2) != 0u ? vu.half(top + 1u, 3) : 0u;
-    return entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u ? 4u : 0u;
+    const uint32_t bones = entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u ? 4u : 0u;
+    return bones <= program.maxBones ? bones : 0u;
 }
 
 // The skinning B: the position (w 1) scaled by each bone's weight (an int
@@ -232,9 +249,7 @@ uint32_t bonesOf(const VuData &vu, uint32_t top)
 // of the quad at `weights`, the weights the words of the next.
 void skin(const VuData &vu, uint32_t weights, uint32_t bones, float position[3])
 {
-    uint32_t bits = 0x3B808081u; // the program's I: 1/255
-    float scale;
-    std::memcpy(&scale, &bits, sizeof(scale));
+    const float scale = fromBits(0x3b808081u); // the program's I: 1/255
     float acc[3] = {};
     bool first = true;
     for (uint32_t b = 0; b < bones; ++b)
@@ -273,6 +288,21 @@ void putFloats(std::vector<uint8_t> &packet, float x, float y, float z, float w)
 {
     const float words[4] = {x, y, z, w};
     putQuad(packet, words);
+}
+
+// Vertex k's position as B leaves it: the int16 / 32768 times quad 77, then
+// skinned over `bones` bones (0: not skinned).
+void decodePosition(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, float position[3])
+{
+    const uint32_t positions = top + 2u;
+    const Vec4 scale = vu.quad(77);
+    position[0] = itof15(vu.word(positions + k, 0)) * scale.x;
+    position[1] = itof15(vu.word(positions + k, 1)) * scale.y;
+    position[2] = itof15(vu.word(positions + k, 2)) * scale.z;
+    if (bones != 0u)
+    {
+        skin(vu, positions + vu.half(top + 1u, 2) + k * 2u, bones, position);
+    }
 }
 
 // A chunk read out of VU1 data memory: the FOGCOL packet, the first quads of
@@ -342,7 +372,6 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     }
     h.triangleList = (prim & 7u) == 3u ? 1u : 0u;
 
-    const Vec4 positionScale = vu.quad(77);
     const Vec4 uvScale = vu.quad(79);
     Vec4 material = vu.quad(82);
     material.w *= vu.quad(81).w;
@@ -357,19 +386,13 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
     }
     const bool perVertex = program.color == Color::PerVertex;
-    const uint32_t weights = positions + vu.half(top + 1u, 2);
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(vu, top) : 0u;
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
     chunk.mesh.vertices.resize(count);
     for (uint32_t k = 0; k < count; ++k)
     {
         GSNativeMesh::Vertex &v = chunk.mesh.vertices[k];
-        float position[3] = {itof15(vu.word(positions + k, 0)) * positionScale.x,
-                             itof15(vu.word(positions + k, 1)) * positionScale.y,
-                             itof15(vu.word(positions + k, 2)) * positionScale.z};
-        if (bones != 0u)
-        {
-            skin(vu, weights + k * 2u, bones, position);
-        }
+        float position[3];
+        decodePosition(vu, top, k, bones, position);
         v.x = position[0];
         v.y = position[1];
         v.z = position[2];
@@ -382,6 +405,120 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     }
 }
 
+// The outline C. With TOP.x 19 the chunk's points come in fours: an edge
+// (the second and third) and the far vertices of its two triangles (the
+// first and fourth); otherwise in twos, the edge alone. Each is transformed
+// (quads 68-71) and divided. The edge's vertices carry ADC unless both ends
+// are inside the guard band and, in fours, the two triangles face the same
+// way on screen (the z of their cross products agree in sign: a
+// silhouette). It is drawn as four lines, the edge moved by +-h in x, then
+// in y: h = alpha / 2, alpha = clamp(10/9 - w / 360, 0, 1) of its first
+// end, which is also its RGBA's (16, 16, 16, alpha * 64). The vertex tag's
+// NLOOP is the edge count, also written to quad 1023.x.
+uint32_t outlinePoints(const VuData &vu, uint32_t top)
+{
+    return vu.half(top, 0) == 19u ? 4u : 2u;
+}
+
+uint32_t outlineLoopWord(const VuData &vu, uint32_t top)
+{
+    const float share = outlinePoints(vu, top) == 4u ? 0.25f : 0.5f;
+    return static_cast<uint32_t>(gsNativeFtoi(static_cast<float>(vu.half(top, 1)) * share + 32768.0f, 1.0f));
+}
+
+void buildOutline(const Program &program, const VuData &vu, uint32_t top,
+                  std::vector<std::vector<uint8_t>> &packets)
+{
+    const uint32_t count = vu.half(top, 1);
+    const uint32_t points = outlinePoints(vu, top);
+    const uint32_t first = points == 4u ? 1u : 0u; // the edge's first end
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    packets.clear();
+    std::vector<uint8_t> &packet = packets.emplace_back();
+    packet.reserve(64u + count / points * 144u);
+    putQuad(packet, vu.bytes(0));
+    putWords(packet, 1u, 0u, 0u, 0u);
+    putWords(packet, vu.half(87, 0), 0u, 27u, 0u);
+    uint32_t tag[4];
+    std::memcpy(tag, vu.bytes(86), sizeof(tag));
+    tag[0] = outlineLoopWord(vu, top);
+    putQuad(packet, tag);
+
+    float m[4][4];
+    for (uint32_t row = 0; row < 4u; ++row)
+    {
+        std::memcpy(m[row], vu.bytes(68u + row), sizeof(m[row]));
+    }
+    // The guard band as A leaves it: 109 = 17 with xy times 16.xy, 110 = 18;
+    // a point p is inside when every |p * 109 + 110 * 109| <= 1.
+    const Vec4 viewport = vu.quad(16), band = vu.quad(17), offset = vu.quad(18);
+    const float bandScale[3] = {band.x * viewport.x, band.y * viewport.y, band.z};
+    const float bandOffset[3] = {offset.x * bandScale[0], offset.y * bandScale[1], offset.z * bandScale[2]};
+    const float fadeBase = fromBits(0x3f8e38e4u);  // 10/9
+    const float fadeSlope = fromBits(0xbb360b61u); // -1/360
+
+    for (uint32_t edge = 0; edge < count / points; ++edge)
+    {
+        float s[4][3];
+        float w1 = 0.0f;
+        for (uint32_t j = 0; j < points; ++j)
+        {
+            float p[3];
+            decodePosition(vu, top, edge * points + j, bones, p);
+            float clip[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                clip[i] = p[0] * m[0][i] + p[1] * m[1][i] + p[2] * m[2][i] + m[3][i];
+            }
+            const float q = 1.0f / clip[3];
+            for (int i = 0; i < 3; ++i)
+            {
+                s[j][i] = clip[i] * q;
+            }
+            if (j == first)
+            {
+                w1 = clip[3];
+            }
+        }
+        bool outside = false;
+        for (uint32_t j = first; j <= first + 1u; ++j)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                const float g = s[j][i] * bandScale[i] + bandOffset[i];
+                outside = outside || g > 1.0f || g < -1.0f;
+            }
+        }
+        bool hidden = outside;
+        if (points == 4u)
+        {
+            const float ax = s[1][0] - s[0][0], ay = s[1][1] - s[0][1];
+            const float bx = s[2][0] - s[0][0], by = s[2][1] - s[0][1];
+            const float cx = s[2][0] - s[1][0], cy = s[2][1] - s[1][1];
+            const float ex = s[3][0] - s[1][0], ey = s[3][1] - s[1][1];
+            const float near = ax * by - bx * ay;
+            const float far = cx * ey - ex * cy;
+            hidden = hidden || near * far < 0.0f;
+        }
+        const float alpha = std::fmin(std::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
+        const float h = 0.5f * alpha;
+        putWords(packet, 16u, 16u, 16u, static_cast<uint32_t>(gsNativeFtoi(alpha * 64.0f, 1.0f)));
+        // MFIR sign-extends ADC's 0x8000 into the word (0xffff8000, an
+        // exponent of 255), and adding the offset's 0 clamps that to -Fmax,
+        // as the VU does: ADC, and fog 0xff.
+        const uint32_t adc = hidden ? 0xff7fffffu : 0u;
+        const float dx[8] = {h, h, -h, -h, 0.0f, 0.0f, 0.0f, 0.0f};
+        const float dy[8] = {0.0f, 0.0f, 0.0f, 0.0f, -h, -h, h, h};
+        for (uint32_t v = 0; v < 8u; ++v)
+        {
+            const float *end = s[first + (v & 1u)];
+            putWords(packet, static_cast<uint32_t>(gsNativeFtoi(end[0] + dx[v], 16.0f)),
+                     static_cast<uint32_t>(gsNativeFtoi(end[1] + dy[v], 16.0f)),
+                     static_cast<uint32_t>(gsNativeFtoi(end[2] + 0.0f, 16.0f)), adc);
+        }
+    }
+}
+
 } // namespace
 
 const Program *identify(const uint8_t *code, uint32_t startPC)
@@ -389,6 +526,16 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     if (startPC != kEntry)
     {
         return nullptr;
+    }
+    if (matches(code, kOutlineA))
+    {
+        const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
+        if (!decode || !matches(code, kOutlineC))
+        {
+            return nullptr;
+        }
+        Program shape{nullptr, Cull::None, Color::Material, false, decode->decode, decode->maxBones, Kind::Outline};
+        return intern(shape);
     }
     for (const Piece &piece : kCommon)
     {
@@ -404,7 +551,7 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     {
         return nullptr;
     }
-    Program shape{nullptr, finish->cull, color->color, finish->depthBounds, decode->decode};
+    Program shape{nullptr, finish->cull, color->color, finish->depthBounds, decode->decode, decode->maxBones};
     return intern(shape);
 }
 
@@ -451,8 +598,15 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     const VuData vu(data);
     if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)
         return "quad 76.z set (an entry into B other than its first)";
-    if (program.decode == Decode::Skinned && bonesOf(vu, top) == 0u)
-        return "an entry into the skinning B other than 0, 2 or 4";
+    if (program.decode == Decode::Skinned && bonesOf(program, vu, top) == 0u)
+        return "an entry into the skinning B not read";
+    if (program.kind == Kind::Outline)
+    {
+        const uint32_t count = vu.half(top, 1);
+        if (count == 0u || count % outlinePoints(vu, top) != 0u)
+            return "an outline chunk not of whole edges";
+        return nullptr;
+    }
     if ((vu.half(81, 0) & 2u) && !clips)
         return "clipping (slot E)";
     // PRIM from the chunk header. Only the backface piece reads it, with a
@@ -503,6 +657,13 @@ void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4
 
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 {
+    if (program.kind == Kind::Outline)
+    {
+        const VuRounding rounding;
+        const uint32_t word = outlineLoopWord(VuData(data), top);
+        std::memcpy(data + 1023u * 16u, &word, sizeof(word));
+        return;
+    }
     if (!program.depthBounds)
     {
         return;
@@ -516,6 +677,11 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 
 bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after)
 {
+    if (program.kind == Kind::Outline)
+    {
+        const VuRounding rounding;
+        return outlineLoopWord(VuData(before), top) == static_cast<uint32_t>(VuData(after).word(1023, 0));
+    }
     if (!program.depthBounds)
     {
         return true;
@@ -541,6 +707,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
 {
     const VuRounding rounding;
+    if (program.kind == Kind::Outline)
+    {
+        buildOutline(program, VuData(data), top, packets);
+        return;
+    }
     Chunk chunk;
     readChunk(program, VuData(data), top, chunk);
     packets.clear();
@@ -591,6 +762,13 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
                std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
 {
+    if (!hasMesh(program))
+    {
+        buildChunk(program, data, top, packets);
+        mesh.vertices.clear();
+        mesh.header.vertexCount = 0u;
+        return;
+    }
     const VuRounding rounding;
     Chunk chunk;
     readChunk(program, VuData(data), top, chunk);
