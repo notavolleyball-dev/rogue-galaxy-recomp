@@ -257,6 +257,9 @@ public:
     bool destinationCopy() const { return m_destinationShader != nullptr; }
     // Whether pipelines with dualSource can be made (Rogue Galaxy: added).
     bool dualSourceBlend() const { return m_dualSourceBlend; }
+    // DQ8_GFX_GPU_TIMES=1 (Rogue Galaxy: added): the backend labels its GPU
+    // work, and the patched SDL logs the GPU's time by label ("[gputime]").
+    bool gpuTimes() const { return m_gpuTimes; }
 
 private:
     SDL_GPUDevice *m_device = nullptr;
@@ -266,6 +269,10 @@ private:
     SDL_GPUShader *m_destinationShader = nullptr;
     SDL_GPUShader *m_dualSourceShader = nullptr;
     bool m_dualSourceBlend = false;
+    const bool m_gpuTimes = [] {
+        const char *value = std::getenv("DQ8_GFX_GPU_TIMES");
+        return value && *value && *value != '0';
+    }();
     SDL_GPUSampler *m_sampler = nullptr;
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     bool m_framebufferFetch = false;

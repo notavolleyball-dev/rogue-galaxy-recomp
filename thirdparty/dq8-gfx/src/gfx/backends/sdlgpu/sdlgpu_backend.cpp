@@ -2950,6 +2950,21 @@ struct SdlGpuBackend::Impl {
     // Submission
     // -----------------------------------------------------------------
 
+    // What DQ8_GFX_GPU_TIMES files a batch's GPU time under: its target,
+    // whether it is 3D (a depth buffer), and what kind of draw it is.
+    static std::string timeLabel(const DrawBatch &batch) {
+        const bool textured = (batch.fragmentUniforms.control[0] & kFragFlagTme) != 0u;
+        const bool big = uint64_t(batch.written.width()) * batch.written.height() * 2u >=
+                         uint64_t(batch.color->width) * batch.color->height;
+        char label[48];
+        std::snprintf(label, sizeof(label), "%05x %ux%u %s%s%s%s%s%s", batch.color->base, batch.color->width,
+                      batch.color->height, batch.depth ? "3D" : "2D", batch.native ? " mesh" : "",
+                      batch.feedback ? " feedback" : batch.destination ? " destination" : "",
+                      textured ? " tex" : "", batch.pipeline.blendEnabled ? " blend" : "",
+                      !batch.native && big ? " big" : "");
+        return label;
+    }
+
     bool ensureBuffer(AppendBuffer &stream, uint32_t requiredBytes) {
         if (stream.buffer && stream.capacity >= requiredBytes)
             return true;
@@ -3080,6 +3095,8 @@ struct SdlGpuBackend::Impl {
         SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
         if (!commands)
             return setError(std::move(error));
+        if (device.gpuTimes())
+            SDL_InsertGPUDebugLabel(commands, "draw data upload");
         // Keep the upload ordered with its consumers without another submission.
         if (!uploadVertices(commands)) {
             return false;
@@ -3102,6 +3119,8 @@ struct SdlGpuBackend::Impl {
             SDL_GPUTexture *destinationTexture = nullptr;
             if (batch.snapshot) {
                 endPass();
+                if (device.gpuTimes())
+                    SDL_InsertGPUDebugLabel(commands, batch.feedback ? "snapshot copy (feedback)" : "snapshot copy (destination)");
                 SDL_GPUTexture *snapshot =
                     recordSnapshot(commands, *batch.color,
                                    batch.feedback ? &batch.snapshotReads
@@ -3167,6 +3186,8 @@ struct SdlGpuBackend::Impl {
                 endPass();
                 return setError(std::move(error));
             }
+            if (device.gpuTimes())
+                SDL_InsertGPUDebugLabel(commands, timeLabel(batch).c_str());
             SDL_BindGPUGraphicsPipeline(pass, pipeline);
             SDL_SetGPUScissor(pass, &batch.scissor);
             if (batch.usesBlendConstant) {
@@ -3224,6 +3245,8 @@ struct SdlGpuBackend::Impl {
         }
 
         endPass();
+        if (device.gpuTimes())
+            SDL_InsertGPUDebugLabel(commands, "other: uploads, refreshes, copies");
         ++stats.drawFlushes;
         recordedDraws += static_cast<uint32_t>(batches.size());
         vertexStream.base += static_cast<uint32_t>(vertices.size());
@@ -4145,6 +4168,8 @@ struct SdlGpuBackend::Impl {
         SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device.handle());
         if (!commands)
             return fail("SDL_AcquireGPUCommandBuffer(present): ");
+        if (device.gpuTimes())
+            SDL_InsertGPUDebugLabel(commands, "present");
 
         SDL_GPUTexture *swapchain = nullptr;
         uint32_t swapchainWidth = 0u;

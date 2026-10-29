@@ -399,6 +399,17 @@ triangles expanded on the CPU instead. The stats line counts `native
 strips`, and the draws they took. Salgin, 1x: 57 of 229,376 pixels differ
 by more than 8 levels from the VU1's frame.
 
+GPU time by label (Rogue Galaxy: added). `DQ8_GFX_GPU_TIMES=1` labels the
+backend's GPU work (each batch by target, 2D or 3D, mesh, feedback,
+textured, blended, covering half its target; the snapshot copies; the draw
+data upload; the present; everything else as "other") with
+`SDL_InsertGPUDebugLabel`, and SDL, patched (`cmake/patches/sdl3-gpu-
+timestamps.patch`, Vulkan only), writes a GPU timestamp at each label. When
+a command buffer is done the time from each label to the next is added to
+that label's total; every two seconds `[gputime]` lines give each label's
+GPU milliseconds and count per second, heaviest first. The timestamps cost
+about a tenth of the frame at 8x; off, nothing changes.
+
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window
 hidden and never raises it, for scripted runs that should leave the desktop

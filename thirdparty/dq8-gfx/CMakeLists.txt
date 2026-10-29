@@ -19,7 +19,9 @@ set(SDL_RENDER_D3D12 OFF CACHE BOOL "" FORCE)
 set(SDL_RENDER_VULKAN OFF CACHE BOOL "" FORCE)
 # Patched (Rogue Galaxy: added): dual-source blend factors
 # (SDL_GPU_BLENDFACTOR_SRC1_ALPHA), so a source-alpha blend stores its exact
-# alpha in the same pass as its colour (cmake/patches).
+# alpha in the same pass as its colour; and, with DQ8_GFX_GPU_TIMES=1, a GPU
+# timestamp at each debug label, the GPU's time logged by label
+# (cmake/patches).
 FetchContent_Declare(SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
     GIT_TAG release-3.2.24
@@ -27,6 +29,9 @@ FetchContent_Declare(SDL3
     GIT_PROGRESS TRUE
     PATCH_COMMAND "${CMAKE_COMMAND}"
         -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/sdl3-dual-source-blend.patch
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dq8ApplyPatch.cmake"
+    COMMAND "${CMAKE_COMMAND}"
+        -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/sdl3-gpu-timestamps.patch
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dq8ApplyPatch.cmake")
 FetchContent_MakeAvailable(SDL3)
 

@@ -1043,6 +1043,8 @@ SDL_GPUCommandBuffer *SdlGpuDevice::pendingCommands(std::string &error) {
         m_pending = SDL_AcquireGPUCommandBuffer(m_device);
         if (!m_pending)
             error = std::string("SDL_AcquireGPUCommandBuffer(pending): ") + SDL_GetError();
+        else if (m_gpuTimes)
+            SDL_InsertGPUDebugLabel(m_pending, "other: uploads, refreshes, copies");
     }
     return m_pending;
 }
