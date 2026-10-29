@@ -2957,6 +2957,15 @@ struct SdlGpuBackend::Impl {
         const bool big = uint64_t(batch.written.width()) * batch.written.height() * 2u >=
                          uint64_t(batch.color->width) * batch.color->height;
         char label[48];
+        const uint32_t c0 = batch.fragmentUniforms.control[0], c3 = batch.fragmentUniforms.control[3];
+        if (textured) {
+            std::snprintf(label, sizeof(label), "%05x %s%s%s%s s%.0f w%u%u f%.0f %s%s%s t%u", batch.color->base, batch.depth ? "3D" : "2D",
+                          batch.native ? " mesh" : "", batch.feedback ? " fb" : "", batch.pipeline.blendEnabled ? " bl" : "",
+                          batch.fragmentUniforms.misc[1], c3 & 3u, (c3 >> 2u) & 3u, batch.fragmentUniforms.misc[2],
+                          (c0 & kFragFlagLinear) ? "L" : "P", (c0 & kFragFlagFst) ? " uv" : " stq", (c0 & kFragFlagNativeGrid) ? " g" : "",
+                          batch.fragmentUniforms.control[2]);
+            return label;
+        }
         std::snprintf(label, sizeof(label), "%05x %ux%u %s%s%s%s%s%s", batch.color->base, batch.color->width,
                       batch.color->height, batch.depth ? "3D" : "2D", batch.native ? " mesh" : "",
                       batch.feedback ? " feedback" : batch.destination ? " destination" : "",
