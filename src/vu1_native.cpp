@@ -191,6 +191,7 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     h.guardBand = program.cull != Cull::None ? 1u : 0u;
     h.backface = program.cull == Cull::GuardBandAndBackface ? 1u : 0u;
     h.vertexCount = count;
+    h.triangleList = (prim & 7u) == 3u ? 1u : 0u;
 
     const Vec4 positionScale = vu.quad(77);
     const Vec4 uvScale = vu.quad(79);
@@ -241,15 +242,22 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     return nullptr;
 }
 
-const char *declineChunk(const Program &, const uint8_t *data, uint32_t top, bool clips)
+const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
 {
     const VuData vu(data);
     if (vu.half(76, 2) != 0u)
         return "quad 76.z set (A's other branch)";
     if ((vu.half(81, 0) & 2u) && !clips)
         return "clipping (slot E)";
-    if (vu.half(top, 0) == 3u)
-        return "triangle list";
+    // PRIM from the chunk header. Only the backface piece reads it, with a
+    // path of its own for triangle lists; the others run lists through
+    // their strip code, whose ADC window of three vertices lands on each
+    // triangle.
+    const uint32_t primType = vu.half(top, 0) & 7u;
+    if (primType == 3u && program.cull == Cull::GuardBandAndBackface)
+        return "triangle list (D's own path)";
+    if (primType != 3u && primType != 4u)
+        return "neither strip nor triangle list";
     const uint32_t flags = vu.half(87, 1);
     if (flags & 0x200u)
         return "quad 87.y & 0x200 (C's other color)";

@@ -128,4 +128,7 @@ field walk in each mode; `tools/bench/vram2png.py` draws two frames and
 their difference. On that frame against the VU1: `skip` (the VU1 not run
 for those chunks) differs in 3 pixels by more than 8 levels; `gpu` (strips
 transformed by `gs_native.vert`, the clipping chunks included, since the GPU
-clips) in 54. Only triangle lists still ran on the VU1.
+clips) in 54. Triangle lists (PRIM 3), which the guard-band piece runs
+through its strip code, followed: as meshes on the GPU too, 57 pixels, and
+no chunk of these programs left on the VU1 (the backface piece's own list
+path, which the field never ran, is still declined).

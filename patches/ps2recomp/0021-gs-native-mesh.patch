@@ -59,7 +59,7 @@ index ccfadf6..27c0456 100644
      void UploadImage(const uint8_t *data, uint32_t size) override;
      void Flush() override;
 diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
-index 4014e39..012817a 100644
+index 4014e39..851ac64 100644
 --- a/ps2xRuntime/include/runtime/gs/gs_types.h
 +++ b/ps2xRuntime/include/runtime/gs/gs_types.h
 @@ -2,6 +2,7 @@
@@ -70,7 +70,7 @@ index 4014e39..012817a 100644
  #include <cstdint>
  #include <cstring>
  #include <limits>
-@@ -327,6 +328,155 @@ struct GSPrimitiveBatch
+@@ -327,6 +328,159 @@ struct GSPrimitiveBatch
      uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
  };
  
@@ -109,6 +109,9 @@ index 4014e39..012817a 100644
 +        uint32_t guardBand = 0u;
 +        uint32_t backface = 0u;
 +        uint32_t vertexCount = 0u;
++        // A triangle list (PRIM 3) rather than a strip: a triangle every
++        // third vertex, tested by the same rule at that vertex.
++        uint32_t triangleList = 0u;
 +    };
 +    Header header{};
 +    std::vector<Vertex> vertices;
@@ -214,7 +217,8 @@ index 4014e39..012817a 100644
 +    {
 +        const bool skip = gsNativeMeshSkips(mesh.header, points.data(), k, winding);
 +        winding = -winding;
-+        if (k >= 2u && !skip)
++        const bool kicks = mesh.header.triangleList ? k % 3u == 2u : k >= 2u;
++        if (kicks && !skip)
 +        {
 +            const GSVertex triangle[3] = {gsNativeMeshVertex(points[k - 2u]), gsNativeMeshVertex(points[k - 1u]),
 +                                          gsNativeMeshVertex(points[k])};

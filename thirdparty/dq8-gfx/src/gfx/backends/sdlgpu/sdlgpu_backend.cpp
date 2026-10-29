@@ -1596,7 +1596,10 @@ struct SdlGpuBackend::Impl {
             return;
         }
         ++stats.nativeMeshes;
-        for (const GSNativeMesh::Vertex &in : mesh.vertices) {
+        // A list's vertices past its last whole triangle draw nothing.
+        const size_t count = mesh.header.triangleList ? mesh.vertices.size() / 3u * 3u : mesh.vertices.size();
+        for (size_t index = 0; index < count; ++index) {
+            const GSNativeMesh::Vertex &in = mesh.vertices[index];
             GsGpuVertex out{};
             out.x = in.x;
             out.y = in.y;
@@ -1610,7 +1613,7 @@ struct SdlGpuBackend::Impl {
             vertices.push_back(out);
         }
         draw.native = true;
-        draw.pipeline.nativeMesh = 1u;
+        draw.pipeline.nativeMesh = mesh.header.triangleList ? 2u : 1u;
         // The program skips a triangle whose cross product, times the strip's
         // alternating sign, is negative; the GPU's strip alternates the
         // same way, so one face is culled throughout.

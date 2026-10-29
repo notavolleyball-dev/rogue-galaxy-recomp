@@ -896,7 +896,7 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     // A native strip (Rogue Galaxy: added) is a strip, and culls the
     // backfaces its program skipped.
     info.primitive_type =
-        key.nativeMesh ? SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        key.nativeMesh == 1u ? SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     // The GS has no backface culling; every primitive it is given is drawn.
     info.rasterizer_state.cull_mode = static_cast<SDL_GPUCullMode>(key.cullMode);
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;

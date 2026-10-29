@@ -121,8 +121,8 @@ struct GsPipelineKey {
     // The draw shader that reads the destination from a snapshot bound as a
     // second texture, with the blend done in the shader (Rogue Galaxy: added).
     uint8_t destinationCopy = 0u;
-    // A native strip (Rogue Galaxy: added): gs_native.vert, a triangle strip,
-    // and the SDL_GPUCullMode its backfaces need.
+    // A native strip (Rogue Galaxy: added): gs_native.vert, a triangle strip
+    // (1) or list (2), and the SDL_GPUCullMode its backfaces need.
     uint8_t nativeMesh = 0u;
     uint8_t cullMode = 0u;
 

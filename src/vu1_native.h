@@ -19,9 +19,10 @@
 //
 // Done: the field's strip programs, slots A, B, C and F as one set and the
 // three D pieces that finish them (no culling, the guard band, the guard band
-// and backfaces). Not done, so left to the VU1 chunk by chunk: triangle
-// lists, scrolling UVs and two flag branches; and slot E's clipping, except
-// where the GPU clips (a GSNativeMesh drawn by SdlGpuBackend).
+// and backfaces), strips and triangle lists. Not done, so left to the VU1
+// chunk by chunk: the backface piece's triangle lists, scrolling UVs and two
+// flag branches; and slot E's clipping, except where the GPU clips (a
+// GSNativeMesh drawn by SdlGpuBackend).
 //
 // The arithmetic per vertex is the runtime's (gsNativeMeshPoint in
 // runtime/gs/gs_types.h), whichever way a chunk goes out.
