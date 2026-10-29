@@ -62,6 +62,7 @@ enum class Kind : uint8_t
     Outline, // the toon outlines: A, B, then C draws the silhouette edges as lines
     Shadow,  // the shadow volumes: A, B, then C extrudes the lit triangles as fans
     Overlay, // the screen sprites over the last object's bounds: B's own entry, its MSCAL
+    Base,    // the per-object setup at 0x000: the state packet, matrices and lights into VU1 memory
 };
 
 // How the B piece decodes a vertex's position.
@@ -100,7 +101,7 @@ inline bool hasMesh(const Program &program)
 // then the MSCAL's run.
 inline bool drawsAtCall(const Program &program)
 {
-    return program.kind == Kind::Overlay;
+    return program.kind == Kind::Overlay || program.kind == Kind::Base;
 }
 
 // The program whose MSCAL enters at `startPC` (in bytes) with `code` (all of

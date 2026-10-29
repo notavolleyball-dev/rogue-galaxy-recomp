@@ -70,7 +70,11 @@ Everything runs in a build of this branch (`cmake --build build/game
    from a copy of the memory card (the field walk by default; other scenes
    need their own saves and input scripts, `RG_INPUT`, see
    `tools/bench/walk.sh`). `tools/vu1/census.py --recording FILES` shows
-   which pieces they reach.
+   which pieces they reach. For a program whose output is VU1 memory,
+   record with `RG_VU1_REPLAY_AFTER=1` (the memory after each run): the
+   oracle's native candidate then checks what it leaves there
+   (`memoryEffectsMatch`) on every run (`build/run/fieldafter.vu1r`, 10
+   lists of the walk, 600 MB).
 2. **Check the recording replays.** `rg_vu1_oracle NAME.vu1r --candidate
    all`: both engines must reproduce every run (the `differ` column 0).
 3. **Pick the next program.** `rg_vu1_oracle NAME.vu1r --inventory` lists
@@ -148,6 +152,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 
 | Slot | Bytes | Hash | What |
 |---|---|---|---|
+| base | 0x0000-0x02c0 | `12ad73d26e1badec` | The object setup (the `:0` rows, `runBase`), run by an MSCAL before each object: kicks the state packet at quad 19, writes 64-66 (model rows normalized by ERLENG), 68-75 (quads 4-7 and 8-11 times 24-27 times the model), 100-102 (lights 30-32 in object space), 111.z (the determinant's sign). Packets only; its memory is what every strip program reads |
 | A | 0x0320-0x05d8 | `07151c2597283286` | The strip driver |
 | B | 0x0960-0x0a38 | `af62ff64ac67b45f` | int16 positions, normals, UVs |
 | C | 0x10e0-0x1328 | `70362be426b17f94` | Vertex colors (87.y & 0x100 and 0x200 declined) |

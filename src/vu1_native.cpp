@@ -47,6 +47,7 @@ namespace
 
 constexpr uint32_t kEntry = 0x320u;
 constexpr uint32_t kOverlayEntry = 0x960u;
+constexpr uint32_t kBaseEntry = 0x000u;
 
 // Round toward zero while it lives, as VU1Interpreter::run sets it for the
 // VU1: the products, sums and the divide then come out as the VU1's, bit for
@@ -121,6 +122,9 @@ constexpr DecodePiece kDecodes[] = {
 constexpr Piece kOutlineA = {0x0320u, 0x04e8u, 0x3f6df595be6e31b7ull};
 constexpr Piece kOutlineC = {0x10e0u, 0x1e70u, 0x3689bac97cae3c73ull};
 
+// The base piece: the setup each object's draw starts with (runBase()).
+constexpr Piece kBase = {0x0000u, 0x02c0u, 0x12ad73d26e1badecull};
+
 // The overlay sprites: B 6e42dac6 entered by an MSCAL at its start.
 constexpr Piece kOverlayB = {0x0960u, 0x0b38u, 0x6e42dac662887054ull};
 
@@ -189,6 +193,7 @@ const Program *intern(const Program &shape)
     std::string &name = names.emplace_back(shape.kind == Kind::Outline  ? "outline"
                                            : shape.kind == Kind::Shadow ? "shadow volume"
                                            : shape.kind == Kind::Overlay ? "overlay sprites"
+                                           : shape.kind == Kind::Base    ? "object setup"
                                                                         : "strip");
     name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
             : shape.cull == Cull::GuardBand          ? ", guard band"
@@ -875,6 +880,65 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
     }
 }
 
+// The base piece (12ad73d2), run by an MSCAL at 0x000 before each object's
+// chunks: it kicks the object's state packet at quad 19, then leaves in VU1
+// memory what the strip programs read. With M the model rows (quads 60-63)
+// and W = quads 24-27 times each: 68-71 = quads 4-7 times W (to the GS
+// window), 72-75 = quads 8-11 times W (to clip space); 64-66 = the model
+// rows 60-62 normalized (ERLENG: 1 / sqrt(x x + y y + z z), as the
+// runtime's EFU has it), their w kept; 100-102 = the lights (quads 30-32)
+// times those; 111.z = 1, or -1 when the model rows' determinant is
+// negative (the winding of the strips' backface test).
+void runBase(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
+{
+    const VuData vu(data);
+    if (packets)
+    {
+        packets->push_back(gifPacket(vu, 19));
+    }
+    const auto store = [data](uint32_t q, const Vec4 &v) { std::memcpy(data + q * 16u, &v, 16u); };
+    Vec4 model[4], view[4], window[4], clip[4], lights[3];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        model[i] = vu.quad(60u + i);
+        view[i] = vu.quad(24u + i);
+        window[i] = vu.quad(4u + i);
+        clip[i] = vu.quad(8u + i);
+    }
+    for (uint32_t i = 0; i < 3u; ++i)
+    {
+        lights[i] = vu.quad(30u + i);
+    }
+    const Vec4 &r0 = model[0], &r1 = model[1], &r2 = model[2];
+    const float cx = r0.y * r1.z - r1.y * r0.z, cy = r0.z * r1.x - r1.z * r0.x, cz = r0.x * r1.y - r1.x * r0.y;
+    const float determinant = cx * r2.x + cy * r2.y + cz * r2.z;
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        const Vec4 w = transform(view, model[i]);
+        store(68u + i, transform(window, w));
+        store(72u + i, transform(clip, w));
+    }
+    for (uint32_t i = 0; i < 3u; ++i)
+    {
+        const Vec4 &r = model[i];
+        const float length = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
+        const float scale = length != 0.0f ? 1.0f / length : length;
+        const Vec4 unit{r.x * scale, r.y * scale, r.z * scale, r.w};
+        store(64u + i, unit);
+        const Vec4 v{unit.x, unit.y, unit.z, 0.0f};
+        Vec4 light;
+        float *out = &light.x;
+        const float *l0 = &lights[0].x, *l1 = &lights[1].x, *l2 = &lights[2].x;
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            out[lane] = l0[lane] * v.x + l1[lane] * v.y + l2[lane] * v.z;
+        }
+        store(100u + i, light);
+    }
+    const float sign = determinant < 0.0f ? -1.0f : 1.0f;
+    std::memcpy(data + 111u * 16u + 8u, &sign, 4u);
+}
+
 // The overlay B (6e42dac6), run by its own MSCAL: screen sprites over the
 // bounds the last depth-and-bounds program left in quads 98 and 99, one
 // pixel wider each way, within the rectangle of quads 140 and 141, in
@@ -942,6 +1006,11 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 
 const Program *identify(const uint8_t *code, uint32_t startPC)
 {
+    if (startPC == kBaseEntry && matches(code, kBase))
+    {
+        Program shape{nullptr, Cull::None, Color::Material, false, Decode::Plain, 0, Kind::Base};
+        return intern(shape);
+    }
     if (startPC == kOverlayEntry && matches(code, kOverlayB))
     {
         Program shape{nullptr, Cull::None, Color::Material, false, Decode::Plain, 0, Kind::Overlay};
@@ -1044,7 +1113,7 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
 {
     const VuData vu(data);
-    if (program.kind == Kind::Overlay)
+    if (program.kind == Kind::Overlay || program.kind == Kind::Base)
         return nullptr;
     if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)
         return "quad 76.z set (an entry into B other than its first)";
@@ -1118,6 +1187,12 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
         runOverlay(data, nullptr);
         return;
     }
+    if (program.kind == Kind::Base)
+    {
+        const VuRounding rounding;
+        runBase(data, nullptr);
+        return;
+    }
     if (program.kind == Kind::Outline)
     {
         const VuRounding rounding;
@@ -1144,6 +1219,17 @@ bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t 
         std::vector<uint8_t> copy(before, before + 1024u * 16u);
         runOverlay(copy.data(), nullptr);
         return std::memcmp(copy.data() + 144u * 16u, after + 144u * 16u, 26u * 16u) == 0;
+    }
+    if (program.kind == Kind::Base)
+    {
+        const VuRounding rounding;
+        std::vector<uint8_t> copy(before, before + 1024u * 16u);
+        runBase(copy.data(), nullptr);
+        const auto same = [&](uint32_t first, uint32_t quads) {
+            return std::memcmp(copy.data() + first * 16u, after + first * 16u, quads * 16u) == 0;
+        };
+        return same(64u, 3u) && same(68u, 8u) && same(100u, 3u) &&
+               std::memcmp(copy.data() + 111u * 16u + 8u, after + 111u * 16u + 8u, 4u) == 0;
     }
     if (program.kind == Kind::Outline)
     {
@@ -1190,6 +1276,12 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
         std::vector<uint8_t> copy(data, data + 1024u * 16u);
         packets.clear();
         runOverlay(copy.data(), &packets);
+        return;
+    }
+    if (program.kind == Kind::Base)
+    {
+        packets.clear();
+        packets.push_back(gifPacket(VuData(data), 19));
         return;
     }
     Chunk chunk;
