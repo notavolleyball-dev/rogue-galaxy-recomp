@@ -112,6 +112,8 @@ constexpr DecodePiece kDecodes[] = {
     {{0x0960u, 0x0a38u, 0xaf62ff64ac67b45full}, Decode::Plain, 0},
     {{0x0960u, 0x1020u, 0x26a933a58f99a9daull}, Decode::Skinned, 4},
     {{0x0960u, 0x0f30u, 0x542b235c4775a710ull}, Decode::Skinned, 2},
+    // Positions only, one entry (a shadow volume B).
+    {{0x0960u, 0x09e0u, 0xa293001f25f94532ull}, Decode::Plain, 0},
 };
 
 // The outline program's A (header with PRIM 1, lines; calls B, then C) and

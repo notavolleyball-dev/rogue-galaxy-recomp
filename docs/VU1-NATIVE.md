@@ -155,6 +155,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | F | 0x39d0-0x3a68 | `d3f6f6312a13ff1c` | UV scroll (declined when active) |
 | B | 0x0960-0x1020 | `26a933a58f99a9da` | Skinning: entries for 1, 2 and 4 bones (A enters at 0x960 plus TOP+1.w pairs with 76.z set); per bone the position (w 1) times weight / 255 times the matrix at quads 900 + 2 * index |
 | B | 0x0960-0x0f30 | `542b235c4775a710` | The outlines' skinning: 1 bone (positions only) and 2 bones |
+| B | 0x0960-0x09e0 | `a293001f25f94532` | Positions only, one entry (shadow volumes) |
 | A | 0x0320-0x04e8 | `3f6df595be6e31b7` | The outline driver: header with PRIM 1 (lines), calls B and C, no D, E or F |
 | C | 0x10e0-0x1e70 | `3689bac97cae3c73` | The toon outlines (`buildOutline`): edges as four offset lines; with TOP.x 19 a silhouette test from the two adjacent triangles. Packets only: `gpu` mode sends them as `skip` does |
 | A | 0x0320-0x0500 | `821b638f42fcaa6e` | The shadow volume driver: header with PRIM 5 (fans), calls B and C |
