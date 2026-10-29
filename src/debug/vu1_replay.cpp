@@ -1,13 +1,19 @@
 #include "vu1_replay.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include <xmmintrin.h>
 
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "vu1_native.h"
 
 namespace rg::vu1replay
 {
@@ -15,6 +21,7 @@ namespace
 {
 
 const char *const g_path = std::getenv("RG_VU1_REPLAY");
+const char *const g_harvest = std::getenv("RG_VU1_HARVEST");
 
 uint32_t envNumber(const char *name, uint32_t fallback)
 {
@@ -94,15 +101,244 @@ Recorder &recorder()
     return instance;
 }
 
+void putRun(std::FILE *file, bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t list,
+            uint32_t index, uint64_t codeHash, const uint8_t *data, const VU1State &state)
+{
+    RunHeader header{};
+    header.flags = (resume ? kRunResume : 0u) | (state.dBitEnabled ? kRunDBit : 0u) |
+                   (state.tBitEnabled ? kRunTBit : 0u);
+    header.startPC = startPC;
+    header.top = top;
+    header.itop = itop;
+    header.list = list;
+    header.index = index;
+    header.mxcsr = _mm_getcsr();
+    header.codeHash = codeHash;
+    const uint32_t kind = kRun;
+    std::fwrite(&kind, sizeof(kind), 1, file);
+    std::fwrite(&header, sizeof(header), 1, file);
+    std::fwrite(&state, sizeof(state), 1, file);
+    std::fwrite(data, 1, PS2_VU1_DATA_SIZE, file);
+}
+
+// RG_VU1_HARVEST: samples of the programs DIR has no file for. Only the
+// thread that runs VU1 calls in.
+struct Harvester
+{
+    struct Program
+    {
+        std::string path;
+        bool known = false; // DIR had its file before this run
+        uint32_t samples = 0u;
+        uint32_t lastList = 0u;
+        std::vector<uint64_t> images; // code images written to its file
+    };
+
+    uint32_t maxSamples = envNumber("RG_VU1_HARVEST_SAMPLES", 4u);
+    uint32_t maxChunks = envNumber("RG_VU1_HARVEST_CHUNKS", 64u);
+    uint32_t spacing = envNumber("RG_VU1_HARVEST_SPACING", 300u);
+    std::unordered_map<uint64_t, Program> programs;
+    std::FILE *file = nullptr; // the sample being written
+    uint64_t image = 0u;
+    uint32_t chunks = 0u;
+    uint32_t runs = 0u;
+    // A sample is open, and a run of it is being recorded (the packets
+    // between runs are the game's own, not the program's).
+    bool recording = false;
+    bool inRun = false;
+    bool started = false;
+
+    ~Harvester() { closeSample(); }
+
+    void closeSample()
+    {
+        recording = false;
+        inRun = false;
+        if (file)
+        {
+            std::fclose(file);
+            file = nullptr;
+        }
+    }
+
+    // The program at an MSCAL: its entry and 64 bytes at each code slot's
+    // start, which tell its pieces apart without hashing the whole image. The
+    // base program (entry 0) is in its own slot whatever the others hold.
+    static uint64_t key(const uint8_t *code, uint32_t startPC)
+    {
+        static constexpr uint32_t kSlots[] = {0x0000u, 0x0320u, 0x0960u, 0x10E0u, 0x1900u, 0x2620u, 0x39D0u};
+        uint64_t hash = fnv(reinterpret_cast<const uint8_t *>(&startPC), sizeof(startPC));
+        for (const uint32_t slot : kSlots)
+        {
+            if (startPC == 0u && slot != 0u)
+            {
+                break;
+            }
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                hash = (hash ^ code[slot + i]) * 1099511628211ull;
+            }
+        }
+        return hash;
+    }
+
+    void begin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t list, const uint8_t *code,
+               const uint8_t *data, const VU1State &state)
+    {
+        if (resume)
+        {
+            if (recording && chunks < maxChunks)
+            {
+                putRun(file, true, startPC, top, itop, list, runs++, image, data, state);
+                ++chunks;
+                inRun = true;
+            }
+            else
+            {
+                recording = false;
+            }
+            return;
+        }
+        closeSample();
+        if (!started)
+        {
+            started = true;
+            std::error_code error;
+            std::filesystem::create_directories(g_harvest, error);
+        }
+        const auto [entry, inserted] = programs.try_emplace(key(code, startPC));
+        Program &program = entry->second;
+        if (inserted)
+        {
+            char name[64];
+            std::snprintf(name, sizeof(name), "/%016llx_%x.vu1r",
+                          static_cast<unsigned long long>(fnv(code, PS2_VU1_CODE_SIZE)), startPC);
+            program.path = std::string(g_harvest) + name;
+            std::error_code error;
+            program.known = std::filesystem::exists(program.path, error);
+            if (!program.known)
+            {
+                std::fprintf(stderr, "[harvest] new program %s, entry 0x%x: %s\n", name + 1, startPC,
+                             rg::vu1native::describePieces(code, startPC).c_str());
+            }
+        }
+        if (program.known || program.samples >= maxSamples ||
+            (program.samples != 0u && list - program.lastList < spacing))
+        {
+            return;
+        }
+        file = std::fopen(program.path.c_str(), "ab");
+        if (!file)
+        {
+            program.known = true;
+            return;
+        }
+        if (program.samples == 0u)
+        {
+            const uint32_t header[5] = {kMagic, kVersion, sizeof(VU1State), PS2_VU1_CODE_SIZE, PS2_VU1_DATA_SIZE};
+            std::fwrite(header, sizeof(header), 1, file);
+        }
+        image = fnv(code, PS2_VU1_CODE_SIZE);
+        if (std::find(program.images.begin(), program.images.end(), image) == program.images.end())
+        {
+            program.images.push_back(image);
+            const uint32_t kind = kCode;
+            std::fwrite(&kind, sizeof(kind), 1, file);
+            std::fwrite(&image, sizeof(image), 1, file);
+            std::fwrite(code, 1, PS2_VU1_CODE_SIZE, file);
+        }
+        putRun(file, false, startPC, top, itop, list, runs++, image, data, state);
+        ++program.samples;
+        program.lastList = list;
+        chunks = 0u;
+        recording = true;
+        inRun = true;
+    }
+
+    void kick(const uint8_t *data, uint32_t size)
+    {
+        if (!inRun)
+        {
+            return;
+        }
+        const uint32_t header[2] = {kKick, size};
+        std::fwrite(header, sizeof(header), 1, file);
+        std::fwrite(data, 1, size, file);
+    }
+
+    void end(const VU1State &state)
+    {
+        if (!inRun)
+        {
+            return;
+        }
+        inRun = false;
+        const uint32_t header[2] = {kEnd, 0u};
+        std::fwrite(header, sizeof(header), 1, file);
+        std::fwrite(&state, sizeof(state), 1, file);
+    }
+};
+
+Harvester &harvester()
+{
+    static Harvester instance;
+    return instance;
+}
+
+void recordBegin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t list, const uint8_t *code,
+                 uint64_t codeGeneration, const uint8_t *data, const VU1State &state);
+void recordKick(const uint8_t *data, uint32_t size);
+void recordEnd(const VU1State &state, const uint8_t *data);
+
 } // namespace
 
 bool enabled()
 {
-    return g_path != nullptr;
+    return g_path != nullptr || g_harvest != nullptr;
 }
 
 void begin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t list, const uint8_t *code,
            uint64_t codeGeneration, const uint8_t *data, const VU1State &state)
+{
+    if (g_path)
+    {
+        recordBegin(resume, startPC, top, itop, list, code, codeGeneration, data, state);
+    }
+    if (g_harvest)
+    {
+        harvester().begin(resume, startPC, top, itop, list, code, data, state);
+    }
+}
+
+void kick(const uint8_t *data, uint32_t size)
+{
+    if (g_path)
+    {
+        recordKick(data, size);
+    }
+    if (g_harvest)
+    {
+        harvester().kick(data, size);
+    }
+}
+
+void end(const VU1State &state, const uint8_t *data)
+{
+    if (g_path)
+    {
+        recordEnd(state, data);
+    }
+    if (g_harvest)
+    {
+        harvester().end(state);
+    }
+}
+
+namespace
+{
+
+void recordBegin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t list, const uint8_t *code,
+                 uint64_t codeGeneration, const uint8_t *data, const VU1State &state)
 {
     Recorder &r = recorder();
     r.recording = false;
@@ -166,7 +402,7 @@ void begin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t 
     r.recording = true;
 }
 
-void kick(const uint8_t *data, uint32_t size)
+void recordKick(const uint8_t *data, uint32_t size)
 {
     Recorder &r = recorder();
     if (!r.recording)
@@ -179,7 +415,7 @@ void kick(const uint8_t *data, uint32_t size)
     ++r.kicks;
 }
 
-void end(const VU1State &state, const uint8_t *data)
+void recordEnd(const VU1State &state, const uint8_t *data)
 {
     Recorder &r = recorder();
     if (!r.recording)
@@ -195,5 +431,7 @@ void end(const VU1State &state, const uint8_t *data)
         r.put(data, PS2_VU1_DATA_SIZE);
     }
 }
+
+} // namespace
 
 } // namespace rg::vu1replay

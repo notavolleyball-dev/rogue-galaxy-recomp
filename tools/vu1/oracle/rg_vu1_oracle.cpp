@@ -2,7 +2,7 @@
 // through VU1 without the game, and checks what each candidate draws against
 // what the game's own runs kicked.
 //
-//   rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]
+//   rg_vu1_oracle FILE... [--candidate compiled|interpreter|all|native] [--runs N]
 //                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]
 //                      [--tol-rgba N] [--tol-uv N] [--tol-stq F]
 //                      [--program HASH:PC --coverage FILE] [--time] [--inventory]
@@ -19,6 +19,8 @@
 // --show prints one run's events beside the recorded ones, from its first
 // difference; `--show diff` does so for the first differing run of each
 // program.
+//
+// Several files (RG_VU1_HARVEST's, one a program) are read one after another.
 //
 // A candidate turns a run into GS events (gif_events.h): the VU1 engines run
 // the recorded program from the registers and data memory the game had and
@@ -332,7 +334,7 @@ constexpr int64_t kShowFirstDifferences = -2;
 
 struct Options
 {
-    const char *path = nullptr;
+    std::vector<const char *> paths;
     std::string candidate = "all";
     uint32_t maxRuns = UINT32_MAX;
     bool filtered = false;
@@ -348,7 +350,7 @@ struct Options
 void usage()
 {
     std::fprintf(stderr,
-                 "usage: rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]\n"
+                 "usage: rg_vu1_oracle FILE... [--candidate compiled|interpreter|all|native] [--runs N]\n"
                  "                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]\n"
                  "                      [--tol-rgba N] [--tol-uv N] [--tol-stq F] [--time] [--inventory]\n");
 }
@@ -393,12 +395,12 @@ bool parse(int argc, char **argv, Options &options)
             options.tolerance.uv = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
         else if (arg == "--tol-stq" && hasValue)
             options.tolerance.stq = std::strtof(argv[++i], nullptr);
-        else if (!options.path && arg[0] != '-')
-            options.path = argv[i];
+        else if (arg[0] != '-')
+            options.paths.push_back(argv[i]);
         else
             return false;
     }
-    return options.path != nullptr && (!options.coverage || options.filtered);
+    return !options.paths.empty() && (!options.coverage || options.filtered);
 }
 
 void showRun(const Run &run, const std::vector<GifEvent> &reference, const std::vector<GifEvent> &candidate,
@@ -475,9 +477,12 @@ int main(int argc, char **argv)
         return 2;
     }
     Recording recording;
-    if (!readRecording(options.path, options.maxRuns, recording))
+    for (const char *path : options.paths)
     {
-        return 2;
+        if (!readRecording(path, options.maxRuns, recording))
+        {
+            return 2;
+        }
     }
     uint32_t resumes = 0u;
     uint64_t kicks = 0u;
@@ -486,8 +491,8 @@ int main(int argc, char **argv)
         resumes += (run.header.flags & replay::kRunResume) ? 1u : 0u;
         kicks += run.kicks.size();
     }
-    std::printf("%s: %zu runs (%u continuations), %" PRIu64 " packets, %zu code images, lists %u-%u\n",
-                options.path, recording.runs.size(), resumes, kicks, recording.codes.size(),
+    std::printf("%s%s: %zu runs (%u continuations), %" PRIu64 " packets, %zu code images, lists %u-%u\n",
+                options.paths[0], options.paths.size() > 1 ? " and the rest" : "", recording.runs.size(), resumes, kicks, recording.codes.size(),
                 recording.runs.empty() ? 0u : recording.runs.front().header.list,
                 recording.runs.empty() ? 0u : recording.runs.back().header.list);
 

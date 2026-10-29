@@ -27,16 +27,43 @@ recognizes pieces by the FNV-1a hash of each piece's byte range (the range
 its coverage reached), so no game code is kept, and an image with the same
 pieces is the same program whatever else micro memory holds.
 
+## The whole list, and how samples are gathered
+
+**The census** (`tools/vu1/census.py`) finds every piece in the executable:
+each is a DMA packet in the ELF's data whose VIF codes are an MPG to its
+slot's address (pieces over 256 pairs are several MPGs, joined). It prints
+each piece's slot, size, address and hash, and its name where
+`src/vu1_native.cpp` knows it; with `--recording` files, how many recorded
+program starts held it. On 2026-10-28: 56 uploads, 7 pieces native, 35
+never run in the field. Some are not work: the 2-pair upload is the empty
+piece of every slot, the 112-pair base piece at 0x445820 is VU0's program
+(and likely the 20-pair one after it), and slot E never needs porting.
+
+**Harvest mode** collects what the census cannot: real inputs for each
+piece, to check it by. `tools/vu1/oracle/harvest-play.sh` runs this build
+with your own card and settings while `RG_VU1_HARVEST=build/harvest` keeps
+a few samples of every program it has no file for yet (a file each,
+`<image>_<entry>.vu1r`, the replay format) and `RG_VU1_NATIVE=check` checks
+the native ones; a `[harvest]` line names each new program with the pieces
+it has. It is cheap to leave on (a program is known by 64 bytes at each
+slot's start), and a later session skips what an earlier one sampled. The
+field walk gave 22 files, 12 MB; battles, events, menus and other planets
+are where the missing pieces are. Every file replays exactly
+(`rg_vu1_oracle build/harvest/*.vu1r --candidate all`), and the census and
+the oracle's `--inventory` read the directory as one recording.
+
 ## The loop
 
 Everything runs in a build of this branch (`cmake --build build/game
 --target roguegalaxy rg_vu1_oracle`) on Linux; `disc/` holds the game.
 
-1. **Record a scene.** `tools/vu1/oracle/capture.sh NAME [FROM_LIST] [LISTS]`
-   records every VU1 run of 40 lists (frames) to `build/run/NAME.vu1r`,
-   about 32 MB a frame, from a copy of the memory card. The field walk is
-   what it does by default; battles, events and menus need their own saves
-   and input scripts (`RG_INPUT`, see `tools/bench/walk.sh`).
+1. **Get samples.** The harvest directory (above), or a whole scene:
+   `tools/vu1/oracle/capture.sh NAME [FROM_LIST] [LISTS]` records every VU1
+   run of 40 lists (frames) to `build/run/NAME.vu1r`, about 32 MB a frame,
+   from a copy of the memory card (the field walk by default; other scenes
+   need their own saves and input scripts, `RG_INPUT`, see
+   `tools/bench/walk.sh`). `tools/vu1/census.py --recording FILES` shows
+   which pieces they reach.
 2. **Check the recording replays.** `rg_vu1_oracle NAME.vu1r --candidate
    all`: both engines must reproduce every run (the `differ` column 0).
 3. **Pick the next program.** `rg_vu1_oracle NAME.vu1r --inventory` lists

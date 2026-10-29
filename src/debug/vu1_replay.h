@@ -15,6 +15,14 @@ struct VU1State;
 // the field, a list a frame. RG_VU1_REPLAY_AFTER=1 adds the data memory each
 // run ends with, the state a following run reads. Needs the VIF1 thread
 // (RG_VIF1_THREAD not 0): it runs every program through Vif1Thread::runVu1.
+//
+// RG_VU1_HARVEST=DIR keeps a few samples of every program it meets that DIR
+// has no file for yet, a file each (DIR/<image>_<entry>.vu1r, this format), to
+// leave on while playing: a program is known by 64 bytes at each code slot's
+// start, so nothing is hashed whole until a sample begins. A sample is an
+// MSCAL and up to RG_VU1_HARVEST_CHUNKS (64) of its MSCNTs; there are
+// RG_VU1_HARVEST_SAMPLES (4) of each program, RG_VU1_HARVEST_SPACING (300)
+// DMA lists apart. A line names each new program (src/vu1_native.h's pieces).
 namespace rg::vu1replay
 {
 
@@ -54,7 +62,8 @@ struct RunHeader
 };
 static_assert(sizeof(RunHeader) == 40u);
 
-// Whether RG_VU1_REPLAY is set; the calls below are only made when it is.
+// Whether RG_VU1_REPLAY or RG_VU1_HARVEST is set; the calls below are only
+// made when one is.
 bool enabled();
 
 // Before a run, on the thread that runs VU1, with the state it starts from.
