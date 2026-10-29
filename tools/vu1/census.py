@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every VU1 microcode piece in the game's executable, and which are native.
 
-  tools/vu1/census.py [--elf disc/SCUS_974.90] [--recording FILE.vu1r ...]
+  tools/vu1/census.py [--elf disc/SCUS_974.90] [--recording FILE.vu1r ...] [--programs]
 
 The game uploads its VU1 code as pieces, each a DMA packet in the ELF's data:
 a tag (`ret` or `cnt`) whose upper half holds the VIF codes NOP and MPG (load
@@ -10,6 +10,10 @@ the load address, and hashes the code the way src/vu1_native.cpp does
 (FNV-1a over the piece's bytes), so a known piece shows its name. With
 recordings (RG_VU1_REPLAY, capture.sh or RG_VU1_HARVEST), it also says
 which pieces the recorded programs held, and how many runs began with each.
+
+--programs lists each recorded code image instead: the piece in each slot
+(the first 8 hex digits of its hash, `*` when native, `.` for none known),
+for choosing a program whose pieces are all known but one.
 
 No game code is printed: addresses, sizes and hashes only.
 """
@@ -42,15 +46,9 @@ def fnv(data):
 
 
 def known_pieces():
-    """(hash -> name) from the piece tables of src/vu1_native.cpp."""
+    """(hash -> label) of every piece src/vu1_native.cpp lists."""
     text = (ROOT / "src" / "vu1_native.cpp").read_text()
-    names = {}
-    common = re.search(r"kCommon\[\] = \{(.*?)\};", text, re.S).group(1)
-    for slot, h in zip("ABCF", re.findall(r"0x([0-9a-f]{16})ull", common)):
-        names[int(h, 16)] = slot
-    for h, name in re.findall(r"0x([0-9a-f]{16})ull\}, \{\"([^\"]+)\"", text):
-        names[int(h, 16)] = "D: " + name
-    return names
+    return {int(h, 16): "native" for h in re.findall(r"0x([0-9a-f]{16})ull", text)}
 
 
 def elf_segments(elf):
@@ -146,6 +144,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--elf", default=str(ROOT / "disc" / "SCUS_974.90"))
     ap.add_argument("--recording", nargs="*", default=[])
+    ap.add_argument("--programs", action="store_true")
     a = ap.parse_args()
     elf = open(a.elf, "rb").read()
     pieces = find_pieces(elf)
@@ -163,6 +162,21 @@ def main():
     distinct = {}
     for p in pieces:
         distinct.setdefault((p["load"], p["hash"]), p)
+
+    if a.programs:
+        slots = ["A", "B", "C", "D", "E", "F"]
+        print("%-16s %7s  %s" % ("image", "starts", "  ".join("%-9s" % s for s in slots)))
+        for h, code in sorted(images.items(), key=lambda item: -runs[item[0]]):
+            cells = {s: "." for s in slots}
+            for p in distinct.values():
+                slot = slot_of(p["load"])
+                at = p["load"] * 8
+                if slot in cells and p["pairs"] > 2 and code[at:at + p["pairs"] * 8] == p["code"]:
+                    mark = "*" if names.get(p["hash"]) else " "
+                    if cells[slot] == "." or p["pairs"] * 8 > 0:
+                        cells[slot] = "%08x%s" % (p["hash"] >> 32, mark)
+            print("%016x %7d  %s" % (h, runs[h], "  ".join("%-9s" % cells[s] for s in slots)))
+        return
     print("%d MPG uploads in %s, %d distinct pieces (by load address and code)\n" %
           (len(pieces), Path(a.elf).name, len(distinct)))
     print("%-4s %-6s %6s %10s %-17s %8s  %s" % ("slot", "load", "pairs", "address", "hash", "runs" if a.recording else "", "native"))

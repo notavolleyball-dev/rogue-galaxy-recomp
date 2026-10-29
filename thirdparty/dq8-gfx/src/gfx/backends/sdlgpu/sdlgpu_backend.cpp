@@ -1610,6 +1610,7 @@ struct SdlGpuBackend::Impl {
             out.g = in.g;
             out.b = in.b;
             out.a = in.a;
+            out.fog = in.depth;
             vertices.push_back(out);
         }
         draw.native = true;
@@ -1628,6 +1629,8 @@ struct SdlGpuBackend::Impl {
         u.misc[0] = offsetX;
         u.misc[1] = offsetY;
         u.misc[2] = depthScale;
+        u.depth[0] = mesh.header.depthScale;
+        u.depth[1] = mesh.header.depthMax;
     }
 
     // A native strip through submit(): a stand-in primitive covering the

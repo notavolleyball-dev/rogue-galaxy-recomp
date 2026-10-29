@@ -1,10 +1,14 @@
 #include "vu1_native.h"
 
+#include <cfenv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <xmmintrin.h>
+#endif
 
 #include "gif_events.h"
 
@@ -27,12 +31,38 @@
 //            clamped to quad 39; ADC as its Cull says; then FOGCOL (quad 41
 //            behind tag quad 19, its low word zeroed with quad 87.y & 0x10)
 //            is kicked, then the chunk.
+// The arithmetic runs in the VU's rounding (toward zero), set around each
+// entry point (VuRounding): the compiler must not move float work across it.
+#pragma STDC FENV_ACCESS ON
+
 namespace rg::vu1native
 {
 namespace
 {
 
 constexpr uint32_t kEntry = 0x320u;
+
+// Round toward zero while it lives, as VU1Interpreter::run sets it for the
+// VU1: the products, sums and the divide then come out as the VU1's, bit for
+// bit, done in its order. (Round to nearest left Z a unit off at times, which
+// a pass drawn at nearly the same depth turned into missing pixels.)
+class VuRounding
+{
+public:
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    VuRounding() : m_saved(_mm_getcsr()) { _mm_setcsr((m_saved & ~0x6000u) | 0x6000u); }
+    ~VuRounding() { _mm_setcsr(m_saved); }
+
+private:
+    uint32_t m_saved;
+#else
+    VuRounding() : m_saved(std::fegetround()) { std::fesetround(FE_TOWARDZERO); }
+    ~VuRounding() { std::fesetround(m_saved); }
+
+private:
+    int m_saved;
+#endif
+};
 
 struct Piece
 {
@@ -41,26 +71,55 @@ struct Piece
     uint64_t hash;
 };
 
-// Slots A, B, C and F, the same in every strip program met so far.
+// Slots A, B and F, the same in every strip program met so far.
 constexpr Piece kCommon[] = {
     {0x0320u, 0x05d8u, 0x07151c2597283286ull},
     {0x0960u, 0x0a38u, 0xaf62ff64ac67b45full},
-    {0x10e0u, 0x1328u, 0x70362be426b17f94ull},
     {0x39d0u, 0x3a68u, 0xd3f6f6312a13ff1cull},
 };
+constexpr const char *kCommonNames[] = {"A", "B", "F"};
 
-struct Finish
+// The C pieces: both build the material color, quad 82 * 42 + 83 * 128
+// (82.w scaled by 81.w); 70362be4 multiplies it by each vertex's int16
+// color / 32768 * 256 (and has paths of its own with 87.y & 0x100 or
+// 0x200, not read yet), 780d503e gives it to every vertex as it is (with
+// 0x200, 82 * 43 and no ambient).
+struct ColorPiece
 {
-    Piece d;
-    Program program;
+    Piece c;
+    Color color;
+};
+constexpr ColorPiece kColors[] = {
+    {{0x10e0u, 0x1328u, 0x70362be426b17f94ull}, Color::PerVertex},
+    {{0x10e0u, 0x11b0u, 0x780d503e649c9116ull}, Color::Material},
 };
 
 // The D pieces. (a786efabfa469ada is also the name of its compiled routine,
 // the VIF1 thread's busiest in docs/STATUS.md.)
+struct Finish
+{
+    Piece d;
+    Cull cull;
+    bool depthBounds;
+};
 constexpr Finish kFinishes[] = {
-    {{0x1900u, 0x20c8u, 0xa786efabfa469adaull}, {"strip, guard band and backfaces", Cull::GuardBandAndBackface}},
-    {{0x1900u, 0x1c38u, 0x126a58a39a8f944aull}, {"strip, guard band", Cull::GuardBand}},
-    {{0x1900u, 0x1bc0u, 0x4b7b81f2fe1beeefull}, {"strip", Cull::None}},
+    {{0x1900u, 0x20c8u, 0xa786efabfa469adaull}, Cull::GuardBandAndBackface, false},
+    {{0x1900u, 0x1c38u, 0x126a58a39a8f944aull}, Cull::GuardBand, false},
+    {{0x1900u, 0x1bc0u, 0x4b7b81f2fe1beeefull}, Cull::None, false},
+    // No culling; z times 87.z, at most 1.y; the bounds into 98 and 99.
+    {{0x1900u, 0x1b98u, 0xb8ea8ed53805b0c4ull}, Cull::None, true},
+};
+
+// Every C with every D: the programs, by name.
+constexpr Program kPrograms[] = {
+    {"strip, guard band and backfaces", Cull::GuardBandAndBackface, Color::PerVertex},
+    {"strip, guard band", Cull::GuardBand, Color::PerVertex},
+    {"strip", Cull::None, Color::PerVertex},
+    {"strip, guard band and backfaces, one color", Cull::GuardBandAndBackface, Color::Material},
+    {"strip, guard band, one color", Cull::GuardBand, Color::Material},
+    {"strip, one color", Cull::None, Color::Material},
+    {"strip, depth and bounds", Cull::None, Color::PerVertex, true},
+    {"strip, depth and bounds, one color", Cull::None, Color::Material, true},
 };
 
 uint64_t fnv(const uint8_t *bytes, uint32_t size)
@@ -191,6 +250,11 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     h.guardBand = program.cull != Cull::None ? 1u : 0u;
     h.backface = program.cull == Cull::GuardBandAndBackface ? 1u : 0u;
     h.vertexCount = count;
+    if (program.depthBounds)
+    {
+        h.depthScale = vu.quad(87).z;
+        h.depthMax = vu.quad(1).y;
+    }
     h.triangleList = (prim & 7u) == 3u ? 1u : 0u;
 
     const Vec4 positionScale = vu.quad(77);
@@ -199,8 +263,15 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     material.w *= vu.quad(81).w;
     const Vec4 light = vu.quad(42);
     const Vec4 ambient = vu.quad(83);
-    const Vec4 colorBase{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
-                         material.z * light.z + ambient.z * 128.0f, material.w * light.w};
+    Vec4 colorBase{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
+                   material.z * light.z + ambient.z * 128.0f, material.w * light.w};
+    // The one-color C with 87.y & 0x200: quad 82 times 43, no ambient.
+    if (program.color == Color::Material && (vu.half(87, 1) & 0x200u))
+    {
+        const Vec4 other = vu.quad(43);
+        colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
+    }
+    const bool perVertex = program.color == Color::PerVertex;
     chunk.mesh.vertices.resize(count);
     for (uint32_t k = 0; k < count; ++k)
     {
@@ -210,10 +281,10 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         v.z = itof15(vu.word(positions + k, 2)) * positionScale.z;
         v.u = itof15(vu.word(uvs + k, 0)) * uvScale.x;
         v.v = itof15(vu.word(uvs + k, 1)) * uvScale.y;
-        v.r = colorBase.x * itof15(vu.word(colors + k, 0)) * 256.0f;
-        v.g = colorBase.y * itof15(vu.word(colors + k, 1)) * 256.0f;
-        v.b = colorBase.z * itof15(vu.word(colors + k, 2)) * 256.0f;
-        v.a = colorBase.w * itof15(vu.word(colors + k, 3)) * 256.0f;
+        v.r = perVertex ? colorBase.x * itof15(vu.word(colors + k, 0)) * 256.0f : colorBase.x;
+        v.g = perVertex ? colorBase.y * itof15(vu.word(colors + k, 1)) * 256.0f : colorBase.y;
+        v.b = perVertex ? colorBase.z * itof15(vu.word(colors + k, 2)) * 256.0f : colorBase.z;
+        v.a = perVertex ? colorBase.w * itof15(vu.word(colors + k, 3)) * 256.0f : colorBase.w;
     }
 }
 
@@ -232,11 +303,34 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
             return nullptr;
         }
     }
-    for (const Finish &finish : kFinishes)
+    const ColorPiece *color = nullptr;
+    for (const ColorPiece &candidate : kColors)
     {
-        if (matches(code, finish.d))
+        if (matches(code, candidate.c))
         {
-            return &finish.program;
+            color = &candidate;
+            break;
+        }
+    }
+    const Finish *finish = nullptr;
+    for (const Finish &candidate : kFinishes)
+    {
+        if (matches(code, candidate.d))
+        {
+            finish = &candidate;
+            break;
+        }
+    }
+    if (!color || !finish)
+    {
+        return nullptr;
+    }
+    for (const Program &program : kPrograms)
+    {
+        if (program.cull == finish->cull && program.color == color->color &&
+            program.depthBounds == finish->depthBounds)
+        {
+            return &program;
         }
     }
     return nullptr;
@@ -248,23 +342,32 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     {
         return "-";
     }
-    static constexpr const char *kNames[] = {"A", "B", "C", "F"};
     std::string out;
     for (size_t i = 0; i < std::size(kCommon); ++i)
     {
-        out += matches(code, kCommon[i]) ? kNames[i] : "-";
+        out += matches(code, kCommon[i]) ? kCommonNames[i] : "-";
         out += ' ';
+    }
+    const char *color = "C:?";
+    for (const ColorPiece &candidate : kColors)
+    {
+        if (matches(code, candidate.c))
+        {
+            color = candidate.color == Color::PerVertex ? "C:vertex colors" : "C:one color";
+        }
     }
     const char *finish = "D:?";
     for (const Finish &candidate : kFinishes)
     {
         if (matches(code, candidate.d))
         {
-            finish = candidate.program.name;
-            break;
+            finish = candidate.depthBounds                        ? "D:depth and bounds"
+                     : candidate.cull == Cull::GuardBandAndBackface ? "D:guard band and backfaces"
+                     : candidate.cull == Cull::GuardBand            ? "D:guard band"
+                                                                    : "D:no culling";
         }
     }
-    return out + (finish[0] == 'D' ? std::string(finish) : std::string("D:") + finish);
+    return out + color + " " + finish;
 }
 
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
@@ -284,18 +387,82 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     if (primType != 3u && primType != 4u)
         return "neither strip nor triangle list";
     const uint32_t flags = vu.half(87, 1);
-    if (flags & 0x200u)
+    if ((flags & 0x200u) && program.color == Color::PerVertex)
         return "quad 87.y & 0x200 (C's other color)";
-    if (flags & 0x100u)
+    if ((flags & 0x100u) && program.color == Color::PerVertex)
         return "quad 87.y & 0x100 (C's other loop)";
     if (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f)
         return "scrolling UVs (slot F)";
     return nullptr;
 }
 
+namespace
+{
+
+// The bounds a depth-and-bounds chunk leaves: quads 98 and 99 as they were,
+// widened lane by lane by each vertex's projected x, y, z and fog.
+void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most)
+{
+    const VuData vu(data);
+    least = vu.quad(98);
+    most = vu.quad(99);
+    Chunk chunk;
+    readChunk(program, vu, top, chunk);
+    for (const GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+    {
+        const GSNativeMeshPoint p = gsNativeMeshPoint(chunk.mesh.header, v);
+        const float lanes[4] = {p.px, p.py, p.pz, p.pf};
+        float *lo = &least.x, *hi = &most.x;
+        for (int i = 0; i < 4; ++i)
+        {
+            lo[i] = std::fmin(lo[i], lanes[i]);
+            hi[i] = std::fmax(hi[i], lanes[i]);
+        }
+    }
+}
+
+} // namespace
+
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
+{
+    if (!program.depthBounds)
+    {
+        return;
+    }
+    const VuRounding rounding;
+    Vec4 least, most;
+    boundsAfter(program, data, top, least, most);
+    std::memcpy(data + 98u * 16u, &least, sizeof(least));
+    std::memcpy(data + 99u * 16u, &most, sizeof(most));
+}
+
+bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after)
+{
+    if (!program.depthBounds)
+    {
+        return true;
+    }
+    const VuRounding rounding;
+    Vec4 least, most;
+    boundsAfter(program, before, top, least, most);
+    const VuData vu(after);
+    const Vec4 vuLeast = vu.quad(98), vuMost = vu.quad(99);
+    const float *a = &least.x, *b = &vuLeast.x, *c = &most.x, *d = &vuMost.x;
+    for (int i = 0; i < 4; ++i)
+    {
+        const float scale = std::fmax(1.0f, std::fmax(std::fabs(a[i]), std::fabs(c[i])));
+        if (std::fabs(a[i] - b[i]) > 1e-4f * scale || std::fabs(c[i] - d[i]) > 1e-4f * scale)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
 {
+    const VuRounding rounding;
     Chunk chunk;
     readChunk(program, VuData(data), top, chunk);
     packets.clear();
@@ -338,6 +505,7 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
                std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
 {
+    const VuRounding rounding;
     Chunk chunk;
     readChunk(program, VuData(data), top, chunk);
     packets.clear();
@@ -350,6 +518,11 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
     putQuad(state, tag);
     putQuad(state, chunk.header[1]);
     putQuad(state, chunk.header[2]);
+    // The Z exactly as the program has it: the GPU rounds to nearest.
+    for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+    {
+        v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
+    }
     mesh = std::move(chunk.mesh);
 }
 

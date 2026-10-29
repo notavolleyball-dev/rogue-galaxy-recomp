@@ -17,9 +17,10 @@
 // tools/vu1/vudis.py over a recording's coverage and is checked against the
 // VU1 with tools/vu1/oracle; see its README.
 //
-// Done: the field's strip programs, slots A, B, C and F as one set and the
-// three D pieces that finish them (no culling, the guard band, the guard band
-// and backfaces), strips and triangle lists. Not done, so left to the VU1
+// Done: the field's strip programs: slots A, B and F as one set, two C pieces
+// (vertex colors, one material color) and four D pieces (no culling, the
+// guard band, the guard band and backfaces, and a scaled and capped depth
+// with the vertices' bounds kept in VU1 memory), strips and triangle lists. Not done, so left to the VU1
 // chunk by chunk: the backface piece's triangle lists, scrolling UVs and two
 // flag branches; and slot E's clipping, except where the GPU clips (a
 // GSNativeMesh drawn by SdlGpuBackend).
@@ -37,10 +38,21 @@ enum class Cull : uint8_t
     GuardBandAndBackface,
 };
 
+// What the C piece gives each vertex.
+enum class Color : uint8_t
+{
+    PerVertex, // the vertex's int16 color times the material color
+    Material,  // the material color alone
+};
+
 struct Program
 {
     const char *name;
     Cull cull;
+    Color color;
+    // The projected z scaled by quad 87.z and capped by quad 1.y, and the
+    // vertices' bounds kept in quads 98 (least) and 99 (most).
+    bool depthBounds = false;
 };
 
 // The program whose MSCAL enters at `startPC` (in bytes) with `code` (all of
@@ -57,6 +69,14 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
 // slot, for rg_vu1_oracle --inventory: "A B C F D:guard band" when all of a
 // program, "A B C - D:?" when C and D are other pieces.
 std::string describePieces(const uint8_t *code, uint32_t startPC);
+
+// What the program leaves in VU1 data memory that a later run, or the EE,
+// may read: the bounds in quads 98 and 99 for the programs with
+// `depthBounds`. `apply` writes it where the VU1 did not run (skip, gpu);
+// `matches` says whether the VU1 left the same (check), from the data
+// memory before the run and after it.
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
+bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after);
 
 // The GS packets the program kicks for that chunk, in order.
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
@@ -99,6 +119,12 @@ public:
     // Z, color, UV, STQ, fog), or null when nothing does beyond the tolerance.
     const char *check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
                       const std::vector<std::vector<uint8_t>> &native);
+    // A difference found outside the packets (VU1 memory), counted as check's.
+    void noteKind(const Program &program, const char *kind)
+    {
+        ++m_differ;
+        ++m_kinds[std::string(program.name) + ": " + kind];
+    }
     // Prints the line when it is due.
     void tick();
 

@@ -2,20 +2,23 @@
 
 // A strip a VU1 program would have drawn, from the program's own inputs
 // (GSNativeMesh, Rogue Galaxy: added): the program's transform, done here, to
-// the GS window pixels, depth, Q, S/T, colour and fog gs_draw.vert passes on,
+// the GS window pixels, depth, Q, S/T, color and fog gs_draw.vert passes on,
 // so gs_draw.frag draws it as it draws the program's triangles. The position
 // goes out homogeneous, so the GPU clips the strip where the program would
 // have dropped a triangle at its guard band or clipped it in slot E.
 //
 // The vertex is a GsGpuVertex slot read another way: x, y and z the object-
 // space position, q and s the texture coordinates before the divide, the
-// colour before its clamp (0-255).
+// color before its clamp (0-255), and in the fog slot the Z the program
+// computes (GSNativeMesh::Vertex::depth): this arithmetic rounds to nearest
+// where the VU truncates, and a unit of Z decides a pass drawn at nearly the
+// same depth.
 
 layout(location = 0) in vec2 inPositionXY;
 layout(location = 1) in vec2 inPositionZU;
 layout(location = 2) in vec2 inV;
 layout(location = 3) in vec4 inColor;
-layout(location = 4) in float inUnused;
+layout(location = 4) in float inDepth;     // the program's Z, when not negative
 
 layout(set = 1, binding = 0) uniform VertexParams {
     // As gs_draw.vert's.
@@ -29,6 +32,8 @@ layout(set = 1, binding = 0) uniform VertexParams {
     vec4 colorMax;
     // xy: XYOFFSET in pixels. z: 1 / the depth format's largest value.
     vec4 misc;
+    // The projected z: x scales it, y caps it.
+    vec4 depth;
 } params;
 
 layout(location = 0) noperspective out vec2 vTexCoord;
@@ -41,9 +46,10 @@ void main() {
                 inPositionZU.x * params.matrix[2] + params.matrix[3];
     float q = 1.0 / clip.w;
     vec3 projected = clip.xyz * q;
+    projected.z = min(projected.z * params.depth.x, params.depth.y);
     // The program's FTOI4: x and y in 12.4 fixed point, Z in whole units.
     vec2 pixel = trunc(projected.xy * 16.0) / 16.0 - params.misc.xy;
-    float depth = clamp(trunc(projected.z) * params.misc.z, 0.0, 1.0);
+    float depth = clamp((inDepth >= 0.0 ? inDepth : trunc(projected.z)) * params.misc.z, 0.0, 1.0);
 
     vec2 normalised = (pixel + params.adjust.xy) * params.targetSize.zw;
     vec2 ndc = normalised * 2.0 - 1.0;

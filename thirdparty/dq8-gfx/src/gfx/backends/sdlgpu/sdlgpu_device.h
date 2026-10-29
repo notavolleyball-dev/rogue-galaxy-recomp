@@ -76,6 +76,7 @@ struct GsNativeVertexUniforms {
     float fog[4] = {};
     float colorMax[4] = {};
     float misc[4] = {}; // XYOFFSET x and y in pixels, 1 / the depth maximum
+    float depth[4] = {1.0f, 3.402823466e38f, 0.0f, 0.0f}; // the projected z's scale and cap
 };
 
 struct GsFragmentUniforms {

@@ -148,11 +148,13 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 |---|---|---|---|
 | A | 0x0320-0x05d8 | `07151c2597283286` | The strip driver |
 | B | 0x0960-0x0a38 | `af62ff64ac67b45f` | int16 positions, normals, UVs |
-| C | 0x10e0-0x1328 | `70362be426b17f94` | Vertex colors |
+| C | 0x10e0-0x1328 | `70362be426b17f94` | Vertex colors (87.y & 0x100 and 0x200 declined) |
+| C | 0x10e0-0x11b0 | `780d503e649c9116` | One material color for every vertex (with 87.y & 0x200: 82 * 43, no ambient) |
 | F | 0x39d0-0x3a68 | `d3f6f6312a13ff1c` | UV scroll (declined when active) |
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |
+| D | 0x1900-0x1b98 | `b8ea8ed53805b0c4` | No culling; z times 87.z, at most 1.y; the vertices' bounds (x, y, z, fog) widen quads 98 and 99, which the `:960` sprite programs read, so `skip` and `gpu` write them too (`applyMemoryEffects`) |
 
 E (clipping) is never ported: the GPU clips the mesh (`gs_native.vert`
 outputs homogeneous positions), so a clipping chunk goes to the GPU like any
@@ -231,7 +233,15 @@ In the game, the last 25 s of the walk in the 60 fps mode
 - **Flag reads have latency.** `FMEQ` after an FMAC reads its flags four
   pairs later; in the D pieces the distance is exact, so the plain reading
   holds, but check it in a new piece.
-- **The VU truncates.** Products and sums round toward zero; native code
-  rounds to nearest. Expect ±1 in the last place and judge by tolerance.
+- **The VU truncates.** Products and sums round toward zero. The native
+  code runs under the same rounding (`VuRounding`, MXCSR round toward zero,
+  around each entry point) and does the arithmetic in the VU's order, which
+  makes it bit-exact: the oracle at zero tolerance agrees on every run. The
+  GPU cannot round that way, so the mesh carries each vertex's Z from the
+  CPU (`GSNativeMesh::Vertex::depth`); a pass drawn over another at the same
+  depth lost pixels without it.
+- **VU1 memory is output too.** A piece that writes data memory a later
+  program reads (the bounds of `b8ea8ed5`) must do so natively when the VU1
+  is skipped; check mode compares it (`memoryEffectsMatch`).
 - **Commands over SSH run in zsh** on the build machine: `set -- $pair`
   does not split, and an empty argument vanishes. Wrap loops in `bash -c`.

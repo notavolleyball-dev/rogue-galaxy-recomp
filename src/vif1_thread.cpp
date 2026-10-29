@@ -761,7 +761,14 @@ public:
         {
             if (g_nativeMode == rg::vu1native::Mode::Check)
             {
-                if (const char *kind = m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets))
+                const char *kind = m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets);
+                if (!kind && !rg::vu1native::memoryEffectsMatch(*native, m_checkData.data(), top,
+                                                                memory.getVU1Data()))
+                {
+                    kind = "VU1 memory";
+                    m_nativeMonitor.noteKind(*native, kind);
+                }
+                if (kind)
                 {
                     rg::vu1replay::saveChunk(native->name, kind, memory.getVU1Code(), m_nativePC, top, itop,
                                              m_current.number, m_checkData.data(), m_checkState, m_vu1Packets,
@@ -777,6 +784,11 @@ public:
                 if (g_nativeMode == rg::vu1native::Mode::Gpu)
                 {
                     deliverMesh(m_runtime.gs(), m_nativeMesh);
+                }
+                // What the VU1 would have left in its memory, where it did not run.
+                if (g_nativeMode != rg::vu1native::Mode::Replace)
+                {
+                    rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
                 }
             }
         }
