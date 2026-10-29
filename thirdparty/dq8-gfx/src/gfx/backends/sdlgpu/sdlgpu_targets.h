@@ -161,6 +161,7 @@ public:
         m_effectBases = std::move(bases);
         m_effectScale = scale;
     }
+    uint32_t effectScale() const { return m_effectScale; }
 
     void reset();
 

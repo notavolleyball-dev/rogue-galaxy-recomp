@@ -121,6 +121,8 @@ public:
     {
         m_inner->SubmitNativeMesh(mesh, state);
     }
+    bool SupportsNativeEffects() const override { return m_inner->SupportsNativeEffects(); }
+    void SubmitNativeEffect(const GSNativeEffect &effect) override { m_inner->SubmitNativeEffect(effect); }
     void Submit(const GSPrimitiveBatch &batch) override
     {
         if (keep(batch))

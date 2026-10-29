@@ -360,6 +360,7 @@ void SdlGpuDevice::destroy() {
     m_linearSampler = nullptr;
     releaseIndex8();
     releaseLocalCopy();
+    releaseEffects();
     if (m_sampler)
         SDL_ReleaseGPUSampler(m_device, m_sampler);
     if (m_fragmentShader)

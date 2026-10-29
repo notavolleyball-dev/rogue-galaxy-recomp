@@ -370,6 +370,18 @@ besides drawing (timers, work-texture registration, the `GfxEndFrame` probe
 bookkeeping) is reproduced in the hook. The diff of the function's
 non-graphics side effects is part of the review.
 
+**The glare (2026-10-29), behind `RG_NATIVE_GLARE=1`.** It went another
+way than planned above: the game's function still runs, and the VIF1 thread
+holds the packets it wrote (`src/native_effects.cpp`), builds a
+`GSNativeEffect` from their sprites (3 buffers, 29 sprites) and sends the
+packets on with their kicks withheld, so the GS registers end as before. The
+packets are taken one DIRECT at a time as `GS::processGIFPacket` takes them:
+the effect's first A+D tag counts 14 and its DIRECT holds 8, and the GS drops
+the rest. On the 30 fps walk at 1x it is drawn every frame, the render
+passes fall from 180 to 111 a frame and the draws from 716 to 632, and the
+field's screenshots match the GS path's (the bright sky to the pixel).
+Not yet measured: the GPU's power, and the 60 fps mode at higher scales.
+
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
 with `gpubusy.sh` falls by an amount recorded in the ledger.
@@ -412,7 +424,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | now ([FSR.md](FSR.md)) |
-| 3 Post | M-L (about ten effects, each S-M) | now: the glare first |
+| 3 Post | M-L (about ten effects, each S-M) | the glare done (2026-10-29); the per-object composites next |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 

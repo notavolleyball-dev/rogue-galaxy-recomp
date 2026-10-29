@@ -2251,6 +2251,119 @@ struct SdlGpuBackend::Impl {
     // they are drawn as they are, at their own pixels. A marked shadow copy
     // is drawn from the shadow version where it goes, or as it is without
     // one (Rogue Galaxy: added).
+    // A GSNativeEffect: its sprites in order, its own buffers at the effect
+    // scale (as the GS path keeps DQ8_GFX_EFFECT_BASES), each sprite into a
+    // buffer one pass from the buffer before it, so a sprite that reads what
+    // it draws needs no snapshot; external buffers are the GS's targets.
+    bool submitEffect(const GSNativeEffect &effect) {
+        if (!device.valid() || effect.bufferCount == 0u || effect.bufferCount > GSNativeEffect::kMaxBuffers ||
+            effect.opCount > GSNativeEffect::kMaxOps)
+            return false;
+        if (!flushDraws())
+            return false;
+        std::string error;
+        const uint32_t sceneScale = std::max(targets->scale(), 1u);
+        const uint32_t ownScale =
+            targets->effectScale() != 0u ? std::min(sceneScale, targets->effectScale()) : sceneScale;
+        struct Live {
+            GsSurface *surface = nullptr;
+            SDL_GPUTexture *textures[2] = {};
+            int current = -1;
+            uint32_t scale = 1u;
+            uint32_t width = 0u; // GS pixels the texture holds
+            uint32_t height = 0u;
+        };
+        std::array<Live, GSNativeEffect::kMaxBuffers> live{};
+        for (uint32_t i = 0; i < effect.bufferCount; ++i) {
+            const GSNativeEffect::Buffer &buffer = effect.buffers[i];
+            Live &entry = live[i];
+            if (buffer.external != 0u) {
+                ResolveReasonScope scope(*targets, GsResolveReason::View);
+                entry.surface = targets->acquire(buffer.base, buffer.fbw, buffer.psm, false, buffer.width,
+                                                 buffer.height, error);
+                if (!entry.surface || !targets->prepareColorView(*entry.surface, error))
+                    return setError(std::move(error));
+                entry.scale = std::max(entry.surface->scale, 1u);
+                entry.width = entry.surface->width;
+                entry.height = entry.surface->height;
+                continue;
+            }
+            entry.scale = ownScale;
+            entry.width = buffer.width;
+            entry.height = buffer.height;
+            for (uint32_t k = 0; k < 2u; ++k) {
+                entry.textures[k] =
+                    device.effectTexture(i * 2u + k, buffer.width * ownScale, buffer.height * ownScale, error);
+                if (!entry.textures[k])
+                    return setError(std::move(error));
+            }
+        }
+        for (uint32_t n = 0; n < effect.opCount; ++n) {
+            const GSNativeEffect::Op &op = effect.ops[n];
+            if (op.target >= effect.bufferCount || op.source >= int32_t(effect.bufferCount))
+                return setError("native effect: no such buffer");
+            Live &target = live[op.target];
+            Live *source = op.source >= 0 ? &live[op.source] : nullptr;
+            SDL_GPUTexture *sourceTexture = nullptr;
+            if (source)
+                sourceTexture = source->surface ? source->surface->texture
+                                                : (source->current >= 0 ? source->textures[source->current] : nullptr);
+            if (source && (!sourceTexture || (target.surface && source->surface == target.surface)))
+                return setError("native effect: a sprite reads a buffer it cannot");
+            SdlGpuDevice::GsEffectUniforms uniforms{};
+            for (int k = 0; k < 4; ++k) {
+                uniforms.rect[k] = op.rect[k];
+                uniforms.uv[k] = op.uv[k];
+                uniforms.scissor[k] = float(op.scissor[k]);
+                uniforms.rgba[k] = op.rgba[k];
+            }
+            uniforms.misc[0] = float(target.scale);
+            uniforms.misc[1] = source ? float(source->width) : 1.0f;
+            uniforms.misc[2] = source ? float(source->height) : 1.0f;
+            uniforms.control[0] = op.flags | (target.surface ? 256u : 0u) | (source ? 512u : 0u);
+            uniforms.control[1] = uint32_t(op.alpha & 0xffu);
+            uniforms.control[2] = uint32_t((op.alpha >> 32u) & 0xffu);
+            uniforms.control[3] = uint32_t(op.test & 0x3fffu);
+            const bool linear = (op.flags & GSNativeEffect::kLinear) != 0u;
+            if (target.surface) {
+                // The pixels the sprite covers: x0 <= x < x1 and the scissor.
+                const auto first = [](float edge, uint32_t bound) {
+                    return std::max(uint32_t(std::max(std::ceil(edge), 0.0f)), bound);
+                };
+                const auto last = [](float edge, uint32_t bound) {
+                    return std::min(uint32_t(std::max(std::ceil(edge), 0.0f)), bound);
+                };
+                const uint32_t x0 = first(op.rect[0], op.scissor[0]);
+                const uint32_t y0 = first(op.rect[1], op.scissor[1]);
+                const uint32_t x1 = std::min(last(op.rect[2], op.scissor[2] + 1u), target.width);
+                const uint32_t y1 = std::min(last(op.rect[3], op.scissor[3] + 1u), target.height);
+                if (x1 <= x0 || y1 <= y0)
+                    continue;
+                const uint32_t scale = target.scale;
+                const SDL_Rect scissor{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale),
+                                       int((y1 - y0) * scale)};
+                if (!device.effectOp(target.surface->texture, target.width * scale, target.height * scale,
+                                     sourceTexture, linear, nullptr, (op.flags & GSNativeEffect::kBlend) != 0u,
+                                     &scissor, uniforms, error))
+                    return setError(std::move(error));
+                targets->markDrawn(*target.surface, GsRegion{x0, y0, x1, y1});
+            } else {
+                const int next = target.current >= 0 ? 1 - target.current : 0;
+                SDL_GPUTexture *previous = target.textures[1 - next];
+                if (source == &target)
+                    sourceTexture = previous;
+                if (!device.effectOp(target.textures[next], target.width * target.scale,
+                                     target.height * target.scale, sourceTexture, linear, previous, false, nullptr,
+                                     uniforms, error))
+                    return setError(std::move(error));
+                target.current = next;
+            }
+            ++stats.nativeEffectOps;
+        }
+        ++stats.nativeEffects;
+        return true;
+    }
+
     void submit(const GSPrimitiveBatch &batch) {
         if (regionPack && shadowCopy(batch)) {
             borderIndex = 0u;
@@ -3639,7 +3752,7 @@ struct SdlGpuBackend::Impl {
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
                      "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
-                     "draws %llu, off screen %llu)\n",
+                     "draws %llu, off screen %llu) | native effects=%llu (%llu sprites)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3652,7 +3765,9 @@ struct SdlGpuBackend::Impl {
                      d(stats.nativeMeshes, previousReasons.nativeMeshes),
                      d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded),
                      d(stats.nativeDraws, previousReasons.nativeDraws),
-                     d(stats.nativeMeshesCulled, previousReasons.nativeMeshesCulled));
+                     d(stats.nativeMeshesCulled, previousReasons.nativeMeshesCulled),
+                     d(stats.nativeEffects, previousReasons.nativeEffects),
+                     d(stats.nativeEffectOps, previousReasons.nativeEffectOps));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -4991,6 +5106,17 @@ void SdlGpuBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->submitNative(mesh, state);
+}
+
+bool SdlGpuBackend::SupportsNativeEffects() const {
+    std::lock_guard lock(m_impl->mutex);
+    return m_impl->device.supportsEffects();
+}
+
+void SdlGpuBackend::SubmitNativeEffect(const GSNativeEffect &effect) {
+    std::lock_guard lock(m_impl->mutex);
+    Impl::ScopedTimer timer(m_impl->backendNanos);
+    m_impl->submitEffect(effect);
 }
 
 void SdlGpuBackend::SubmitMany(const GSPrimitiveBatch *const *batches, size_t count) {

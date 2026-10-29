@@ -99,6 +99,7 @@ add_executable(roguegalaxy
     stick_response.cpp
     vif1_thread.cpp
     vu1_native.cpp
+    native_effects.cpp
     gif_events.cpp
     vu0_flags.cpp
     overlay/overlay_manager.cpp

@@ -197,6 +197,27 @@ public:
                    uint32_t scale, const SDL_Rect &box, const std::vector<uint32_t> &mapping,
                    std::string &error);
 
+    // GSNativeEffect's sprites (gs_effect.frag; Rogue Galaxy: added). SPIR-V
+    // only: elsewhere the effects stay GS packets.
+    struct GsEffectUniforms {
+        float rect[4];
+        float uv[4];
+        float scissor[4];
+        float misc[4];
+        uint32_t rgba[4];
+        uint32_t control[4];
+    };
+    bool supportsEffects() const;
+    // An effect's buffer, by slot, kept from one effect to the next.
+    SDL_GPUTexture *effectTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error);
+    // One sprite into `target` (width x height). Without `scissor`, into an
+    // effect's own buffer: the whole of it, from `previous` where the sprite
+    // does not draw. With it, into an external target, written or (`add`)
+    // added. `source` is the sprite's texture, null when untextured.
+    bool effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source, bool linear,
+                  SDL_GPUTexture *previous, bool add, const SDL_Rect *scissor, const GsEffectUniforms &uniforms,
+                  std::string &error);
+
     bool composeDisplay(SDL_GPUTexture *circuit1, SDL_GPUTexture *circuit2,
                         SDL_GPUTexture *destination, uint32_t width, uint32_t height,
                         const GsDisplayUniforms &uniforms, SDL_GPUFence *&completed, std::string &error);
@@ -280,6 +301,19 @@ private:
     bool m_framebufferFetch = false;
     bool createIndex8(std::string &error);
     void releaseIndex8();
+
+    // GSNativeEffect's: written and added pipelines, a bilinear sampler and
+    // the buffers.
+    struct EffectTexture {
+        SDL_GPUTexture *texture = nullptr;
+        uint32_t width = 0u;
+        uint32_t height = 0u;
+    };
+    bool effectPipeline(bool add, std::string &error);
+    void releaseEffects();
+    SDL_GPUGraphicsPipeline *m_effectPipelines[2] = {};
+    SDL_GPUSampler *m_effectLinearSampler = nullptr;
+    std::array<EffectTexture, 8> m_effectTextures{};
 
     SDL_GPUGraphicsPipeline *m_reinterpretPipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_localCopyPipeline = nullptr;

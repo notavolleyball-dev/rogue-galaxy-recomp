@@ -48,6 +48,7 @@ add_library(dq8_gfx_sdlgpu STATIC
     src/gfx/backends/sdlgpu/sdlgpu_backend.cpp
     src/gfx/backends/sdlgpu/sdlgpu_device.cpp
     src/gfx/backends/sdlgpu/sdlgpu_display.cpp
+    src/gfx/backends/sdlgpu/sdlgpu_effect.cpp
     src/gfx/backends/sdlgpu/sdlgpu_input.cpp
     src/gfx/backends/sdlgpu/sdlgpu_targets.cpp
     src/gfx/backends/sdlgpu/sdlgpu_textures.cpp
@@ -64,6 +65,7 @@ foreach(shader IN ITEMS
         "gs_display.frag;frag;kGsDisplayFragSpirv"
         "gs_index8.frag;frag;kGsIndex8FragSpirv"
         "gs_local_copy.frag;frag;kGsLocalCopyFragSpirv"
+        "gs_effect.frag;frag;kGsEffectFragSpirv"
         "present_sides.frag;frag;kPresentSidesFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)

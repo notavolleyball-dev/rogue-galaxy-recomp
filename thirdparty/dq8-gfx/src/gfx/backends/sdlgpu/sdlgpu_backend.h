@@ -70,6 +70,9 @@ struct SdlGpuStats {
     // screen, not drawn (Rogue Galaxy: added).
     uint64_t nativeDraws = 0u;
     uint64_t nativeMeshesCulled = 0u;
+    // GSNativeEffects drawn, and their sprites (Rogue Galaxy: added).
+    uint64_t nativeEffects = 0u;
+    uint64_t nativeEffectOps = 0u;
     // Drawn through the same-state fast path (Rogue Galaxy: added).
     uint64_t sameStatePrimitives = 0u;
     uint64_t trianglesDrawn = 0u;
@@ -179,6 +182,9 @@ public:
     void Submit(const GSPrimitiveBatch &batch) override;
     // Transformed on the GPU, by gs_native.vert (Rogue Galaxy: added).
     void SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state) override;
+    // Drawn by gs_effect.frag on buffers of its own (Rogue Galaxy: added).
+    bool SupportsNativeEffects() const override;
+    void SubmitNativeEffect(const GSNativeEffect &effect) override;
     void SubmitMany(const GSPrimitiveBatch *const *batches, size_t count) override;
     void BeginTransfer(const GSTransferCommand &command) override;
     void UploadImage(const uint8_t *data, uint32_t sizeBytes) override;

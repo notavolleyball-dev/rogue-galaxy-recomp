@@ -50,6 +50,7 @@
 #include "settings_pages.h"
 #include "shop_prices.h"
 #include "step_fixes.h"
+#include "native_effects.h"
 #include "vif1_thread.h"
 #include "vu0_flags.h"
 #include "ps2_runtime.h"
@@ -187,6 +188,7 @@ int run(int argc, char **argv)
         std::fprintf(stderr, "[rg] native renderer on\n");
     rg::debug::installCallTrace(runtime);
     rg::debug::installDrawOrigins(runtime);
+    rg::nativefx::install(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);
     rg::debug::installJumpTrace(runtime);
