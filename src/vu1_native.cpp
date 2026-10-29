@@ -143,6 +143,9 @@ constexpr ColorPiece kColors[] = {
     {{0x10e0u, 0x1328u, 0x70362be426b17f94ull}, Color::PerVertex},
     {{0x10e0u, 0x11b0u, 0x780d503e649c9116ull}, Color::Material},
     {{0x10e0u, 0x1240u, 0x91f542d069307d6cull}, Color::Lit},
+    // 91f542d0's lighting times the vertex colors (87.y & 0x100: a loop of
+    // its own, not read).
+    {{0x10e0u, 0x14a0u, 0x2460e5281034f152ull}, Color::LitVertex},
 };
 
 // The D pieces. (a786efabfa469ada is also the name of its compiled routine,
@@ -190,6 +193,7 @@ const Program *intern(const Program &shape)
     name += shape.depthBounds ? ", depth and bounds" : "";
     name += shape.color == Color::Material && shape.kind == Kind::Strip ? ", one color"
             : shape.color == Color::Lit                                  ? ", lit"
+            : shape.color == Color::LitVertex                            ? ", lit vertex colors"
                                                                          : "";
     name += shape.uv == Uv::SphereMap ? ", sphere map" : "";
     name += shape.decode == Decode::Skinned ? ", skinned" : "";
@@ -528,14 +532,15 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     Vec4 colorBase{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
                    material.z * light.z + ambient.z * 128.0f, material.w * light.w};
     // Either C with 87.y & 0x200: quad 82 times 43, no ambient.
-    if (program.color != Color::Lit && (vu.half(87, 1) & 0x200u))
+    if ((program.color == Color::PerVertex || program.color == Color::Material) && (vu.half(87, 1) & 0x200u))
     {
         const Vec4 other = vu.quad(43);
         colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
     }
     const bool perVertex = program.color == Color::PerVertex;
     const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    const bool normals = program.color == Color::Lit || program.uv == Uv::SphereMap;
+    const bool lit = program.color == Color::Lit || program.color == Color::LitVertex;
+    const bool normals = lit || program.uv == Uv::SphereMap;
     const Lights lights(vu);
     const SphereMap sphere(vu);
     chunk.mesh.vertices.resize(count);
@@ -557,13 +562,20 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         {
             float normal[3];
             decodeNormal(vu, top, k, bones, normal);
-            if (program.color == Color::Lit)
+            if (lit)
             {
                 const Vec4 c = lights.shade(normal);
                 v.r = c.x;
                 v.g = c.y;
                 v.b = c.z;
                 v.a = c.w;
+                if (program.color == Color::LitVertex)
+                {
+                    v.r = c.x * (itof15(vu.word(colors + k, 0)) * 256.0f);
+                    v.g = c.y * (itof15(vu.word(colors + k, 1)) * 256.0f);
+                    v.b = c.z * (itof15(vu.word(colors + k, 2)) * 256.0f);
+                    v.a = c.w * (itof15(vu.word(colors + k, 3)) * 256.0f);
+                }
             }
             if (program.uv == Uv::SphereMap)
             {
@@ -1003,9 +1015,10 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     {
         if (matches(code, candidate.c))
         {
-            color = candidate.color == Color::PerVertex ? "C:vertex colors"
-                    : candidate.color == Color::Lit     ? "C:lit"
-                                                        : "C:one color";
+            color = candidate.color == Color::PerVertex   ? "C:vertex colors"
+                    : candidate.color == Color::Lit       ? "C:lit"
+                    : candidate.color == Color::LitVertex ? "C:lit vertex colors"
+                                                          : "C:one color";
         }
     }
     const char *finish = "D:?";
@@ -1058,7 +1071,7 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     if (primType != 3u && primType != 4u)
         return "neither strip nor triangle list";
     const uint32_t flags = vu.half(87, 1);
-    if ((flags & 0x100u) && program.color == Color::PerVertex)
+    if ((flags & 0x100u) && (program.color == Color::PerVertex || program.color == Color::LitVertex))
         return "quad 87.y & 0x100 (C's other loop)";
     if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f))
         return "scrolling UVs (slot F)";

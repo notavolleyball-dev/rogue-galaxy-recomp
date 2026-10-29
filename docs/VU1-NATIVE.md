@@ -161,6 +161,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | A | 0x0320-0x0500 | `821b638f42fcaa6e` | The shadow volume driver: header with PRIM 5 (fans), calls B and C |
 | C | 0x10e0-0x1938 | `dc8dbfe4905cb635` | The shadow volumes (`buildShadow`): each triangle lit (normal . light > 1e-4) and inside is extruded into five fans, each after the A+D packet at quad 38 (facing) or 35. Packets only |
 | C | 0x10e0-0x1240 | `91f542d069307d6c` | Lighting: four directional lights (lanes of quads 100-102) on the normal, each clamped at 0, colors 33-36 and ambient 37 times the material 82 (`Lights`) |
+| C | 0x10e0-0x14a0 | `2460e5281034f152` | `91f542d0`'s lighting times each vertex's color / 32768 * 256 (87.y & 0x100 declined) |
 | F | 0x39d0-0x3b70 | `150031ee1534d185` | Sphere map: UV = (normal through quads 24-26 times 64-66, xy, + 1) / 2 (`SphereMap`) |
 | B | 0x0960-0x0b38 | `6e42dac662887054` | The overlay sprites (the `:960` rows), run by an MSCAL of their own (`drawsAtCall`): 32-pixel columns over the bounds in quads 98/99, one pixel wider, within quads 140/141, with the tag at 144 in buffers 145 and 165. Packets only; leaves 144-169 as the VU1 does |
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |

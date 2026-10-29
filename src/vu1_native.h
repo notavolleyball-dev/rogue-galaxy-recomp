@@ -45,6 +45,7 @@ enum class Color : uint8_t
     PerVertex, // the vertex's int16 color times the material color
     Material,  // the material color alone
     Lit,       // four directional lights on the normal, and an ambient
+    LitVertex, // that, times the vertex's int16 color / 32768 * 256
 };
 
 // What the F piece does to the UVs.
