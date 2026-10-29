@@ -187,12 +187,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR commandLine, in
 
     // RogueGalaxy.bat's variables (it says what they do): the [gfx] line a
     // second unless one is set already, and other programs' Vulkan layers
-    // kept out of the game.
+    // kept out of the game. Not under Wine or Proton, where the variable
+    // reaches the host's Vulkan loader and would keep out the layers the
+    // picture goes through (gamescope's on a Steam Deck, Steam's overlay).
     if (GetEnvironmentVariableW(L"DQ8_GFX_STATS_EVERY", NULL, 0) == 0)
     {
         SetEnvironmentVariableW(L"DQ8_GFX_STATS_EVERY", L"60");
     }
-    SetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", L"~implicit~");
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const BOOL wine = ntdll != NULL && GetProcAddress(ntdll, "wine_get_version") != NULL;
+    if (!wine)
+    {
+        SetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", L"~implicit~");
+    }
 
     // The previous run's log survives one more run (there may be none).
     CopyFileW(kLog, kPreviousLog, FALSE);

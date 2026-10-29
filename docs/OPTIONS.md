@@ -49,6 +49,7 @@
 | Show the loading recap at once | The story so far appears whole, and you can go on as soon as it has loaded. |
 | Instant text | Dialogue a page at a time instead of letter by letter. |
 | Chests on the map | Unopened chests show on the map in the parts explored. |
+| Save anywhere (R1 + Triangle) | In the field, Triangle with R1 held opens the transporter's menu (save, teleport, exchange points, item storage) wherever the main menu could open. A save made there loads at the area's transporter. |
 | Fast transporters | Transporter warps play up to twice as fast. |
 | Check for new versions | At each start, asks GitHub for this project's releases and says when a newer one is out (Rogue Galaxy > About links to it). On by default. |
 | Fast Revelation Flow | Revelation Flow animations play up to twice as fast. |
@@ -61,6 +62,7 @@
 | Experience from battles | 0% to 500%. |
 | Money from battles | 0% to 500%. |
 | Item drops | 0% to 1000%. |
+| Weapon growth | 100% to 1000%: each battle fills a weapon's gauge (15 to full), then its attributes, by 1 point, or more. |
 | Shop prices | 10% to 200%. |
 | Action gauge speed | 25% to 400%. |
 

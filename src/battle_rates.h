@@ -29,6 +29,12 @@ class PS2Runtime;
 // drops at 30% with 300%), 0 for none. The results hold three kinds of
 // items: past them the game gives no more, as it does.
 //
+// Last, each weapon of the members fighting grows: its gauge by 1, 15 to
+// full, and once full one of its five attributes not at its maximum, drawn
+// at random, by 1 (the weapon is complete when all are). `weapon_growth`
+// multiplies those 1s, 300 giving 3 (whole steps; what passes a maximum is
+// lost, as the setters clamp).
+//
 // A character's action gauge refills in CharaActionGaugeRegen (0x3B6490, a
 // virtual UnitBaseUpdate calls each frame with the time step, f12): a rate
 // for what the character is doing times the step. `action_gauge` scales the
@@ -46,5 +52,6 @@ void setExperience(int percent);
 void setMoney(int percent);
 void setActionGauge(int percent);
 void setItemDrops(int percent);
+void setWeaponGrowth(int percent);
 
 } // namespace rg::battlerates

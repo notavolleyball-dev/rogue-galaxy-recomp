@@ -225,13 +225,14 @@ public:
     // bilinear and clamped to it, once the host has one.
     //
     // Borders: the host can mark the copies of a glyph the game draws as its
-    // border -- four, black, a pixel above, below, right and left of the
-    // glyph, in that order, before it -- by putting their y a sixteenth of a
-    // pixel above the whole pixel. The first is then drawn where the glyph
+    // border -- 4, 8 or 12, black or dark grey (up to 0x20), around the
+    // glyph, before it -- by putting their y a sixteenth of a pixel above the
+    // whole pixel when the first is a pixel above the glyph, three when it
+    // is a pixel above and left. The first is then drawn where the glyph
     // goes, from the host's border version of the region (a margin of
     // kRegionBorderMargin texels about it, its alpha the border's coverage),
-    // and the other three are left out; without one, the four are drawn as
-    // they are, at their own pixels.
+    // and the others from the same texels are left out; without one, they
+    // are drawn as they are, at their own pixels.
     //
     // Shadows: a copy of a glyph the game draws down and right of it as its
     // shadow, of any colour, its y marked two sixteenths of a pixel above

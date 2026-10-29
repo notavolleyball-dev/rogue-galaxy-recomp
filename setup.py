@@ -688,6 +688,35 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portable(args: argparse.Namespace) -> int:
+    """The built game in a folder of its own, to copy to another machine (a Steam Deck, through Proton)."""
+    out = Path(args.out).resolve()
+    game_dir = GAME_BUILD / "src"
+    launcher = ROOT / "Rogue Galaxy.exe"
+    disc = ROOT / "disc"
+    for needed in (game_dir / "roguegalaxy.exe", launcher, disc / "manifest.json"):
+        if not needed.is_file():
+            sys.exit(f"{needed} is missing: install and build the game first")
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty; pick a new folder")
+    (out / "build" / "game" / "src").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(launcher, out)
+    shutil.copy2(game_dir / "roguegalaxy.exe", out / "build" / "game" / "src")
+    for dll in game_dir.glob("*.dll"):
+        shutil.copy2(dll, out / "build" / "game" / "src")
+    # The memory cards only when asked: the copy's saves then go their own way.
+    skip = () if args.saves else ("mc0", "mc1")
+    print(f"== copying disc/ (about 6.3 GiB){' with the memory cards' if args.saves else ''}", flush=True)
+    shutil.copytree(disc, out / "disc", ignore=lambda folder, names: [n for n in names
+                                                                       if Path(folder) == disc and n in skip])
+    if (ROOT / "borders").is_dir():
+        shutil.copytree(ROOT / "borders", out / "borders")
+    print(f"done: {out}\n"
+          "On a Steam Deck: copy the folder over, add \"Rogue Galaxy.exe\" to Steam as a non-Steam game, and in its "
+          "Properties > Compatibility force a Proton version. It starts in fullscreen there.")
+    return 0
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     """Everything from a dump to a game: verify, extract, tools, recompile, build."""
     disc = ROOT / "disc"
@@ -757,6 +786,11 @@ def main() -> int:
     p = sub.add_parser("install", help="from a dump to the game: verify, extract, tools, recompile, build")
     p.add_argument("--iso", help="your dump of the game (not needed once disc/ is extracted)")
     p.set_defaults(func=cmd_install)
+
+    p = sub.add_parser("portable", help="copy the built game to a folder of its own (for a Steam Deck, through Proton)")
+    p.add_argument("--out", required=True, help="a new or empty folder")
+    p.add_argument("--saves", action="store_true", help="also copy the memory cards (disc/mc0, disc/mc1)")
+    p.set_defaults(func=cmd_portable)
 
     p = sub.add_parser("make-hashes", help="(maintainers) regenerate hashes.json from a known-good dump")
     p.add_argument("--iso", required=True)

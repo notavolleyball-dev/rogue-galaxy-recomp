@@ -745,4 +745,70 @@ bool drawLarger(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const u
     return cell->face ? drawFace(view, scale, opaque, out) : drawPlate(view, scale, opaque, out);
 }
 
+bool drawLoadingLarger(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *rgba,
+                       uint32_t scale, const std::vector<uint8_t> &crossCell, std::vector<uint8_t> &out)
+{
+    const int cellX = kLoadingCrossX - int(x), cellY = kLoadingCrossY - int(y);
+    const int w = int(width), h = int(height), s = int(scale);
+    std::vector<uint8_t> face;
+    if (scale < 2u || cellX < 0 || cellY < 0 || cellX + kLoadingCross > w || cellY + kLoadingCross > h ||
+        crossCell.size() != size_t(kFaceSize) * kFaceSize * 4u ||
+        !drawLarger(uint32_t(kCells[0].x), uint32_t(kCells[0].y), kFaceSize, kFaceSize, crossCell.data(), scale,
+                    face))
+    {
+        return false;
+    }
+    const int outWidth = w * s, outHeight = h * s;
+    out.assign(size_t(outWidth) * outHeight * 4u, 0u);
+    const auto texel = [&](int tx, int ty) {
+        return &rgba[(size_t(std::clamp(ty, 0, h - 1)) * w + std::clamp(tx, 0, w - 1)) * 4u];
+    };
+    // The face's circle is the cross's, a texel nearer its cell's corner
+    // (its centre at 11 of 22, the cross's at 10 of 20).
+    const float centreX = float(cellX) + 10.0f, centreY = float(cellY) + 10.0f;
+    const int faceX = (cellX - 1) * s, faceY = (cellY - 1) * s, faceSize = kFaceSize * s;
+    for (int j = 0; j < outHeight; ++j)
+    {
+        for (int i = 0; i < outWidth; ++i)
+        {
+            uint8_t *pixel = &out[(size_t(j) * outWidth + i) * 4u];
+            const float px = (float(i) + 0.5f) / float(s), py = (float(j) + 0.5f) / float(s);
+            if (std::hypot(px - centreX, py - centreY) > 10.5f)
+            {
+                const float u = px - 0.5f, v = py - 0.5f;
+                const int u0 = int(std::floor(u)), v0 = int(std::floor(v));
+                const float fu = u - float(u0), fv = v - float(v0);
+                const uint8_t *a = texel(u0, v0), *b = texel(u0 + 1, v0), *c = texel(u0, v0 + 1),
+                              *d = texel(u0 + 1, v0 + 1);
+                for (int k = 0; k < 4; ++k)
+                {
+                    const float top = float(a[k]) + (float(b[k]) - float(a[k])) * fu;
+                    const float bottom = float(c[k]) + (float(d[k]) - float(c[k])) * fu;
+                    pixel[k] = uint8_t(top + (bottom - top) * fv + 0.5f);
+                }
+            }
+            const int fi = i - faceX, fj = j - faceY;
+            if (fi < 0 || fj < 0 || fi >= faceSize || fj >= faceSize)
+            {
+                continue;
+            }
+            // The face over the picture, both with straight alpha.
+            const uint8_t *over = &face[(size_t(fj) * faceSize + fi) * 4u];
+            const float top = std::min(float(over[3]) / 128.0f, 1.0f);
+            const float below = std::min(float(pixel[3]) / 128.0f, 1.0f) * (1.0f - top);
+            const float alpha = top + below;
+            if (alpha <= 0.0f)
+            {
+                continue;
+            }
+            for (int k = 0; k < 3; ++k)
+            {
+                pixel[k] = uint8_t((float(over[k]) * top + float(pixel[k]) * below) / alpha + 0.5f);
+            }
+            pixel[3] = uint8_t(alpha * 128.0f + 0.5f);
+        }
+    }
+    return true;
+}
+
 } // namespace rg::buttons::art

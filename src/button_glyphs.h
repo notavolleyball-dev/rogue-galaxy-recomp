@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class PS2Runtime;
 
@@ -17,7 +18,10 @@ class PS2Runtime;
 // RB, LT and RT), back to the PlayStation's otherwise. The picture is
 // 8-bit indexed, stored as the GS keeps it, so the new pixels take the
 // nearest of its 256 colours. Above 1x they are drawn larger from their
-// shapes instead (button_art.h, through sharp_letters.cpp).
+// shapes instead (button_art.h, through sharp_letters.cpp). The loading
+// screen's "Press X" is a picture of its own, its cross redrawn the same way
+// as it is registered (its letter's colour in one of the cross's blues,
+// which nothing else uses).
 //
 // RG_GAIJI_DUMP=FILE writes the picture as loaded.
 namespace rg::buttons
@@ -46,5 +50,17 @@ void install(PS2Runtime &runtime);
 // What each button shows from now on; the game's thread redraws the
 // picture before its next special character.
 void setGlyphs(const Glyphs &glyphs);
+
+// The loading screen's picture with "Press X" (Loading_01, 128x64) and its
+// cross's 20x20 circle there.
+constexpr int kLoadingCrossX = 81;
+constexpr int kLoadingCrossY = 42;
+constexpr int kLoadingCross = 20;
+// Its palette as last redrawn, hashed as the renderer hashes a texture's
+// (FNV-1a over CT32, CSM1 and each entry in index order), 0 for none.
+uint64_t loadingPalette();
+// The special characters' Cross cell when it was (22x22 RGBA, alpha as the
+// GS's), the button its cross shows: drawn larger over it.
+std::vector<uint8_t> loadingCrossCell();
 
 } // namespace rg::buttons

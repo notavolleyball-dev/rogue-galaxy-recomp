@@ -439,16 +439,20 @@ bool markedCopy(const GSPrimitiveBatch &batch, int32_t marks) {
     return true;
 }
 
-// One of a glyph's border copies: black, marked a sixteenth up.
-bool borderCopy(const GSPrimitiveBatch &batch) {
-    if (!markedCopy(batch, 1))
-        return false;
+// One of a glyph's border copies, black or the dark grey (0x20) some of
+// Rogue Galaxy's borders mix in: its marks, a sixteenth up for a border
+// whose first copy is a pixel up, three for one whose first is a pixel up
+// and left; 0 for any other draw.
+int32_t borderCopy(const GSPrimitiveBatch &batch) {
+    const int32_t marks = markedCopy(batch, 1) ? 1 : markedCopy(batch, 3) ? 3 : 0;
+    if (marks == 0)
+        return 0;
     for (uint8_t i = 0u; i < 2u; ++i) {
         const GSVertex &v = batch.vertices[i];
-        if (v.r != 0u || v.g != 0u || v.b != 0u)
-            return false;
+        if (v.r > 0x20u || v.g > 0x20u || v.b > 0x20u)
+            return 0;
     }
-    return true;
+    return marks;
 }
 
 // One of a glyph's shadow copies: marked two sixteenths up.
@@ -876,6 +880,8 @@ struct SdlGpuBackend::Impl {
     // host's border; while the first is drawn so, it asked for the border
     // version, and whether it was drawn.
     uint32_t borderIndex = 0u;
+    // The texels of the first copy (its glyph's).
+    GsRegion borderGlyph{};
     bool borderRounded = false;
     bool borderRequest = false;
     bool borderDrawn = false;
@@ -979,7 +985,8 @@ struct SdlGpuBackend::Impl {
     // the game moved it up, to the glyph's place (`down`), and grown by the
     // border version's margin each side at the sprite's own pixels per
     // texel. A shadow copy's quad stays where it is.
-    static bool borderQuad(const GSPrimitiveBatch &copy, GSPrimitiveBatch &out, float down = 1.0f) {
+    static bool borderQuad(const GSPrimitiveBatch &copy, GSPrimitiveBatch &out, float down = 1.0f,
+                           float right = 0.0f) {
         out = copy;
         GSVertex &a = out.vertices[0];
         GSVertex &b = out.vertices[1];
@@ -993,8 +1000,8 @@ struct SdlGpuBackend::Impl {
         // turned into pixels.
         const float outU = a.u < b.u ? -margin : margin;
         const float outV = a.v < b.v ? -margin : margin;
-        a.x += outU * perU;
-        b.x -= outU * perU;
+        a.x += right + outU * perU;
+        b.x += right - outU * perU;
         a.y += down + outV * perV;
         b.y += down - outV * perV;
         return true;
@@ -1978,32 +1985,41 @@ struct SdlGpuBackend::Impl {
 
     // A glyph's border copies, marked by the host, stop here first
     // (setRegionReplacements): the first is drawn where the glyph goes from
-    // the host's border version, and the other three are left out; without
-    // one, the four are drawn as they are, at their own pixels. A marked
-    // shadow copy is drawn from the shadow version where it goes, or as it
-    // is without one (Rogue Galaxy: added).
+    // the host's border version, and the others are left out; without one,
+    // they are drawn as they are, at their own pixels. A marked shadow copy
+    // is drawn from the shadow version where it goes, or as it is without
+    // one (Rogue Galaxy: added).
     void submit(const GSPrimitiveBatch &batch) {
         if (regionPack && shadowCopy(batch)) {
             borderIndex = 0u;
             submitShadow(batch);
             return;
         }
-        if (!regionPack || !borderCopy(batch)) {
+        const int32_t marks = regionPack ? borderCopy(batch) : 0;
+        if (marks == 0) {
             borderIndex = 0u;
             submitOne(batch);
             return;
         }
         GSPrimitiveBatch copy = batch;
         for (uint8_t i = 0u; i < 2u; ++i)
-            copy.vertices[i].y += 1.0f / 16.0f;
+            copy.vertices[i].y += float(marks) / 16.0f;
+        // A border has 4, 8 or 12 copies, all from the glyph's texels: one
+        // from others starts a glyph of its own.
+        GsRegion glyph;
+        const bool sameGlyph = spriteTexelRect(copy, glyph) && glyph.x0 == borderGlyph.x0 &&
+                               glyph.y0 == borderGlyph.y0 && glyph.x1 == borderGlyph.x1 && glyph.y1 == borderGlyph.y1;
+        if (!sameGlyph)
+            borderIndex = 0u;
         const uint32_t index = borderIndex++;
         if (index == 0u) {
+            borderGlyph = glyph;
             borderRounded = false;
             GSPrimitiveBatch grown;
             GsRegion region;
             if (spriteTexelRect(copy, region) && !spriteSampledTexels(copy, borderShown))
                 borderShown = region;
-            if (borderQuad(copy, grown)) {
+            if (borderQuad(copy, grown, 1.0f, marks == 3 ? 1.0f : 0.0f)) {
                 // Its own batch, from the full path: the glyph before it has
                 // the same state.
                 last.valid = false;
@@ -2016,7 +2032,7 @@ struct SdlGpuBackend::Impl {
                 if (borderRounded)
                     return;
             }
-        } else if (index < 4u && borderRounded) {
+        } else if (borderRounded) {
             return;
         }
         submitOne(copy);

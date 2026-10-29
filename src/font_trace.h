@@ -33,6 +33,9 @@ struct Params
     // texels), and how close to its chord a run stays to be a straight line.
     float smooth = 0.4f;
     float straight = 0.12f;
+    // The turn, in degrees over 0.8 texels either side, that makes a point
+    // of the contour a corner.
+    float corner = 60.0f;
 };
 
 // `coverage` row by row, 0 to 1.

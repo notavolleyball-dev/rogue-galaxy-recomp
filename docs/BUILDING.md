@@ -77,13 +77,27 @@ VU0 alone), and CMake compiles every `build/vu-blocks/*.txt` it finds too
 (as many shards at a time as memory allows: each takes 2.2 GB to compile); maintainers:
 `python setup.py vu-blocks-manifest` folds the recordings into the manifest.
 
+## Steam Deck (untested)
+
+The installer needs Windows, but the game it builds can go to a Steam Deck
+and run through Proton. On the Windows PC, after the install:
+
+    python setup.py portable --out D:\RogueGalaxyDeck --saves
+
+copies the game, its DLLs, `disc/` and the borders into that folder (about
+6.5 GB; `--saves` adds your memory cards, which then go their own way on
+the Deck). Copy the folder to the Deck, add `Rogue Galaxy.exe` to Steam as
+a non-Steam game, and force a Proton version in its Properties >
+Compatibility. It starts in fullscreen there; Back + Start opens the menu
+(F1).
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `Install.bat`, `tools/install/` | The Windows installer: build tools into `toolchain\`, then `setup.py install` |
 | `CHANGELOG.md` | What each release brings, and its known issues |
-| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile`, `tools`, `build`, `install` (and `make-hashes`, `maps`, `vu1-manifest`, `vu-blocks-manifest` for maintainers) |
+| `setup.py` | `verify`, `extract`, `info`, `overlays`, `check`, `recompile`, `tools`, `build`, `install`, `portable` (and `make-hashes`, `maps`, `vu1-manifest`, `vu-blocks-manifest` for maintainers) |
 | `CMakeLists.txt`, `src/` | The game executable: build of the generated trees, overlay manager (`src/overlay/`), call tracing (`src/debug/`), `main.cpp`; the Windows launcher, `Rogue Galaxy.exe` (`src/launcher/`) |
 | `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` and `vu-blocks.txt` (VU1 and VU0 microcode locations) |
 | `tools/disc/iso9660.py` | Read-only ISO9660 reader for dual-layer PS2 DVDs |

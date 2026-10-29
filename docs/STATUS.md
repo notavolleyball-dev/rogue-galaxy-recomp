@@ -1665,6 +1665,32 @@ its region (18,236 15x20) ends a texel past the picture's bottom, the
 texel a sprite's UVs span past its pixels, and `spriteTexelRect` turned
 it down; a region a texel past its texture is now cut to it.
 
+Later the user compared the names over heads with the console's at a low
+scale: pixelated, but defined, where ours came out too round. The town
+walk at 4x was captured once per version (temporary knobs, the names
+cropped side by side): a border of four copies like the game's (no
+visible change at that size), a thinner round border, less smoothing with
+corners from a 40-degree turn (the user's pick, but wobbly: the field's
+small errors show), and that with the smoothing back. The rounded font
+now has its own `Params` (`kRounded`: corners at 40 degrees instead of
+60, now a field of `Params`, smoothing 0.3 instead of 0.4, runs within
+0.2 texels of their chord straight); the narrow and bordered fonts keep
+theirs.
+
+Then the dialogue: a grey ring between the letters and their dark border,
+which came out dotted, and no border on top of an "l". The trace showed a
+style in border mode 5, which the earlier logs never had: black copies on
+the four diagonals, then dark grey (0x20) ones on the four sides
+(D_0047E970, D_0047E978), a soft border at 1x; traced, the copies showed
+apart, the grey covering the black but at the corners. Modes 4 (twelve
+black copies, two pixels out on the sides) and 6 (eight black) are alike.
+They are now marked as borders too, three sixteenths up for the modes
+whose first copy is diagonal (the backend moves that one a pixel right as
+well as down to place the border), the backend takes dark grey copies up
+to 0x20 as border copies, and it leaves out every other copy from the
+same texels (it stopped at three, mode 1's). The battle's ability name,
+in mode 5, now has one round dark border.
+
 **A VU1 program of later Salgin (2026-10-28).** The user found the walk
 choppy: their log had the field at 38-50 fps, the VIF1 thread 94% busy,
 and "vu1 interpreted" at 1-9% of the pairs from the moment the save
@@ -1678,6 +1704,80 @@ and compiled, the same walk interprets nothing and the VIF1 thread is
 41.5% busy against 61.8% (hidden window, 4x). `setup.py vu1-manifest`
 folded it into `vu1-programs.txt` (51 images, 3 new), so a fresh install
 compiles it too.
+
+**Weapon growth (2026-10-28).** Asked for by players: weapons that grow
+faster, as the experience option. BattleCalcResults ends with each weapon
+of the members fighting (the two slots, through the weapon's virtuals):
+while its gauge (ItemWeaponGetGrowth, +0x16) is under 15 (0x465B68) it
+gains 1 (ItemWeaponAddGrowth, 0x3D3640, vtable +0x6C); once full, the five
+attributes are shuffled with RandFloat and the first under its maximum
+gains 1 (ItemWeaponAddAttr, 0x3D3290, +0xA4; the setter clamps to the
+item's maximum); all at their maximums is the complete weapon (the
+results' 0x8000). Game > Weapon growth (100 to 1000% in 100s) multiplies
+the two 1s at those calls, known by their return addresses (0x3A2DDC,
+0x3A2EE8): the hook on BattleCalcResults has already returned there (its
+`g_results` was 0 at the weapon calls, though set at the money calls), so
+it is no guide. The battle bench at 300%: every attribute call gave 3
+(5 to 8), the money at 200% scaled as before.
+
+**The loading screen's cross (2026-10-28).** With an Xbox controller the
+loading screen after picking a save still said "Press" with the
+PlayStation's cross, though redrawing the special characters' picture at
+every draw had changed nothing there: LoadingScreenFrame draws it from a
+picture of its own, Loading_01 (128x64, 8-bit, with "Story", the progress
+bar's pieces and "Press X" at 0,40), in rc/loading2_?.img, which
+LoadingScreenLoadImages reads into its arena (0x4E8970) and registers
+(NameTableRegisterImArchive, the call returning to 0x344774). The cross's
+circle (20x20 at 81,42) is redrawn there before that call, as the face
+buttons in gaiji2.img are, when its indices are the ones known (an FNV-1a
+of them). Redrawn after the call, the letter took its shape but not its
+colour: the CLUT goes out at registration. The picture uses all 256
+colours, but the cross's five blues only in the cross, so once emptied
+one of them is set to the letter's green. Above 1x the user found that A
+coarse beside the text's sharp ones and low in its circle (the circle's
+dark lower bevel): button_glyphs.cpp now also hashes the redrawn palette
+as the renderer does (FNV-1a over CT32, CSM1 and the 256 entries in index
+order) and keeps the special characters' Cross cell, and sharp_letters
+takes that palette as a font of its own (up to 128 texels): the "Press X"
+region comes back enlarged as the GS's bilinear filter shows it, the
+circle cleared and the text's face button drawn over it from its shapes
+(button_art.cpp's drawLoadingLarger), so both A's are alike.
+
+**Toward Linux and the Steam Deck (2026-10-28).** An audit of the tree
+(notes kept outside the repository) found the runtime already built on
+Linux by its fork's CI, the renderer on Vulkan already, and in `src/` one
+call that does not compile with glibc: `_putenv`, now `setenv` off
+Windows. Two changes for the Steam Deck, through Proton as natively: the
+first window is fullscreen when Steam says `SteamDeck=1` and no window
+size is saved (Game Mode letterboxes a window), and `Rogue Galaxy.exe`
+no longer sets `VK_LOADER_LAYERS_DISABLE=~implicit~` under Wine (ntdll's
+`wine_get_version`), where it reaches the host's loader and would keep
+out gamescope's layer and Steam's overlay. Not tried on either: there is
+no Linux here (no WSL), and the installer cannot run under Proton
+(Windows PowerShell 5.1, System32 tools), so a Deck takes a folder built
+on Windows: `setup.py portable --out DIR [--saves]` copies what the game
+runs from (the launcher, the game and its DLLs, `disc/`, the borders) in
+the repository's layout, the memory cards only with `--saves`.
+
+**Save anywhere (2026-10-28).** The game saves only at transporters, whose
+menu is a game mode of its own: GameModeDispatch's 20,
+TransporterMenuModeUpdate (0x27CC20), which holds the game's requests,
+pushes the tasks' states, opens the panel (Save, Teleport, Exchange
+Points, Item Storage), waits for it to close, and gives the field back
+(or warps, for Teleport). FieldExploreModeUpdate asks for it with
+GameReqQueuePushFront(20) for Cross at a transporter, and for the main
+menu (17) with GameReqQueuePushBack for Triangle when the leader is free
+(LeaderGetControlStateMaybe 0). In the field Select opens the full map,
+L3 the leader's choice, R3 a fixed camera, and R1 nothing alone (only
+with Square). Game > Save anywhere (`src/save_anywhere.cpp`) turns
+Triangle with R1 held into mode 20 at the main menu's request: the
+Triangle check returning to 0x283840, the request to 0x283880. Scripted
+from File 04: walked off the transporter, R1 + Triangle opened its panel,
+Circle closed it to the field, and Triangle alone still opened the main
+menu. The user saved so and loaded the save: it loads at the area's
+transporter, not where it was made (LeaderPlaceAtSavePoint places the
+leader by the save point the area records). Kept so, off by default; the
+exact place is left for later.
 
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and

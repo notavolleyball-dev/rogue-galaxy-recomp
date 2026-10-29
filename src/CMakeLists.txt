@@ -89,6 +89,7 @@ add_executable(roguegalaxy
     opening.cpp
     widescreen.cpp
     hud_size.cpp
+    save_anywhere.cpp
     update_check.cpp
     scene_timing.cpp
     settings_pages.cpp

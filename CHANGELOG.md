@@ -16,6 +16,11 @@
   slow path every frame, and the walk there was choppy.
 - The field's minimap and compass can be made smaller (Game > Minimap
   size, Compass size, 50% to 100%).
+- Weapons can grow faster in battle (Game > Weapon growth, up to 1000%).
+- The loading screen's "Press X" shows the Xbox controller's A too.
+- Save anywhere: in the field, R1 + Triangle opens the transporter's menu
+  (Game > Save anywhere, off by default). Such a save loads at the area's
+  transporter.
 
 ## 0.1.0 (pre-release)
 

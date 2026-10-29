@@ -40,6 +40,7 @@
 #include "sharp_letters.h"
 #include "map_chests.h"
 #include "hud_size.h"
+#include "save_anywhere.h"
 #include "opening.h"
 #include "widescreen.h"
 #include "quick_scenes.h"
@@ -164,6 +165,7 @@ int run(int argc, char **argv)
     rg::loading::install(runtime);
     rg::widescreen::install(runtime);
     rg::hudsize::install(runtime);
+    rg::saveanywhere::install(runtime);
     rg::buttons::install(runtime);
     rg::opening::install(runtime);
     rg::devtools::install(runtime);

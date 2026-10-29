@@ -360,11 +360,12 @@ Five more fix results:
   instead (REGION_CLAMP), the last shown row came out again below it, the
   shader keeping the position inside a clamped GS texel. Only
   into the frame (the buffer last shown, or the target last copied into
-  it), from indexed textures, above 1x. Borders: a glyph's four black
-  copies a pixel each way, marked by the host with their y a sixteenth of
-  a pixel up, are drawn as one, where the glyph goes, from the host's
-  border version (the outline grown round, with a margin about the
-  region), the other three left out; without one, the four as they are.
+  it), from indexed textures, above 1x. Borders: a glyph's 4, 8 or 12
+  black or dark grey copies around it, marked by the host with their y a
+  sixteenth of a pixel up (three when the first is diagonal), are drawn as
+  one, where the glyph goes, from the host's border version (the outline
+  grown round, with a margin about the region), the others left out;
+  without one, all as they are.
   Shadows: a copy marked two sixteenths up, of any colour, is drawn where
   it goes from the host's shadow version (the glyph swept back toward the
   one before it, the same margin), so copies a pixel apart join as the

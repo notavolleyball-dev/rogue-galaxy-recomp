@@ -35,17 +35,31 @@ constexpr uint32_t kParty = 0x00483820u;
 constexpr uint32_t kPartyCount = 0x18Cu;
 constexpr uint32_t kPartyIds = 0x190u;
 constexpr uint32_t kCharaId = 0xCu;
+// What a won battle gives each weapon of the members fighting
+// (BattleCalcResults, through the weapon's virtuals): ItemWeaponAddGrowth
+// (weapon, amount), its gauge, 15 to full (0x465B68), then
+// ItemWeaponAddAttr(weapon, attribute, amount), one of its five attributes
+// not yet at its maximum, drawn at random. Both 1, each clamped by its
+// setter. Known by their calls' return: the hook on BattleCalcResults has
+// returned by then (at its first indirect call), so g_results is no guide.
+constexpr uint32_t kWeaponAddGrowth = 0x003D3640u;
+constexpr uint32_t kWeaponAddAttr = 0x003D3290u;
+constexpr uint32_t kWeaponGrowthReturn = 0x003A2DDCu;
+constexpr uint32_t kWeaponAttrReturn = 0x003A2EE8u;
 
 PS2Runtime::RecompiledFunction g_encounterDistTick = nullptr;
 PS2Runtime::RecompiledFunction g_battleCalcResults = nullptr;
 PS2Runtime::RecompiledFunction g_partyAddMoney = nullptr;
 PS2Runtime::RecompiledFunction g_actionGaugeRegen = nullptr;
 PS2Runtime::RecompiledFunction g_randFloat = nullptr;
+PS2Runtime::RecompiledFunction g_weaponAddGrowth = nullptr;
+PS2Runtime::RecompiledFunction g_weaponAddAttr = nullptr;
 std::atomic<int> g_encounterRate{100};
 std::atomic<int> g_experience{100};
 std::atomic<int> g_money{100};
 std::atomic<int> g_actionGauge{100};
 std::atomic<int> g_itemDrops{100};
+std::atomic<int> g_weaponGrowth{100};
 // BattleCalcResults's argument while it runs, and whether its experience
 // has been scaled yet (the game thread's alone).
 uint32_t g_results = 0u;
@@ -128,6 +142,30 @@ void randFloat(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
+// A weapon's growth from a won battle (the call returning to `from`), its
+// amount in register `reg`, times the percentage.
+void scaleWeaponAmount(R5900Context *ctx, uint32_t from, int reg)
+{
+    const int percent = g_weaponGrowth.load(std::memory_order_relaxed);
+    if (getRegU32(ctx, 31) == from && percent != 100)
+    {
+        const int64_t amount = static_cast<int32_t>(getRegU32(ctx, reg));
+        ctx->r[reg] = _mm_set_epi64x(_mm_extract_epi64(ctx->r[reg], 1), amount * percent / 100);
+    }
+}
+
+void weaponAddGrowth(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    scaleWeaponAmount(ctx, kWeaponGrowthReturn, 5);
+    g_weaponAddGrowth(rdram, ctx, runtime);
+}
+
+void weaponAddAttr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    scaleWeaponAmount(ctx, kWeaponAttrReturn, 6);
+    g_weaponAddAttr(rdram, ctx, runtime);
+}
+
 bool inParty(const uint8_t *rdram, uint32_t chara)
 {
     uint32_t party = 0u;
@@ -176,12 +214,15 @@ void install(PS2Runtime &runtime)
     setFrom("RG_BATTLE_MONEY", &setMoney);
     setFrom("RG_ACTION_GAUGE", &setActionGauge);
     setFrom("RG_ITEM_DROPS", &setItemDrops);
+    setFrom("RG_WEAPON_GROWTH", &setWeaponGrowth);
     const bool complete =
         rg::timing::hookFunction(runtime, kEncounterDistTick, &encounterDistTick, g_encounterDistTick) &&
         rg::timing::hookFunction(runtime, kBattleCalcResults, &battleCalcResults, g_battleCalcResults) &&
         rg::timing::hookFunction(runtime, kPartyAddMoney, &partyAddMoney, g_partyAddMoney) &&
         rg::timing::hookFunction(runtime, kActionGaugeRegen, &actionGaugeRegen, g_actionGaugeRegen) &&
-        rg::timing::hookFunction(runtime, kRandFloat, &randFloat, g_randFloat);
+        rg::timing::hookFunction(runtime, kRandFloat, &randFloat, g_randFloat) &&
+        rg::timing::hookFunction(runtime, kWeaponAddGrowth, &weaponAddGrowth, g_weaponAddGrowth) &&
+        rg::timing::hookFunction(runtime, kWeaponAddAttr, &weaponAddAttr, g_weaponAddAttr);
     if (!complete)
     {
         std::fprintf(stderr, "[rg] battle rates: some hooks are missing, see above\n");
@@ -211,6 +252,11 @@ void setActionGauge(int percent)
 void setItemDrops(int percent)
 {
     g_itemDrops.store(std::max(percent, 0), std::memory_order_relaxed);
+}
+
+void setWeaponGrowth(int percent)
+{
+    g_weaponGrowth.store(std::max(percent, 0), std::memory_order_relaxed);
 }
 
 } // namespace rg::battlerates

@@ -69,4 +69,12 @@ constexpr int kPlateFaceLeft = 4, kPlateFaceRight = 27, kPlateFaceTop = 4, kPlat
 bool drawLarger(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t scale,
                 std::vector<uint8_t> &out);
 
+// The region of the loading screen's picture at (x, y) holding its cross
+// (kLoadingCrossX, kLoadingCrossY), `scale` times larger: the picture as the
+// GS's bilinear filter enlarges it, the circle cleared and the face button
+// of `crossCell` (the special characters' Cross cell, 22x22 RGBA) drawn
+// over it from its shapes, as the text's are. False for any other region.
+bool drawLoadingLarger(uint32_t x, uint32_t y, uint32_t width, uint32_t height, const uint8_t *rgba,
+                       uint32_t scale, const std::vector<uint8_t> &crossCell, std::vector<uint8_t> &out);
+
 } // namespace rg::buttons::art

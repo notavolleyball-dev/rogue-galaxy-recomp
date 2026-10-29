@@ -92,6 +92,7 @@ constexpr Row kSwitches[] = {
     {"instant_loading_recap", "Quick Loading Recap", Kind::Switch, ""},
     {"instant_text", "Instant Text", Kind::Switch, ""},
     {"map_chests", "Chests on Map", Kind::Switch, ""},
+    {"save_anywhere", "Save Anywhere R1+Tri", Kind::Switch, ""},
     {"faster_camera", "Faster Camera", Kind::Switch, ""},
     {"free_camera", "Free Camera", Kind::Switch, ""},
     {"dev_tools", "Developer Tools", Kind::Switch, ""},
@@ -101,11 +102,11 @@ constexpr Row kNumbers[] = {
     {"field_of_view", "Field of View", Kind::Number, ""},
     {"camera_distance", "Camera Distance", Kind::Number, "%"},
     {"draw_distance", "Draw Distance", Kind::Number, "%"},
-    {"sides", "Borders", Kind::Number, "", kSidesNames},
     {"encounter_rate", "Encounters", Kind::Number, "%"},
     {"battle_experience", "Experience", Kind::Number, "%"},
     {"battle_money", "Money", Kind::Number, "%"},
     {"item_drops", "Item Drops", Kind::Number, "%"},
+    {"weapon_growth", "Weapon Growth", Kind::Number, "%"},
     {"shop_prices", "Shop Prices", Kind::Number, "%"},
     {"action_gauge", "Action Gauge", Kind::Number, "%"},
 };
@@ -114,6 +115,7 @@ constexpr Row kScenes[] = {
     {"fast_transporter", "Fast Transporters", Kind::Switch, ""},
     {"fast_revelation", "Fast Revelation", Kind::Switch, ""},
     {"sharp_letters", "Sharp Letters", Kind::Switch, ""},
+    {"sides", "Borders", Kind::Number, "", kSidesNames},
     {"minimap_size", "Minimap Size", Kind::Number, "%"},
     {"compass_size", "Compass Size", Kind::Number, "%"},
 };
@@ -131,6 +133,8 @@ constexpr Page kPages[] = {
     {kScenes, static_cast<int>(std::size(kScenes))},
 };
 constexpr int kPageCount = static_cast<int>(std::size(kPages));
+static_assert(std::size(kSwitches) <= kRows && std::size(kNumbers) <= kRows && std::size(kScenes) <= kRows,
+              "a page shows kRows rows at most");
 
 struct Range
 {

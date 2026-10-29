@@ -33,6 +33,7 @@
 #include "shop_prices.h"
 #include "vif1_thread.h"
 #include "hud_size.h"
+#include "save_anywhere.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
@@ -226,6 +227,8 @@ void applyGameOption(const std::string &key, bool on)
         rg::instanttext::setEnabled(on);
     else if (key == "sharp_letters")
         rg::letters::setEnabled(on);
+    else if (key == "save_anywhere")
+        rg::saveanywhere::setEnabled(on);
     else if (key == "map_chests")
         rg::mapchests::setEnabled(on);
     else if (key == "dev_tools")
@@ -261,6 +264,8 @@ void applyGameNumber(const std::string &key, int value)
         rg::battlerates::setMoney(value);
     else if (key == "item_drops")
         rg::battlerates::setItemDrops(value);
+    else if (key == "weapon_growth")
+        rg::battlerates::setWeaponGrowth(value);
     else if (key == "shop_prices")
         rg::shopprices::setPercent(value);
     else if (key == "action_gauge")
@@ -609,6 +614,11 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "The chests not yet opened show on the maps in the parts you have explored, as the game shows them once "
          "every save point of a planet is activated. Nothing is saved: the planet's own completion still comes.",
          false},
+        {"save_anywhere", "Save anywhere (R1 + Triangle)",
+         "In the field, Triangle with R1 held opens the transporter's menu wherever the main menu could open: save, "
+         "teleport, exchange points and item storage. A save made away from a transporter loads at the area's "
+         "transporter.",
+         false},
         {"fast_transporter", "Fast transporters",
          "A transporter's warp plays at up to twice the speed. The music and the sounds keep their pace.", false},
         {"check_updates", "Check for new versions",
@@ -633,6 +643,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "to 10% chance, which 1000% makes 20 to 100%; 0% for none. A battle still gives three kinds of items at "
          "most, as the game does.",
          false, 0, 1000, 100, "%d%%", 50},
+        {"weapon_growth", "Weapon growth",
+         "How fast weapons grow in won battles, against the game's (100%): each battle fills a weapon's gauge by "
+         "1 (15 to full), then raises one of its attributes by 1, which 300% makes 3.",
+         false, 100, 1000, 100, "%d%%", 100},
         {"shop_prices", "Shop prices",
          "What shops ask for their items, against the game's (100%). Below 100% nothing sells for more than it "
          "costs, so buying and selling back makes no money.",
@@ -704,7 +718,11 @@ Setup::Setup(PS2Runtime &runtime)
         const bool showFps = env("RG_SHOW_FPS", "0") != "0";
         if (showFps && noWindow)
         {
+#if defined(_WIN32)
             _putenv("DQ8_GFX_SHOW_FPS=1");
+#else
+            setenv("DQ8_GFX_SHOW_FPS", "1", 1);
+#endif
         }
         std::string error;
         std::unique_ptr<dq8::gfx::SdlGpuBackend> sdl = dq8::gfx::createSdlGpuBackend(error);
@@ -722,6 +740,12 @@ Setup::Setup(PS2Runtime &runtime)
         if (!dq8::ui::loadSettings(settingsPath, settings))
         {
             std::fprintf(stderr, "[rg] could not read %s; using default settings\n", settingsPath.c_str());
+        }
+        // A Steam Deck (Steam sets SteamDeck=1, natively and under Proton)
+        // starts in fullscreen: its Game Mode shows a window letterboxed.
+        if (settings.windowWidth < 320 && env("SteamDeck", "0") == "1")
+        {
+            settings.fullscreen = true;
         }
         uint32_t runScale = settings.resolutionScale;
         if (const std::string scale = env("RG_GS_SCALE", ""); !scale.empty())

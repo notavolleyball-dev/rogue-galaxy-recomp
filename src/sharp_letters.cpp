@@ -40,11 +40,19 @@ namespace
 // GsPktSpriteUVRect, whose GsPktSetXYZPixel adds the packet's offsets, in
 // the GS's 12.4, to the whole pixels it is given. Mode 2 is a shadow: a
 // grey copy a pixel down and right, then a black one two; mode 3 the black
-// one alone (the field's prompts, some towns' dialogue).
+// one alone (the field's prompts, some towns' dialogue). The others are
+// borders too: 4 twelve black copies, the four of mode 1, the diagonals and
+// two pixels out (D_0044EBB0); 5 black on the four diagonals, then dark grey
+// (0x20) on mode 1's four (the dialogue); 6 black on all eight. Traced, the
+// copies of mode 5 showed apart, a grey ring with black dots at the
+// corners: like mode 1's they are drawn as one round border.
 constexpr uint32_t kFontDrawGlyphOutline = 0x0026E450u;
 constexpr int8_t kFourCopies = 1;
 constexpr int8_t kTwoShadows = 2;
 constexpr int8_t kOneShadow = 3;
+constexpr int8_t kTwelveCopies = 4;
+constexpr int8_t kDiagonalsThenSides = 5;
+constexpr int8_t kEightCopies = 6;
 constexpr uint32_t kPacketOffsetY = 0x124u;
 
 std::atomic<bool> g_enabled{true};
@@ -73,16 +81,21 @@ void drawGlyphOutline(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
     }
     const int8_t mode = style ? static_cast<int8_t>(style[0]) : 0;
-    const int32_t marks = mode == kFourCopies ? 1 : mode == kTwoShadows || mode == kOneShadow ? 2 : 0;
+    // A border whose first copy is a pixel up, one whose first is a pixel up
+    // and left, or a shadow.
+    const int32_t marks = mode == kFourCopies || mode == kTwelveCopies                ? 1
+                          : mode == kDiagonalsThenSides || mode == kEightCopies       ? 3
+                          : mode == kTwoShadows || mode == kOneShadow                 ? 2
+                                                                                      : 0;
     if (!g_enabled.load(std::memory_order_relaxed) || !offset || marks == 0)
     {
         g_original(rdram, ctx, runtime);
         return;
     }
-    // The border's copies a sixteenth of a pixel up, a shadow's two: the
-    // marks the backend knows them by (sdlgpu_backend.h,
-    // setRegionReplacements). At a pixel's centre, as the GS samples, that
-    // changes no pixel and no texel.
+    // The border's copies a sixteenth of a pixel up (three when the first is
+    // diagonal), a shadow's two: the marks the backend knows them by
+    // (sdlgpu_backend.h, setRegionReplacements). At a pixel's centre, as the
+    // GS samples, that changes no pixel and no texel.
     int32_t saved = 0;
     std::memcpy(&saved, offset, sizeof(saved));
     const int32_t marked = saved - marks;
@@ -108,6 +121,10 @@ enum class Kind
     // the registered mark are drawn from their shapes (button_art.cpp), the
     // rest left as they are.
     Icons,
+    // The loading screen's picture with "Press X" (button_glyphs.h), its
+    // palette known once redrawn: the region with the button, enlarged, the
+    // button drawn as the text's.
+    Loading,
 };
 struct Font
 {
@@ -119,12 +136,17 @@ struct Font
 // from the field's small errors, so they are smoothed harder and keep their
 // full width.
 constexpr rg::fonttrace::Params kNarrow{0.0f, 1.0f, 0.25f};
+// The rounded letters as defined as the console's at 1x: corners from a
+// sharper turn (40 degrees), the runs between them smoothed less and the
+// nearly straight ones straight (the user's pick of six versions; less
+// smoothing alone came out wobbly).
+constexpr rg::fonttrace::Params kRounded{0.15f, 0.3f, 0.2f, 40.0f};
 // gaiji2.img's palette (button_glyphs.cpp redraws only its indices).
 constexpr uint64_t kGaijiPalette = 0x844F1E0969532C9Dull;
 constexpr Font kFonts[] = {
     // The dialogue's and the menus' rounded letters, 18x22, bordered by
     // copies.
-    {0x33A2CFEFAEC9F88Bull, Kind::White, {}},
+    {0x33A2CFEFAEC9F88Bull, Kind::White, kRounded},
     // The narrow letters, 16x20 and 16x18.
     {0xCFBAE4E31E471D6Eull, Kind::White, kNarrow},
     {0x75B5F042466BE787ull, Kind::White, kNarrow},
@@ -132,8 +154,11 @@ constexpr Font kFonts[] = {
     {0x1C80044CAB6BF201ull, Kind::Bordered, kNarrow},
     {kGaijiPalette, Kind::Icons, kNarrow},
 };
+constexpr Font kLoadingFont{0u, Kind::Loading, {}};
 // Larger than a glyph: art that shares a palette with one.
 constexpr uint32_t kLargestGlyph = 32u;
+// The loading picture's "Press X": 128x24.
+constexpr uint32_t kLargestLoading = 128u;
 
 const Font *fontOf(uint64_t palette)
 {
@@ -143,6 +168,10 @@ const Font *fontOf(uint64_t palette)
         {
             return &font;
         }
+    }
+    if (palette != 0u && palette == rg::buttons::loadingPalette())
+    {
+        return &kLoadingFont;
     }
     return nullptr;
 }
@@ -198,6 +227,21 @@ Result make(const Job &job)
         Result result;
         if (!job.border && !job.shadow &&
             rg::buttons::art::drawLarger(job.x, job.y, w, h, job.rgba.data(), s, result.rgba))
+        {
+            result.width = w * s;
+            result.height = h * s;
+        }
+        else
+        {
+            result.rgba.clear();
+        }
+        return result;
+    }
+    if (job.font->kind == Kind::Loading)
+    {
+        Result result;
+        if (rg::buttons::art::drawLoadingLarger(job.x, job.y, w, h, job.rgba.data(), s,
+                                                rg::buttons::loadingCrossCell(), result.rgba))
         {
             result.width = w * s;
             result.height = h * s;
@@ -390,7 +434,7 @@ int lookup(const dq8::gfx::RegionRequest &request, uint32_t &width, uint32_t &he
 {
     if (g_tracePalettes)
     {
-        if (request.width <= kLargestGlyph && request.height <= kLargestGlyph)
+        if (request.width <= kLargestLoading && request.height <= kLargestLoading)
         {
             std::fprintf(stderr, "[letters] palette %016llX region %u,%u %ux%u\n",
                          static_cast<unsigned long long>(request.clut), request.x, request.y, request.width,
@@ -399,14 +443,16 @@ int lookup(const dq8::gfx::RegionRequest &request, uint32_t &width, uint32_t &he
         return dq8::gfx::kRegionNone;
     }
     const Font *font = fontOf(request.clut);
-    if (!font || request.width > kLargestGlyph || request.height > kLargestGlyph || request.width < 2u ||
-        request.height < 2u)
+    const uint32_t largest = font && font->kind == Kind::Loading ? kLargestLoading : kLargestGlyph;
+    if (!font || request.width > largest || request.height > largest || request.width < 2u || request.height < 2u)
     {
         return dq8::gfx::kRegionNone;
     }
     const uint32_t scale = std::min(request.scale, 8u);
     // A special character is what its place says as much as its texels.
-    const uint64_t place = font->kind == Kind::Icons ? uint64_t(request.x) << 32u | request.y : 0u;
+    const uint64_t place = font->kind == Kind::Icons || font->kind == Kind::Loading
+                               ? uint64_t(request.x) << 32u | request.y
+                               : 0u;
     uint64_t key = 1469598103934665603ull;
     for (const uint64_t value : {request.texels, request.clut, uint64_t(request.width) << 32u | request.height,
                                  uint64_t(scale) << 3u | (request.shadow ? 4u : 0u) | (request.border ? 2u : 0u) |

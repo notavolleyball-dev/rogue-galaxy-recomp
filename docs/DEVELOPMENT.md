@@ -16,6 +16,8 @@ them in the terminal before running it. Both launchers also set
 `VK_LOADER_LAYERS_DISABLE=~implicit~`, which keeps other programs' Vulkan
 layers (OBS's capture hook, ReShade, the Steam, GOG and Epic overlays) out
 of the game's process; set it yourself when running from a terminal.
+`Rogue Galaxy.exe` leaves it unset under Wine or Proton, where it would
+reach the host's loader and keep out the layers the picture needs there.
 The launchers in `debug\` are for diagnosis, not for playing.
 `debug\RogueGalaxy-profile.bat` runs the same game with the profiler ready:
 each F9 samples every thread for the next 20 seconds
@@ -97,6 +99,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_BATTLE_EXPERIENCE=N` | A won battle's experience, percent of the game's (the menu's "Experience from battles") |
 | `RG_BATTLE_MONEY=N` | The defeated enemies' money, percent of the game's (the menu's "Money from battles") |
 | `RG_ITEM_DROPS=N` | The chance of each item defeated enemies leave, percent of the game's (the menu's "Item drops") |
+| `RG_WEAPON_GROWTH=N` | What a won battle adds to each weapon's gauge and then attributes, percent of the game's 1, in whole steps (the menu's "Weapon growth") |
 | `RG_SHOP_PRICES=N` | What shops ask for their items, percent of the game's (the menu's "Shop prices") |
 | `RG_ACTION_GAUGE=N` | How fast the party's action gauge fills, percent of the game's (the menu's "Action gauge speed") |
 | `RG_FREE_CAMERA=1` | Starts with the free camera on (the menu's "Free camera"; `src/free_camera.h`) |
@@ -104,6 +107,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_SHARP_LETTERS=0` | The letters as the game draws them, enlarged, whatever the menu's "Sharp letters" says (`=1` traced; `src/sharp_letters.h`, `src/font_trace.h`); the `[gfx]` stats line counts `larger regions` (glyphs drawn traced) and `borders` (round borders drawn for their copies); `RG_SHARP_LETTERS_TRACE=1` logs each text style's border mode and each glyph traced, `=DIR` also writes each glyph as found and as made there |
 | `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
 | `RG_MAP_CHESTS=1` | The chests not yet opened on the maps before a planet is complete (the menu's "Chests on the map"; `src/map_chests.h`) |
+| `RG_SAVE_ANYWHERE=1` | In the field, R1 + Triangle opens the transporter's menu (the menu's "Save anywhere"; `src/save_anywhere.h`) |
 | `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |

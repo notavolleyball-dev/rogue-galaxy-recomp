@@ -14,10 +14,9 @@ namespace
 // The field's border, in texels: room for the zero line outside the glyph.
 constexpr int kPad = 2;
 constexpr double kSqrt2 = 1.4142135623730951;
-// The arc either side of a point over which its turn is measured, and the
-// turn that makes it a corner.
+// The arc either side of a point over which its turn is measured (the turn
+// that makes it a corner is Params::corner).
 constexpr double kTurnSpan = 0.8;
-constexpr double kCornerTurn = 60.0 * 3.14159265358979323846 / 180.0;
 // Contour points this close (in arc) to a corner give way to it.
 constexpr double kCut = 0.5;
 // Schneider's tolerance, in squared texels.
@@ -435,7 +434,7 @@ struct Corner
 
 // The points where the contour turns sharply, each moved to where the lines
 // of its two sides meet, so a stem's corner is square.
-std::vector<Corner> corners(const Loop &lp)
+std::vector<Corner> corners(const Loop &lp, double cornerTurn)
 {
     const size_t n = lp.n();
     std::vector<double> turn(n);
@@ -448,7 +447,7 @@ std::vector<Corner> corners(const Loop &lp)
     std::vector<size_t> candidates;
     for (size_t i = 0; i < n; ++i)
     {
-        if (turn[i] <= kCornerTurn)
+        if (turn[i] <= cornerTurn)
         {
             continue;
         }
@@ -694,7 +693,7 @@ std::vector<P> smooth(const std::vector<P> &d, bool closed, double sigma)
 std::vector<Bezier> traceLoop(const std::vector<P> &points, const Params &params)
 {
     const Loop lp(points);
-    const std::vector<Corner> cs = corners(lp);
+    const std::vector<Corner> cs = corners(lp, params.corner * 3.14159265358979323846 / 180.0);
     std::vector<Bezier> curves;
     if (cs.empty())
     {
