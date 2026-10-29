@@ -45,7 +45,12 @@ with your own card and settings while `RG_VU1_HARVEST=build/harvest` keeps
 a few samples of every program it has no file for yet (a file each,
 `<image>_<entry>.vu1r`, the replay format) and `RG_VU1_NATIVE=check` checks
 the native ones; a `[harvest]` line names each new program with the pieces
-it has. It is cheap to leave on (a program is known by 64 bytes at each
+it has. A checked chunk that differs is saved there too
+(`mismatch_<image>_<list>_<n>.vu1r`, at most 8 a program and kind of
+difference), and replays in the oracle like any recording: what differed at
+a boss fight comes back as data. The `[vu1native]` line counts the
+differences by program and kind (position, Z, fog, color, UV, STQ, ADC or a
+register, vertex count). It is cheap to leave on (a program is known by 64 bytes at each
 slot's start), and a later session skips what an earlier one sampled. The
 field walk gave 22 files, 12 MB; battles, events, menus and other planets
 are where the missing pieces are. Every file replays exactly

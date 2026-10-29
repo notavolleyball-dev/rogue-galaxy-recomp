@@ -95,8 +95,10 @@ public:
 
     void native(const Program &program) { ++m_native[program.name]; }
     void declined(const Program &program, const char *reason);
-    void check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
-               const std::vector<std::vector<uint8_t>> &native);
+    // What differs (the first of: vertex count, ADC or a register, position,
+    // Z, color, UV, STQ, fog), or null when nothing does beyond the tolerance.
+    const char *check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
+                      const std::vector<std::vector<uint8_t>> &native);
     // Prints the line when it is due.
     void tick();
 
@@ -104,6 +106,7 @@ private:
     Mode m_mode;
     std::map<std::string, uint64_t> m_native;
     std::map<std::string, uint64_t> m_declined;
+    std::map<std::string, uint64_t> m_kinds;
     uint64_t m_checked = 0u;
     uint64_t m_differ = 0u;
     uint32_t m_shown = 0u;

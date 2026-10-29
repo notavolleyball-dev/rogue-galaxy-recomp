@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 struct VU1State;
 
@@ -73,5 +74,15 @@ void begin(bool resume, uint32_t startPC, uint32_t top, uint32_t itop, uint32_t 
 void kick(const uint8_t *data, uint32_t size);
 // After the run.
 void end(const VU1State &state, const uint8_t *data);
+
+// With RG_VU1_HARVEST: a chunk whose native packets differed from the VU1's
+// (RG_VU1_NATIVE=check), saved into the harvest directory as a file the
+// oracle replays, mismatch_<image>_<n>.vu1r: the code, a stand-in MSCAL at
+// `programPC` (the program's, which names it), then the chunk's MSCNT as it
+// ran, with the VU1's packets and end registers. At most 8 a program and kind;
+// a line names each.
+void saveChunk(const char *program, const char *kind, const uint8_t *code, uint32_t programPC, uint32_t top,
+               uint32_t itop, uint32_t list, const uint8_t *data, const VU1State &state,
+               const std::vector<std::vector<uint8_t>> &packets, const VU1State &endState);
 
 } // namespace rg::vu1replay

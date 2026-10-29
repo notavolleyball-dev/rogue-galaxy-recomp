@@ -372,8 +372,8 @@ void Monitor::declined(const Program &program, const char *reason)
     ++m_declined[std::string(program.name) + ": " + reason];
 }
 
-void Monitor::check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
-                    const std::vector<std::vector<uint8_t>> &native)
+const char *Monitor::check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
+                           const std::vector<std::vector<uint8_t>> &native)
 {
     const auto events = [](const std::vector<std::vector<uint8_t>> &packets) {
         std::vector<rg::gif::GifEvent> out;
@@ -395,9 +395,18 @@ void Monitor::check(const Program &program, const std::vector<std::vector<uint8_
     ++m_checked;
     if (result.mismatched == 0u && result.countDifference == 0)
     {
-        return;
+        return nullptr;
     }
     ++m_differ;
+    const char *kind = result.countDifference != 0     ? "vertex count"
+                       : result.kindMismatches != 0u   ? "ADC or register"
+                       : result.maxXy > tolerance.xy   ? "position"
+                       : result.maxZ > tolerance.z     ? "Z"
+                       : result.maxRgba > tolerance.rgba ? "color"
+                       : result.maxUv > tolerance.uv   ? "UV"
+                       : result.maxStq > tolerance.stq ? "STQ"
+                                                       : "fog";
+    ++m_kinds[std::string(program.name) + ": " + kind];
     if (m_shown++ < 5u)
     {
         const size_t at = static_cast<size_t>(result.firstMismatch);
@@ -406,6 +415,7 @@ void Monitor::check(const Program &program, const std::vector<std::vector<uint8_
                      at < reference.size() ? rg::gif::describe(reference[at]).c_str() : "-",
                      at < candidate.size() ? rg::gif::describe(candidate[at]).c_str() : "-");
     }
+    return kind;
 }
 
 void Monitor::tick()
@@ -442,6 +452,10 @@ void Monitor::tick()
     {
         std::fprintf(stderr, "; checked %llu, differ %llu", static_cast<unsigned long long>(m_checked),
                      static_cast<unsigned long long>(m_differ));
+        for (const auto &[kind, count] : m_kinds)
+        {
+            std::fprintf(stderr, " [%s]=%llu", kind.c_str(), static_cast<unsigned long long>(count));
+        }
     }
     std::fprintf(stderr, "\n");
 }

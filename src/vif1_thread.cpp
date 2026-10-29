@@ -729,6 +729,9 @@ public:
             {
                 m_vu1Packets.clear();
                 t_vu1Packets = &m_vu1Packets;
+                // Its inputs, to save it if it differs.
+                m_checkData.assign(memory.getVU1Data(), memory.getVU1Data() + PS2_VU1_DATA_SIZE);
+                m_checkState = vu1.state();
             }
             t_dropVu1Packets = native && g_nativeMode == rg::vu1native::Mode::Replace;
             static const bool replay = rg::vu1replay::enabled();
@@ -758,7 +761,12 @@ public:
         {
             if (g_nativeMode == rg::vu1native::Mode::Check)
             {
-                m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets);
+                if (const char *kind = m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets))
+                {
+                    rg::vu1replay::saveChunk(native->name, kind, memory.getVU1Code(), m_nativePC, top, itop,
+                                             m_current.number, m_checkData.data(), m_checkState, m_vu1Packets,
+                                             vu1.state());
+                }
             }
             else
             {
@@ -935,6 +943,8 @@ private:
     std::vector<std::vector<uint8_t>> m_nativePackets;
     GSNativeMesh m_nativeMesh;
     std::vector<std::vector<uint8_t>> m_vu1Packets;
+    std::vector<uint8_t> m_checkData;
+    VU1State m_checkState{};
     uint64_t m_tagGeneration = 0u;
     std::unordered_map<uint32_t, uint32_t> m_tagCache;
     uint64_t m_submitted = 0u;
