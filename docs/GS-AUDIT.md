@@ -24,9 +24,11 @@ the main checkout does the same with power; this one reads frame rate.
 | Meshes wholly off screen not drawn | cac9414 | 39.0 | 46,014 | 55% |
 | Snapshots copy only what is read | 4f2f822 | standing: 41.7 -> 43.4 (the walk window not run) | | |
 | Source-alpha blends in one pass (dual-source) | d1c6a8c | 44.2 | 38,397 | 56% |
+| Upscaled texture taps without integer divides | 000e310 | 48.8 | 38,393 | 56% |
+| Upscaled taps read directly inside a clamp | 1a8b8b8 | 55.9 | 38,404 | 55% |
 
-The VU1's own mode (`0`) gets the last two as well: 44.2 fps at 8x,
-38,212 draws/s at 3x. At 3x both modes hold 60 fps; `gpu` keeps the VIF1
+The VU1's own mode (`0`) gets the last four as well: 55.6 fps at 8x.
+At 3x the GPU's power went 61.3 -> 48.7 W over the day. At 3x both modes hold 60 fps; `gpu` keeps the VIF1
 thread at 18% of the wall against 45%, and the GS backend at 56%
 against 66%.
 
@@ -34,6 +36,37 @@ Tried and dropped: a fragment shader without the alpha test's `discard`
 for draws whose test always passes, so the depth test could run first
 (GS-PERFORMANCE.md candidate 6). No change in frame rate (43.5 against
 43.4 fps); not committed.
+
+## GPU time by label (DQ8_GFX_GPU_TIMES)
+
+Skipping categories cannot separate a draw's cost from the stalls around
+it, and read both wrong once (it said the passes were the cost; forcing
+three times as many cost 1 ms). `DQ8_GFX_GPU_TIMES=1` (patched SDL,
+`thirdparty/dq8-gfx/README.md`) times the GPU's work by label instead.
+It found textured full-target draws at about a sixth of an untextured
+one's rate a pixel: the shader's four taps for an upscaled target were
+mostly arithmetic (eight integer divides, then the wrap and sub-texel
+round trip). The two shader commits above took a full-frame textured
+blend from 0.69 to 0.28 ms.
+
+After them, 8x, standing, about 53 fps with the timestamps (ms a frame):
+
+| Label | ms |
+|---|---|
+| per-object composites and other textured blends into the frame | 2.0 |
+| the scene's meshes | 1.8 |
+| full-frame textured blends into the frame (5) | 1.4 |
+| the two full-frame copies into 02a40 | 1.2 |
+| blur and bloom draws | 1.6 |
+| snapshot copies (blur) | 0.9 |
+| shadow volumes (02a00 3D blend) | 1.0 |
+| importing pages between aliased targets | 1.0 |
+| feedback copies of sampled targets | 0.7 |
+| patches from local memory | 0.9 |
+| draw data upload | 0.3 |
+
+The tables below come from before the shader commits, by skipping
+categories; their proportions have moved since.
 
 ## Where the frame goes now (8x, standing, 20.0 ms)
 
