@@ -49,6 +49,13 @@ thread_local uint32_t t_vu1Camera = 0;
 thread_local std::vector<std::vector<uint8_t>> *t_vu1Packets = nullptr;
 thread_local bool t_dropVu1Packets = false;
 const rg::vu1native::Mode g_nativeMode = rg::vu1native::modeFromEnvironment();
+// RG_VU1_NATIVE_CHECK_EVERY=N: check mode compares one chunk in N (each costs
+// the VU1's run, the native build and two decodes, on this thread).
+const uint32_t g_checkEvery = [] {
+    const char *value = std::getenv("RG_VU1_NATIVE_CHECK_EVERY");
+    const unsigned long every = value ? std::strtoul(value, nullptr, 10) : 1ul;
+    return static_cast<uint32_t>(every == 0ul ? 1ul : every);
+}();
 const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
 // RG_VU1_CAPTURE=<file> records the VU1 data memory each program starts with
 // (16 KiB a start), for tools/vu1/capture_report.py; RG_VU1_CAPTURE_MAX caps
@@ -696,6 +703,10 @@ public:
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
                 }
+                else if (g_nativeMode == rg::vu1native::Mode::Check && m_checkCount++ % g_checkEvery != 0u)
+                {
+                    // Not this one: the VU1 runs it, unchecked.
+                }
                 else
                 {
                     native = m_nativeProgram;
@@ -919,6 +930,7 @@ private:
     const rg::vu1native::Program *m_nativeProgram = nullptr;
     uint64_t m_nativeGeneration = ~0ull;
     uint32_t m_nativePC = 0u;
+    uint32_t m_checkCount = 0u;
     rg::vu1native::Monitor m_nativeMonitor{g_nativeMode};
     std::vector<std::vector<uint8_t>> m_nativePackets;
     GSNativeMesh m_nativeMesh;
