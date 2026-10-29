@@ -1039,11 +1039,13 @@ struct SdlGpuBackend::Impl {
     // when RG_JITTER or DQ8_GFX_PROFILE_CYCLE is set (src/vif1_thread.cpp).
     const bool jitterScene = std::getenv("RG_JITTER") != nullptr;
     // Native strips (Rogue Galaxy: added): the one submitNative hands
-    // submit(); DQ8_GFX_NATIVE_CPU=1 expands every strip on the CPU, and
-    // DQ8_GFX_NATIVE_CULL_FLIP=1 culls the other face.
+    // submit(); DQ8_GFX_NATIVE_CPU=1 expands every strip on the CPU,
+    // DQ8_GFX_NATIVE_CULL_FLIP=1 culls the other face, and
+    // DQ8_GFX_NATIVE_NO_CULL=1 draws the meshes wholly off screen too.
     const GSNativeMesh *nativeMesh = nullptr;
     const bool nativeOnCpu = std::getenv("DQ8_GFX_NATIVE_CPU") != nullptr;
     const bool nativeCullFlip = std::getenv("DQ8_GFX_NATIVE_CULL_FLIP") != nullptr;
+    const bool nativeNoCull = std::getenv("DQ8_GFX_NATIVE_NO_CULL") != nullptr;
     // RG_CAMERA_LOG=N (Rogue Galaxy: added): every N presents, the cameras the
     // scene's draws ran under since the last line, busiest first, with the
     // projection read back from them. Needs RG_JITTER or the profile cycle
@@ -1689,10 +1691,38 @@ struct SdlGpuBackend::Impl {
         const float x1 = x0 + static_cast<float>(context.scissor.x1 + 1u - context.scissor.x0);
         const float y1 = y0 + static_cast<float>(context.scissor.y1 + 1u - context.scissor.y0);
         uint8_t alphaLow = 0xFFu, alphaHigh = 0u;
+        float low[3] = {INFINITY, INFINITY, INFINITY}, high[3] = {-INFINITY, -INFINITY, -INFINITY};
         for (const GSNativeMesh::Vertex &v : mesh.vertices) {
             const uint8_t a = static_cast<uint8_t>(gsNativeFtoi(std::fmin(v.a, mesh.header.colorMax[3]), 1.0f));
             alphaLow = std::min(alphaLow, a);
             alphaHigh = std::max(alphaHigh, a);
+            const float position[3] = {v.x, v.y, v.z};
+            for (size_t i = 0; i < 3u; ++i) {
+                low[i] = std::fmin(low[i], position[i]);
+                high[i] = std::fmax(high[i], position[i]);
+            }
+        }
+        // A mesh whose bounding box is wholly past one edge of the scissor,
+        // or behind the eye (w at most 0), draws nothing: the program would
+        // have kicked none of it either. The test is on the box's corners in
+        // clip space, so it holds for every point inside the box.
+        if (!nativeNoCull) {
+            const auto &m = mesh.header.matrix;
+            uint32_t outside = 0x1Fu;
+            for (uint32_t corner = 0; corner < 8u && outside != 0u; ++corner) {
+                const float p[3] = {corner & 1u ? high[0] : low[0], corner & 2u ? high[1] : low[1],
+                                    corner & 4u ? high[2] : low[2]};
+                float clip[4];
+                for (size_t i = 0; i < 4u; ++i)
+                    clip[i] = p[0] * m[0][i] + p[1] * m[1][i] + p[2] * m[2][i] + m[3][i];
+                outside &= (clip[3] <= 0.0f ? 1u : 0u) | (clip[0] < x0 * clip[3] ? 2u : 0u) |
+                           (clip[0] > x1 * clip[3] ? 4u : 0u) | (clip[1] < y0 * clip[3] ? 8u : 0u) |
+                           (clip[1] > y1 * clip[3] ? 16u : 0u);
+            }
+            if (outside != 0u) {
+                ++stats.nativeMeshesCulled;
+                return;
+            }
         }
         const float corners[3][2] = {{x0, y0}, {x1, y0}, {x0, y1}};
         const float st[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
@@ -3499,7 +3529,7 @@ struct SdlGpuBackend::Impl {
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
                      "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
-                     "draws %llu)\n",
+                     "draws %llu, off screen %llu)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3511,7 +3541,8 @@ struct SdlGpuBackend::Impl {
                      d(stats.coveredPages, previousReasons.coveredPages),
                      d(stats.nativeMeshes, previousReasons.nativeMeshes),
                      d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded),
-                     d(stats.nativeDraws, previousReasons.nativeDraws));
+                     d(stats.nativeDraws, previousReasons.nativeDraws),
+                     d(stats.nativeMeshesCulled, previousReasons.nativeMeshesCulled));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;

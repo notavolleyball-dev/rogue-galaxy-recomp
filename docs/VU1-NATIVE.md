@@ -239,12 +239,33 @@ mode):
   GIF stage from 16% to 7%: the VU1 and the GS front end no longer see
   the meshes.
 - Draw calls go up 2.4x (a draw per mesh, and the packet programs'
-  draws around them); the GS backend's share goes up with them. Merging
-  meshes of one state, and culling repeated meshes on the GPU, are the
-  next cuts there.
+  draws around them); the GS backend's share goes up with them.
 - At 8x every mode is GPU-bound (99% busy), and `gpu` is 3% slower: the
   extra draw calls cost there too. Fill and the post passes dominate
   (`docs/GS-PERFORMANCE.md`).
+
+Then (2026-10-29) the meshes of one draw state share a draw call (their
+transforms in a storage buffer, `thirdparty/dq8-gfx/README.md`), and a
+mesh wholly off the scissor or behind the eye is not drawn. On the walk,
+per frame: 769 meshes of 25,000 vertices; 196 of them (7,000 vertices)
+off screen; 379 the same bytes as the frame before, none repeated within
+one.
+
+| Mode | Scale | fps | GS backend | VIF1 | GIF stage | draws/s | GPU busy | Power |
+|---|---|---|---|---|---|---|---|---|
+| `gpu`, merged | 3x | 59.9 | 56% | 18% | 8% | 51,248 | 72% | 62.3 W |
+| `gpu`, merged and culled | 3x | 59.9 | 55% | 18% | 7% | 46,014 | 72% | 61.3 W |
+| `gpu`, merged | 8x | 38.9 | 180% | 13% | 86% | 51,795 | 99% | 181.6 W |
+| `gpu`, merged and culled | 8x | 39.0 | 180% | 13% | 86% | 48,672 | 99% | 183.4 W |
+
+- The native strips take about a third of the draws they did (14,820 for
+  42,600 meshes a stats interval), and `gpu` makes no more draws than the
+  VU1 did; the GS backend is 55% of the wall at 3x, against 63% with the
+  VU1 and 71% before.
+- Culling takes a quarter of the meshes but few draws: most off-screen
+  meshes had shared a draw already. It saves their upload and vertex work.
+- At 8x `gpu` is level with the VU1 again (39.0 fps): the GPU's fill is
+  the limit, not the meshes.
 
 ## Speed (2026-10-28, RX 6700 XT, the four programs above native)
 
@@ -280,8 +301,8 @@ In the game, the last 25 s of the walk in the 60 fps mode
 - At 8x every mode is GPU-bound (99% busy, 182 W, 39 fps): native strips
   draw the same pixels. What costs there is fill, the post passes above all
   (`docs/GS-PERFORMANCE.md`), which is phase 3 of the plan, not this.
-- `gpu` mode issues a draw call per mesh (draws/s up 72%). Merging
-  consecutive meshes of the same state is the next cut on that side.
+- `gpu` mode issues a draw call per mesh (draws/s up 72%); see above for
+  the merged draws.
 
 ## Lessons
 
