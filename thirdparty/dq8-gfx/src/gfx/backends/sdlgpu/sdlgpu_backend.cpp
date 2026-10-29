@@ -178,6 +178,10 @@ struct DrawBatch {
     // batch before it.
     bool feedback = false;
     bool snapshot = false;
+    // With `feedback` and `snapshot`: the texels, in GS pixels, that this
+    // batch and the ones sharing its snapshot read, which is all the copy
+    // takes (empty: the whole surface) (Rogue Galaxy: added).
+    GsRegion snapshotReads{};
     // Reads its colour target's pixels through a snapshot the flush takes
     // before it, bound as the second texture, and blends in the shader
     // (Rogue Galaxy: added). Always with a snapshot of its own.
@@ -2635,8 +2639,28 @@ struct SdlGpuBackend::Impl {
                 // pixels no earlier strip of the pass has drawn, so they can
                 // share one snapshot, and then one draw call.
                 draw.feedback = true;
+                const GsRegion reads = sampledTexels(batch, *color);
                 draw.snapshot = batches.empty() || !batches.back().feedback || batches.back().color != color ||
-                                sampledTexels(batch, *color).intersects(feedbackWritten);
+                                reads.intersects(feedbackWritten);
+                // The copy takes only what the draws sharing it read, a texel
+                // further out for the filter: a blur's strips each read a
+                // narrow band of a buffer, and at 8x each full copy was a
+                // 1536x1536 one, about a hundred a frame (Rogue Galaxy: added).
+                GsRegion band = reads;
+                band.x0 = band.x0 > 0u ? band.x0 - 1u : 0u;
+                band.y0 = band.y0 > 0u ? band.y0 - 1u : 0u;
+                band.x1 = std::min(band.x1 + 1u, color->width);
+                band.y1 = std::min(band.y1 + 1u, color->height);
+                if (draw.snapshot) {
+                    draw.snapshotReads = band;
+                } else {
+                    for (size_t index = batches.size(); index-- > 0u;) {
+                        if (batches[index].snapshot && batches[index].feedback) {
+                            batches[index].snapshotReads.merge(band);
+                            break;
+                        }
+                    }
+                }
                 textureScale = static_cast<float>(color->scale);
                 liveTargetTexa();
             } else if (directSample) {
@@ -3073,7 +3097,8 @@ struct SdlGpuBackend::Impl {
                 endPass();
                 SDL_GPUTexture *snapshot =
                     recordSnapshot(commands, *batch.color,
-                                   batch.destination && !batch.feedback ? &batch.written : nullptr);
+                                   batch.feedback ? &batch.snapshotReads
+                                   : batch.destination ? &batch.written : nullptr);
                 if (!snapshot)
                     return false;
                 if (batch.feedback || !batch.destination)
