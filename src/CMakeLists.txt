@@ -87,6 +87,7 @@ add_executable(roguegalaxy
     loading_screen.cpp
     map_chests.cpp
     opening.cpp
+    voice_language.cpp
     widescreen.cpp
     hud_size.cpp
     save_anywhere.cpp
