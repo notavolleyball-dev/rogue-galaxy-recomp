@@ -1,10 +1,11 @@
 # VU1 programs, natively
 
 How a VU1 program of the game moves off the VU1: read it from its own code,
-write it as C++ that builds a `GSNativeMesh`, check it against the recording
-and the game, then draw it on the GPU. The first four programs went this way
-on 2026-10-28; this is the recipe for the rest. The plan around it is
-`docs/NATIVE-RENDERER.md` (phase 1).
+write it as C++ that builds a `GSNativeMesh` (or, for what is not a mesh,
+the packets), check it against the recording and the game, then draw it on
+the GPU. Every program the recordings hold went this way on 2026-10-28
+("Status"); this is the recipe for the pieces still unseen. The plan
+around it is `docs/NATIVE-RENDERER.md` (phase 1).
 
 ## What a program is
 
@@ -185,26 +186,65 @@ E (clipping) is never ported: the GPU clips the mesh (`gs_native.vert`
 outputs homogeneous positions), so a clipping chunk goes to the GPU like any
 other. The packet paths (`1`, `skip`) leave clipping chunks to the VU1.
 
-## Status: the field (Salgin, File 01, `field1.vu1r`)
+## Status (2026-10-28): every recorded program
 
-21 model programs at `:320`, 8 overlay programs at `:960`. Done: 4 programs,
-53.5% of the vertices.
+Every program the recordings hold is native: the field walk
+(`field1.vu1r`), its 10-list capture with the memory after each run
+(`fieldafter.vu1r`) and the harvest of one evening's play (battles, a boss
+and events among it). Each agrees with the VU1 at zero tolerance
+in the oracle, packets and VU1 memory; in-game `check` on the walk compared
+1,541,024 chunks, none different. In `gpu` mode the walk runs no VU1
+program at all.
 
-| Program | Share | Pieces | State |
-|---|---|---|---|
-| `9f727028f73861c3` | 33.3% | A B C F, D guard+backface | Native |
-| `3dd4ba5d80f01760` | 17.2% | F only | Next: A, B, C and D unknown |
-| `cfb586576df9c3d2` | 15.0% | A B C F, D none | Native |
-| `30da21d7b6d089bf` | 8.2% | A F | B, C, D unknown |
-| `0f44ab11d3953380` | 4.8% | F only | |
-| `3856a013e86478a4` | 4.5% | A B C F, D guard | Native |
-| `a953fc53a82da5ff` | 3.3% | A B F, D guard+backface | C unknown: one piece away |
-| `2bfa7bdfc67419e7` | 2.4% | A F | |
-| `a63f076af44e86c4` | 2.1% | A B F | C, D unknown |
-| `4e7f7a9d2f5e591c`, `eb83918ee1506b2a` | 1.7%, 1.5% | A F | |
-| 9 more | under 1.0% each | | `a419f27f…` (A B F, D guard) and `a58ff96c…` (A B F, D none) are one C away |
-| `cf035ca99ede7ad8` | 0.7% | A B C F, D none | Native |
-| `:960` overlay programs (8) | 0.4% together | B entry | Not started |
+| Kind (`Kind`) | Programs | Field vertices | Pieces | In `gpu` mode |
+|---|---|---|---|---|
+| Strips | 9f727028, cfb58657, 30da21d7, ... (most) | about 78% | A 07151c25; B plain or skinned; C vertex colors, one color, lit, lit vertex colors; D five; F scroll or sphere map | Mesh, the GPU transforms and clips |
+| Outlines | 3dd4ba5d and 5 more | 17.1% | A 3f6df595, B 542b235c, C 3689bac9 | Packets |
+| Shadow volumes | 0f44ab11 and 11 more | 5.0% | A 821b638f, B 542b235c or a293001f, C dc8dbfe4 | Packets |
+| Overlay sprites (`:960`) | 4cb64ec1 and 28 more | 0.2% | B 6e42dac6 at its own MSCAL | Packets, VU1 memory |
+| Object setup (`:0`) | before every object | none | base 12ad73d2 | Packets, VU1 memory |
+| Particles | c56c50af and 4 more (harvest) | none | A 0b1031ae, D 8ecadb3a | Packets |
+| Projected texture | a8ff1228 (harvest) | none | A 4beba151, F 15be21a5, C 3b890d00 | Packets |
+
+Left to the VU1, chunk by chunk:
+
+- **Clipping** (slot E: 6e420ef8, and 860dd144 in the projected texture)
+  in the packet modes (`check`, `1`, `skip`). The GPU path takes the strip
+  programs' clipping chunks and draws them clipped; it never needs E.
+- **Paths no recording took**: the triangle lists of the backface D pieces
+  (a786efab, 93cfd2f5) and of the projected texture's C; 87.y & 0x100 in
+  the vertex-color C pieces (70362be4, 2460e528).
+- **Pieces no recording reached** (`census.py`): A 8855d9e7, c8143ab4,
+  964be3bc, cf7a85a5 (at 0x0c8); B 36d686cd, 89123290, 857fbbc2; C
+  127ca0b4, e3bca52a; D 1bd1b5c0, 2feaa9a1, 312d076b; E 56d6683a, ab37fe79,
+  c9e1cecc; F 0594a063, 9df36d6a, a04c11ce, ad209cd3, b1d29245. (2aa11602,
+  in every slot, is the empty piece; base f1d259d7 is VU0's.) A program
+  with one of them is left whole to the VU1. Harvest mode collects their
+  samples where they run: other planets, more battles and events, menus.
+
+## Speed with every program native (2026-10-28, RX 6700 XT)
+
+The same walk and measure as below (`native-perf.sh`, last 25 s, 60 fps
+mode):
+
+| Mode | Scale | fps | GS backend | VIF1 | GIF stage | draws/s | GPU busy | Power |
+|---|---|---|---|---|---|---|---|---|
+| `0` | 3x | 59.9 | 63% | 45% | 16% | 45,806 | 73% | 61.1 W |
+| `skip` | 3x | 59.9 | 64% | 37% | 16% | 46,013 | 75% | 60.9 W |
+| `gpu` | 3x | 59.9 | 71% | 18% | 7% | 110,789 | 73% | 62.0 W |
+| `0` | 8x | 39.0 | 188% | 31% | 78% | 47,776 | 99% | 183.8 W |
+| `gpu` | 8x | 37.8 | 162% | 13% | 94% | 117,891 | 99% | 177.4 W |
+
+- `gpu` takes the VIF1 thread from 45% of the wall to 18% at 3x, and the
+  GIF stage from 16% to 7%: the VU1 and the GS front end no longer see
+  the meshes.
+- Draw calls go up 2.4x (a draw per mesh, and the packet programs'
+  draws around them); the GS backend's share goes up with them. Merging
+  meshes of one state, and culling repeated meshes on the GPU, are the
+  next cuts there.
+- At 8x every mode is GPU-bound (99% busy), and `gpu` is 3% slower: the
+  extra draw calls cost there too. Fill and the post passes dominate
+  (`docs/GS-PERFORMANCE.md`).
 
 ## Speed (2026-10-28, RX 6700 XT, the four programs above native)
 

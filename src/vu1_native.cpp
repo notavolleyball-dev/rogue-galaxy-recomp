@@ -27,9 +27,11 @@
 //   B 0x960  int16 positions, normals and UVs to floats: x / 32768 times the
 //            mesh scales in quads 77, 78, 79 (the skinning B then sums the
 //            position over the vertex's bones);
-//   F 0x39d0 nothing unless quad 88.xy is set (scrolling UVs);
+//   F 0x39d0 nothing unless quad 88.xy is set (scrolling UVs), or a
+//            sphere map from the normals;
 //   C 0x10e0 the vertex colors: the int16 color / 32768 * 256 times
-//            quad 82 * quad 42 + quad 83 * 128 (82.w scaled by 81.w);
+//            quad 82 * quad 42 + quad 83 * 128 (82.w scaled by 81.w), or
+//            that color alone, or lights on the normal;
 //   E 0x2620 with quad 81.x & 2 only: clipping, before D;
 //   D 0x1900 per vertex: clip = position * quads 68-71 (the matrix lands in
 //            screen space), Q = 1/w, XYZ in 12.4, F the fog clamp(40.x +
@@ -37,6 +39,9 @@
 //            clamped to quad 39; ADC as its Cull says; then FOGCOL (quad 41
 //            behind tag quad 19, its low word zeroed with quad 87.y & 0x10)
 //            is kicked, then the chunk.
+// The other programs (Kind) are written out below, each by itself:
+// buildOutline, buildShadow, runOverlay, runBase, buildParticles,
+// buildProjector.
 // The arithmetic runs in the VU's rounding (toward zero), set around each
 // entry point (VuRounding): the compiler must not move float work across it.
 #pragma STDC FENV_ACCESS ON

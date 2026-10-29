@@ -17,14 +17,15 @@
 // tools/vu1/vudis.py over a recording's coverage and is checked against the
 // VU1 with tools/vu1/oracle; see its README.
 //
-// Done: the field's strip programs: slots A and F, two B pieces (plain,
-// skinned), two C pieces (vertex colors, one material color) and four D
-// pieces (no culling, the guard band, the guard band and backfaces, and a
-// scaled and capped depth with the vertices' bounds kept in VU1 memory),
-// strips and triangle lists. Not done, so left to the VU1
-// chunk by chunk: the backface piece's triangle lists, scrolling UVs and two
-// flag branches; and slot E's clipping, except where the GPU clips (a
-// GSNativeMesh drawn by SdlGpuBackend).
+// Done: every program the recordings hold (docs/VU1-NATIVE.md, "Status"):
+// the strip programs, composed from a piece per slot (A; B plain or skinned;
+// C vertex colors, one color, lit, lit vertex colors; D: none, guard band,
+// guard band and backfaces, each with or without the scaled depth and
+// bounds; F scroll or sphere map), and the programs whose pieces draw by
+// themselves (Kind): the outlines, the shadow volumes, the overlay sprites,
+// the object setup, the particles and the projected texture. Not done, so
+// left to the VU1 chunk by chunk: clipping (slot E) where the GPU does not
+// clip, the paths no recording took, and the pieces no recording reached.
 //
 // The arithmetic per vertex is the runtime's (gsNativeMeshPoint in
 // runtime/gs/gs_types.h), whichever way a chunk goes out.
