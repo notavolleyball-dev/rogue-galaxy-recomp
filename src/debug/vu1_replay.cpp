@@ -419,7 +419,8 @@ void recordKick(const uint8_t *data, uint32_t size)
 
 void saveChunk(const char *program, const char *kind, const uint8_t *code, uint32_t programPC, uint32_t top,
                uint32_t itop, uint32_t list, const uint8_t *data, const VU1State &state,
-               const std::vector<std::vector<uint8_t>> &packets, const VU1State &endState)
+               const std::vector<std::vector<uint8_t>> &packets, const VU1State &endState, bool atCall,
+               const uint8_t *after)
 {
     if (!g_harvest)
     {
@@ -453,18 +454,27 @@ void saveChunk(const char *program, const char *kind, const uint8_t *code, uint3
     // The stand-in MSCAL: the strip programs' only ends, and names the
     // program for what follows.
     const uint32_t endHeader[2] = {kEnd, 0u};
-    putRun(file, false, programPC, top, itop, list, 0u, image, data, state);
-    std::fwrite(endHeader, sizeof(endHeader), 1, file);
-    std::fwrite(&state, sizeof(state), 1, file);
-    putRun(file, true, 0u, top, itop, list, 1u, image, data, state);
+    if (atCall)
+    {
+        putRun(file, false, programPC, top, itop, list, 0u, image, data, state);
+    }
+    else
+    {
+        putRun(file, false, programPC, top, itop, list, 0u, image, data, state);
+        std::fwrite(endHeader, sizeof(endHeader), 1, file);
+        std::fwrite(&state, sizeof(state), 1, file);
+        putRun(file, true, 0u, top, itop, list, 1u, image, data, state);
+    }
     for (const auto &packet : packets)
     {
         const uint32_t kick[2] = {kKick, static_cast<uint32_t>(packet.size())};
         std::fwrite(kick, sizeof(kick), 1, file);
         std::fwrite(packet.data(), 1, packet.size(), file);
     }
-    std::fwrite(endHeader, sizeof(endHeader), 1, file);
+    const uint32_t endWithData[2] = {kEnd, kEndData};
+    std::fwrite(endWithData, sizeof(endWithData), 1, file);
     std::fwrite(&endState, sizeof(endState), 1, file);
+    std::fwrite(after, 1, PS2_VU1_DATA_SIZE, file);
     std::fclose(file);
     std::fprintf(stderr, "[harvest] %s differs (%s): saved %s\n", program, kind, name + 1);
 }

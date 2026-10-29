@@ -47,7 +47,9 @@ a few samples of every program it has no file for yet (a file each,
 the native ones; a `[harvest]` line names each new program with the pieces
 it has. A checked chunk that differs is saved there too
 (`mismatch_<image>_<list>_<n>.vu1r`, at most 8 a program and kind of
-difference), and replays in the oracle like any recording: what differed at
+difference, with the data memory after the run: the native candidate then
+also checks what the program leaves in VU1 memory, a line of its own when
+that differs), and replays in the oracle like any recording: what differed at
 a boss fight comes back as data. The `[vu1native]` line counts the
 differences by program and kind (position, Z, fog, color, UV, STQ, ADC or a
 register, vertex count). It is cheap to leave on (a program is known by 64 bytes at each
@@ -159,6 +161,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | C | 0x10e0-0x1938 | `dc8dbfe4905cb635` | The shadow volumes (`buildShadow`): each triangle lit (normal . light > 1e-4) and inside is extruded into five fans, each after the A+D packet at quad 38 (facing) or 35. Packets only |
 | C | 0x10e0-0x1240 | `91f542d069307d6c` | Lighting: four directional lights (lanes of quads 100-102) on the normal, each clamped at 0, colors 33-36 and ambient 37 times the material 82 (`Lights`) |
 | F | 0x39d0-0x3b70 | `150031ee1534d185` | Sphere map: UV = (normal through quads 24-26 times 64-66, xy, + 1) / 2 (`SphereMap`) |
+| B | 0x0960-0x0b38 | `6e42dac662887054` | The overlay sprites (the `:960` rows), run by an MSCAL of their own (`drawsAtCall`): 32-pixel columns over the bounds in quads 98/99, one pixel wider, within quads 140/141, with the tag at 144 in buffers 145 and 165. Packets only; leaves 144-169 as the VU1 does |
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |
@@ -249,6 +252,13 @@ In the game, the last 25 s of the walk in the 60 fps mode
   GPU cannot round that way, so the mesh carries each vertex's Z from the
   CPU (`GSNativeMesh::Vertex::depth`); a pass drawn over another at the same
   depth lost pixels without it.
+- **The VU has no denormals.** `VuRounding` also sets DAZ and FTZ: the
+  overlay sprites add a denormal to -2^24, which rounds toward zero to
+  -2^24 + 1 on x86 and stays -2^24 on the VU. In-game `check` found it as
+  a VU1 memory difference, in two chunks of 1.4 million.
+- **The culling pieces set the first vertex's ADC** from its own guard band
+  judgment; the oracle's recordings never had a first vertex outside it.
+  Run `check` in the game after the oracle passes.
 - **VU1 memory is output too.** A piece that writes data memory a later
   program reads (the bounds of `b8ea8ed5`) must do so natively when the VU1
   is skipped; check mode compares it (`memoryEffectsMatch`).

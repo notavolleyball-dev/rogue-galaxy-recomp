@@ -138,7 +138,8 @@ bool readRecording(const char *path, uint32_t maxRuns, Recording &out)
             truncated = !get(&flags, sizeof(flags)) || !get(&run.endState, sizeof(run.endState));
             if (!truncated && (flags & replay::kEndData))
             {
-                truncated = std::fseek(file, PS2_VU1_DATA_SIZE, SEEK_CUR) != 0;
+                run.endData.resize(PS2_VU1_DATA_SIZE);
+                truncated = !get(run.endData.data(), run.endData.size());
             }
             run.ended = !truncated;
         }

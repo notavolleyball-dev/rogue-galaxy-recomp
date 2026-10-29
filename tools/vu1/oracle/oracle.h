@@ -24,6 +24,9 @@ struct Run
     std::vector<uint8_t> data;
     std::vector<std::vector<uint8_t>> kicks;
     VU1State endState{};
+    // The data memory after the run, where the recording has it (saved
+    // mismatches).
+    std::vector<uint8_t> endData;
     bool ended = false;
     // The program it belongs to: the MSCAL's code image and entry.
     uint64_t programHash = 0u;

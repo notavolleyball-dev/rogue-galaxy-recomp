@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <utility>
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <xmmintrin.h>
 #endif
@@ -45,16 +46,19 @@ namespace
 {
 
 constexpr uint32_t kEntry = 0x320u;
+constexpr uint32_t kOverlayEntry = 0x960u;
 
 // Round toward zero while it lives, as VU1Interpreter::run sets it for the
 // VU1: the products, sums and the divide then come out as the VU1's, bit for
 // bit, done in its order. (Round to nearest left Z a unit off at times, which
-// a pass drawn at nearly the same depth turned into missing pixels.)
+// a pass drawn at nearly the same depth turned into missing pixels.) And
+// denormals as zero, in and out (DAZ, FTZ), as the VU has them: the overlay
+// sprites add a denormal to -2^24, which must stay -2^24.
 class VuRounding
 {
 public:
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    VuRounding() : m_saved(_mm_getcsr()) { _mm_setcsr((m_saved & ~0x6000u) | 0x6000u); }
+    VuRounding() : m_saved(_mm_getcsr()) { _mm_setcsr((m_saved & ~0x6000u) | 0x6000u | 0x8040u); }
     ~VuRounding() { _mm_setcsr(m_saved); }
 
 private:
@@ -115,6 +119,9 @@ constexpr DecodePiece kDecodes[] = {
 constexpr Piece kOutlineA = {0x0320u, 0x04e8u, 0x3f6df595be6e31b7ull};
 constexpr Piece kOutlineC = {0x10e0u, 0x1e70u, 0x3689bac97cae3c73ull};
 
+// The overlay sprites: B 6e42dac6 entered by an MSCAL at its start.
+constexpr Piece kOverlayB = {0x0960u, 0x0b38u, 0x6e42dac662887054ull};
+
 // The shadow volume program's A (header with PRIM 5, fans; calls B, then C)
 // and C (dc8dbfe4).
 constexpr Piece kShadowA = {0x0320u, 0x0500u, 0x821b638f42fcaa6eull};
@@ -173,6 +180,7 @@ const Program *intern(const Program &shape)
     }
     std::string &name = names.emplace_back(shape.kind == Kind::Outline  ? "outline"
                                            : shape.kind == Kind::Shadow ? "shadow volume"
+                                           : shape.kind == Kind::Overlay ? "overlay sprites"
                                                                         : "strip");
     name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
             : shape.cull == Cull::GuardBand          ? ", guard band"
@@ -850,10 +858,78 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
     }
 }
 
+// The overlay B (6e42dac6), run by its own MSCAL: screen sprites over the
+// bounds the last depth-and-bounds program left in quads 98 and 99, one
+// pixel wider each way, within the rectangle of quads 140 and 141, in
+// columns of 32 pixels. Each column is the GIF tag of quad 144 (two
+// sprites' UV, XYZF2: the corners plus quad 142, plus 143.xy) in one of two
+// buffers, 145 and 165, kicked in turn; then 144, made an empty EOP tag, is
+// kicked to end. Nothing is kicked when the box is empty. It runs on `data`
+// as the VU1 would, leaving what it leaves there, and appends its packets
+// to `packets` if given.
+void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
+{
+    const VuData vu(data);
+    const auto store = [data](uint32_t q, const void *bytes) { std::memcpy(data + q * 16u, bytes, 16u); };
+    std::memcpy(data + 145u * 16u, data + 144u * 16u, 16u);
+    std::memcpy(data + 165u * 16u, data + 144u * 16u, 16u);
+    const uint32_t end = 0x8000u;
+    std::memcpy(data + 144u * 16u, &end, 4u);
+
+    const Vec4 lo = vu.quad(98), hi = vu.quad(99), rectLo = vu.quad(140), rectHi = vu.quad(141);
+    const Vec4 a{std::fmax(rectLo.x, lo.x - 1.0f), std::fmax(rectLo.y, lo.y - 1.0f), std::fmax(rectLo.z, lo.z), 0.0f};
+    const Vec4 b{std::fmin(rectHi.x, hi.x + 1.0f), std::fmin(rectHi.y, hi.y + 1.0f), std::fmin(rectHi.z, hi.z), 0.0f};
+    if (b.x - a.x < 0.0f || b.y - a.y < 0.0f)
+    {
+        return;
+    }
+    const Vec4 offset = vu.quad(142);
+    const Vec4 xyOffset{vu.quad(143).x, vu.quad(143).y, 0.0f, 0.0f};
+    float left = (b.x - a.x) - 1.0f;
+    Vec4 from = a;
+    uint32_t tag = 145u, other = 165u;
+    for (;;)
+    {
+        const Vec4 to{std::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
+        const Vec4 corners[4] = {{from.x + offset.x, from.y + offset.y, from.z + offset.z, from.w + offset.w},
+                                 {from.x + xyOffset.x, from.y + xyOffset.y, from.z + xyOffset.z, from.w + xyOffset.w},
+                                 {to.x + offset.x, to.y + offset.y, to.z + offset.z, to.w + offset.w},
+                                 {to.x + xyOffset.x, to.y + xyOffset.y, to.z + xyOffset.z, to.w + xyOffset.w}};
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            const uint32_t fixed[4] = {static_cast<uint32_t>(gsNativeFtoi(corners[i].x, 16.0f)),
+                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].y, 16.0f)),
+                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].z, 16.0f)),
+                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].w, 16.0f))};
+            store(tag + 1u + i, fixed);
+        }
+        if (packets)
+        {
+            packets->push_back(gifPacket(vu, tag));
+        }
+        left -= 32.0f;
+        from.x += 32.0f;
+        std::swap(tag, other);
+        if (left < 0.0f)
+        {
+            break;
+        }
+    }
+    if (packets)
+    {
+        packets->push_back(gifPacket(vu, 144));
+    }
+}
+
 } // namespace
 
 const Program *identify(const uint8_t *code, uint32_t startPC)
 {
+    if (startPC == kOverlayEntry && matches(code, kOverlayB))
+    {
+        Program shape{nullptr, Cull::None, Color::Material, false, Decode::Plain, 0, Kind::Overlay};
+        return intern(shape);
+    }
     if (startPC != kEntry)
     {
         return nullptr;
@@ -900,13 +976,13 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
 
 std::string describePieces(const uint8_t *code, uint32_t startPC)
 {
-    if (startPC != kEntry)
-    {
-        return "-";
-    }
     if (const Program *program = identify(code, startPC); program && program->kind != Kind::Strip)
     {
         return std::string("all: ") + program->name;
+    }
+    if (startPC != kEntry)
+    {
+        return "-";
     }
     std::string out;
     for (size_t i = 0; i < std::size(kCommon); ++i)
@@ -948,6 +1024,8 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
 {
     const VuData vu(data);
+    if (program.kind == Kind::Overlay)
+        return nullptr;
     if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)
         return "quad 76.z set (an entry into B other than its first)";
     if (program.decode == Decode::Skinned && bonesOf(program, vu, top) == 0u)
@@ -1014,6 +1092,12 @@ void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4
 
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 {
+    if (program.kind == Kind::Overlay)
+    {
+        const VuRounding rounding;
+        runOverlay(data, nullptr);
+        return;
+    }
     if (program.kind == Kind::Outline)
     {
         const VuRounding rounding;
@@ -1034,6 +1118,13 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 
 bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after)
 {
+    if (program.kind == Kind::Overlay)
+    {
+        const VuRounding rounding;
+        std::vector<uint8_t> copy(before, before + 1024u * 16u);
+        runOverlay(copy.data(), nullptr);
+        return std::memcmp(copy.data() + 144u * 16u, after + 144u * 16u, 26u * 16u) == 0;
+    }
     if (program.kind == Kind::Outline)
     {
         const VuRounding rounding;
@@ -1074,6 +1165,13 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
         buildShadow(program, VuData(data), top, packets);
         return;
     }
+    if (program.kind == Kind::Overlay)
+    {
+        std::vector<uint8_t> copy(data, data + 1024u * 16u);
+        packets.clear();
+        runOverlay(copy.data(), &packets);
+        return;
+    }
     Chunk chunk;
     readChunk(program, VuData(data), top, chunk);
     packets.clear();
@@ -1102,10 +1200,10 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     }
     if (program.cull != Cull::None)
     {
-        // The guard band piece clears the clip flags, then sets each
-        // vertex's ADC from the last three judgments: the first vertex's
-        // from its own. (It never draws; it is in the packet.)
-        if (program.cull == Cull::GuardBand && count != 0u && points[0].outside)
+        // The culling pieces clear the clip flags, then set each vertex's
+        // ADC from the last three judgments: the first vertex's from its
+        // own. (It never draws; it is in the packet.)
+        if (count != 0u && points[0].outside)
         {
             const uint32_t w = (static_cast<uint32_t>(points[0].f16) & 0xFFFFu) | 0x8000u;
             std::memcpy(packet.data() + 64u + 2u * 16u + 12u, &w, 4u);

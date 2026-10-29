@@ -682,7 +682,8 @@ public:
         }
         // RG_VU1_NATIVE: the chunk of a program done natively, built from the
         // data memory before the VU1 changes it. The MSCAL names the program
-        // (once per code image and entry), its MSCNTs run the chunks.
+        // (once per code image and entry), its MSCNTs run the chunks; or the
+        // MSCAL is the chunk (drawsAtCall).
         const rg::vu1native::Program *native = nullptr;
         if (g_nativeMode != rg::vu1native::Mode::Off)
         {
@@ -695,7 +696,7 @@ public:
                     m_nativeProgram = rg::vu1native::identify(memory.getVU1Code(), startPC);
                 }
             }
-            else if (m_nativeProgram)
+            if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = g_nativeMode == rg::vu1native::Mode::Gpu;
                 const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, gpu);
@@ -772,7 +773,8 @@ public:
                 {
                     rg::vu1replay::saveChunk(native->name, kind, memory.getVU1Code(), m_nativePC, top, itop,
                                              m_current.number, m_checkData.data(), m_checkState, m_vu1Packets,
-                                             vu1.state());
+                                             vu1.state(), rg::vu1native::drawsAtCall(*native),
+                                             memory.getVU1Data());
                 }
             }
             else

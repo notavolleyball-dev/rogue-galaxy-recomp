@@ -24,9 +24,17 @@ public:
         {
             return false;
         }
-        if (!(run.header.flags & rg::vu1replay::kRunResume))
+        // A strip program's MSCAL only ends (its MSCNTs draw); the overlay
+        // program's draws, and no MSCNT follows it.
+        const bool resume = (run.header.flags & rg::vu1replay::kRunResume) != 0u;
+        if (!resume && !rg::vu1native::drawsAtCall(*program))
         {
             return true;
+        }
+        if (resume && rg::vu1native::drawsAtCall(*program))
+        {
+            ++m_declined[std::string("left to the VU1, ") + program->name + ": an MSCNT after it"];
+            return false;
         }
         const char *reason = rg::vu1native::declineChunk(*program, run.data.data(), run.header.top);
         if (reason)
@@ -45,6 +53,10 @@ public:
         {
             lines[std::string("done natively, ") + name] = count;
         }
+        for (const auto &[name, count] : m_memoryDiffers)
+        {
+            lines[name] = count;
+        }
         return lines;
     }
 
@@ -59,7 +71,8 @@ public:
                 code == recording.codes.end() ? nullptr : rg::vu1native::identify(code->second.data(), run.programPC);
         }
         const rg::vu1native::Program *program = programOf(run);
-        if (!program || !(run.header.flags & rg::vu1replay::kRunResume) ||
+        const bool resume = program && (run.header.flags & rg::vu1replay::kRunResume) != 0u;
+        if (!program || resume == rg::vu1native::drawsAtCall(*program) ||
             rg::vu1native::declineChunk(*program, run.data.data(), run.header.top))
         {
             return;
@@ -77,6 +90,13 @@ public:
         for (const auto &packet : m_packets)
         {
             decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
+        }
+        // What it leaves in VU1 memory, where the recording has the memory
+        // after the run: counted on a line of its own.
+        if (!run.endData.empty() &&
+            !rg::vu1native::memoryEffectsMatch(*program, run.data.data(), run.header.top, run.endData.data()))
+        {
+            ++m_memoryDiffers[std::string("VU1 memory differs, ") + program->name];
         }
     }
 
@@ -114,6 +134,7 @@ private:
     uint64_t m_meshChunks = 0u;
     mutable std::map<std::string, uint32_t> m_declined;
     mutable std::map<std::string, uint32_t> m_taken;
+    std::map<std::string, uint32_t> m_memoryDiffers;
 };
 
 } // namespace

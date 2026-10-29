@@ -60,6 +60,7 @@ enum class Kind : uint8_t
     Strip,   // triangle strips and lists: A, B, C, D, F (E clips)
     Outline, // the toon outlines: A, B, then C draws the silhouette edges as lines
     Shadow,  // the shadow volumes: A, B, then C extrudes the lit triangles as fans
+    Overlay, // the screen sprites over the last object's bounds: B's own entry, its MSCAL
 };
 
 // How the B piece decodes a vertex's position.
@@ -91,6 +92,14 @@ struct Program
 inline bool hasMesh(const Program &program)
 {
     return program.kind == Kind::Strip;
+}
+
+// Whether the program draws in its MSCAL (the overlay sprites) rather than
+// in the MSCNTs after it (every other: the MSCAL only ends). Its chunk is
+// then the MSCAL's run.
+inline bool drawsAtCall(const Program &program)
+{
+    return program.kind == Kind::Overlay;
 }
 
 // The program whose MSCAL enters at `startPC` (in bytes) with `code` (all of
