@@ -399,6 +399,19 @@ triangles expanded on the CPU instead. The stats line counts `native
 strips`, and the draws they took. Salgin, 1x: 57 of 229,376 pixels differ
 by more than 8 levels from the VU1's frame.
 
+Effect buffers at a lower scale (Rogue Galaxy: added). Rogue Galaxy blurs
+in two 192x192 buffers, 0x2C40 (a zoom streak: twenty passes a frame, each
+adding a zoomed copy of the buffer to itself) and 0x3800 (a glow: six); at
+8x each is 1536x1536, larger than the PS2's frame. `DQ8_GFX_EFFECT_SCALE=N`
+(2 unless set; 0 for the scene's scale) makes colour surfaces at
+`DQ8_GFX_EFFECT_BASES` (hex, `2c40,3800` unless set), at most 256 pixels
+wide, at scale N (`GsTargetCache::setEffectBuffers`). They share pages with
+surfaces at the scene's scale (0x2C40 lies inside the per-object buffer at
+0x2A00), so pages move between scales GPU-side: `importColorPages` and a
+feedback snapshot's padding blit them (nearest) where the scales differ,
+instead of resolving to local memory. Field walk at 3x, against the
+scene's scale: 2,426 of 229,376 pixels differ, 16 by more than 8 levels.
+
 GPU time by label (Rogue Galaxy: added). `DQ8_GFX_GPU_TIMES=1` labels the
 backend's GPU work (each batch by target, 2D or 3D, mesh, feedback,
 textured, blended, covering half its target; the snapshot copies; the draw

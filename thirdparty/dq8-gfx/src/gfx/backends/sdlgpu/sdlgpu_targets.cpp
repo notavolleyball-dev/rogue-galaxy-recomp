@@ -455,6 +455,9 @@ GsSurface *GsTargetCache::acquire(uint32_t base,
     created->width = wantWidth;
     created->height = wantHeight;
     created->scale = m_scale;
+    if (m_effectScale != 0u && !depth && wantWidth <= 256u &&
+        std::find(m_effectBases.begin(), m_effectBases.end(), base) != m_effectBases.end())
+        created->scale = std::min(m_scale, m_effectScale);
     if (!createTexture(*created, error))
         return nullptr;
     recomputePages(*created);
@@ -1326,11 +1329,12 @@ bool GsTargetCache::prepareColorView(GsSurface &surface, std::string &error) {
             return true;
         }
     }
-    // Whole CT32 pages at the surface's own scale: GPU page copies between
-    // them keep an upscaled target's detail, where a resolve would bring it
-    // down to native and stall for the readback.
-    auto nativePages = [&surface](const GsSurface &s) {
-        return s.psm == GS_PSM_CT32 && s.scale == surface.scale && (s.base & 31u) == 0u &&
+    // Whole CT32 pages: GPU page copies between them keep an upscaled
+    // target's detail, where a resolve would bring it down to native and
+    // stall for the readback. Between surfaces of different scales the pages
+    // go as nearest blits (Rogue Galaxy: changed).
+    auto nativePages = [](const GsSurface &s) {
+        return s.psm == GS_PSM_CT32 && (s.base & 31u) == 0u &&
                s.width == s.bufferWidth * 64u && s.height % 32u == 0u &&
                s.pages.count() == s.bufferWidth * (s.height / 32u);
     };
@@ -1385,6 +1389,11 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         m_device.cancelPending();
         return fail("SDL_BeginGPUCopyPass");
     }
+    struct Blit {
+        const GsSurface *source;
+        uint32_t srcColumn, srcRow, dstColumn, dstRow, pages, rows;
+    };
+    std::vector<Blit> blits;
     for (auto *source : sources) {
         const GsPageSet shared = source->ownedPages & surface.pages;
         const uint32_t scale = std::max(surface.scale, 1u);
@@ -1419,6 +1428,11 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
             page += run - 1u;
         }
         for (const Block &block : blocks) {
+            if (std::max(source->scale, 1u) != scale) {
+                blits.push_back({source, block.srcColumn, block.srcRow, block.dstColumn, block.dstRow, block.pages,
+                                 block.rows});
+                continue;
+            }
             SDL_GPUTextureLocation from{};
             from.texture = source->texture;
             from.x = block.srcColumn * 64u * scale;
@@ -1432,6 +1446,26 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         }
     }
     SDL_EndGPUCopyPass(copy);
+    // The pages of a surface at another scale, scaled: nearest, so an
+    // upscale repeats each pixel and a downscale keeps one of its samples,
+    // as a resolve and an upload would (Rogue Galaxy: added).
+    for (const Blit &block : blits) {
+        const uint32_t from = std::max(block.source->scale, 1u), to = std::max(surface.scale, 1u);
+        SDL_GPUBlitInfo blit{};
+        blit.source.texture = block.source->texture;
+        blit.source.x = block.srcColumn * 64u * from;
+        blit.source.y = block.srcRow * 32u * from;
+        blit.source.w = 64u * block.pages * from;
+        blit.source.h = 32u * block.rows * from;
+        blit.destination.texture = surface.texture;
+        blit.destination.x = block.dstColumn * 64u * to;
+        blit.destination.y = block.dstRow * 32u * to;
+        blit.destination.w = 64u * block.pages * to;
+        blit.destination.h = 32u * block.rows * to;
+        blit.load_op = SDL_GPU_LOADOP_LOAD;
+        blit.filter = SDL_GPU_FILTER_NEAREST;
+        SDL_BlitGPUTexture(commands, &blit);
+    }
     for (auto *source : sources) {
         const GsPageSet shared = source->ownedPages & surface.pages;
         surface.ownedPages |= shared;

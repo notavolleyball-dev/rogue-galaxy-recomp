@@ -28,6 +28,7 @@ the main checkout does the same with power; this one reads frame rate.
 | Upscaled taps read directly inside a clamp | 1a8b8b8 | 55.9 | 38,404 | 55% |
 | The fast path for CT24 and CT16 views too | 4e48219 | (timed: 53.5 -> 55.4) | | |
 | A texture at its own size: each axis wraps once | 24792e0 | 59.9 (the 60 fps cap) | 38,393 | 53% |
+| The blur buffers at scale 2, pages moved between scales on the GPU | "The blur buffers at scale 2" | 59.9; GPU busy 99% -> 84%, 185 -> 160 W | 38,555 | 49% |
 
 The VU1's own mode (`0`) gets the GS-side ones as well (55.6 fps at 8x
 before the last two). At 3x the GPU's power went 61.3 -> 46.1 W over the
@@ -126,7 +127,10 @@ memory's padding path.
    A sliver rule (a draw whose reads overlap the writes since the snapshot
    by two texels or less reuses it) was tried: 111 -> 92 snapshots a frame,
    119 pixels off by 1 or 2 levels; not kept.
-2. **The effect buffers at the scene's scale.** The 192x192 blur and bloom
+2. **The effect buffers at the scene's scale** (done for the two blur
+   buffers: `DQ8_GFX_EFFECT_SCALE`, 2 by default; it costs a few pixels by a
+   few levels, see above).
+   Originally: The 192x192 blur and bloom
    buffers are 1536x1536 at 8x, larger than the PS2's frame. At a scale of
    2 they would cost a sixteenth in fill and copies. The backend keeps
    every target at one scale, and these buffers alias others' pages, so

@@ -1992,7 +1992,9 @@ struct SdlGpuBackend::Impl {
                              surface.base, surface.psm, surface.width, surface.height,
                              paddingSource ? paddingSource->base : 0u, paddingSource ? paddingSource->scale : 0u, scale,
                              gpuTail.count(), tailPages.count());
-            if (paddingSource && (paddingSource == &surface || paddingSource->scale != scale ||
+            // An owner at another scale gives its cells by blit (Rogue
+            // Galaxy: changed).
+            if (paddingSource && (paddingSource == &surface ||
                                   paddingSource->psm != GS_PSM_CT32 || (view16 && gpuTail != tailPages)))
                 paddingSource = nullptr;
             if (paddingSource && view16 &&
@@ -2120,6 +2122,12 @@ struct SdlGpuBackend::Impl {
             for (uint32_t column = 0u; column < surface.bufferWidth; ++column) {
                 const uint32_t page = ((surface.base >> 5u) + pageRow * surface.bufferWidth + column) % kGsPageCount;
                 const uint32_t relative = (page + kGsPageCount - (paddingSource->base >> 5u)) % kGsPageCount;
+                if (std::max(paddingSource->scale, 1u) != scale) {
+                    paddingBlits.push_back({paddingScratch, (relative % paddingSource->bufferWidth) * 64u,
+                                            (relative / paddingSource->bufferWidth) * 32u, column * 64u,
+                                            pageRow * 32u, 64u, 32u});
+                    continue;
+                }
                 SDL_GPUTextureLocation from{}, to{};
                 from.texture = paddingSource->texture;
                 from.x = (relative % paddingSource->bufferWidth) * 64u * scale;
@@ -2131,33 +2139,62 @@ struct SdlGpuBackend::Impl {
             }
         } else if (paddingSource) {
             // Each padding texel's page, through this surface's whole-page
-            // CT32 layout, is a 64x32 cell of the source: a row segment
-            // within one page is one row segment there.
+            // CT32 layout, is a 64x32 cell of the source: the part of a
+            // padding region within one page is one rectangle there, copied,
+            // or blitted (nearest) from an owner at another scale (Rogue
+            // Galaxy: changed, from a copy a row).
+            const uint32_t from = std::max(paddingSource->scale, 1u);
             for (const auto &region : padding.uploads) {
-                for (uint32_t y = region.y0; y < region.y1; ++y) {
+                for (uint32_t y = region.y0; y < region.y1;) {
+                    const uint32_t rows = std::min(region.y1 - y, 32u - y % 32u);
                     for (uint32_t x = region.x0; x < region.x1;) {
                         const uint32_t segment = std::min(region.x1 - x, 64u - x % 64u);
                         const uint32_t page =
                             ((surface.base >> 5u) + (y / 32u) * surface.bufferWidth + x / 64u) % kGsPageCount;
-                        if (!gpuTail.test(page)) {
-                            x += segment;
-                            continue;
+                        if (gpuTail.test(page)) {
+                            const uint32_t relative =
+                                (page + kGsPageCount - (paddingSource->base >> 5u)) % kGsPageCount;
+                            const uint32_t sx = (relative % paddingSource->bufferWidth) * 64u + x % 64u;
+                            const uint32_t sy = (relative / paddingSource->bufferWidth) * 32u + y % 32u;
+                            if (from == scale) {
+                                SDL_GPUTextureLocation source{}, destination{};
+                                source.texture = paddingSource->texture;
+                                source.x = sx * scale;
+                                source.y = sy * scale;
+                                destination.texture = feedbackTexture;
+                                destination.x = x * scale;
+                                destination.y = y * scale;
+                                SDL_CopyGPUTextureToTexture(copy, &source, &destination, segment * scale, rows * scale,
+                                                            1u, false);
+                            } else {
+                                paddingBlits.push_back({feedbackTexture, sx, sy, x, y, segment, rows});
+                            }
                         }
-                        const uint32_t relative = (page + kGsPageCount - (paddingSource->base >> 5u)) % kGsPageCount;
-                        SDL_GPUTextureLocation from{}, to{};
-                        from.texture = paddingSource->texture;
-                        from.x = ((relative % paddingSource->bufferWidth) * 64u + x % 64u) * scale;
-                        from.y = ((relative / paddingSource->bufferWidth) * 32u + y % 32u) * scale;
-                        to.texture = feedbackTexture;
-                        to.x = x * scale;
-                        to.y = y * scale;
-                        SDL_CopyGPUTextureToTexture(copy, &from, &to, segment * scale, scale, 1u, false);
                         x += segment;
                     }
+                    y += rows;
                 }
             }
         }
         SDL_EndGPUCopyPass(copy);
+        for (const PaddingBlit &cell : paddingBlits) {
+            const uint32_t from = std::max(paddingSource->scale, 1u);
+            SDL_GPUBlitInfo blit{};
+            blit.source.texture = paddingSource->texture;
+            blit.source.x = cell.sourceX * from;
+            blit.source.y = cell.sourceY * from;
+            blit.source.w = cell.width * from;
+            blit.source.h = cell.height * from;
+            blit.destination.texture = cell.destination;
+            blit.destination.x = cell.x * scale;
+            blit.destination.y = cell.y * scale;
+            blit.destination.w = cell.width * scale;
+            blit.destination.h = cell.height * scale;
+            blit.load_op = SDL_GPU_LOADOP_LOAD;
+            blit.filter = SDL_GPU_FILTER_NEAREST;
+            SDL_BlitGPUTexture(commands, &blit);
+        }
+        paddingBlits.clear();
         if (paddingSource && view16) {
             const SDL_Rect row{0, int(surface.height * scale), int(surface.width * scale), int(scale)};
             if (!device.recordReinterpret(commands, paddingScratch, feedbackTexture, surface.width, height / scale,
@@ -2169,6 +2206,15 @@ struct SdlGpuBackend::Impl {
         ++stats.feedbackCopies;
         return feedbackTexture;
     }
+
+    // A padding cell from an owner at another scale, blitted after the copy
+    // pass into the snapshot or a CT16 view's scratch (Rogue Galaxy: added);
+    // in GS pixels.
+    struct PaddingBlit {
+        SDL_GPUTexture *destination;
+        uint32_t sourceX, sourceY, x, y, width, height;
+    };
+    std::vector<PaddingBlit> paddingBlits;
 
     // The scratch a CT16 view's padding row is reinterpreted from (Rogue
     // Galaxy: added): at least this big, RGBA8, sampled by the shader.
@@ -4898,6 +4944,25 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
         });
     }
     m_impl->targets->setScale(m_impl->scale);
+    // DQ8_GFX_EFFECT_SCALE=N (Rogue Galaxy: added): Rogue Galaxy's two blur
+    // buffers, 192x192 at 0x2C40 (a zoom streak, twenty passes of it added
+    // to itself a frame) and 0x3800 (a glow, six), at scale N, 2 unless set;
+    // 0 keeps them at the scene's. DQ8_GFX_EFFECT_BASES=hex,hex names others.
+    {
+        const char *scaleValue = std::getenv("DQ8_GFX_EFFECT_SCALE");
+        const uint32_t effectScale = scaleValue ? static_cast<uint32_t>(std::strtoul(scaleValue, nullptr, 10)) : 2u;
+        std::vector<uint32_t> bases;
+        const char *baseValue = std::getenv("DQ8_GFX_EFFECT_BASES");
+        for (const char *cursor = baseValue ? baseValue : "2c40,3800"; *cursor;) {
+            char *end = nullptr;
+            const unsigned long base = std::strtoul(cursor, &end, 16);
+            if (end == cursor)
+                break;
+            bases.push_back(static_cast<uint32_t>(base));
+            cursor = *end == ',' ? end + 1 : end;
+        }
+        m_impl->targets->setEffectBuffers(std::move(bases), effectScale);
+    }
     m_impl->targets->reset();
     m_impl->textures->reset();
 }
