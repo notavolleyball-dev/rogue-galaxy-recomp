@@ -393,7 +393,7 @@ std::string SdlGpuDevice::driverName() const {
 bool SdlGpuDevice::reinterpretColor(SDL_GPUTexture *source, SDL_GPUTexture *destination,
                                     uint32_t width, uint32_t height, bool destination16, uint32_t scale,
                                     std::string &error) {
-    SDL_GPUCommandBuffer *commands = pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, "reinterpret (format view)");
     if (!commands)
         return false;
     if (!recordReinterpret(commands, source, destination, width, height, destination16, scale, nullptr, error)) {
@@ -574,7 +574,7 @@ bool SdlGpuDevice::localCopy(SDL_GPUTexture *source, SDL_GPUTexture *destination
     std::memcpy(mapped, mapping.data(), mapping.size() * sizeof(uint32_t));
     SDL_UnmapGPUTransferBuffer(m_device, m_localCopyUpload);
 
-    SDL_GPUCommandBuffer *commands = pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, "local copy");
     if (!commands)
         return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
@@ -846,7 +846,7 @@ bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palett
     std::memcpy(mapped, palette, 256u * 4u);
     SDL_UnmapGPUTransferBuffer(m_device, m_index8Upload);
 
-    SDL_GPUCommandBuffer *commands = pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, "expand indexed texture");
     if (!commands)
         return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
@@ -1038,14 +1038,16 @@ bool SdlGpuDevice::downloadTexture(SDL_GPUTexture *texture, uint32_t width, uint
     return true;
 }
 
-SDL_GPUCommandBuffer *SdlGpuDevice::pendingCommands(std::string &error) {
+SDL_GPUCommandBuffer *SdlGpuDevice::pendingCommands(std::string &error, const char *what) {
     if (!m_pending) {
         m_pending = SDL_AcquireGPUCommandBuffer(m_device);
         if (!m_pending)
             error = std::string("SDL_AcquireGPUCommandBuffer(pending): ") + SDL_GetError();
         else if (m_gpuTimes)
-            SDL_InsertGPUDebugLabel(m_pending, "other: uploads, refreshes, copies");
+            SDL_InsertGPUDebugLabel(m_pending, "other");
     }
+    if (m_pending && m_gpuTimes && what)
+        SDL_InsertGPUDebugLabel(m_pending, what);
     return m_pending;
 }
 

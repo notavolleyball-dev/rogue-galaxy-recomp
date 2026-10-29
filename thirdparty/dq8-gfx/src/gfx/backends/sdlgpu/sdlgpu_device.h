@@ -220,7 +220,9 @@ public:
     // draws into it and submits it, so what was recorded first runs first,
     // as with immediate submissions; a readback or a present submits it
     // first. Only the GS worker thread records into it.
-    SDL_GPUCommandBuffer *pendingCommands(std::string &error);
+    // what (Rogue Galaxy: added): with gpuTimes(), the label the GPU time
+    // of the work recorded next is logged under.
+    SDL_GPUCommandBuffer *pendingCommands(std::string &error, const char *what = nullptr);
     bool hasPending() const { return m_pending != nullptr; }
     // Submits what is pending, if anything, with a fence `completedSerial`
     // reports on.

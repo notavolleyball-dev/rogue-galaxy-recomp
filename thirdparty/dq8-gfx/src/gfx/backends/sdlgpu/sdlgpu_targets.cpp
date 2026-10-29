@@ -1031,7 +1031,7 @@ bool GsTargetCache::resolveSurfaces(const std::vector<GsSurface *> &surfaces,
         return false;
     // Kept for the next resolve: this one waits for its fence before returning.
     auto release = []() {};
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "resolve to local memory");
     if (!commands) {
         release();
         return false;
@@ -1378,7 +1378,7 @@ bool GsTargetCache::importColorPages(GsSurface &surface,
         error = std::string(operation) + "(target page import): " + SDL_GetError();
         return false;
     };
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "import pages from other targets");
     if (!commands) return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
@@ -1504,7 +1504,7 @@ bool GsTargetCache::downloadScaled(GsSurface &surface,
     // Both are kept for the next resolve.
     auto release = []() {};
 
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "download scaled");
     if (!commands) {
         release();
         return false;
@@ -1591,7 +1591,7 @@ bool GsTargetCache::patchNative(GsSurface &surface, const GsRegion &region, std:
         GSMem::ReadRowCT32(m_vram.data(), surface.base, surface.bufferWidth, region.x0, y, width,
                            mapped + size_t(y - region.y0) * width * 4u);
     SDL_UnmapGPUTransferBuffer(device, upload);
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "patch target (native)");
     if (!commands) return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
@@ -1697,7 +1697,7 @@ bool GsTargetCache::applyCpuPatches(GsSurface &surface, std::string &error) {
         offset += patchBytes(region);
     }
     SDL_UnmapGPUTransferBuffer(device, upload);
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "patch target (cpu)");
     if (!commands) return false;
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     if (!copy) {
@@ -1769,7 +1769,7 @@ bool GsTargetCache::uploadNative(GsSurface &surface,
     std::memcpy(mapped, pixels.data(), bytes);
     SDL_UnmapGPUTransferBuffer(device, upload);
 
-    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error);
+    SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "upload local memory to target");
     if (!commands) {
         return false;
     }

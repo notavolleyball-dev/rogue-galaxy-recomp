@@ -2072,7 +2072,7 @@ struct SdlGpuBackend::Impl {
         // The copy below overwrites the snapshot in place (see recordSnapshot).
         if (cycleSnapshots && !device.reservePending(uint64_t(width) * height * 4u, error))
             return nullptr;
-        SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "feedback copy (sampled target)");
         if (!commands)
             return nullptr;
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
@@ -3246,7 +3246,7 @@ struct SdlGpuBackend::Impl {
 
         endPass();
         if (device.gpuTimes())
-            SDL_InsertGPUDebugLabel(commands, "other: uploads, refreshes, copies");
+            SDL_InsertGPUDebugLabel(commands, "other");
         ++stats.drawFlushes;
         recordedDraws += static_cast<uint32_t>(batches.size());
         vertexStream.base += static_cast<uint32_t>(vertices.size());
@@ -3276,7 +3276,7 @@ struct SdlGpuBackend::Impl {
 
     bool clearSurface(GsSurface &surface, float r, float g, float b, float a) {
         std::string error;
-        SDL_GPUCommandBuffer *commands = device.pendingCommands(error);
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "clear surface");
         if (!commands)
             return setError(std::move(error));
         SDL_GPUColorTargetInfo info{};
