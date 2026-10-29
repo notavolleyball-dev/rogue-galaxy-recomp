@@ -113,3 +113,19 @@ the same E and F, most the same A, and they differ in B, C and D:
 | `a953fc53a82da5ff` | = | = | x | = |
 
 So the native side is per slot piece, composed, as the code is.
+
+## In the game, and on the GPU (2026-10-28)
+
+The native code moved to `src/vu1_native.{h,cpp}`, where the game uses it
+(`RG_VU1_NATIVE`, docs/DEVELOPMENT.md) and this oracle wraps it
+(`native.cpp`); the GIF decoder moved to `src/gif_events.{h,cpp}`. It knows
+three D pieces now (no culling, the guard band, the guard band and
+backfaces), found by a hash of each slot's code, so any image with those
+pieces is done: four programs in the recording, 21,120 chunks.
+
+`tools/vu1/oracle/native-run.sh NAME MODE` logs the same frame of the
+field walk in each mode; `tools/bench/vram2png.py` draws two frames and
+their difference. On that frame against the VU1: `skip` (the VU1 not run
+for those chunks) differs in 3 pixels by more than 8 levels; `gpu` (strips
+transformed by `gs_native.vert`, the clipping chunks included, since the GPU
+clips) in 54. Only triangle lists still ran on the VU1.

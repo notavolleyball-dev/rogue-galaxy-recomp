@@ -68,6 +68,16 @@ struct GsVertexUniforms {
     float adjust[4] = {0.0f, 0.0f, 1.0f, 0.0f};
 };
 
+// gs_native.vert's: a native strip's transform (GSNativeMesh) after
+// GsVertexUniforms' two (Rogue Galaxy: added).
+struct GsNativeVertexUniforms {
+    GsVertexUniforms base;
+    float matrix[4][4] = {};
+    float fog[4] = {};
+    float colorMax[4] = {};
+    float misc[4] = {}; // XYOFFSET x and y in pixels, 1 / the depth maximum
+};
+
 struct GsFragmentUniforms {
     uint32_t control[4] = {0u, 0u, 0u, 0u};
     float fog[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -111,6 +121,10 @@ struct GsPipelineKey {
     // The draw shader that reads the destination from a snapshot bound as a
     // second texture, with the blend done in the shader (Rogue Galaxy: added).
     uint8_t destinationCopy = 0u;
+    // A native strip (Rogue Galaxy: added): gs_native.vert, a triangle strip,
+    // and the SDL_GPUCullMode its backfaces need.
+    uint8_t nativeMesh = 0u;
+    uint8_t cullMode = 0u;
 
     bool operator==(const GsPipelineKey &other) const = default;
 };
@@ -232,6 +246,7 @@ public:
 private:
     SDL_GPUDevice *m_device = nullptr;
     SDL_GPUShader *m_vertexShader = nullptr;
+    SDL_GPUShader *m_nativeVertexShader = nullptr;
     SDL_GPUShader *m_fragmentShader = nullptr;
     SDL_GPUShader *m_destinationShader = nullptr;
     SDL_GPUSampler *m_sampler = nullptr;

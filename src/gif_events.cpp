@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace rg::oracle
+namespace rg::gif
 {
 namespace
 {
@@ -332,4 +332,4 @@ std::string describe(const GifEvent &event)
     return line;
 }
 
-} // namespace rg::oracle
+} // namespace rg::gif

@@ -9,7 +9,7 @@
 // give the same events draw the same thing, however they were laid out (PACKED
 // or REGLIST, one tag or several), which is what a native replacement of a VU1
 // program has to match.
-namespace rg::oracle
+namespace rg::gif
 {
 
 struct GifEvent
@@ -88,4 +88,4 @@ Comparison compare(const std::vector<GifEvent> &reference, const std::vector<Gif
 
 std::string describe(const GifEvent &event);
 
-} // namespace rg::oracle
+} // namespace rg::gif

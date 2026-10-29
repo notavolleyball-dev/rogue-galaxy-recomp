@@ -185,12 +185,17 @@ struct DrawBatch {
     // The camera its VU1 program ran under (GSPrimitiveBatch::sourceCamera,
     // ps2_gs_detail::CameraRegistry; 0 without one) (Rogue Galaxy: added).
     uint32_t camera = 0u;
+    // A native strip (GSNativeMesh), drawn alone with gs_native.vert and
+    // these uniforms (Rogue Galaxy: added).
+    bool native = false;
+    GsNativeVertexUniforms nativeUniforms{};
 
     // Everything except the vertex range; two consecutive primitives with the
     // same answer here can share one draw call. One that needs a snapshot of
     // its own starts a new batch.
     bool sameStateAs(const DrawBatch &other) const {
-        return !other.snapshot && feedback == other.feedback && destination == other.destination &&
+        return !native && !other.native &&
+               !other.snapshot && feedback == other.feedback && destination == other.destination &&
                source == other.source &&
                color == other.color && depth == other.depth &&
                pipeline == other.pipeline && texture == other.texture &&
@@ -1027,6 +1032,12 @@ struct SdlGpuBackend::Impl {
     // multiplies it (4 makes it easy to see). The game tags those draws only
     // when RG_JITTER or DQ8_GFX_PROFILE_CYCLE is set (src/vif1_thread.cpp).
     const bool jitterScene = std::getenv("RG_JITTER") != nullptr;
+    // Native strips (Rogue Galaxy: added): the one submitNative hands
+    // submit(); DQ8_GFX_NATIVE_CPU=1 expands every strip on the CPU, and
+    // DQ8_GFX_NATIVE_CULL_FLIP=1 culls the other face.
+    const GSNativeMesh *nativeMesh = nullptr;
+    const bool nativeOnCpu = std::getenv("DQ8_GFX_NATIVE_CPU") != nullptr;
+    const bool nativeCullFlip = std::getenv("DQ8_GFX_NATIVE_CULL_FLIP") != nullptr;
     // RG_CAMERA_LOG=N (Rogue Galaxy: added): every N presents, the cameras the
     // scene's draws ran under since the last line, busiest first, with the
     // projection read back from them. Needs RG_JITTER or the profile cycle
@@ -1564,6 +1575,97 @@ struct SdlGpuBackend::Impl {
         out.a = static_cast<float>(vertex.a) / 255.0f;
         out.fog = static_cast<float>(vertex.fog) / 255.0f;
         return out;
+    }
+
+    // A native strip (GSNativeMesh, Rogue Galaxy: added) where submit() would
+    // have appended the stand-in primitive submitNative gave it: its vertices
+    // as the program's inputs, for gs_native.vert, in a batch of its own. A
+    // draw that reads its target per primitive (a snapshot, feedback, a
+    // destination read) gets the triangles the program would have kicked
+    // instead, from the CPU, under one snapshot.
+    void appendNative(const GSNativeMesh &mesh, const GSPrimitiveBatch &standIn, DrawBatch &draw,
+                      float offsetX, float offsetY, float depthScale) {
+        if (draw.snapshot || draw.feedback || draw.destination || nativeOnCpu) {
+            ++stats.nativeMeshesExpanded;
+            GSPrimitiveBatch triangle = standIn;
+            gsExpandNativeMesh(mesh, [&](const GSVertex *corners) {
+                for (size_t i = 0; i < 3u; ++i)
+                    triangle.vertices[i] = corners[i];
+                appendPrimitive(triangle, offsetX, offsetY, depthScale);
+            });
+            return;
+        }
+        ++stats.nativeMeshes;
+        for (const GSNativeMesh::Vertex &in : mesh.vertices) {
+            GsGpuVertex out{};
+            out.x = in.x;
+            out.y = in.y;
+            out.z = in.z;
+            out.q = in.u;
+            out.s = in.v;
+            out.r = in.r;
+            out.g = in.g;
+            out.b = in.b;
+            out.a = in.a;
+            vertices.push_back(out);
+        }
+        draw.native = true;
+        draw.pipeline.nativeMesh = 1u;
+        // The program skips a triangle whose cross product, times the strip's
+        // alternating sign, is negative; the GPU's strip alternates the
+        // same way, so one face is culled throughout.
+        if (mesh.header.backface)
+            draw.pipeline.cullMode = static_cast<uint8_t>(
+                (mesh.header.winding > 0.0f) != nativeCullFlip ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK);
+        GsNativeVertexUniforms &u = draw.nativeUniforms;
+        u.base = draw.vertexUniforms;
+        std::memcpy(u.matrix, mesh.header.matrix, sizeof(u.matrix));
+        std::memcpy(u.fog, mesh.header.fog, sizeof(u.fog));
+        std::memcpy(u.colorMax, mesh.header.colorMax, sizeof(u.colorMax));
+        u.misc[0] = offsetX;
+        u.misc[1] = offsetY;
+        u.misc[2] = depthScale;
+    }
+
+    // A native strip through submit(): a stand-in primitive covering the
+    // scissor and sampling the whole texture, with the strip's alpha, gets
+    // the targets, texture, flushes and pages any primitive there would; the
+    // strip goes where its vertices would (appendNative).
+    void submitNative(const GSNativeMesh &mesh, const GSDrawState &state) {
+        if (mesh.vertices.size() < 3u)
+            return;
+        GSPrimitiveBatch standIn{};
+        standIn.vertexCount = 3u;
+        standIn.state = state;
+        const GSContext &context = state.context;
+        const float x0 = static_cast<float>(context.scissor.x0) + static_cast<float>(context.xyoffset.ofx) / 16.0f;
+        const float y0 = static_cast<float>(context.scissor.y0) + static_cast<float>(context.xyoffset.ofy) / 16.0f;
+        const float x1 = x0 + static_cast<float>(context.scissor.x1 + 1u - context.scissor.x0);
+        const float y1 = y0 + static_cast<float>(context.scissor.y1 + 1u - context.scissor.y0);
+        uint8_t alphaLow = 0xFFu, alphaHigh = 0u;
+        for (const GSNativeMesh::Vertex &v : mesh.vertices) {
+            const uint8_t a = static_cast<uint8_t>(gsNativeFtoi(std::fmin(v.a, mesh.header.colorMax[3]), 1.0f));
+            alphaLow = std::min(alphaLow, a);
+            alphaHigh = std::max(alphaHigh, a);
+        }
+        const float corners[3][2] = {{x0, y0}, {x1, y0}, {x0, y1}};
+        const float st[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+        for (size_t i = 0; i < 3u; ++i) {
+            GSVertex &v = standIn.vertices[i];
+            v.x = corners[i][0];
+            v.y = corners[i][1];
+            v.a = i == 0u ? alphaLow : alphaHigh;
+            v.s = st[i][0];
+            v.t = st[i][1];
+            v.q = 1.0f;
+            v.u = static_cast<uint16_t>(st[i][0] * state.textureWidth * 16.0f);
+            v.v = static_cast<uint16_t>(st[i][1] * state.textureHeight * 16.0f);
+        }
+        // Never the same-state path: that would append the stand-in.
+        last.valid = false;
+        nativeMesh = &mesh;
+        submit(standIn);
+        nativeMesh = nullptr;
     }
 
     // Expands one GS primitive into triangles. Points and lines become thin
@@ -2619,7 +2721,10 @@ struct SdlGpuBackend::Impl {
             1.0f / static_cast<float>(depthMaximumForPsm(context.zbuf.psm));
 
         const uint32_t firstVertex = static_cast<uint32_t>(vertices.size());
-        appendPrimitive(batch, offsetX, offsetY, depthScale);
+        if (nativeMesh)
+            appendNative(*nativeMesh, batch, draw, offsetX, offsetY, depthScale);
+        else
+            appendPrimitive(batch, offsetX, offsetY, depthScale);
         const uint32_t addedVertices = static_cast<uint32_t>(vertices.size()) - firstVertex;
         if (addedVertices == 0u)
             return;
@@ -2699,7 +2804,7 @@ struct SdlGpuBackend::Impl {
         // past the buffer decides per vertex whether the surface widens.
         const bool widens = static_cast<uint32_t>(context.scissor.x1) + 1u > bufferPixels && bufferPixels != 0u;
         last.valid = !feedbackRecorded && !draw.feedback && !draw.destination && !draw.source && !clearsWhole &&
-                     !widens &&
+                     !widens && !nativeMesh &&
                      (!state.prim.tme || plainTexture);
         if (last.valid) {
             std::memcpy(&last.state, &state, sizeof(last.state));
@@ -2923,8 +3028,12 @@ struct SdlGpuBackend::Impl {
                 {destinationTexture ? destinationTexture : dummyTexture, device.sampler()}};
             SDL_BindGPUFragmentSamplers(pass, 0u, textureBindings, batch.destination ? 2u : 1u);
 
-            SDL_PushGPUVertexUniformData(commands, 0u, &batch.vertexUniforms,
-                                         sizeof(batch.vertexUniforms));
+            if (batch.native)
+                SDL_PushGPUVertexUniformData(commands, 0u, &batch.nativeUniforms,
+                                             sizeof(batch.nativeUniforms));
+            else
+                SDL_PushGPUVertexUniformData(commands, 0u, &batch.vertexUniforms,
+                                             sizeof(batch.vertexUniforms));
             SDL_PushGPUFragmentUniformData(commands, 0u, &batch.fragmentUniforms,
                                            sizeof(batch.fragmentUniforms));
             SDL_DrawGPUPrimitives(pass, batch.vertexCount, 1u, vertexBase + batch.firstVertex, 0u);
@@ -3286,7 +3395,7 @@ struct SdlGpuBackend::Impl {
         std::fprintf(stderr,
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
-                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages)\n",
+                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3295,7 +3404,9 @@ struct SdlGpuBackend::Impl {
                      d(stats.flushLocalCopy, previousReasons.flushLocalCopy), d(stats.flushPresent, previousReasons.flushPresent),
                      d(stats.flushRewrite, previousReasons.flushRewrite), d(stats.drawFlushes, previousReasons.drawFlushes),
                      d(stats.coveredReleases, previousReasons.coveredReleases),
-                     d(stats.coveredPages, previousReasons.coveredPages));
+                     d(stats.coveredPages, previousReasons.coveredPages),
+                     d(stats.nativeMeshes, previousReasons.nativeMeshes),
+                     d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -4606,6 +4717,12 @@ void SdlGpuBackend::Submit(const GSPrimitiveBatch &batch) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->submit(batch);
+}
+
+void SdlGpuBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state) {
+    std::lock_guard lock(m_impl->mutex);
+    Impl::ScopedTimer timer(m_impl->backendNanos);
+    m_impl->submitNative(mesh, state);
 }
 
 void SdlGpuBackend::SubmitMany(const GSPrimitiveBatch *const *batches, size_t count) {

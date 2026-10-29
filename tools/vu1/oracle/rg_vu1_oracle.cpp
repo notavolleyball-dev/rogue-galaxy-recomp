@@ -18,9 +18,9 @@
 // A candidate turns a run into GS events (gif_events.h): the VU1 engines run
 // the recorded program from the registers and data memory the game had and
 // decode what it kicks; a native replacement of a program family (phase 1 of
-// docs/NATIVE-RENDERER.md) computes the events itself: `native` is the
-// field's strip program (native_strip.cpp), which lists the runs it left to
-// the VU1 and why. Runs are replayed in
+// docs/NATIVE-RENDERER.md) computes the events itself: `native` is
+// src/vu1_native.h (native.cpp), which lists the runs it did, and those it
+// left to the VU1 and why. Runs are replayed in
 // the file's order on one VU1, since an MSCNT continues the run before it.
 //
 // A run's program is its code image and the entry of the MSCAL that began it;
@@ -442,7 +442,7 @@ int main(int argc, char **argv)
         stepper = options.coverage ? static_cast<Vu1Engine *>(candidates.back().get()) : nullptr;
     }
     if (options.candidate == "native")
-        candidates.push_back(makeNativeStrip());
+        candidates.push_back(makeNative());
     if (candidates.empty())
     {
         usage();
@@ -516,7 +516,7 @@ int main(int argc, char **argv)
                     total.comparison.maxStq);
         for (const auto &[reason, count] : candidate->declined())
         {
-            std::printf("left to the VU1: %u runs, %s\n", count, reason.c_str());
+            std::printf("%9u runs  %s\n", count, reason.c_str());
         }
         allMatch = allMatch && total.identical == total.runs;
     }

@@ -15,6 +15,8 @@
 namespace rg::oracle
 {
 
+using namespace rg::gif;
+
 struct Run
 {
     rg::vu1replay::RunHeader header{};
@@ -46,11 +48,12 @@ public:
     virtual void run(const Recording &recording, const Run &run, std::vector<GifEvent> &events) = 0;
     // The registers the last run ended with, where the candidate has them.
     virtual const VU1State *endState() const { return nullptr; }
-    // Runs of its programs it left to the VU1, by reason, for the report.
+    // Lines for the report under its table, with a run count each (what it
+    // did natively, what it left to the VU1 and why).
     virtual std::map<std::string, uint32_t> declined() const { return {}; }
 };
 
-// The native replacement for the field's strip program (native_strip.cpp).
-std::unique_ptr<Candidate> makeNativeStrip();
+// The native programs of src/vu1_native.h (native.cpp).
+std::unique_ptr<Candidate> makeNative();
 
 } // namespace rg::oracle
