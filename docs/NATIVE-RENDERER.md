@@ -3,8 +3,10 @@
 A plan for retiring the GS emulation (local memory, page ownership, feedback
 snapshots, readbacks, the register-level state machine) and drawing the game
 with a renderer that knows what it is drawing: models with their matrices,
-named effect buffers, and a 2D layer. Proposed 2026-10-28, for review; nothing
-here is implemented except where a section says so.
+named effect buffers, and a 2D layer. Proposed 2026-10-28. Since then
+(2026-10-29) phase 1 is done for every VU1 program the recordings hold
+([VU1-NATIVE.md](VU1-NATIVE.md)), and phase 0's census of the effects is in
+"Phase 0" below; the rest is a plan.
 
 ## Why
 
@@ -12,17 +14,26 @@ The GS path works and is fast on a desktop card, but what it can do is capped
 by what reaches it: screen-space vertices with fixed-point Z, textures known
 only by a VRAM address, and effects drawn as hundreds of sprites that sample
 the buffer they write. From [GS-PASS-GRAPH.md](GS-PASS-GRAPH.md) and
-[GS-PERFORMANCE.md](GS-PERFORMANCE.md) (Salgin's first scene, 4x):
+[GS-PERFORMANCE.md](GS-PERFORMANCE.md) (Salgin's first scene, 4x), and again
+after the native VU1 programs and the GS audit ([GS-AUDIT.md](GS-AUDIT.md);
+the walk's last 25 s, standing in the street, 60 fps mode, `RG_VU1_NATIVE=gpu`,
+RX 6700 XT):
 
-| Today | Figure |
-|---|---|
-| Render passes a frame | 191, of which 2 are the 3D scene |
-| Snapshot passes (a copy of the whole target before a feedback draw) | 98 |
-| Draws no VU1 program made (post, clears, copies, 2D) | 219 of 805, 36 W of the GPU's 42-50 W of draw work |
-| GS worker thread | 66% of a core (130% on a core half as fast) |
-| VIF1 thread | 50-90% busy, the compiled VU1 programs 35-56% of it |
+| Figure | 2026-10-28, 4x | 2026-10-29, 3x | 2026-10-29, 1x |
+|---|---|---|---|
+| Render passes a frame | 191, of which 2 are the 3D scene | 199 | 187 |
+| Snapshot copies a frame (a copy of a target before a feedback draw) | 98 | 121 | 108 |
+| Draws a frame | 805, 219 of them no VU1 program's | 644 | 630 |
+| Texture transfers a frame | | 352 | 352 |
+| GS worker thread | 66% of a core | 46% of the wall | 43% of the wall |
+| VIF1 thread | 50-90% busy | 19% (no VU1 program runs) | 19% |
+| GPU | 42-50 W of draw work | 66% busy at 1.2 GHz, 32 W | 54% busy at 500 MHz, 15 W |
 
-The goal in the ledger is an iGPU at 1080p and Android handhelds. The features
+The per-frame counts barely move between 1x and 3x: what the frame costs at a
+low scale is the number of passes, copies and draws, not their pixels (GS-AUDIT's
+"Bandwidth" section). That is the work a native renderer removes.
+
+The goal in the ledger is an iGPU at 1080p, the Steam Deck ([FSR.md](FSR.md)) and Android handhelds. The features
 people expect from a modern port all need data the GS never sees:
 
 | Feature | What it needs | Blocked today by |
@@ -136,20 +147,25 @@ Phase 6 revisits it.
 ### Effects: hook the function, not the sprites
 
 Each effect is an EE function with parameters. The native pass takes those
-parameters and the scene's targets by name, never VRAM addresses. Candidates
-from the function maps; the GS stage letters are from [GS-PASS-GRAPH.md](GS-PASS-GRAPH.md),
-and which function makes which stage is phase 0's first job:
+parameters and the scene's targets by name, never VRAM addresses. The GS stage
+letters are from [GS-PASS-GRAPH.md](GS-PASS-GRAPH.md); which function makes
+which is from phase 0's census below (field and battle, 2026-10-29), in the
+order to port them:
 
-| Function | Likely stage | Native form |
+| Function | Stage, per frame | Native form |
 |---|---|---|
-| `GlareFilterDrawMaybe_17a0d0`, `BloomExtractBlurMaybe_179360` | A (69 single-draw snapshot passes), C | downsample + separable blur at the buffer's own size |
-| `DofFilterDrawMaybe_17d150`, `FocusFilterDrawMaybe_17c000` | D | one or two passes reading native depth |
-| `ModelDrawOffscreenCompositeMaybe_16aac0` and its callers | E (47 per-object pass pairs) | unknown until classified; possibly one pass with a stencil or object mask |
-| `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | F | a shadow pass at a chosen size; blur or PCF |
-| `CBlurDrawMaybe_1784e0`, `RefractionCaptureFrame_13ffd0` | ? | copy plus a sampled pass |
-| `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | F | native depth sampled in a small compute pass, read a frame late |
-| `ScreenColorFilterMaybe_179c60`, `ScreenFade*`, `ScreenFadeBlockCaptureFrame_177ed0` | | full-screen tint or fade; capture kept on the GPU |
-| `GfxFlipBuffersMaybe_143650` (41-strip copy to the display buffer) | | a present from the scene target, no copy |
+| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size |
+| `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | a direct draw; one offscreen pass per object only when its alpha is below 1 (to confirm) |
+| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size |
+| `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
+| `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
+| `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass |
+| `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
+| `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; not seen | as the glare |
+| `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
+| `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | native depth sampled in a small compute pass, read a frame late |
+| `ScreenColorFilterMaybe_179c60`, `ScreenFade*`, `ScreenFadeBlockCaptureFrame_177ed0` | fades (the battle's start) | full-screen tint or fade; capture kept on the GPU |
+| `GfxFlipBuffersMaybe_143650`, and the game thread's 32-strip transfer at the frame's end | | a present from the scene target, no copy |
 
 Each pass ships twice: a **parity** version that matches the GS path at 1x,
 which is the default, and later an **enhanced** version (HDR intermediate,
@@ -200,7 +216,7 @@ item message and a battle dissolve (screen captures), the item menu, a movie.
   Z buffer as texture), readbacks by reason, CLUT sources, any `MARK` the game
   sends.
 - Open questions to settle here: what stage E's per-object offscreen pairs
-  are for; whether a depth-probe read through `depth_reads.cpp` sees the depth
+  are for (what they are is answered below; why, not yet); whether a depth-probe read through `depth_reads.cpp` sees the depth
   the GPU drew (the GS backend never reads depth back, so local memory may hold
   a stale Z); what the screen overlay sprite (`ScreenTexOverlayWriteSpriteMaybe_16a890`,
   an `MSCAL` into slot B) relies on in VU1 memory.
@@ -209,7 +225,105 @@ item message and a battle dissolve (screen captures), the item menu, a movie.
 attributed. The output is a table in this document of families, functions and
 cases, which becomes the work list for phases 1-4.
 
+#### The effects census (2026-10-29)
+
+`RG_DRAW_ORIGINS=FILE` (`src/debug/draw_origins.h`) names the guest function
+behind every GS packet: it hooks the draw-list builders (a
+`DrawListBeginPrim` to its `DrawListEndPrim`, `DrawListAdd*`,
+`GfxBlitTexRect`, ...) and the frame's memory stack allocator, keeps which call
+site wrote which range of the frame's packet memory, and joins that with the EE
+address the VIF1 list took each `DIRECT` packet from. VU1 kicks are named by
+their program. Per origin it counts primitives, sprites and their pixels, the
+targets drawn and the textures read (primitives counted as the GS assembles them), reads of a render target (feedback when
+it is the target being drawn, reinterpreted when in another format family),
+and transfers. `tools/bench/origins_names.py` names the call sites and sums
+them by function; `RG_DRAW_ORIGINS_SEQ=N` writes one frame's order.
+`tools/bench/origins-run.sh` runs it on the File 01 walk (1x, 30 fps mode, VU1
+programs on the VU1).
+
+Two scenes so far: the Salgin streets after the walk (`field2`, 900 frames)
+and the scripted battle with the Hooded Man that `RG_FORCE_ENCOUNTER=1`
+starts on the same walk (`battle2`, 1,560 frames: the event before it and
+the battle). 99.8% and 99.7% of primitives attributed; what is left is the
+game thread's own GIF transfer at the end of each frame (32 strips of the
+frame onto itself, likely the flip's copy) and a few packets a frame.
+
+Per frame, field / battle. Block addresses are the GS's (base pointer x 64
+words): `00000` the frame, `02a00` the per-object buffer, `02c40` the glare's
+192x192 buffer, `03800` the shadow buffer, all CT32 unless a format follows.
+
+| Origin | Primitives | Sprite pixels (1x) | Target reads (feedback) | What it does |
+|---|---|---|---|---|
+| VU1 strips into `00000` | 16,200 / 7,600 | | 1,270 / 1,270 (none) | the scene; textures from uploaded pages and from TexAnime's targets |
+| VU1 strips with depth and bounds | 7,900 / 7,900 | | 105 / 92 (none) | the characters and objects, drawn offscreen into `02a00` (and `02a40`-`02b00`) against the scene's depth |
+| VU1 outlines | 590 / 510 | | | the toon outlines, mostly into `02a00` with their object |
+| VU1 shadow volumes | 1,120 / 1,130 | | | into `02a00`, counted by add and subtract blends |
+| VU1 overlay sprites | 94 / 93 | 219 K | 94 (none) | each object's bounds from `02a00`, read as CT24, blended into the frame |
+| `ModelDrawOffscreenCompositeMaybe_16aac0` | 90 / 79 | 535 K / 471 K | | clears each object's region of `02a00` before it is drawn: about 20 objects a frame |
+| `GlareFilterDrawMaybe_17a0d0` | 159 / 159 | 1.1 M | 154 (120) | the frame down to `02a00` and `02c40`, then 20 shifted adds of `02c40` onto itself (120 strips), then back onto the frame |
+| `DrawListBegin/EndPlaneShadowPass` | 52 / 52 | 980 K | 50 (48) | the volumes' mask from `02a00` to `03800`, 48 feedback sprites of blur, then onto the frame |
+| `TexAnimeTableApplyMaybe_162f50` | 174 / 176 | 123 K | none | animated textures: sprites from T8 and T4 pages into `02ae0`, `02b00`, `02b20`, `02b60`, `02a60`, which the scene then samples as CT32 textures; one local copy a frame |
+| `DofFilterDrawMaybe_17d150` | 48 / 14 | 57 K / 16 K | 48 / 14 (none) | the frame to `02a00` and blended back |
+| `GfxBlitTexRectPixels_141710` (and `...At`) | 18 / 18 | 233 K | 2 | the display buffer (`00e00`, read as CT24) copied into `02a40` |
+| `CBlurDrawMaybe`, `CBlurTexBlurMaybe`, `CBlurTexClearMaybe` | 10 / 10 | 479 K | 7 (4) | a small blur in `03f80`, and a full-frame blend |
+| `BloomExtractBlurMaybe_179360` | 0 / 4 | 0 / 186 K | 0 / 3 | the battle only, now and then |
+| `CharaDrawTranslucentPass_1f8250` | 1 / 1 | 66 K | 1 | the frame copied to `03b80` (for refraction) |
+| `MapDrawGroupRange_1e1710` | 12 / 12 | 49 K | | map pieces drawn into `02ac0` and `02a20`, and about 1 MB of texture uploads |
+| `DrawListFrameBegin_1425d0` | 16 / 16 | 230 K | | the clear |
+| UI: `MesWinDraw`, `FontDrawText*`, `MinimapDrawEntry` (into `02ca0`, then the frame), `CompassHudRender`, `UiDrawWidgets`, the gauges | 120 / 250 | 256 K / 159 K | 10 / 3 | |
+| Effects drawn as geometry: `EffectEntryDrawNodes`, `SunLightDraw` (the battle), `BattleEffectBurstDraw`, `SwordTrailDraw` | 17 / 98 | | | |
+| The game thread's GIF transfer | 32 / 32 | 229 K | 32 (32) | 32 strips of the frame onto itself at the end of it |
+| All | 26,700 / 18,200 | | | about 4 MB of texture data uploaded a frame; no readbacks |
+
+What it says for phases 3 and 4:
+
+- **One function makes stage A.** `GlareFilterDraw` is the blur the audit
+  found most expensive ([GS-AUDIT.md](GS-AUDIT.md), about 2.9 ms of the
+  frame at 8x with its snapshot copies). Its 120 feedback sprites are 20
+  shifted copies of one buffer in four diagonal directions (five rounds,
+  weights 23 to 4 of 128), each reading the result of the last. It is the first
+  native pass: a downsample and a separable blur at the buffer's own size.
+- **Stage E is the per-object composite.** About 20 objects a frame go
+  offscreen: a clear of the object's region of `02a00`
+  (`ModelDrawOffscreenComposite`), its strips and outline drawn there against
+  the scene's depth, then the overlay sprite program blends its bounds into
+  the frame. Why the game draws them offscreen (a fade's alpha over the whole
+  object, so it does not show its own overlaps, is the likely reason) is
+  still open; a native form is one pass per object only when its alpha is
+  below 1, and a direct draw otherwise.
+- **The shadow is the plane shadow pass**, not `ShadowMapRender` (not seen in
+  these scenes): volumes into `02a00`, a 48-sprite feedback blur in
+  `03800`, then onto the frame. Native: stencil volumes, a blur at the
+  buffer's own size.
+- **`TexAnimeTableApply` is render-to-texture** that the old table missed: 174
+  sprites a frame build animated textures in GS memory that the scene then
+  samples. Phase 4's address table must name these targets as textures, or
+  the pass becomes its own native render-to-texture.
+- **Textures are streamed, about 4 MB of image data a frame** in both
+  scenes, as on the PS2, whose 4 MB of GS memory holds only what the frame
+  draws. The native texture table has to recognize a page's content again
+  (the `gs_replacement_hash` key) rather than decode it again. Uploads into
+  pages a target last drew are likely the audit's "patches from local
+  memory" (0.9 ms at 8x); not yet checked.
+- **No readbacks** in either scene, and no local-to-local copies besides
+  TexAnime's one a frame.
+- **Not measured yet:** the GPU time and snapshot copies per origin (the
+  origin is not yet carried on the backend's batches; the targets above tie
+  them to the GPU-time labels in GS-AUDIT.md), and the town, menus, events
+  with item messages and dissolves, and movies.
+
 ### Phase 1: native model geometry (output replaced)
+
+**Done (2026-10-28/29), see [VU1-NATIVE.md](VU1-NATIVE.md).** Every program
+the recordings hold is native and agrees with the VU1 at zero tolerance
+(`check` on the walk: 1.5 million chunks, none different). It went another
+way than planned below: the programs are recognized by the hash of each
+piece (`src/vu1_native.cpp`), the strips go to the backend as `GSNativeMesh`
+(object-space vertices and a transform record, merged per draw state and
+culled on the CPU), and the oracle (`tools/vu1/oracle`) is the harness. In
+`gpu` mode no VU1 program runs on the walk. Still packets, not meshes: the
+outlines, shadow volumes, overlay sprites, particles and the projected
+texture. The plan as written:
 
 - `NativeDrawSink`, a narrow interface on the SDL GPU backend that accepts
   `NativeMesh` and `NativePass` commands into the same target cache and pass
@@ -229,8 +343,9 @@ measured GPU power within noise of the GS path.
 
 ### Phase 2: motion vectors and temporal upscaling
 
-Phase 2 builds on the uncommitted `RG_JITTER` Halton offsets and the
-`CameraRegistry` from `0020-gs-source-camera.patch`.
+Phase 2 builds on the `RG_JITTER` Halton offsets and the `CameraRegistry`
+from `0020-gs-source-camera.patch`, and is tracked step by step in
+[FSR.md](FSR.md).
 
 - Object identity across frames: the model matrix's EE source address plus
   the mesh shape, as `capture_report.py` matches them. Keep last frame's
@@ -247,7 +362,9 @@ characters or the camera, as an option in the F1 menu.
 
 ### Phase 3: native post and offscreen effects
 
-Port the effect table one function at a time, parity first. Each hook records
+Port the effect table one function at a time, parity first, in the census's
+order: the glare, the per-object composites, the plane shadow's blur, then
+the rest. Each hook records
 a `NativePass` and a `MARK`, and skips the original. Anything the original does
 besides drawing (timers, work-texture registration, the `GfxEndFrame` probe
 bookkeeping) is reproduced in the hook. The diff of the function's
@@ -292,15 +409,15 @@ the long pole and needs phase 0's family count.
 
 | Phase | Size | Can start |
 |---|---|---|
-| 0 Attribution and census | S-M | now |
-| 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | after 0 |
-| 2 TAA | M | after the first ported family |
-| 3 Post | M-L (about ten effects, each S-M) | after 0, beside 1 |
+| 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
+| 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
+| 2 TAA | M | now ([FSR.md](FSR.md)) |
+| 3 Post | M-L (about ten effects, each S-M) | now: the glare first |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 
-Phases 1 and 3 run in parallel; 2 can ship as soon as the heaviest families
-are native.
+Phases 2 and 3 run in parallel, and meet: phase 3's scene/post split is what
+FSR's upscaler needs as its input.
 
 ## Risks
 
@@ -329,7 +446,9 @@ are native.
 
 - The families: their count, vertex formats, GIF tag templates, and which do
   lighting, skinning or clipping (phase 0, then the harness).
-- What stage E's per-object pairs are.
+- Why the game draws about 20 objects a frame offscreen and blends them back
+  (stage E): a fade's alpha over the whole object is the likely reason, which
+  decides whether the native form needs the offscreen pass at all.
 - Whether the lens flare's occlusion is right today (the depth-probe question
   above).
 - The 2D layer's end state: keep translating `GsPkt` packets, or hook the
