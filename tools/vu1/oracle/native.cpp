@@ -1,6 +1,9 @@
 // The native programs of src/vu1_native.h as an oracle candidate: every run of
 // a program it recognizes, MSCAL (which kicks nothing) and the MSCNTs it does
 // not decline, compared with the recording.
+#include <chrono>
+#include <cstdio>
+
 #include "oracle.h"
 #include "vu1_native.h"
 
@@ -61,7 +64,15 @@ public:
         {
             return;
         }
+        // Timed apart: the packets (the CPU path) and the mesh (the GPU path,
+        // whose transform is then the GPU's).
+        auto started = std::chrono::steady_clock::now();
         rg::vu1native::buildChunk(*program, run.data.data(), run.header.top, m_packets);
+        m_lastNanos = elapsed(started);
+        started = std::chrono::steady_clock::now();
+        rg::vu1native::buildMesh(*program, run.data.data(), run.header.top, m_meshPackets, m_mesh);
+        m_meshNanos += elapsed(started);
+        ++m_meshChunks;
         GifState state;
         for (const auto &packet : m_packets)
         {
@@ -69,7 +80,24 @@ public:
         }
     }
 
+    uint64_t lastNanos() const override { return m_lastNanos; }
+
+    std::string timing() const override
+    {
+        char line[160];
+        std::snprintf(line, sizeof(line), "the mesh instead of the packets: %.2f us a chunk over %llu",
+                      m_meshChunks ? m_meshNanos / 1000.0 / m_meshChunks : 0.0,
+                      static_cast<unsigned long long>(m_meshChunks));
+        return line;
+    }
+
 private:
+    static uint64_t elapsed(std::chrono::steady_clock::time_point started)
+    {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+    }
+
     const rg::vu1native::Program *programOf(const Run &run) const
     {
         const auto found = m_programs.find(std::make_pair(run.programHash, run.programPC));
@@ -79,6 +107,11 @@ private:
     // Per code image and entry (the MSCAL's), what it is, if anything.
     std::map<std::pair<uint64_t, uint32_t>, const rg::vu1native::Program *> m_programs;
     std::vector<std::vector<uint8_t>> m_packets;
+    std::vector<std::vector<uint8_t>> m_meshPackets;
+    GSNativeMesh m_mesh;
+    uint64_t m_lastNanos = 0u;
+    uint64_t m_meshNanos = 0u;
+    uint64_t m_meshChunks = 0u;
     mutable std::map<std::string, uint32_t> m_declined;
     mutable std::map<std::string, uint32_t> m_taken;
 };

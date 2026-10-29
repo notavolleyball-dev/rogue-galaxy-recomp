@@ -5,7 +5,12 @@
 //   rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]
 //                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]
 //                      [--tol-rgba N] [--tol-uv N] [--tol-stq F]
-//                      [--program HASH:PC --coverage FILE]
+//                      [--program HASH:PC --coverage FILE] [--time] [--inventory]
+//
+// --time adds the time each candidate's own work took per run (the VU1
+// program's execution; the native code's packets or mesh), averaged over the
+// runs it took. --inventory lists every program in the recording instead, by
+// its share of the vertices, with the pieces of src/vu1_native.cpp it has.
 //
 // --coverage single-steps the interpreter through the program's runs (with
 // --program) and writes how often each instruction pair ran, `pc hits` in
@@ -29,6 +34,7 @@
 // and whether the registers the run ended with match. Exit status 1 when any
 // candidate differs.
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -46,6 +52,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "vu1_native.h"
 #include "vu1_replay.h"
 
 namespace
@@ -195,6 +202,7 @@ public:
     const char *name() const override { return m_compiled ? "compiled" : "interpreter"; }
     bool accepts(const Run &) const override { return true; }
     const VU1State *endState() const override { return &m_vu.state(); }
+    uint64_t lastNanos() const override { return m_lastNanos; }
 
     // Single-steps the runs while set, counting each pair that ran, and
     // hashing the run's path into `path`.
@@ -234,6 +242,7 @@ public:
         m_packets = &packets;
         const uint32_t mxcsr = _mm_getcsr();
         _mm_setcsr(run.header.mxcsr);
+        const auto started = std::chrono::steady_clock::now();
         if (m_hits)
         {
             step(run);
@@ -248,6 +257,8 @@ public:
             m_vu.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, m_memory.getVU1Data(), PS2_VU1_DATA_SIZE, m_gs,
                          &m_memory, run.header.startPC, run.header.top, run.header.itop, 65536);
         }
+        m_lastNanos = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
         _mm_setcsr(mxcsr);
         m_packets = nullptr;
         events = eventsOf(packets);
@@ -284,6 +295,7 @@ private:
         }
     }
 
+    uint64_t m_lastNanos = 0u;
     std::map<uint32_t, uint64_t> *m_hits = nullptr;
     uint64_t *m_path = nullptr;
     bool m_compiled;
@@ -312,6 +324,7 @@ struct ProgramResult
     uint32_t identical = 0; // runs whose events all match within the tolerance
     uint32_t registers = 0; // runs whose end registers differ
     uint64_t kicks = 0;
+    uint64_t nanos = 0;
     Comparison comparison;
 };
 
@@ -327,6 +340,8 @@ struct Options
     uint32_t programPC = 0u;
     int64_t show = -1;
     const char *coverage = nullptr;
+    bool time = false;
+    bool inventory = false;
     Tolerance tolerance;
 };
 
@@ -335,7 +350,7 @@ void usage()
     std::fprintf(stderr,
                  "usage: rg_vu1_oracle FILE [--candidate compiled|interpreter|all|native] [--runs N]\n"
                  "                      [--program HASH:PC] [--show RUN|diff] [--tol-xy N] [--tol-z N]\n"
-                 "                      [--tol-rgba N] [--tol-uv N] [--tol-stq F]\n");
+                 "                      [--tol-rgba N] [--tol-uv N] [--tol-stq F] [--time] [--inventory]\n");
 }
 
 bool parse(int argc, char **argv, Options &options)
@@ -362,6 +377,10 @@ bool parse(int argc, char **argv, Options &options)
             const std::string value = argv[++i];
             options.show = value == "diff" ? kShowFirstDifferences : std::strtoll(value.c_str(), nullptr, 0);
         }
+        else if (arg == "--time")
+            options.time = true;
+        else if (arg == "--inventory")
+            options.inventory = true;
         else if (arg == "--coverage" && hasValue)
             options.coverage = argv[++i];
         else if (arg == "--tol-xy" && hasValue)
@@ -398,6 +417,53 @@ void showRun(const Run &run, const std::vector<GifEvent> &reference, const std::
     }
 }
 
+// Every program of the recording by its share of the vertices kicked, with
+// the pieces src/vu1_native.cpp knows in it: the work list for the next
+// native programs (docs/VU1-NATIVE.md).
+int inventory(const Recording &recording)
+{
+    struct Entry
+    {
+        uint32_t runs = 0u, chunks = 0u;
+        uint64_t packets = 0u, vertices = 0u;
+        std::string pieces;
+    };
+    std::map<std::pair<uint64_t, uint32_t>, Entry> programs;
+    uint64_t total = 0u;
+    for (const Run &run : recording.runs)
+    {
+        Entry &entry = programs[{run.programHash, run.programPC}];
+        if (entry.runs++ == 0u)
+        {
+            const auto code = recording.codes.find(run.programHash);
+            entry.pieces = code == recording.codes.end()
+                ? "?" : rg::vu1native::describePieces(code->second.data(), run.programPC);
+        }
+        entry.chunks += (run.header.flags & replay::kRunResume) ? 1u : 0u;
+        entry.packets += run.kicks.size();
+        for (const GifEvent &event : eventsOf(run.kicks))
+        {
+            entry.vertices += event.kind == GifEvent::Kind::Vertex ? 1u : 0u;
+        }
+    }
+    for (const auto &[key, entry] : programs)
+    {
+        total += entry.vertices;
+    }
+    std::vector<std::pair<std::pair<uint64_t, uint32_t>, Entry>> sorted(programs.begin(), programs.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto &a, const auto &b) { return a.second.vertices > b.second.vertices; });
+    std::printf("%-24s %7s %7s %8s %9s %6s  %s\n", "program", "runs", "mscnt", "packets", "vertices", "share",
+                "pieces (A B C F, D) known to src/vu1_native.cpp");
+    for (const auto &[key, entry] : sorted)
+    {
+        std::printf("%016" PRIx64 ":%-6x %7u %7u %8" PRIu64 " %9" PRIu64 " %5.1f%%  %s\n", key.first, key.second,
+                    entry.runs, entry.chunks, entry.packets, entry.vertices,
+                    total ? 100.0 * entry.vertices / total : 0.0, entry.pieces.c_str());
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -424,6 +490,11 @@ int main(int argc, char **argv)
                 options.path, recording.runs.size(), resumes, kicks, recording.codes.size(),
                 recording.runs.empty() ? 0u : recording.runs.front().header.list,
                 recording.runs.empty() ? 0u : recording.runs.back().header.list);
+
+    if (options.inventory)
+    {
+        return inventory(recording);
+    }
 
     std::vector<std::unique_ptr<Candidate>> candidates;
     std::map<uint32_t, uint64_t> hits;
@@ -478,6 +549,7 @@ int main(int argc, char **argv)
             ++result.runs;
             result.resumes += (run.header.flags & replay::kRunResume) ? 1u : 0u;
             result.kicks += run.kicks.size();
+            result.nanos += candidate->lastNanos();
             result.comparison.add(comparison);
             const bool same = comparison.mismatched == 0u && comparison.countDifference == 0;
             result.identical += same ? 1u : 0u;
@@ -492,21 +564,25 @@ int main(int argc, char **argv)
         }
 
         ProgramResult total;
-        std::printf("\n%s\n%-24s %7s %6s %8s %9s %9s %9s %6s %8s %6s %5s %9s %8s\n", candidate->name(), "program",
+        std::printf("\n%s\n%-24s %7s %6s %8s %9s %9s %9s %6s %8s %6s %5s %9s %8s%s\n", candidate->name(), "program",
                     "runs", "mscnt", "packets", "vertices", "same", "differ", "regs", "max xy", "max z", "rgba",
-                    "uv/16", "stq");
+                    "uv/16", "stq", options.time ? "   us/run" : "");
         for (const auto &[key, result] : programs)
         {
             const Comparison &c = result.comparison;
-            std::printf("%016" PRIx64 ":%-6x %7u %6u %8" PRIu64 " %9" PRIu64 " %9u %9u %6u %8.4f %6u %5u %9u %8.2g\n",
+            std::printf("%016" PRIx64 ":%-6x %7u %6u %8" PRIu64 " %9" PRIu64 " %9u %9u %6u %8.4f %6u %5u %9u %8.2g",
                         key.first, key.second, result.runs, result.resumes, result.kicks, c.vertices,
                         result.identical, result.runs - result.identical, result.registers, c.maxXy / 16.0, c.maxZ,
                         c.maxRgba, c.maxUv, c.maxStq);
+            if (options.time)
+                std::printf(" %9.2f", result.runs ? result.nanos / 1000.0 / result.runs : 0.0);
+            std::printf("\n");
             total.runs += result.runs;
             total.resumes += result.resumes;
             total.identical += result.identical;
             total.registers += result.registers;
             total.kicks += result.kicks;
+            total.nanos += result.nanos;
             total.comparison.add(result.comparison);
         }
         std::printf("%-24s %7u %6u %8" PRIu64 " %9" PRIu64 " %9u %9u %6u %8.4f %6u %5u %9u %8.2g\n", "all",
@@ -514,6 +590,12 @@ int main(int argc, char **argv)
                     total.runs - total.identical, total.registers, total.comparison.maxXy / 16.0,
                     total.comparison.maxZ, total.comparison.maxRgba, total.comparison.maxUv,
                     total.comparison.maxStq);
+        if (options.time)
+        {
+            std::printf("time: %.1f ms for all %u runs taken, %.2f us a run%s%s\n", total.nanos / 1e6, total.runs,
+                        total.runs ? total.nanos / 1000.0 / total.runs : 0.0,
+                        candidate->timing().empty() ? "" : "; ", candidate->timing().c_str());
+        }
         for (const auto &[reason, count] : candidate->declined())
         {
             std::printf("%9u runs  %s\n", count, reason.c_str());

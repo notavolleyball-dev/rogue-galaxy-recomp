@@ -48,6 +48,11 @@ public:
     virtual void run(const Recording &recording, const Run &run, std::vector<GifEvent> &events) = 0;
     // The registers the last run ended with, where the candidate has them.
     virtual const VU1State *endState() const { return nullptr; }
+    // How long the last run took, the program's own work only (no copying of
+    // inputs, no decoding of packets), for --time.
+    virtual uint64_t lastNanos() const { return 0u; }
+    // A line under the table about time, if the candidate has more to say.
+    virtual std::string timing() const { return {}; }
     // Lines for the report under its table, with a run count each (what it
     // did natively, what it left to the VU1 and why).
     virtual std::map<std::string, uint32_t> declined() const { return {}; }

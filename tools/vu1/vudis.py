@@ -2,9 +2,10 @@
 """Disassemble a VU1 code image, with operands, as far as a run reached it.
 
   vudis.py CODE [--coverage FILE] [--all] [--from PC] [--to PC]
+  vudis.py RECORDING.vu1r --image HASH [...]
 
-CODE is 16 KiB of micro memory (a code image from build/vu1-manifest, or one
-taken out of an RG_VU1_REPLAY recording). With --coverage (rg_vu1_oracle
+CODE is 16 KiB of micro memory (a code image from build/vu1-manifest), or the
+image HASH (as rg_vu1_oracle prints it) out of an RG_VU1_REPLAY recording. With --coverage (rg_vu1_oracle
 --coverage) only the pairs that ran are listed, each with how often; blocks
 that did not run are elided. PCs are in bytes, as the oracle prints them;
 pairs are 8 bytes, lower word first.
@@ -184,15 +185,43 @@ def pair_text(code, pc):
     return bits, ut, lt, target
 
 
+def image_from_recording(path, wanted):
+    """The CODE record `wanted` (hex) of an RG_VU1_REPLAY file (src/debug/vu1_replay.h)."""
+    want = int(wanted, 16)
+    with open(path, "rb") as f:
+        state_size = struct.unpack("<5I", f.read(20))[2]
+        while True:
+            kind = f.read(4)
+            if len(kind) < 4:
+                break
+            kind = struct.unpack("<I", kind)[0]
+            if kind == 0x45444F43:    # CODE
+                image_hash = struct.unpack("<Q", f.read(8))[0]
+                code = f.read(16384)
+                if image_hash == want:
+                    return code
+            elif kind == 0x204E5552:  # RUN
+                f.seek(40 + state_size + 16384, 1)
+            elif kind == 0x4B43494B:  # KICK
+                f.seek(struct.unpack("<I", f.read(4))[0], 1)
+            elif kind == 0x20444E45:  # END
+                flags = struct.unpack("<I", f.read(4))[0]
+                f.seek(state_size + (16384 if flags & 1 else 0), 1)
+            else:
+                break
+    raise SystemExit("image %s is not in %s" % (wanted, path))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("code")
+    ap.add_argument("--image", help="with a recording: the code image's hash (hex)")
     ap.add_argument("--coverage")
     ap.add_argument("--all", action="store_true", help="every pair, not only those that ran")
     ap.add_argument("--from", dest="start", default="0")
     ap.add_argument("--to", dest="end", default="4000")
     a = ap.parse_args()
-    code = open(a.code, "rb").read()
+    code = image_from_recording(a.code, a.image) if a.image else open(a.code, "rb").read()
     hits = {}
     if a.coverage:
         for line in open(a.coverage):

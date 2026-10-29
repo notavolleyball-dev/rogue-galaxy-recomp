@@ -242,6 +242,31 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     return nullptr;
 }
 
+std::string describePieces(const uint8_t *code, uint32_t startPC)
+{
+    if (startPC != kEntry)
+    {
+        return "-";
+    }
+    static constexpr const char *kNames[] = {"A", "B", "C", "F"};
+    std::string out;
+    for (size_t i = 0; i < std::size(kCommon); ++i)
+    {
+        out += matches(code, kCommon[i]) ? kNames[i] : "-";
+        out += ' ';
+    }
+    const char *finish = "D:?";
+    for (const Finish &candidate : kFinishes)
+    {
+        if (matches(code, candidate.d))
+        {
+            finish = candidate.program.name;
+            break;
+        }
+    }
+    return out + (finish[0] == 'D' ? std::string(finish) : std::string("D:") + finish);
+}
+
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
 {
     const VuData vu(data);

@@ -53,6 +53,11 @@ const Program *identify(const uint8_t *code, uint32_t startPC);
 // triangles itself (the GPU), so slot E's chunks are done too.
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips = false);
 
+// Which of the pieces this file knows the code at `startPC` has, slot by
+// slot, for rg_vu1_oracle --inventory: "A B C F D:guard band" when all of a
+// program, "A B C - D:?" when C and D are other pieces.
+std::string describePieces(const uint8_t *code, uint32_t startPC);
+
 // The GS packets the program kicks for that chunk, in order.
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets);

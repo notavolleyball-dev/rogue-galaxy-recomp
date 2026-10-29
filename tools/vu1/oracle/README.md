@@ -1,5 +1,8 @@
 # VU1 oracle
 
+The step-by-step recipe for moving a program off the VU1, the pieces known
+and the status per scene are in [docs/VU1-NATIVE.md](../../../docs/VU1-NATIVE.md).
+
 The check for phase 1 of [NATIVE-RENDERER.md](../../../docs/NATIVE-RENDERER.md):
 a native replacement for a family of VU1 programs is right when it draws what
 the program drew. The game records every VU1 program run in full
