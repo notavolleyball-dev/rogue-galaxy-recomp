@@ -57,18 +57,24 @@ memory's padding path.
 
 ## What is left, by size
 
-1. **Render passes and the stalls between them (about 195 a frame).**
-   Each character is drawn into a buffer of its own (02a00, cleared over
-   its bounds), then composited into the frame: about 30 round trips
-   between two 8x targets. The blur draws 34-pixel strips into a 192x192
-   buffer, each reading what the one before wrote, so each takes a
-   snapshot and a pass of its own (about 100). The draws themselves are
-   small; skipping them saves far more than their pixels would cost, so
-   the stalls at each pass and copy look like most of it. Cutting them
-   means drawing the per-object work without leaving the pass (several
-   objects into one buffer, or the composite folded into the object's
-   own draws), or the blur in one pass with a shader that reads the strip
-   it needs from the snapshot before. Neither is a small change.
+1. **Chains of draws that each read the one before.** Pass breaks as such
+   are cheap: forcing a pass per batch (195 -> about 650 passes a frame)
+   cost about 1 ms, 2 us a pass. What costs is work that must wait for the
+   work before it. The blur adds shifted copies of a 192x192 buffer to
+   itself (offsets like +0.62, -1.62, +1, -2 pixels, bilinear), each copy
+   drawn as 32-pixel strips; the strips of one copy already share a
+   snapshot and a draw, but each copy reads the whole result of the one
+   before, so each needs a snapshot of its own: about 9 copies a blur, 60
+   to 100 snapshots a frame, a dependent chain of small copies and draws
+   (about 3 ms at 8x with its copies). The per-object composites (about 20
+   to 30 a frame: clear a region of 02a00, draw the character against the
+   scene's depth, blend the region into the frame) are a chain of the same
+   kind, shorter. Shortening either means doing the effect another way: the
+   blur's copies summed in one or two passes of a shader of its own, which
+   matches the GS's sequential result only to the rounding of each step.
+   A sliver rule (a draw whose reads overlap the writes since the snapshot
+   by two texels or less reuses it) was tried: 111 -> 92 snapshots a frame,
+   119 pixels off by 1 or 2 levels; not kept.
 2. **The effect buffers at the scene's scale.** The 192x192 blur and bloom
    buffers are 1536x1536 at 8x, larger than the PS2's frame. At a scale of
    2 they would cost a sixteenth in fill and copies. The backend keeps
@@ -82,4 +88,6 @@ memory's padding path.
    limit today.
 
 The alpha replays (dual-source now) were the one large cost that was a
-pure duplicate; the rest is work the frame does once.
+pure duplicate; the rest is work the frame does once. A GPU timer per pass
+(SDL 3.2 has no timestamp queries; it would be another patch to it) would
+say where the rest of the 20 ms goes better than skipping categories does.
