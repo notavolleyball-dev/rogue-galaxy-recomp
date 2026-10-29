@@ -21,6 +21,7 @@
 #include <xmmintrin.h>
 
 #include "ThreadNaming.h"
+#include "debug/vu1_replay.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "runtime/ee_scheduler.h"
@@ -635,6 +636,12 @@ public:
             std::memcpy(camera.view, data + 24u * 16u, sizeof(camera.view));
             t_vu1Camera = ps2_gs_detail::CameraRegistry::add(camera);
         }
+        static const bool replay = rg::vu1replay::enabled();
+        if (replay)
+        {
+            rg::vu1replay::begin(resume, startPC, top, itop, m_current.number, memory.getVU1Code(),
+                                 memory.getVU1CodeGeneration(), memory.getVU1Data(), vu1.state());
+        }
         if (resume)
         {
             vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
@@ -644,6 +651,10 @@ public:
         {
             vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                         m_runtime.gs(), &memory, startPC, top, itop, 65536);
+        }
+        if (replay)
+        {
+            rg::vu1replay::end(vu1.state(), memory.getVU1Data());
         }
         t_vu1Tag = 0u;
         t_vu1Camera = 0u;
@@ -983,6 +994,12 @@ void install(PS2Runtime &runtime)
     // game's own GIF transfers, after the drain every DMA start does) straight
     // to the GS, behind whatever the stage still holds.
     memory.setGifPacketCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+        // A program's XGKICK, while RG_VU1_REPLAY records the run.
+        static const bool replay = rg::vu1replay::enabled();
+        if (replay && t_onVif1Thread)
+        {
+            rg::vu1replay::kick(data, size);
+        }
         if (g_stage && t_onVif1Thread)
         {
             g_stage->packet(data, size);

@@ -113,6 +113,7 @@ add_executable(roguegalaxy
     debug/sampler.cpp
     debug/stall_watch.cpp
     debug/selftest.cpp
+    debug/vu1_replay.cpp
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
@@ -121,6 +122,15 @@ if(WIN32)
     target_link_libraries(roguegalaxy PRIVATE winhttp)
 endif()
 target_compile_definitions(roguegalaxy PRIVATE RG_APP_VERSION="${PROJECT_VERSION}")
+
+# tools/vu1/oracle: replays an RG_VU1_REPLAY recording through VU1 without the
+# game, the check for native replacements of the VU1 programs. Not built by
+# default: cmake --build build/game --target rg_vu1_oracle
+add_executable(rg_vu1_oracle EXCLUDE_FROM_ALL
+    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/rg_vu1_oracle.cpp"
+    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/gif_events.cpp")
+target_include_directories(rg_vu1_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/debug")
+target_link_libraries(rg_vu1_oracle PRIVATE ps2_runtime)
 # The commit this build is from, for the menu's About window (as of the last
 # configure): the REVISION file of a release's source archive, which is no
 # git checkout (tools/release/source_zip.py), or else git. Changed files make

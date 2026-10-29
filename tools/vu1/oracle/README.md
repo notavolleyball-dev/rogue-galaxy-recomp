@@ -1,0 +1,77 @@
+# VU1 oracle
+
+The check for phase 1 of [NATIVE-RENDERER.md](../../../docs/NATIVE-RENDERER.md):
+a native replacement for a family of VU1 programs is right when it draws what
+the program drew. The game records every VU1 program run in full
+(`RG_VU1_REPLAY`, `src/debug/vu1_replay.h`): the code image, the data memory
+and registers it started with, the GS packets it kicked and the registers it
+ended with. `rg_vu1_oracle` runs each candidate on those inputs, without the
+game, and compares what it draws with what the game's run kicked.
+
+What is compared is the events of the packets (`gif_events.h`): every
+register write, and every vertex with the vertex state at its kick (PRIM,
+XY in 12.4, Z, fog, RGBA, STQ, UV). Two packets laid out differently that
+draw the same thing compare equal.
+
+## Use
+
+```bash
+# The tool (not part of the default build)
+cmake --build build/game --target rg_vu1_oracle
+
+# A recording: File 01 from a copy of the card, 40 lists from list 2700
+tools/vu1/oracle/capture.sh field1 2700 40
+
+# Replay it: both VU1 engines, the first differing run of each program shown
+build/game/src/rg_vu1_oracle build/run/field1.vu1r --candidate all --show diff
+```
+
+Options: `--candidate compiled|interpreter|all`; `--runs N` reads only the
+first N runs; `--program HASH:PC` counts only one program; `--show RUN`
+prints one run's events beside the recorded ones, from its first difference;
+`--tol-xy`, `--tol-z`, `--tol-rgba`, `--tol-uv` (in the GS's own units:
+1/16 pixel, Z units, levels, 1/16 texel) and `--tol-stq` (relative) widen
+what counts as equal. Exit status 1 when anything differs.
+
+A row of the table is a program: the code image (FNV-1a of the 16 KiB of
+micro memory) and the entry of the MSCAL that started it. The MSCNT
+continuations count toward it (`mscnt`); in the field they kick most of the
+vertices, so every recorded run starts from its own recorded data memory.
+`same` and `differ` count runs; `regs` counts runs whose VF, VI, ACC, Q, P
+and I registers ended differently; the `max` columns are the largest
+differences seen, within the tolerance or not.
+
+## The first recording (2026-10-28)
+
+Salgin, File 01, lists 2700-2739 at 1x in the 30 fps mode: 67,640 runs
+(49,440 continuations), 231,504 packets, 1.86 M vertices, 29 code images,
+1.29 GB. Both engines reproduce every run exactly, packets and end
+registers (5.7 s for both). So a recording is a lossless input: a native
+candidate that differs is wrong, not the replay.
+
+The comparison was checked against known changes: a byte altered in a
+recorded packet is the one run reported; the matrix quads 68-75 of a run that
+kicks vertices scaled by 1% leave its XY as they were and move its Q and
+STQ by 1% (a homogeneous scale cancels in the divide), which is what it
+reports.
+
+Programs by vertices kicked in that window (`:320` is the draw entry, pair
+0x64; `:960` is pair 0x12C; `:0` is the per-frame base program, which kicks
+nothing):
+
+| Program | Runs | Vertices |
+|---|---|---|
+| `9f727028f73861c3:320` | 20,720 | 617,640 |
+| `3dd4ba5d80f01760:320` | 6,680 | 319,040 |
+| `cfb586576df9c3d2:320` | 10,680 | 278,360 |
+| `30da21d7b6d089bf:320` | 7,080 | 152,360 |
+| `0f44ab11d3953380:320` | 1,400 | 89,600 |
+| `3856a013e86478a4:320` | 2,160 | 83,520 |
+
+## Adding a native candidate
+
+Derive from `Candidate` in `rg_vu1_oracle.cpp`: `accepts()` says which
+programs it replaces (by `Run::programHash` and `programPC`), `run()` turns
+a run's recorded inputs (`Run::data`, `Run::state`, `RunHeader`) into
+`GifEvent`s. Register it beside the two VU1 engines. Its runs are compared
+with the recording and the others are left out of its table.
