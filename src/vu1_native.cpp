@@ -104,6 +104,11 @@ constexpr DecodePiece kDecodes[] = {
 constexpr Piece kOutlineA = {0x0320u, 0x04e8u, 0x3f6df595be6e31b7ull};
 constexpr Piece kOutlineC = {0x10e0u, 0x1e70u, 0x3689bac97cae3c73ull};
 
+// The shadow volume program's A (header with PRIM 5, fans; calls B, then C)
+// and C (dc8dbfe4).
+constexpr Piece kShadowA = {0x0320u, 0x0500u, 0x821b638f42fcaa6eull};
+constexpr Piece kShadowC = {0x10e0u, 0x1938u, 0xdc8dbfe4905cb635ull};
+
 // The C pieces: both build the material color, quad 82 * 42 + 83 * 128
 // (82.w scaled by 81.w); 70362be4 multiplies it by each vertex's int16
 // color / 32768 * 256 (and has paths of its own with 87.y & 0x100 or
@@ -151,7 +156,9 @@ const Program *intern(const Program &shape)
             return &program;
         }
     }
-    std::string &name = names.emplace_back(shape.kind == Kind::Outline ? "outline" : "strip");
+    std::string &name = names.emplace_back(shape.kind == Kind::Outline  ? "outline"
+                                           : shape.kind == Kind::Shadow ? "shadow volume"
+                                                                        : "strip");
     name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
             : shape.cull == Cull::GuardBand          ? ", guard band"
                                                      : "";
@@ -519,6 +526,179 @@ void buildOutline(const Program &program, const VuData &vu, uint32_t top,
     }
 }
 
+// The GIF packet at quad `q` as XGKICK sends it: tags and their data up to
+// the one with EOP.
+std::vector<uint8_t> gifPacket(const VuData &vu, uint32_t q)
+{
+    std::vector<uint8_t> packet;
+    for (uint32_t tags = 0; tags < 64u; ++tags)
+    {
+        const uint32_t lo = static_cast<uint32_t>(vu.word(q, 0)), hi = static_cast<uint32_t>(vu.word(q, 1));
+        const uint32_t loops = lo & 0x7FFFu, flag = (hi >> 26) & 3u;
+        const uint32_t regs = ((hi >> 28) & 0xFu) == 0u ? 16u : (hi >> 28) & 0xFu;
+        const uint32_t quads = flag == 0u ? loops * regs : flag == 1u ? (loops * regs + 1u) / 2u : loops;
+        for (uint32_t i = 0; i <= quads; ++i)
+        {
+            putQuad(packet, vu.bytes(q + i));
+        }
+        q += quads + 1u;
+        if (lo & 0x8000u)
+        {
+            break;
+        }
+    }
+    return packet;
+}
+
+// out = rows * v as the VU's ACC sums it: ((r0 v.x + r1 v.y) + r2 v.z) + r3 v.w.
+Vec4 transform(const Vec4 rows[4], const Vec4 &v)
+{
+    const float *r0 = &rows[0].x, *r1 = &rows[1].x, *r2 = &rows[2].x, *r3 = &rows[3].x;
+    float out[4];
+    for (int i = 0; i < 4; ++i)
+    {
+        out[i] = r0[i] * v.x + r1[i] * v.y + r2[i] * v.z + r3[i] * v.w;
+    }
+    return {out[0], out[1], out[2], out[3]};
+}
+
+bool clipsOwnW(const Vec4 &v)
+{
+    const float w = std::fabs(v.w);
+    return v.x > w || v.x < -w || v.y > w || v.y < -w || v.z > w || v.z < -w;
+}
+
+// The z of OPMULA a, b then OPMSUB b, a: a.x b.y - b.x a.y.
+float crossZ(const Vec4 &a, const Vec4 &b)
+{
+    return a.x * b.y - b.x * a.y;
+}
+
+Vec4 sub(const Vec4 &a, const Vec4 &b)
+{
+    return {a.x - b.x, a.y - b.y, a.z - b.z, 0.0f};
+}
+
+// The shadow volume C. The chunk's points come in threes, a triangle of
+// the caster. Its world normal (quads 60-63 the model matrix) against the
+// light (quad 34) must exceed 1e-4, else nothing is drawn. Its corners
+// (front) and the same pushed away from the light (back: the model matrix
+// times quads 30-33) go through the view (quads 8-11 times 24-27, x and y
+// scaled by 16) and, unless any falls outside its own w, through the
+// projection (quads 12-15, 12.x by 16.z and 13.y by 16.w) and the divide.
+// It draws the volume as five fans of four: three sides, the front cap and
+// the back cap, each after the A+D packet at quad 38 if it faces the screen
+// (its z cross product is positive), at quad 35 if not (the blend that adds
+// or takes away).
+void buildShadow(const Program &program, const VuData &vu, uint32_t top,
+                 std::vector<std::vector<uint8_t>> &packets)
+{
+    packets.clear();
+    const uint32_t count = vu.half(top, 1);
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    Vec4 model[4], light[4], view[4], projection[4], away[4], camera[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        model[i] = vu.quad(60u + i);
+        away[i] = vu.quad(30u + i);
+        camera[i] = vu.quad(8u + i);
+    }
+    const Vec4 viewport = vu.quad(16);
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        light[i] = transform(away, model[i]);
+        view[i] = transform(camera, vu.quad(24u + i));
+        view[i].x *= viewport.x;
+        view[i].y *= viewport.y;
+        projection[i] = vu.quad(12u + i);
+    }
+    projection[0].x *= viewport.z;
+    projection[1].y *= viewport.w;
+    const Vec4 toLight = vu.quad(34);
+    const float lit = fromBits(0x38d1b717u); // 1e-4
+
+    uint8_t header[4][16];
+    const uint32_t prim[4] = {5u, 0u, 0u, 0u};
+    const uint32_t prmode[4] = {vu.half(87, 0), 0u, 27u, 0u};
+    uint32_t tag[4];
+    std::memcpy(tag, vu.bytes(86), sizeof(tag));
+    tag[0] = 0x8004u;
+    std::memcpy(header[0], vu.bytes(0), 16u);
+    std::memcpy(header[1], prim, 16u);
+    std::memcpy(header[2], prmode, 16u);
+    std::memcpy(header[3], tag, 16u);
+    const std::vector<uint8_t> facing = gifPacket(vu, 38), backing = gifPacket(vu, 35);
+
+    for (uint32_t first = 0; first < count; first += 3u)
+    {
+        Vec4 world[3], pushed[3];
+        for (uint32_t j = 0; j < 3u; ++j)
+        {
+            float p[3];
+            decodePosition(vu, top, first + j, bones, p);
+            const Vec4 point{p[0], p[1], p[2], 1.0f};
+            world[j] = transform(model, point);
+            pushed[j] = transform(light, point);
+        }
+        const Vec4 a = sub(world[1], world[0]), b = sub(world[2], world[0]);
+        const float nx = a.y * b.z - b.y * a.z, ny = a.z * b.x - b.z * a.x, nz = a.x * b.y - b.x * a.y;
+        if (!(toLight.x * nx + toLight.y * ny + toLight.z * nz > lit))
+        {
+            continue;
+        }
+        Vec4 corners[6];
+        bool outside = false;
+        for (uint32_t j = 0; j < 3u; ++j)
+        {
+            corners[j] = transform(view, world[j]);
+            corners[3u + j] = transform(view, pushed[j]);
+        }
+        for (const Vec4 &corner : corners)
+        {
+            outside = outside || clipsOwnW(corner);
+        }
+        if (outside)
+        {
+            continue;
+        }
+        Vec4 screen[6];
+        uint32_t fixed[6][4];
+        for (uint32_t j = 0; j < 6u; ++j)
+        {
+            Vec4 &s = screen[j] = transform(projection, corners[j]);
+            const float q = 1.0f / s.w;
+            s.x *= q;
+            s.y *= q;
+            s.z *= q;
+            const float lanes[4] = {s.x, s.y, s.z, s.w};
+            for (int i = 0; i < 4; ++i)
+            {
+                fixed[j][i] = static_cast<uint32_t>(gsNativeFtoi(lanes[i], 16.0f));
+            }
+        }
+        // The fans: front 0-2, back 3-5, and the corners each takes, and
+        // the two edges whose cross product says which way it faces.
+        constexpr uint8_t kFans[5][4] = {{0, 3, 4, 1}, {1, 4, 5, 2}, {2, 5, 3, 0}, {0, 1, 2, 2}, {5, 4, 3, 3}};
+        constexpr uint8_t kFacing[5][3] = {{0, 3, 4}, {1, 4, 5}, {2, 5, 3}, {0, 1, 2}, {5, 4, 3}};
+        for (uint32_t f = 0; f < 5u; ++f)
+        {
+            const Vec4 &origin = screen[kFacing[f][0]];
+            const float z = crossZ(sub(screen[kFacing[f][1]], origin), sub(screen[kFacing[f][2]], origin)) * 1.0f;
+            packets.push_back(z > 0.0f ? facing : backing);
+            std::vector<uint8_t> &fan = packets.emplace_back();
+            fan.reserve(128u);
+            for (const auto &quad : header)
+            {
+                putQuad(fan, quad);
+            }
+            for (uint32_t v = 0; v < 4u; ++v)
+            {
+                putQuad(fan, fixed[kFans[f][v]]);
+            }
+        }
+    }
+}
+
 } // namespace
 
 const Program *identify(const uint8_t *code, uint32_t startPC)
@@ -527,15 +707,25 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     {
         return nullptr;
     }
-    if (matches(code, kOutlineA))
+    // The programs whose C draws by itself, by their A and C.
+    constexpr struct
     {
-        const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
-        if (!decode || !matches(code, kOutlineC))
+        const Piece &a;
+        const Piece &c;
+        Kind kind;
+    } kOwnDrawing[] = {{kOutlineA, kOutlineC, Kind::Outline}, {kShadowA, kShadowC, Kind::Shadow}};
+    for (const auto &own : kOwnDrawing)
+    {
+        if (matches(code, own.a))
         {
-            return nullptr;
+            const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
+            if (!decode || !matches(code, own.c))
+            {
+                return nullptr;
+            }
+            Program shape{nullptr, Cull::None, Color::Material, false, decode->decode, decode->maxBones, own.kind};
+            return intern(shape);
         }
-        Program shape{nullptr, Cull::None, Color::Material, false, decode->decode, decode->maxBones, Kind::Outline};
-        return intern(shape);
     }
     for (const Piece &piece : kCommon)
     {
@@ -605,6 +795,13 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         const uint32_t count = vu.half(top, 1);
         if (count == 0u || count % outlinePoints(vu, top) != 0u)
             return "an outline chunk not of whole edges";
+        return nullptr;
+    }
+    if (program.kind == Kind::Shadow)
+    {
+        const uint32_t count = vu.half(top, 1);
+        if (count == 0u || count % 3u != 0u)
+            return "a shadow chunk not of whole triangles";
         return nullptr;
     }
     if ((vu.half(81, 0) & 2u) && !clips)
@@ -710,6 +907,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     if (program.kind == Kind::Outline)
     {
         buildOutline(program, VuData(data), top, packets);
+        return;
+    }
+    if (program.kind == Kind::Shadow)
+    {
+        buildShadow(program, VuData(data), top, packets);
         return;
     }
     Chunk chunk;

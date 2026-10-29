@@ -51,6 +51,7 @@ enum class Kind : uint8_t
 {
     Strip,   // triangle strips and lists: A, B, C, D, F (E clips)
     Outline, // the toon outlines: A, B, then C draws the silhouette edges as lines
+    Shadow,  // the shadow volumes: A, B, then C extrudes the lit triangles as fans
 };
 
 // How the B piece decodes a vertex's position.
