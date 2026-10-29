@@ -157,6 +157,8 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | C | 0x10e0-0x1e70 | `3689bac97cae3c73` | The toon outlines (`buildOutline`): edges as four offset lines; with TOP.x 19 a silhouette test from the two adjacent triangles. Packets only: `gpu` mode sends them as `skip` does |
 | A | 0x0320-0x0500 | `821b638f42fcaa6e` | The shadow volume driver: header with PRIM 5 (fans), calls B and C |
 | C | 0x10e0-0x1938 | `dc8dbfe4905cb635` | The shadow volumes (`buildShadow`): each triangle lit (normal . light > 1e-4) and inside is extruded into five fans, each after the A+D packet at quad 38 (facing) or 35. Packets only |
+| C | 0x10e0-0x1240 | `91f542d069307d6c` | Lighting: four directional lights (lanes of quads 100-102) on the normal, each clamped at 0, colors 33-36 and ambient 37 times the material 82 (`Lights`) |
+| F | 0x39d0-0x3b70 | `150031ee1534d185` | Sphere map: UV = (normal through quads 24-26 times 64-66, xy, + 1) / 2 (`SphereMap`) |
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |

@@ -44,6 +44,14 @@ enum class Color : uint8_t
 {
     PerVertex, // the vertex's int16 color times the material color
     Material,  // the material color alone
+    Lit,       // four directional lights on the normal, and an ambient
+};
+
+// What the F piece does to the UVs.
+enum class Uv : uint8_t
+{
+    Plain,     // nothing, unless quad 88.xy scrolls them (declined)
+    SphereMap, // replaced by the normal in view space, as (n.xy + 1) / 2
 };
 
 // What the program draws: the A piece decides (it calls the others).
@@ -75,6 +83,7 @@ struct Program
     // The most bones the B piece has an entry for (Skinned).
     uint8_t maxBones = 0;
     Kind kind = Kind::Strip;
+    Uv uv = Uv::Plain;
 };
 
 // Whether buildMesh can make the program's chunks a GSNativeMesh; if not,

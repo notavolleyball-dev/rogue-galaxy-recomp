@@ -78,9 +78,20 @@ struct Piece
 // Slots A and F, the same in every strip program met so far.
 constexpr Piece kCommon[] = {
     {0x0320u, 0x05d8u, 0x07151c2597283286ull},
-    {0x39d0u, 0x3a68u, 0xd3f6f6312a13ff1cull},
 };
-constexpr const char *kCommonNames[] = {"A", "F"};
+constexpr const char *kCommonNames[] = {"A"};
+
+// The F pieces (A calls F after B, before C): d3f6f631 scrolls the UVs by
+// quad 88.xy (declined when set), 150031ee replaces them by a sphere map.
+struct UvPiece
+{
+    Piece f;
+    Uv uv;
+};
+constexpr UvPiece kUvs[] = {
+    {{0x39d0u, 0x3a68u, 0xd3f6f6312a13ff1cull}, Uv::Plain},
+    {{0x39d0u, 0x3b70u, 0x150031ee1534d185ull}, Uv::SphereMap},
+};
 
 // The B pieces. A calls B at 0x960, or with quad 76.z set at 0x960 plus
 // the chunk's TOP+1.w pairs: af62ff64 has the one entry; 26a933a5 has three,
@@ -122,6 +133,7 @@ struct ColorPiece
 constexpr ColorPiece kColors[] = {
     {{0x10e0u, 0x1328u, 0x70362be426b17f94ull}, Color::PerVertex},
     {{0x10e0u, 0x11b0u, 0x780d503e649c9116ull}, Color::Material},
+    {{0x10e0u, 0x1240u, 0x91f542d069307d6cull}, Color::Lit},
 };
 
 // The D pieces. (a786efabfa469ada is also the name of its compiled routine,
@@ -151,7 +163,8 @@ const Program *intern(const Program &shape)
     for (const Program &program : programs)
     {
         if (program.cull == shape.cull && program.color == shape.color && program.depthBounds == shape.depthBounds &&
-            program.decode == shape.decode && program.maxBones == shape.maxBones && program.kind == shape.kind)
+            program.decode == shape.decode && program.maxBones == shape.maxBones && program.kind == shape.kind &&
+            program.uv == shape.uv)
         {
             return &program;
         }
@@ -163,7 +176,10 @@ const Program *intern(const Program &shape)
             : shape.cull == Cull::GuardBand          ? ", guard band"
                                                      : "";
     name += shape.depthBounds ? ", depth and bounds" : "";
-    name += shape.color == Color::Material && shape.kind == Kind::Strip ? ", one color" : "";
+    name += shape.color == Color::Material && shape.kind == Kind::Strip ? ", one color"
+            : shape.color == Color::Lit                                  ? ", lit"
+                                                                         : "";
+    name += shape.uv == Uv::SphereMap ? ", sphere map" : "";
     name += shape.decode == Decode::Skinned ? ", skinned" : "";
     Program &program = programs.emplace_back(shape);
     program.name = name.c_str();
@@ -312,6 +328,118 @@ void decodePosition(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, 
     }
 }
 
+// The skinning B's normals: as skin(), rows 0-2 only, of the normal scaled
+// by each weight.
+void skinNormal(const VuData &vu, uint32_t weights, uint32_t bones, float normal[3])
+{
+    const float scale = fromBits(0x3b808081u);
+    float acc[3] = {};
+    bool first = true;
+    for (uint32_t b = 0; b < bones; ++b)
+    {
+        const float w = static_cast<float>(vu.word(weights + 1u, b)) * scale;
+        const float scaled[3] = {normal[0] * w, normal[1] * w, normal[2] * w};
+        const uint32_t matrix = 900u + ((vu.half(weights, b) * 2u) & 0xFFFFu);
+        for (uint32_t row = 0; row < 3u; ++row)
+        {
+            const Vec4 m = vu.quad(matrix + row);
+            const float lanes[3] = {m.x, m.y, m.z};
+            for (int i = 0; i < 3; ++i)
+            {
+                const float product = lanes[i] * scaled[row];
+                acc[i] = first ? product : acc[i] + product;
+            }
+            first = false;
+        }
+    }
+    std::memcpy(normal, acc, sizeof(acc));
+}
+
+// Vertex k's normal as B leaves it: the int16 (at TOP+2 plus TOP.w) / 32768
+// times quad 78, then skinned.
+void decodeNormal(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, float normal[3])
+{
+    const uint32_t normals = top + 2u + vu.half(top, 3);
+    const Vec4 scale = vu.quad(78);
+    normal[0] = itof15(vu.word(normals + k, 0)) * scale.x;
+    normal[1] = itof15(vu.word(normals + k, 1)) * scale.y;
+    normal[2] = itof15(vu.word(normals + k, 2)) * scale.z;
+    if (bones != 0u)
+    {
+        skinNormal(vu, top + 2u + vu.half(top + 1u, 2) + k * 2u, bones, normal);
+    }
+}
+
+// The lit C (91f542d0): four directional lights, their directions the lanes
+// of quads 100-102, their colors quads 33-36, an ambient 37, all times the
+// material (quad 82, its w by 81.w). Each light's term is clamped at 0; the
+// sum goes into the vertex's RGBA slot, as floats, for D to clamp.
+struct Lights
+{
+    Vec4 direction[3];
+    Vec4 color[4];
+    Vec4 ambient;
+
+    explicit Lights(const VuData &vu)
+    {
+        const Vec4 material = vu.quad(82);
+        const float alpha = material.w * vu.quad(81).w;
+        for (uint32_t i = 0; i < 3u; ++i)
+        {
+            direction[i] = vu.quad(100u + i);
+        }
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            const Vec4 c = vu.quad(33u + i);
+            color[i] = {c.x * material.x, c.y * material.y, c.z * material.z, 0.0f};
+        }
+        const Vec4 a = vu.quad(37);
+        ambient = {a.x * material.x, a.y * material.y, a.z * material.z, a.w * alpha};
+    }
+
+    Vec4 shade(const float n[3]) const
+    {
+        const float *d0 = &direction[0].x, *d1 = &direction[1].x, *d2 = &direction[2].x;
+        float d[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            d[i] = std::fmax(d0[i] * n[0] + d1[i] * n[1] + d2[i] * n[2], 0.0f);
+        }
+        const float *c0 = &color[0].x, *c1 = &color[1].x, *c2 = &color[2].x, *c3 = &color[3].x;
+        const float *base = &ambient.x;
+        float out[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            out[i] = base[i] * 1.0f + c0[i] * d[0] + c1[i] * d[1] + c2[i] * d[2] + c3[i] * d[3];
+        }
+        return {out[0], out[1], out[2], ambient.w};
+    }
+};
+
+// The sphere map F (150031ee): the normal through the view's rotation
+// (quads 24-26, xy, times 64-66), then (uv + 1) / 2.
+struct SphereMap
+{
+    float rows[3][2];
+
+    explicit SphereMap(const VuData &vu)
+    {
+        const Vec4 r24 = vu.quad(24), r25 = vu.quad(25), r26 = vu.quad(26);
+        for (uint32_t i = 0; i < 3u; ++i)
+        {
+            const Vec4 m = vu.quad(64u + i);
+            rows[i][0] = r24.x * m.x + r25.x * m.y + r26.x * m.z;
+            rows[i][1] = r24.y * m.x + r25.y * m.y + r26.y * m.z;
+        }
+    }
+
+    void uv(const float n[3], float &u, float &v) const
+    {
+        u = (rows[0][0] * n[0] + rows[1][0] * n[1] + rows[2][0] * n[2] + 1.0f) * 0.5f;
+        v = (rows[0][1] * n[0] + rows[1][1] * n[1] + rows[2][1] * n[2] + 1.0f) * 0.5f;
+    }
+};
+
 // A chunk read out of VU1 data memory: the FOGCOL packet, the first quads of
 // the program's output (GIF header, PRIM, PRMODE, the vertex tag) and the
 // strip as a mesh.
@@ -394,6 +522,9 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     }
     const bool perVertex = program.color == Color::PerVertex;
     const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    const bool normals = program.color == Color::Lit || program.uv == Uv::SphereMap;
+    const Lights lights(vu);
+    const SphereMap sphere(vu);
     chunk.mesh.vertices.resize(count);
     for (uint32_t k = 0; k < count; ++k)
     {
@@ -409,6 +540,23 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         v.g = perVertex ? colorBase.y * itof15(vu.word(colors + k, 1)) * 256.0f : colorBase.y;
         v.b = perVertex ? colorBase.z * itof15(vu.word(colors + k, 2)) * 256.0f : colorBase.z;
         v.a = perVertex ? colorBase.w * itof15(vu.word(colors + k, 3)) * 256.0f : colorBase.w;
+        if (normals)
+        {
+            float normal[3];
+            decodeNormal(vu, top, k, bones, normal);
+            if (program.color == Color::Lit)
+            {
+                const Vec4 c = lights.shade(normal);
+                v.r = c.x;
+                v.g = c.y;
+                v.b = c.z;
+                v.a = c.w;
+            }
+            if (program.uv == Uv::SphereMap)
+            {
+                sphere.uv(normal, v.u, v.v);
+            }
+        }
     }
 }
 
@@ -737,11 +885,13 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
     const ColorPiece *color = present(code, kColors, &ColorPiece::c);
     const Finish *finish = present(code, kFinishes, &Finish::d);
-    if (!decode || !color || !finish)
+    const UvPiece *uv = present(code, kUvs, &UvPiece::f);
+    if (!decode || !color || !finish || !uv)
     {
         return nullptr;
     }
-    Program shape{nullptr, finish->cull, color->color, finish->depthBounds, decode->decode, decode->maxBones};
+    Program shape{nullptr,          finish->cull,     color->color, finish->depthBounds,
+                  decode->decode,   decode->maxBones, Kind::Strip,  uv->uv};
     return intern(shape);
 }
 
@@ -750,6 +900,10 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     if (startPC != kEntry)
     {
         return "-";
+    }
+    if (const Program *program = identify(code, startPC); program && program->kind != Kind::Strip)
+    {
+        return std::string("all: ") + program->name;
     }
     std::string out;
     for (size_t i = 0; i < std::size(kCommon); ++i)
@@ -761,12 +915,16 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     out += !decode                             ? "B:? "
            : decode->decode == Decode::Skinned ? "B:skinned "
                                                : "B:plain ";
+    const UvPiece *uv = present(code, kUvs, &UvPiece::f);
+    out += !uv ? "F:? " : uv->uv == Uv::SphereMap ? "F:sphere map " : "F:scroll ";
     const char *color = "C:?";
     for (const ColorPiece &candidate : kColors)
     {
         if (matches(code, candidate.c))
         {
-            color = candidate.color == Color::PerVertex ? "C:vertex colors" : "C:one color";
+            color = candidate.color == Color::PerVertex ? "C:vertex colors"
+                    : candidate.color == Color::Lit     ? "C:lit"
+                                                        : "C:one color";
         }
     }
     const char *finish = "D:?";
@@ -820,7 +978,7 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         return "quad 87.y & 0x200 (C's other color)";
     if ((flags & 0x100u) && program.color == Color::PerVertex)
         return "quad 87.y & 0x100 (C's other loop)";
-    if (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f)
+    if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f))
         return "scrolling UVs (slot F)";
     return nullptr;
 }
