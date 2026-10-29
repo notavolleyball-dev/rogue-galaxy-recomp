@@ -456,7 +456,7 @@ int inventory(const Recording &recording)
     std::sort(sorted.begin(), sorted.end(),
               [](const auto &a, const auto &b) { return a.second.vertices > b.second.vertices; });
     std::printf("%-24s %7s %7s %8s %9s %6s  %s\n", "program", "runs", "mscnt", "packets", "vertices", "share",
-                "pieces (A B C F, D) known to src/vu1_native.cpp");
+                "pieces known to src/vu1_native.cpp, by slot");
     for (const auto &[key, entry] : sorted)
     {
         std::printf("%016" PRIx64 ":%-6x %7u %7u %8" PRIu64 " %9" PRIu64 " %5.1f%%  %s\n", key.first, key.second,

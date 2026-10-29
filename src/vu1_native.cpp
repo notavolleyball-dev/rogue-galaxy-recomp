@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <xmmintrin.h>
 #endif
@@ -20,7 +23,8 @@
 //            quad 0, PRIM, PRMODE from quad 87.x, the vertex tag with quad
 //            86), the guard band (quad 109 = 17 with xy times 16.xy, 110 = 18);
 //   B 0x960  int16 positions, normals and UVs to floats: x / 32768 times the
-//            mesh scales in quads 77, 78, 79;
+//            mesh scales in quads 77, 78, 79 (the skinning B then sums the
+//            position over the vertex's bones);
 //   F 0x39d0 nothing unless quad 88.xy is set (scrolling UVs);
 //   C 0x10e0 the vertex colors: the int16 color / 32768 * 256 times
 //            quad 82 * quad 42 + quad 83 * 128 (82.w scaled by 81.w);
@@ -71,13 +75,25 @@ struct Piece
     uint64_t hash;
 };
 
-// Slots A, B and F, the same in every strip program met so far.
+// Slots A and F, the same in every strip program met so far.
 constexpr Piece kCommon[] = {
     {0x0320u, 0x05d8u, 0x07151c2597283286ull},
-    {0x0960u, 0x0a38u, 0xaf62ff64ac67b45full},
     {0x39d0u, 0x3a68u, 0xd3f6f6312a13ff1cull},
 };
-constexpr const char *kCommonNames[] = {"A", "B", "F"};
+constexpr const char *kCommonNames[] = {"A", "F"};
+
+// The B pieces. A calls B at 0x960, or with quad 76.z set at 0x960 plus
+// the chunk's TOP+1.w pairs: af62ff64 has the one entry; 26a933a5 has three,
+// 0 one bone, 2 two bones, 4 four (skin()).
+struct DecodePiece
+{
+    Piece b;
+    Decode decode;
+};
+constexpr DecodePiece kDecodes[] = {
+    {{0x0960u, 0x0a38u, 0xaf62ff64ac67b45full}, Decode::Plain},
+    {{0x0960u, 0x1020u, 0x26a933a58f99a9daull}, Decode::Skinned},
+};
 
 // The C pieces: both build the material color, quad 82 * 42 + 83 * 128
 // (82.w scaled by 81.w); 70362be4 multiplies it by each vertex's int16
@@ -110,17 +126,33 @@ constexpr Finish kFinishes[] = {
     {{0x1900u, 0x1b98u, 0xb8ea8ed53805b0c4ull}, Cull::None, true},
 };
 
-// Every C with every D: the programs, by name.
-constexpr Program kPrograms[] = {
-    {"strip, guard band and backfaces", Cull::GuardBandAndBackface, Color::PerVertex},
-    {"strip, guard band", Cull::GuardBand, Color::PerVertex},
-    {"strip", Cull::None, Color::PerVertex},
-    {"strip, guard band and backfaces, one color", Cull::GuardBandAndBackface, Color::Material},
-    {"strip, guard band, one color", Cull::GuardBand, Color::Material},
-    {"strip, one color", Cull::None, Color::Material},
-    {"strip, depth and bounds", Cull::None, Color::PerVertex, true},
-    {"strip, depth and bounds, one color", Cull::None, Color::Material, true},
-};
+// The program of these pieces, made once and kept: its name says what each
+// piece does ("strip, guard band, one color").
+const Program *intern(const Program &shape)
+{
+    static std::mutex mutex;
+    static std::deque<Program> programs;
+    static std::deque<std::string> names;
+    const std::lock_guard<std::mutex> lock(mutex);
+    for (const Program &program : programs)
+    {
+        if (program.cull == shape.cull && program.color == shape.color && program.depthBounds == shape.depthBounds &&
+            program.decode == shape.decode)
+        {
+            return &program;
+        }
+    }
+    std::string &name = names.emplace_back("strip");
+    name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
+            : shape.cull == Cull::GuardBand          ? ", guard band"
+                                                     : "";
+    name += shape.depthBounds ? ", depth and bounds" : "";
+    name += shape.color == Color::Material ? ", one color" : "";
+    name += shape.decode == Decode::Skinned ? ", skinned" : "";
+    Program &program = programs.emplace_back(shape);
+    program.name = name.c_str();
+    return &program;
+}
 
 uint64_t fnv(const uint8_t *bytes, uint32_t size)
 {
@@ -135,6 +167,20 @@ uint64_t fnv(const uint8_t *bytes, uint32_t size)
 bool matches(const uint8_t *code, const Piece &piece)
 {
     return fnv(code + piece.start, piece.end - piece.start) == piece.hash;
+}
+
+// The entry of `table` whose piece (the member `piece`) is in `code`, or null.
+template <typename Entry, size_t N>
+const Entry *present(const uint8_t *code, const Entry (&table)[N], Piece Entry::*piece)
+{
+    for (const Entry &entry : table)
+    {
+        if (matches(code, entry.*piece))
+        {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 struct Vec4
@@ -170,6 +216,45 @@ private:
 float itof15(int32_t v)
 {
     return static_cast<float>(v) / 32768.0f;
+}
+
+// How many bones the skinning B's entry sums (A enters B at 0x960 plus
+// TOP+1.w pairs when quad 76.z is set): 1, 2 or 4, or 0 for another entry.
+uint32_t bonesOf(const VuData &vu, uint32_t top)
+{
+    const uint32_t entry = vu.half(76, 2) != 0u ? vu.half(top + 1u, 3) : 0u;
+    return entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u ? 4u : 0u;
+}
+
+// The skinning B: the position (w 1) scaled by each bone's weight (an int
+// / 255), times the bone's matrix (quads 900 + 2 * index, rows 0-3, xyz),
+// summed in ACC bone by bone and row by row. The indices are the low halves
+// of the quad at `weights`, the weights the words of the next.
+void skin(const VuData &vu, uint32_t weights, uint32_t bones, float position[3])
+{
+    uint32_t bits = 0x3B808081u; // the program's I: 1/255
+    float scale;
+    std::memcpy(&scale, &bits, sizeof(scale));
+    float acc[3] = {};
+    bool first = true;
+    for (uint32_t b = 0; b < bones; ++b)
+    {
+        const float w = static_cast<float>(vu.word(weights + 1u, b)) * scale;
+        const float scaled[4] = {position[0] * w, position[1] * w, position[2] * w, w};
+        const uint32_t matrix = 900u + ((vu.half(weights, b) * 2u) & 0xFFFFu);
+        for (uint32_t row = 0; row < 4u; ++row)
+        {
+            const Vec4 m = vu.quad(matrix + row);
+            const float lanes[3] = {m.x, m.y, m.z};
+            for (int i = 0; i < 3; ++i)
+            {
+                const float product = lanes[i] * scaled[row];
+                acc[i] = first ? product : acc[i] + product;
+            }
+            first = false;
+        }
+    }
+    std::memcpy(position, acc, sizeof(acc));
 }
 
 void putQuad(std::vector<uint8_t> &packet, const void *bytes)
@@ -272,13 +357,22 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
     }
     const bool perVertex = program.color == Color::PerVertex;
+    const uint32_t weights = positions + vu.half(top + 1u, 2);
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(vu, top) : 0u;
     chunk.mesh.vertices.resize(count);
     for (uint32_t k = 0; k < count; ++k)
     {
         GSNativeMesh::Vertex &v = chunk.mesh.vertices[k];
-        v.x = itof15(vu.word(positions + k, 0)) * positionScale.x;
-        v.y = itof15(vu.word(positions + k, 1)) * positionScale.y;
-        v.z = itof15(vu.word(positions + k, 2)) * positionScale.z;
+        float position[3] = {itof15(vu.word(positions + k, 0)) * positionScale.x,
+                             itof15(vu.word(positions + k, 1)) * positionScale.y,
+                             itof15(vu.word(positions + k, 2)) * positionScale.z};
+        if (bones != 0u)
+        {
+            skin(vu, weights + k * 2u, bones, position);
+        }
+        v.x = position[0];
+        v.y = position[1];
+        v.z = position[2];
         v.u = itof15(vu.word(uvs + k, 0)) * uvScale.x;
         v.v = itof15(vu.word(uvs + k, 1)) * uvScale.y;
         v.r = perVertex ? colorBase.x * itof15(vu.word(colors + k, 0)) * 256.0f : colorBase.x;
@@ -303,37 +397,15 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
             return nullptr;
         }
     }
-    const ColorPiece *color = nullptr;
-    for (const ColorPiece &candidate : kColors)
-    {
-        if (matches(code, candidate.c))
-        {
-            color = &candidate;
-            break;
-        }
-    }
-    const Finish *finish = nullptr;
-    for (const Finish &candidate : kFinishes)
-    {
-        if (matches(code, candidate.d))
-        {
-            finish = &candidate;
-            break;
-        }
-    }
-    if (!color || !finish)
+    const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
+    const ColorPiece *color = present(code, kColors, &ColorPiece::c);
+    const Finish *finish = present(code, kFinishes, &Finish::d);
+    if (!decode || !color || !finish)
     {
         return nullptr;
     }
-    for (const Program &program : kPrograms)
-    {
-        if (program.cull == finish->cull && program.color == color->color &&
-            program.depthBounds == finish->depthBounds)
-        {
-            return &program;
-        }
-    }
-    return nullptr;
+    Program shape{nullptr, finish->cull, color->color, finish->depthBounds, decode->decode};
+    return intern(shape);
 }
 
 std::string describePieces(const uint8_t *code, uint32_t startPC)
@@ -348,6 +420,10 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
         out += matches(code, kCommon[i]) ? kCommonNames[i] : "-";
         out += ' ';
     }
+    const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
+    out += !decode                             ? "B:? "
+           : decode->decode == Decode::Skinned ? "B:skinned "
+                                               : "B:plain ";
     const char *color = "C:?";
     for (const ColorPiece &candidate : kColors)
     {
@@ -373,8 +449,10 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
 {
     const VuData vu(data);
-    if (vu.half(76, 2) != 0u)
-        return "quad 76.z set (A's other branch)";
+    if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)
+        return "quad 76.z set (an entry into B other than its first)";
+    if (program.decode == Decode::Skinned && bonesOf(vu, top) == 0u)
+        return "an entry into the skinning B other than 0, 2 or 4";
     if ((vu.half(81, 0) & 2u) && !clips)
         return "clipping (slot E)";
     // PRIM from the chunk header. Only the backface piece reads it, with a
@@ -491,6 +569,14 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     }
     if (program.cull != Cull::None)
     {
+        // The guard band piece clears the clip flags, then sets each
+        // vertex's ADC from the last three judgments: the first vertex's
+        // from its own. (It never draws; it is in the packet.)
+        if (program.cull == Cull::GuardBand && count != 0u && points[0].outside)
+        {
+            const uint32_t w = (static_cast<uint32_t>(points[0].f16) & 0xFFFFu) | 0x8000u;
+            std::memcpy(packet.data() + 64u + 2u * 16u + 12u, &w, 4u);
+        }
         float winding = mesh.header.winding;
         for (uint32_t k = 1; k < count; ++k)
         {

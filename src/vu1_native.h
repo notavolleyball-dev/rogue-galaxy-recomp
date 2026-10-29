@@ -17,10 +17,11 @@
 // tools/vu1/vudis.py over a recording's coverage and is checked against the
 // VU1 with tools/vu1/oracle; see its README.
 //
-// Done: the field's strip programs: slots A, B and F as one set, two C pieces
-// (vertex colors, one material color) and four D pieces (no culling, the
-// guard band, the guard band and backfaces, and a scaled and capped depth
-// with the vertices' bounds kept in VU1 memory), strips and triangle lists. Not done, so left to the VU1
+// Done: the field's strip programs: slots A and F, two B pieces (plain,
+// skinned), two C pieces (vertex colors, one material color) and four D
+// pieces (no culling, the guard band, the guard band and backfaces, and a
+// scaled and capped depth with the vertices' bounds kept in VU1 memory),
+// strips and triangle lists. Not done, so left to the VU1
 // chunk by chunk: the backface piece's triangle lists, scrolling UVs and two
 // flag branches; and slot E's clipping, except where the GPU clips (a
 // GSNativeMesh drawn by SdlGpuBackend).
@@ -45,6 +46,15 @@ enum class Color : uint8_t
     Material,  // the material color alone
 };
 
+// How the B piece decodes a vertex's position.
+enum class Decode : uint8_t
+{
+    Plain,   // int16 / 32768 times quad 77
+    Skinned, // that, then summed over 1, 2 or 4 bones (A's entry into B, 76.z)
+};
+
+// A program: the behavior of each of its pieces. identify() composes it from
+// the pieces present, so each combination is one Program, alive for good.
 struct Program
 {
     const char *name;
@@ -53,6 +63,7 @@ struct Program
     // The projected z scaled by quad 87.z and capped by quad 1.y, and the
     // vertices' bounds kept in quads 98 (least) and 99 (most).
     bool depthBounds = false;
+    Decode decode = Decode::Plain;
 };
 
 // The program whose MSCAL enters at `startPC` (in bytes) with `code` (all of
@@ -66,8 +77,9 @@ const Program *identify(const uint8_t *code, uint32_t startPC);
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips = false);
 
 // Which of the pieces this file knows the code at `startPC` has, slot by
-// slot, for rg_vu1_oracle --inventory: "A B C F D:guard band" when all of a
-// program, "A B C - D:?" when C and D are other pieces.
+// slot, for rg_vu1_oracle --inventory: "A F B:plain C:vertex colors D:guard
+// band" when all of a program, "A F B:? C:one color D:?" when B and D are
+// other pieces.
 std::string describePieces(const uint8_t *code, uint32_t startPC);
 
 // What the program leaves in VU1 data memory that a later run, or the EE,
