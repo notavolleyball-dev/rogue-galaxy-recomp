@@ -167,6 +167,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |
+| D | 0x1900-0x21e0 | `93cfd2f5a1056991` | Guard band and backfaces with `b8ea8ed5`'s depth and bounds; its triangle lists are declined |
 | D | 0x1900-0x1cb8 | `634107b0f8a88c88` | The guard band (its z before the scale) with `b8ea8ed5`'s depth and bounds |
 | D | 0x1900-0x1b98 | `b8ea8ed53805b0c4` | No culling; z times 87.z, at most 1.y; the vertices' bounds (x, y, z, fog) widen quads 98 and 99, which the `:960` sprite programs read, so `skip` and `gpu` write them too (`applyMemoryEffects`) |
 

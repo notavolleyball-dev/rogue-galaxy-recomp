@@ -164,6 +164,9 @@ constexpr Finish kFinishes[] = {
     {{0x1900u, 0x1b98u, 0xb8ea8ed53805b0c4ull}, Cull::None, true},
     // The guard band (its z before the scale), and that depth and bounds.
     {{0x1900u, 0x1cb8u, 0x634107b0f8a88c88ull}, Cull::GuardBand, true},
+    // The guard band and backfaces, and that depth and bounds; triangle
+    // lists have a path of their own (declined).
+    {{0x1900u, 0x21e0u, 0x93cfd2f5a1056991ull}, Cull::GuardBandAndBackface, true},
 };
 
 // The program of these pieces, made once and kept: its name says what each
@@ -1026,7 +1029,9 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     {
         if (matches(code, candidate.d))
         {
-            finish = candidate.depthBounds && candidate.cull == Cull::GuardBand ? "D:guard band, depth and bounds"
+            finish = candidate.depthBounds && candidate.cull == Cull::GuardBandAndBackface
+                         ? "D:guard band and backfaces, depth and bounds"
+                     : candidate.depthBounds && candidate.cull == Cull::GuardBand ? "D:guard band, depth and bounds"
                      : candidate.depthBounds                        ? "D:depth and bounds"
                      : candidate.cull == Cull::GuardBandAndBackface ? "D:guard band and backfaces"
                      : candidate.cull == Cull::GuardBand            ? "D:guard band"
