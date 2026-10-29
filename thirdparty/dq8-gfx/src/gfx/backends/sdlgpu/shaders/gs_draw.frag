@@ -210,13 +210,17 @@ vec4 sampleTexture() {
         const vec2 physical = texel * float(sourceScale) - 0.5;
         const ivec2 first = ivec2(floor(physical));
         const vec2 weight = physical - vec2(first);
+        const float inverse = 1.0 / float(sourceScale);
         vec4 taps[4];
         for (int i = 0; i < 4; ++i) {
             const ivec2 p = first + ivec2(i & 1, i >> 1);
-            // Integer floor division: exact at odd scales (a float divide by
-            // 3 can land below a whole number), and texels left of zero wrap
-            // like the GS's.
-            const ivec2 gsTexel = (p - (sourceScale - 1) * ivec2(lessThan(p, ivec2(0)))) / sourceScale;
+            // floor(p / scale), texels left of zero included, as the GS
+            // wraps them. A float divide by 3 can land just below a whole
+            // number; (p + 0.5) / scale is never within 0.5 / scale of one,
+            // far past the float's error, so its floor is exact without the
+            // integer divides, which were most of a textured draw's cost at
+            // 8x (Rogue Galaxy: changed).
+            const ivec2 gsTexel = ivec2(floor((vec2(p) + 0.5) * inverse));
             const vec2 sub = (vec2(p - gsTexel * sourceScale) + 0.5) / float(sourceScale);
             taps[i] = fetchTexelAt(gsTexel, sub);
         }
