@@ -52,6 +52,11 @@ layout(set = 3, binding = 0) uniform FragmentParams {
 } params;
 
 layout(location = 0) out vec4 outColor;
+#ifdef DQ8_DUAL_SOURCE
+// The source-alpha blend's factor, A/128, for SDL_GPU_BLENDFACTOR_SRC1_ALPHA;
+// outColor keeps the exact alpha the GS stores (Rogue Galaxy: added).
+layout(location = 0, index = 1) out vec4 outFactor;
+#endif
 
 const uint FLAG_TME = 1u << 0u;
 const uint FLAG_FST = 1u << 1u;
@@ -352,13 +357,20 @@ void main() {
 #if defined(DQ8_FRAMEBUFFER_FETCH) || defined(DQ8_DESTINATION_COPY)
     outColor = blendPixel(color);
 #else
+#ifdef DQ8_DUAL_SOURCE
+    outColor = color;
+    outFactor = vec4(min(color.a * params.misc.x, 1.0));
+    bool exactAlpha = true;
+#else
     outColor = vec4(color.rgb, min(color.a * params.misc.x, 1.0));
+    bool exactAlpha = params.misc.x == 1.0;
+#endif
     // FBA: the stored alpha gets its top bit (CT24 stores none). Rogue
     // Galaxy: added; it draws a weapon with alpha 0 and FBA into a layer,
     // then copies only the layer's pixels whose alpha is set. Only an exact
     // alpha is the stored one: a scaled one is a blend factor, and that
     // draw's alpha replay stores it.
-    if ((params.blend.w & 8u) != 0u && (params.blend.w >> 8u) != 1u && params.misc.x == 1.0)
+    if ((params.blend.w & 8u) != 0u && (params.blend.w >> 8u) != 1u && exactAlpha)
         outColor.a = float(uint(round(outColor.a * 255.0)) | 128u) / 255.0;
 #endif
 }

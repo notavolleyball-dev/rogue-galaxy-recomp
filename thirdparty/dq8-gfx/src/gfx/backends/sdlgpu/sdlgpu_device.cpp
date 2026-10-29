@@ -2,6 +2,7 @@
 
 #include "gs_draw.frag.spv.h"
 #include "gs_draw.frag.dstcopy.spv.h"
+#include "gs_draw.frag.dual.spv.h"
 #include "gs_draw.vert.spv.h"
 #include "gs_native.vert.spv.h"
 #include "gs_index8.frag.spv.h"
@@ -168,7 +169,7 @@ size_t GsPipelineKeyHash::operator()(const GsPipelineKey &key) const {
         (static_cast<uint64_t>(key.destinationFactor) << 48u) |
         (static_cast<uint64_t>(key.blendOperation) << 56u));
     mix(key.destinationCopy | (static_cast<uint64_t>(key.nativeMesh) << 8u) |
-        (static_cast<uint64_t>(key.cullMode) << 16u));
+        (static_cast<uint64_t>(key.cullMode) << 16u) | (static_cast<uint64_t>(key.dualSource) << 24u));
     return static_cast<size_t>(hash);
 }
 
@@ -282,6 +283,34 @@ bool SdlGpuDevice::create(std::string &error) {
             std::fprintf(stderr, "[gfx] no destination-copy shader: %s\n", SDL_GetError());
     }
 
+    // Dual-source blending (Rogue Galaxy: added): SPIR-V only, and only
+    // where a pipeline using it can be made (the device's dualSrcBlend); the
+    // draws fall back to an alpha replay otherwise, or with
+    // DQ8_GFX_NO_DUAL_SOURCE=1.
+    const char *noDualSource = std::getenv("DQ8_GFX_NO_DUAL_SOURCE");
+    if (!m_framebufferFetch && fragmentInfo.format == SDL_GPU_SHADERFORMAT_SPIRV &&
+        !(noDualSource && *noDualSource && *noDualSource != '0')) {
+        SDL_GPUShaderCreateInfo dualInfo = fragmentInfo;
+        dualInfo.code = reinterpret_cast<const uint8_t *>(kGsDrawDualFragSpirv);
+        dualInfo.code_size = sizeof(kGsDrawDualFragSpirv);
+        m_dualSourceShader = SDL_CreateGPUShader(m_device, &dualInfo);
+        if (m_dualSourceShader) {
+            GsPipelineKey probe{};
+            probe.colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            probe.blendEnabled = 1u;
+            probe.sourceFactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+            probe.destinationFactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            probe.blendOperation = SDL_GPU_BLENDOP_ADD;
+            probe.dualSource = 1u;
+            m_dualSourceBlend = true;
+            std::string probeError;
+            if (!pipeline(probe, probeError)) {
+                m_dualSourceBlend = false;
+                std::fprintf(stderr, "[gfx] no dual-source blending: %s\n", probeError.c_str());
+            }
+        }
+    }
+
     SDL_GPUSamplerCreateInfo samplerInfo{};
     samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
     samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -338,6 +367,10 @@ void SdlGpuDevice::destroy() {
     if (m_destinationShader)
         SDL_ReleaseGPUShader(m_device, m_destinationShader);
     m_destinationShader = nullptr;
+    if (m_dualSourceShader)
+        SDL_ReleaseGPUShader(m_device, m_dualSourceShader);
+    m_dualSourceShader = nullptr;
+    m_dualSourceBlend = false;
     if (m_vertexShader)
         SDL_ReleaseGPUShader(m_device, m_vertexShader);
     if (m_nativeVertexShader)
@@ -875,6 +908,16 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     blend.enable_blend = key.blendEnabled != 0u;
     blend.src_color_blendfactor = static_cast<SDL_GPUBlendFactor>(key.sourceFactor);
     blend.dst_color_blendfactor = static_cast<SDL_GPUBlendFactor>(key.destinationFactor);
+    // The source alpha a dual-source draw blends by is its second output's.
+    if (key.dualSource) {
+        auto second = [](SDL_GPUBlendFactor factor) {
+            return factor == SDL_GPU_BLENDFACTOR_SRC_ALPHA             ? SDL_GPU_BLENDFACTOR_SRC1_ALPHA
+                   : factor == SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC1_ALPHA
+                                                                       : factor;
+        };
+        blend.src_color_blendfactor = second(blend.src_color_blendfactor);
+        blend.dst_color_blendfactor = second(blend.dst_color_blendfactor);
+    }
     blend.color_blend_op = static_cast<SDL_GPUBlendOp>(key.blendOperation);
     // GS ALPHA blends RGB only; the source alpha is stored unchanged.
     blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
@@ -889,7 +932,9 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = key.nativeMesh ? m_nativeVertexShader : m_vertexShader;
-    info.fragment_shader = key.destinationCopy ? m_destinationShader : m_fragmentShader;
+    info.fragment_shader = key.destinationCopy ? m_destinationShader
+                           : key.dualSource            ? m_dualSourceShader
+                                                       : m_fragmentShader;
     info.vertex_input_state.vertex_buffer_descriptions = &bufferDescription;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = kAttributes.data();

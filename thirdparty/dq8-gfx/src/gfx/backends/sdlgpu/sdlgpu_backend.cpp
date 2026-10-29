@@ -2455,9 +2455,15 @@ struct SdlGpuBackend::Impl {
         // Those draws still write their alpha on the GS, and games read it
         // back: DQ8 draws its characters into a layer whose alpha becomes the
         // shadow mask. A second pass over the same primitives stores it.
-        const bool alphaPass = scaleAlpha && (writeMask & SDL_GPU_COLORCOMPONENT_A) != 0u;
+        // With dual-source blending the shader hands the factor to the blend
+        // as a second output and stores the exact alpha itself, in the one
+        // pass (Rogue Galaxy: added): the replay drew every such primitive
+        // twice, a sixth of the frame at 8x.
+        const bool dualSource = scaleAlpha && device.dualSourceBlend();
+        const bool alphaPass = scaleAlpha && !dualSource && (writeMask & SDL_GPU_COLORCOMPONENT_A) != 0u;
         if (scaleAlpha) {
-            writeMask &= static_cast<uint8_t>(~SDL_GPU_COLORCOMPONENT_A);
+            if (!dualSource)
+                writeMask &= static_cast<uint8_t>(~SDL_GPU_COLORCOMPONENT_A);
             // Alpha above 0x80 asks for a blend factor greater than one, which
             // a fixed-point attachment cannot carry.
             for (uint8_t index = 0u; index < batch.vertexCount; ++index) {
@@ -2479,6 +2485,7 @@ struct SdlGpuBackend::Impl {
         const bool fixedBlend = !framebufferFetch && !destinationRead;
         draw.pipeline.blendEnabled = fixedBlend && blend.enabled ? 1u : 0u;
         draw.pipeline.destinationCopy = destinationRead ? 1u : 0u;
+        draw.pipeline.dualSource = dualSource ? 1u : 0u;
         draw.pipeline.sourceFactor = static_cast<uint8_t>(blend.sourceFactor);
         draw.pipeline.destinationFactor = static_cast<uint8_t>(blend.destinationFactor);
         draw.pipeline.blendOperation = static_cast<uint8_t>(blend.operation);

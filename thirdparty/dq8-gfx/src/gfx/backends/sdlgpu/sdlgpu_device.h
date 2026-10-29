@@ -135,6 +135,9 @@ struct GsPipelineKey {
     // triangle list, and the SDL_GPUCullMode their backfaces need.
     uint8_t nativeMesh = 0u;
     uint8_t cullMode = 0u;
+    // A source-alpha blend whose factor comes from the shader's second
+    // output, the alpha written exact in the same pass (Rogue Galaxy: added).
+    uint8_t dualSource = 0u;
 
     bool operator==(const GsPipelineKey &other) const = default;
 };
@@ -252,6 +255,8 @@ public:
     // Pipelines with GsPipelineKey::destinationCopy can be made (Rogue
     // Galaxy: added).
     bool destinationCopy() const { return m_destinationShader != nullptr; }
+    // Whether pipelines with dualSource can be made (Rogue Galaxy: added).
+    bool dualSourceBlend() const { return m_dualSourceBlend; }
 
 private:
     SDL_GPUDevice *m_device = nullptr;
@@ -259,6 +264,8 @@ private:
     SDL_GPUShader *m_nativeVertexShader = nullptr;
     SDL_GPUShader *m_fragmentShader = nullptr;
     SDL_GPUShader *m_destinationShader = nullptr;
+    SDL_GPUShader *m_dualSourceShader = nullptr;
+    bool m_dualSourceBlend = false;
     SDL_GPUSampler *m_sampler = nullptr;
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     bool m_framebufferFetch = false;
