@@ -269,6 +269,26 @@ vec4 sampleTexture() {
         base = floor(base * 16.0 + 0.002) / 16.0;
     const vec2 fraction = fract(base);
     const ivec2 corner = ivec2(floor(base));
+    // A texture at its own size (the cache's, not an upscaled target):
+    // each axis wraps its two texels once, rather than each of the four
+    // taps wrapping both (Rogue Galaxy: added); the same texels as
+    // fetchTexel's.
+    if (int(params.misc.y) <= 1) {
+        const ivec2 size = ivec2(params.textureSize.xy);
+        const ivec4 region = ivec4(params.region);
+        const uint wrapU = params.control.w & 3u;
+        const uint wrapV = (params.control.w >> 2u) & 3u;
+        const ivec2 bound = min(size, textureSize(gsTexture, 0)) - 1;
+        const int x0 = clamp(clamp(wrapAxis(corner.x, wrapU, size.x, region.x, region.y), 0, size.x - 1), 0, bound.x);
+        const int x1 = clamp(clamp(wrapAxis(corner.x + 1, wrapU, size.x, region.x, region.y), 0, size.x - 1), 0, bound.x);
+        const int y0 = clamp(clamp(wrapAxis(corner.y, wrapV, size.y, region.z, region.w), 0, size.y - 1), 0, bound.y);
+        const int y1 = clamp(clamp(wrapAxis(corner.y + 1, wrapV, size.y, region.z, region.w), 0, size.y - 1), 0, bound.y);
+        const vec4 d00 = convertTexel(texelFetch(gsTexture, ivec2(x0, y0), 0));
+        const vec4 d10 = convertTexel(texelFetch(gsTexture, ivec2(x1, y0), 0));
+        const vec4 d01 = convertTexel(texelFetch(gsTexture, ivec2(x0, y1), 0));
+        const vec4 d11 = convertTexel(texelFetch(gsTexture, ivec2(x1, y1), 0));
+        return mix(mix(d00, d10, fraction.x), mix(d01, d11, fraction.x), fraction.y);
+    }
     const vec4 c00 = fetchTexel(corner);
     const vec4 c10 = fetchTexel(corner + ivec2(1, 0));
     const vec4 c01 = fetchTexel(corner + ivec2(0, 1));
