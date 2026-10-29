@@ -68,16 +68,25 @@ struct GsVertexUniforms {
     float adjust[4] = {0.0f, 0.0f, 1.0f, 0.0f};
 };
 
-// gs_native.vert's: a native strip's transform (GSNativeMesh) after
-// GsVertexUniforms' two (Rogue Galaxy: added).
+// gs_native.vert's (Rogue Galaxy: added): GsVertexUniforms' two, then where
+// the draw's meshes start in the storage buffer of GsNativeMeshRecords.
 struct GsNativeVertexUniforms {
     GsVertexUniforms base;
+    float meshes[4] = {}; // x: the submission's records before this flush's
+};
+
+// A native strip's transform (GSNativeMesh), one per mesh in a storage
+// buffer, so the meshes of one draw state share a draw (Rogue Galaxy: added).
+// Each vertex names its record.
+struct GsNativeMeshRecord {
     float matrix[4][4] = {};
     float fog[4] = {};
     float colorMax[4] = {};
     float misc[4] = {}; // XYOFFSET x and y in pixels, 1 / the depth maximum
     float depth[4] = {1.0f, 3.402823466e38f, 0.0f, 0.0f}; // the projected z's scale and cap
 };
+
+static_assert(sizeof(GsNativeMeshRecord) == 128u, "record layout must match gs_native.vert");
 
 struct GsFragmentUniforms {
     uint32_t control[4] = {0u, 0u, 0u, 0u};
@@ -122,8 +131,8 @@ struct GsPipelineKey {
     // The draw shader that reads the destination from a snapshot bound as a
     // second texture, with the blend done in the shader (Rogue Galaxy: added).
     uint8_t destinationCopy = 0u;
-    // A native strip (Rogue Galaxy: added): gs_native.vert, a triangle strip
-    // (1) or list (2), and the SDL_GPUCullMode its backfaces need.
+    // Native strips (Rogue Galaxy: added): gs_native.vert, as an indexed
+    // triangle list, and the SDL_GPUCullMode their backfaces need.
     uint8_t nativeMesh = 0u;
     uint8_t cullMode = 0u;
 

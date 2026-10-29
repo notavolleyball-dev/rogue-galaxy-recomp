@@ -185,16 +185,18 @@ struct DrawBatch {
     // The camera its VU1 program ran under (GSPrimitiveBatch::sourceCamera,
     // ps2_gs_detail::CameraRegistry; 0 without one) (Rogue Galaxy: added).
     uint32_t camera = 0u;
-    // A native strip (GSNativeMesh), drawn alone with gs_native.vert and
-    // these uniforms (Rogue Galaxy: added).
+    // Native strips (GSNativeMesh), drawn with gs_native.vert as the indices
+    // from firstIndex, each vertex naming its mesh's record (Rogue Galaxy:
+    // added). Consecutive meshes of one state share the draw.
     bool native = false;
-    GsNativeVertexUniforms nativeUniforms{};
+    uint32_t firstIndex = 0u;
+    uint32_t indexCount = 0u;
 
     // Everything except the vertex range; two consecutive primitives with the
     // same answer here can share one draw call. One that needs a snapshot of
     // its own starts a new batch.
     bool sameStateAs(const DrawBatch &other) const {
-        return !native && !other.native &&
+        return native == other.native &&
                !other.snapshot && feedback == other.feedback && destination == other.destination &&
                source == other.source &&
                color == other.color && depth == other.depth &&
@@ -662,6 +664,10 @@ struct SdlGpuBackend::Impl {
     std::unique_ptr<GsTextureCache> textures;
 
     std::vector<GsGpuVertex> vertices;
+    // The native strips' triangles, as indices into `vertices`, and their
+    // meshes' transforms (Rogue Galaxy: added).
+    std::vector<uint32_t> indices;
+    std::vector<GsNativeMeshRecord> nativeRecords;
     std::vector<DrawBatch> batches;
     // The pages the queued batches write, in total and per target: every
     // primitive asks whether queued draws touch what it reads or writes, and
@@ -1072,14 +1078,24 @@ struct SdlGpuBackend::Impl {
                targets->canPatchHostWrite(pages);
     }
 
-    SDL_GPUBuffer *vertexBuffer = nullptr;
-    uint32_t vertexBufferCapacity = 0u;
     // A flush appends its vertices after the ones earlier flushes recorded
-    // into the same submission (vertexBase) and cycles the buffer only at
-    // the first flush of a submission (Rogue Galaxy: added). The transfer
-    // buffers come from a pool guarded by the device's submission serials.
+    // into the same submission (base, in elements) and cycles the buffer only
+    // at the first flush of a submission (Rogue Galaxy: added); the native
+    // strips' indices and records the same way. The transfer buffers come
+    // from a pool guarded by the device's submission serials.
+    struct AppendBuffer {
+        const char *name;
+        SDL_GPUBufferUsageFlags usage;
+        uint32_t elementSize;
+        SDL_GPUBuffer *buffer = nullptr;
+        uint32_t capacity = 0u;
+        uint32_t base = 0u;
+    };
+    AppendBuffer vertexStream{"vertices", SDL_GPU_BUFFERUSAGE_VERTEX, sizeof(GsGpuVertex)};
+    AppendBuffer indexStream{"indices", SDL_GPU_BUFFERUSAGE_INDEX, sizeof(uint32_t)};
+    AppendBuffer recordStream{"native records", SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                              sizeof(GsNativeMeshRecord)};
     SdlGpuUploadPool vertexUploads;
-    uint32_t vertexBase = 0u;
     uint64_t vertexSerial = 0u;
     // Draws recorded into the pending command buffer since it last went out.
     uint32_t recordedDraws = 0u;
@@ -1579,10 +1595,12 @@ struct SdlGpuBackend::Impl {
 
     // A native strip (GSNativeMesh, Rogue Galaxy: added) where submit() would
     // have appended the stand-in primitive submitNative gave it: its vertices
-    // as the program's inputs, for gs_native.vert, in a batch of its own. A
-    // draw that reads its target per primitive (a snapshot, feedback, a
-    // destination read) gets the triangles the program would have kicked
-    // instead, from the CPU, under one snapshot.
+    // as the program's inputs, for gs_native.vert, its triangles as indices,
+    // and its transform as a record the vertices name, so the next mesh of
+    // the same state joins the draw. A draw that reads its target per
+    // primitive (a snapshot, feedback, a destination read) gets the
+    // triangles the program would have kicked instead, from the CPU, under
+    // one snapshot.
     void appendNative(const GSNativeMesh &mesh, const GSPrimitiveBatch &standIn, DrawBatch &draw,
                       float offsetX, float offsetY, float depthScale) {
         if (draw.snapshot || draw.feedback || draw.destination || nativeOnCpu) {
@@ -1597,8 +1615,11 @@ struct SdlGpuBackend::Impl {
         }
         ++stats.nativeMeshes;
         // A list's vertices past its last whole triangle draw nothing.
-        const size_t count = mesh.header.triangleList ? mesh.vertices.size() / 3u * 3u : mesh.vertices.size();
-        for (size_t index = 0; index < count; ++index) {
+        const uint32_t count = static_cast<uint32_t>(
+            mesh.header.triangleList ? mesh.vertices.size() / 3u * 3u : mesh.vertices.size());
+        const uint32_t first = static_cast<uint32_t>(vertices.size());
+        const float record = static_cast<float>(nativeRecords.size());
+        for (uint32_t index = 0; index < count; ++index) {
             const GSNativeMesh::Vertex &in = mesh.vertices[index];
             GsGpuVertex out{};
             out.x = in.x;
@@ -1606,6 +1627,7 @@ struct SdlGpuBackend::Impl {
             out.z = in.z;
             out.q = in.u;
             out.s = in.v;
+            out.t = record;
             out.r = in.r;
             out.g = in.g;
             out.b = in.b;
@@ -1613,24 +1635,42 @@ struct SdlGpuBackend::Impl {
             out.fog = in.depth;
             vertices.push_back(out);
         }
-        draw.native = true;
-        draw.pipeline.nativeMesh = mesh.header.triangleList ? 2u : 1u;
         // The program skips a triangle whose cross product, times the strip's
-        // alternating sign, is negative; the GPU's strip alternates the
-        // same way, so one face is culled throughout.
+        // alternating sign, is negative. A strip's triangles go in the order
+        // the GPU's strip would draw them, which alternates the same way, so
+        // one face is culled throughout; a mesh whose first sign is negative
+        // has each triangle turned over, so every mesh culls the same face.
+        const bool turn = mesh.header.backface && mesh.header.winding < 0.0f;
+        auto triangle = [&](uint32_t a, uint32_t b, uint32_t c) {
+            indices.push_back(first + a);
+            indices.push_back(first + (turn ? c : b));
+            indices.push_back(first + (turn ? b : c));
+        };
+        if (mesh.header.triangleList) {
+            for (uint32_t k = 0; k < count; k += 3u)
+                triangle(k, k + 1u, k + 2u);
+        } else {
+            for (uint32_t k = 0; k + 2u < count; ++k) {
+                if (k % 2u == 0u)
+                    triangle(k, k + 1u, k + 2u);
+                else
+                    triangle(k + 1u, k, k + 2u);
+            }
+        }
+        draw.native = true;
+        draw.pipeline.nativeMesh = 1u;
         if (mesh.header.backface)
-            draw.pipeline.cullMode = static_cast<uint8_t>(
-                (mesh.header.winding > 0.0f) != nativeCullFlip ? SDL_GPU_CULLMODE_FRONT : SDL_GPU_CULLMODE_BACK);
-        GsNativeVertexUniforms &u = draw.nativeUniforms;
-        u.base = draw.vertexUniforms;
-        std::memcpy(u.matrix, mesh.header.matrix, sizeof(u.matrix));
-        std::memcpy(u.fog, mesh.header.fog, sizeof(u.fog));
-        std::memcpy(u.colorMax, mesh.header.colorMax, sizeof(u.colorMax));
-        u.misc[0] = offsetX;
-        u.misc[1] = offsetY;
-        u.misc[2] = depthScale;
-        u.depth[0] = mesh.header.depthScale;
-        u.depth[1] = mesh.header.depthMax;
+            draw.pipeline.cullMode =
+                static_cast<uint8_t>(nativeCullFlip ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_FRONT);
+        GsNativeMeshRecord &r = nativeRecords.emplace_back();
+        std::memcpy(r.matrix, mesh.header.matrix, sizeof(r.matrix));
+        std::memcpy(r.fog, mesh.header.fog, sizeof(r.fog));
+        std::memcpy(r.colorMax, mesh.header.colorMax, sizeof(r.colorMax));
+        r.misc[0] = offsetX;
+        r.misc[1] = offsetY;
+        r.misc[2] = depthScale;
+        r.depth[0] = mesh.header.depthScale;
+        r.depth[1] = mesh.header.depthMax;
     }
 
     // A native strip through submit(): a stand-in primitive covering the
@@ -2727,12 +2767,14 @@ struct SdlGpuBackend::Impl {
             1.0f / static_cast<float>(depthMaximumForPsm(context.zbuf.psm));
 
         const uint32_t firstVertex = static_cast<uint32_t>(vertices.size());
+        const uint32_t firstIndex = static_cast<uint32_t>(indices.size());
         if (nativeMesh)
             appendNative(*nativeMesh, batch, draw, offsetX, offsetY, depthScale);
         else
             appendPrimitive(batch, offsetX, offsetY, depthScale);
         const uint32_t addedVertices = static_cast<uint32_t>(vertices.size()) - firstVertex;
-        if (addedVertices == 0u)
+        const uint32_t addedIndices = static_cast<uint32_t>(indices.size()) - firstIndex;
+        if (addedVertices == 0u || (draw.native && addedIndices == 0u))
             return;
         if (largerTexture && (borderRequest || shadowRequest)) {
             toBorderTexels(firstVertex, largerArea);
@@ -2744,7 +2786,7 @@ struct SdlGpuBackend::Impl {
         }
 
         ++stats.primitivesDrawn;
-        stats.trianglesDrawn += addedVertices / 3u;
+        stats.trianglesDrawn += (draw.native ? addedIndices : addedVertices) / 3u;
 
         // The alpha half of a source-alpha blend: the same primitives with
         // blending off, writing exact alpha only, where the colour pass wrote.
@@ -2782,12 +2824,14 @@ struct SdlGpuBackend::Impl {
             batches[open - 1u].sameStateAs(alphaDraw)) {
             for (size_t index = open - 2u; index < open; ++index) {
                 batches[index].vertexCount += addedVertices;
+                batches[index].indexCount += addedIndices;
                 batches[index].written.merge(draw.written);
                 batches[index].writtenPages |= draw.writtenPages;
             }
             notePending(draw.color, draw.writtenPages);
         } else if (!alphaPass && open >= 1u && batches.back().sameStateAs(draw)) {
             batches.back().vertexCount += addedVertices;
+            batches.back().indexCount += addedIndices;
             batches.back().written.merge(draw.written);
             batches.back().writtenPages |= draw.writtenPages;
             notePending(draw.color, draw.writtenPages);
@@ -2797,11 +2841,15 @@ struct SdlGpuBackend::Impl {
             noteSampled(draw);
             draw.firstVertex = firstVertex;
             draw.vertexCount = addedVertices;
+            draw.firstIndex = firstIndex;
+            draw.indexCount = addedIndices;
             batches.push_back(draw);
             ++stats.batches;
             if (alphaPass) {
                 alphaDraw.firstVertex = firstVertex;
                 alphaDraw.vertexCount = addedVertices;
+                alphaDraw.firstIndex = firstIndex;
+                alphaDraw.indexCount = addedIndices;
                 batches.push_back(alphaDraw);
                 ++stats.batches;
             }
@@ -2841,59 +2889,86 @@ struct SdlGpuBackend::Impl {
     // Submission
     // -----------------------------------------------------------------
 
-    bool ensureVertexBuffer(uint32_t requiredBytes) {
-        if (vertexBuffer && vertexBufferCapacity >= requiredBytes)
+    bool ensureBuffer(AppendBuffer &stream, uint32_t requiredBytes) {
+        if (stream.buffer && stream.capacity >= requiredBytes)
             return true;
-        if (vertexBuffer)
-            SDL_ReleaseGPUBuffer(device.handle(), vertexBuffer);
-        vertexBuffer = nullptr;
+        if (stream.buffer)
+            SDL_ReleaseGPUBuffer(device.handle(), stream.buffer);
+        stream.buffer = nullptr;
 
         uint32_t capacity = std::max<uint32_t>(requiredBytes, 64u * 1024u);
         // Round up so a slowly growing scene does not reallocate every frame.
         capacity = (capacity + 0xffffu) & ~0xffffu;
         SDL_GPUBufferCreateInfo info{};
-        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        info.usage = stream.usage;
         info.size = capacity;
-        vertexBuffer = SDL_CreateGPUBuffer(device.handle(), &info);
-        if (!vertexBuffer)
-            return setError(std::string("SDL_CreateGPUBuffer(vertices): ") + SDL_GetError());
-        vertexBufferCapacity = capacity;
+        stream.buffer = SDL_CreateGPUBuffer(device.handle(), &info);
+        if (!stream.buffer)
+            return setError(std::string("SDL_CreateGPUBuffer(") + stream.name + "): " + SDL_GetError());
+        stream.capacity = capacity;
         return true;
     }
 
+    // The flush's vertices, and the native strips' indices and records, in
+    // one transfer.
     bool uploadVertices(SDL_GPUCommandBuffer *commands) {
-        const uint32_t bytes =
-            static_cast<uint32_t>(vertices.size() * sizeof(GsGpuVertex));
-        if (bytes == 0u)
-            return true;
-        uint32_t offset = vertexBase * static_cast<uint32_t>(sizeof(GsGpuVertex));
-        if (!vertexBuffer || vertexBufferCapacity < offset + bytes) {
-            // Start over at the front of a fresh backing (cycled below): the
-            // draws recorded so far keep the one they bound.
-            if (!ensureVertexBuffer(bytes))
-                return false;
-            offset = 0u;
-            vertexBase = 0u;
+        struct Part {
+            AppendBuffer &stream;
+            const void *data;
+            uint32_t bytes;
+        };
+        Part parts[3] = {
+            {vertexStream, vertices.data(), static_cast<uint32_t>(vertices.size() * sizeof(GsGpuVertex))},
+            {indexStream, indices.data(), static_cast<uint32_t>(indices.size() * sizeof(uint32_t))},
+            {recordStream, nativeRecords.data(),
+             static_cast<uint32_t>(nativeRecords.size() * sizeof(GsNativeMeshRecord))}};
+        uint32_t total = 0u;
+        for (Part &part : parts) {
+            if (part.bytes == 0u)
+                continue;
+            AppendBuffer &stream = part.stream;
+            if (!stream.buffer || stream.capacity < stream.base * stream.elementSize + part.bytes) {
+                // Start over at the front of a fresh backing (cycled below):
+                // the draws recorded so far keep the one they bound.
+                if (!ensureBuffer(stream, part.bytes))
+                    return false;
+                stream.base = 0u;
+            }
+            total += part.bytes;
         }
+        if (total == 0u)
+            return true;
 
         std::string error;
-        SDL_GPUTransferBuffer *upload = vertexUploads.take(device, bytes, error);
+        SDL_GPUTransferBuffer *upload = vertexUploads.take(device, total, error);
         if (!upload)
             return setError(std::move(error));
-        void *mapped = SDL_MapGPUTransferBuffer(device.handle(), upload, false);
+        auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device.handle(), upload, false));
         if (!mapped)
             return setError(std::string("SDL_MapGPUTransferBuffer(vertices): ") + SDL_GetError());
-        std::memcpy(mapped, vertices.data(), bytes);
+        uint32_t offset = 0u;
+        for (const Part &part : parts) {
+            if (part.bytes != 0u)
+                std::memcpy(mapped + offset, part.data, part.bytes);
+            offset += part.bytes;
+        }
         SDL_UnmapGPUTransferBuffer(device.handle(), upload);
 
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
         if (!copy)
             return setError(std::string("SDL_BeginGPUCopyPass(vertices): ") + SDL_GetError());
-        const SDL_GPUTransferBufferLocation source{upload, 0u};
-        const SDL_GPUBufferRegion destination{vertexBuffer, offset, bytes};
-        // The first flush of a submission cycles storage the last
-        // submission's draws may still read; the later ones append to it.
-        SDL_UploadToGPUBuffer(copy, &source, &destination, vertexBase == 0u);
+        offset = 0u;
+        for (const Part &part : parts) {
+            if (part.bytes == 0u)
+                continue;
+            const SDL_GPUTransferBufferLocation source{upload, offset};
+            const SDL_GPUBufferRegion destination{part.stream.buffer, part.stream.base * part.stream.elementSize,
+                                                  part.bytes};
+            // The first flush of a submission cycles storage the last
+            // submission's draws may still read; the later ones append to it.
+            SDL_UploadToGPUBuffer(copy, &source, &destination, part.stream.base == 0u);
+            offset += part.bytes;
+        }
         SDL_EndGPUCopyPass(copy);
         vertexUploads.used(upload, device.pendingSerial());
         return true;
@@ -2909,6 +2984,8 @@ struct SdlGpuBackend::Impl {
         last.valid = false;
         if (batches.empty()) {
             vertices.clear();
+            indices.clear();
+            nativeRecords.clear();
             return true;
         }
         if (!device.valid())
@@ -2917,7 +2994,9 @@ struct SdlGpuBackend::Impl {
         // are the GPU's, and this submission starts at the buffer's front.
         if (vertexSerial != device.pendingSerial()) {
             vertexSerial = device.pendingSerial();
-            vertexBase = 0u;
+            vertexStream.base = 0u;
+            indexStream.base = 0u;
+            recordStream.base = 0u;
             recordedDraws = 0u;
         }
 
@@ -3012,8 +3091,13 @@ struct SdlGpuBackend::Impl {
                 viewport.max_depth = 1.0f;
                 SDL_SetGPUViewport(pass, &viewport);
 
-                const SDL_GPUBufferBinding binding{vertexBuffer, 0u};
+                const SDL_GPUBufferBinding binding{vertexStream.buffer, 0u};
                 SDL_BindGPUVertexBuffers(pass, 0u, &binding, 1u);
+                if (indexStream.buffer && recordStream.buffer) {
+                    const SDL_GPUBufferBinding indexBinding{indexStream.buffer, 0u};
+                    SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                    SDL_BindGPUVertexStorageBuffers(pass, 0u, &recordStream.buffer, 1u);
+                }
             }
 
             SDL_GPUGraphicsPipeline *pipeline = device.pipeline(batch.pipeline, error);
@@ -3034,15 +3118,24 @@ struct SdlGpuBackend::Impl {
                 {destinationTexture ? destinationTexture : dummyTexture, device.sampler()}};
             SDL_BindGPUFragmentSamplers(pass, 0u, textureBindings, batch.destination ? 2u : 1u);
 
-            if (batch.native)
-                SDL_PushGPUVertexUniformData(commands, 0u, &batch.nativeUniforms,
-                                             sizeof(batch.nativeUniforms));
-            else
+            if (batch.native) {
+                GsNativeVertexUniforms uniforms;
+                uniforms.base = batch.vertexUniforms;
+                uniforms.meshes[0] = static_cast<float>(recordStream.base);
+                SDL_PushGPUVertexUniformData(commands, 0u, &uniforms, sizeof(uniforms));
+            } else {
                 SDL_PushGPUVertexUniformData(commands, 0u, &batch.vertexUniforms,
                                              sizeof(batch.vertexUniforms));
+            }
             SDL_PushGPUFragmentUniformData(commands, 0u, &batch.fragmentUniforms,
                                            sizeof(batch.fragmentUniforms));
-            SDL_DrawGPUPrimitives(pass, batch.vertexCount, 1u, vertexBase + batch.firstVertex, 0u);
+            if (batch.native) {
+                SDL_DrawGPUIndexedPrimitives(pass, batch.indexCount, 1u, indexStream.base + batch.firstIndex,
+                                             static_cast<int32_t>(vertexStream.base), 0u);
+                ++stats.nativeDraws;
+            } else {
+                SDL_DrawGPUPrimitives(pass, batch.vertexCount, 1u, vertexStream.base + batch.firstVertex, 0u);
+            }
             ++stats.drawCalls;
 
             if (batchTraceEnabled()) {
@@ -3071,9 +3164,13 @@ struct SdlGpuBackend::Impl {
         endPass();
         ++stats.drawFlushes;
         recordedDraws += static_cast<uint32_t>(batches.size());
-        vertexBase += static_cast<uint32_t>(vertices.size());
+        vertexStream.base += static_cast<uint32_t>(vertices.size());
+        indexStream.base += static_cast<uint32_t>(indices.size());
+        recordStream.base += static_cast<uint32_t>(nativeRecords.size());
         clearBatches();
         vertices.clear();
+        indices.clear();
+        nativeRecords.clear();
         // Enough recorded: out it goes, so the GPU works while the worker
         // queues the next batches. Otherwise a later flush, a readback or the
         // present sends it.
@@ -3401,7 +3498,8 @@ struct SdlGpuBackend::Impl {
         std::fprintf(stderr,
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
-                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu)\n",
+                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
+                     "draws %llu)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3412,7 +3510,8 @@ struct SdlGpuBackend::Impl {
                      d(stats.coveredReleases, previousReasons.coveredReleases),
                      d(stats.coveredPages, previousReasons.coveredPages),
                      d(stats.nativeMeshes, previousReasons.nativeMeshes),
-                     d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded));
+                     d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded),
+                     d(stats.nativeDraws, previousReasons.nativeDraws));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -4644,8 +4743,9 @@ SdlGpuBackend::~SdlGpuBackend() {
         m_impl->device.submitPendingAndWait(ignored);
         m_impl->textures.reset();
         m_impl->targets.reset();
-        if (m_impl->vertexBuffer)
-            SDL_ReleaseGPUBuffer(m_impl->device.handle(), m_impl->vertexBuffer);
+        for (auto *stream : {&m_impl->vertexStream, &m_impl->indexStream, &m_impl->recordStream})
+            if (stream->buffer)
+                SDL_ReleaseGPUBuffer(m_impl->device.handle(), stream->buffer);
         m_impl->vertexUploads.release(m_impl->device);
         if (m_impl->dummyTexture)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->dummyTexture);

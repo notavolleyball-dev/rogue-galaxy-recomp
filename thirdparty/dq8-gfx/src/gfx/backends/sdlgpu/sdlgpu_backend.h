@@ -66,6 +66,8 @@ struct SdlGpuStats {
     // because their draw reads its target (Rogue Galaxy: added).
     uint64_t nativeMeshes = 0u;
     uint64_t nativeMeshesExpanded = 0u;
+    // The draw calls the GPU's strips took, merged (Rogue Galaxy: added).
+    uint64_t nativeDraws = 0u;
     // Drawn through the same-state fast path (Rogue Galaxy: added).
     uint64_t sameStatePrimitives = 0u;
     uint64_t trianglesDrawn = 0u;

@@ -219,7 +219,9 @@ bool SdlGpuDevice::create(std::string &error) {
         destroy();
         return false;
     }
-    // The native strips' (Rogue Galaxy: added), with the same bindings.
+    // The native strips' (Rogue Galaxy: added), with the same bindings and
+    // their records' storage buffer.
+    vertexInfo.num_storage_buffers = 1u;
     vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsNativeVertSpirv);
     vertexInfo.code_size = sizeof(kGsNativeVertSpirv);
 #ifdef DQ8_GFX_HAS_MSL
@@ -893,10 +895,9 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     info.vertex_input_state.vertex_attributes = kAttributes.data();
     info.vertex_input_state.num_vertex_attributes =
         static_cast<uint32_t>(kAttributes.size());
-    // A native strip (Rogue Galaxy: added) is a strip, and culls the
-    // backfaces its program skipped.
-    info.primitive_type =
-        key.nativeMesh == 1u ? SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    // Native strips (Rogue Galaxy: added) come as indexed triangle lists, and
+    // cull the backfaces their program skipped.
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     // The GS has no backface culling; every primitive it is given is drawn.
     info.rasterizer_state.cull_mode = static_cast<SDL_GPUCullMode>(key.cullMode);
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
