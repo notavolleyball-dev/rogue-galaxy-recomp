@@ -21,6 +21,11 @@
 - Save anywhere: in the field, R1 + Triangle opens the transporter's menu
   (Game > Save anywhere, off by default). Such a save loads at the area's
   transporter.
+- The free camera no longer lets a button pressed to move it reach a scene
+  waiting for one, and gives the controller back at once when turned off.
+- The free camera no longer leaves the game stuck at the battle's "escape?"
+  question (a hit can push the leader out of the battle's area while the
+  camera flies): the question turns it off, and it can be answered.
 
 ## 0.1.0 (pre-release)
 

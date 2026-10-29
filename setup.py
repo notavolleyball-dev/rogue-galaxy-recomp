@@ -639,7 +639,8 @@ def configured(build: Path) -> bool:
 # failure (DQ8-Recompiled #36). A clock set back leaves such files, and so
 # does a zip extracted west of where it was made, its times having no time
 # zone (0.1.0's first archive, 2026-10-27). The sources get now's time first.
-OWN_TIME = {"build", "disc", "toolchain", "textures"}
+# .claude holds Claude Code's worktrees, each a checkout of its own.
+OWN_TIME = {"build", "disc", "toolchain", "textures", ".claude"}
 
 
 def reset_future_times() -> None:

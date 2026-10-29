@@ -1779,6 +1779,47 @@ transporter, not where it was made (LeaderPlaceAtSavePoint places the
 leader by the save point the area records). Kept so, off by default; the
 exact place is left for later.
 
+**Small ones (2026-10-29).** Left from the free camera's review of
+2026-10-26, three cases, and a check from the upstreams' survey:
+- The free camera turned off from the menu or F6 kept the pad idle one
+  frame more: scePadRead read `g_active`, which only the camera's next
+  update clears. A switch seen off while active now holds the pad as Start
+  does, until the controller lets go of every button, and clears
+  `g_active` there. That matters more than the frame: the battle's
+  "escape?" window (FieldHudBtlEscOpen, 0x203D20; BattleModeUpdate opens it
+  when the leader stands outside the battle's circle, which a hit can push
+  them out of while the camera flies) reads pad 1 alone and pauses the
+  update tasks, the camera's among them, so `g_active` never cleared: the
+  pad stayed idle even after Start, and the game was stuck (a player's
+  report). The window's opening now ends the free camera too, as Start
+  does. Tested with a temporary line that turned the free camera on at the
+  battle bench's start and shrank the circle's radius (0x482210) to 1: the
+  window opened over the free camera, the camera ended, Cross answered it,
+  and it opened and was answered nine times more; Start at the stairs as
+  before.
+- Pad 2 was not blocked. The runtime answers port 1 with the same
+  controller as port 0, and EvCmdPadTestTriggered, the event scripts'
+  button test, ORs in pad 2's triggers whatever IsPad2Enabled says (it
+  tests the function's address, always set), so a button pressed for the
+  camera could reach a script waiting for one. PadUpdate (0x1843A0) is
+  hooked for pad 2: while the controller is the camera's, its state is
+  kept aside and pad 1's idle one put in its place; the camera's update
+  takes the kept one, and the next PadUpdate gets the real one back
+  first, so its last-frame half stays true. Scripted from File 03
+  (`RG_FREE_CAMERA=1`): the camera flew off with the stick, Start brought
+  it back and the party walked to the stairs.
+- Left as it is: releasing the camera writes the override -1 without
+  CameraSetModeOverride's CameraModeSetTop, which applies the camera's
+  mode again (its setup, CameraApplyMode, snaps it to its defaults). Taking
+  it skipped mode 13's setup the same way, so nothing of it needs undoing,
+  the follow camera catches up with the party on its own, and the game's
+  call would need a guest call from a hook.
+- GIF tags with FLG 3 (on the GS, IMAGE again), which the original
+  PS2Recomp learned to read and our fork's GS::processGIFPacket skips:
+  counted with a temporary line through a free camera walk (title, the
+  loading recap, the field), the battle bench and the town bench. None:
+  the game does not send them there, so nothing was brought over.
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.
