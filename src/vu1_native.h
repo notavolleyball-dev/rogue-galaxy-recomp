@@ -64,6 +64,7 @@ enum class Kind : uint8_t
     Overlay, // the screen sprites over the last object's bounds: B's own entry, its MSCAL
     Base,    // the per-object setup at 0x000: the state packet, matrices and lights into VU1 memory
     Particles, // camera-facing quads, rotated and scaled: A, then D draws them
+    Projector, // strips with a projected texture: A, B, F (UVs, color), C transforms and kicks
 };
 
 // How the B piece decodes a vertex's position.

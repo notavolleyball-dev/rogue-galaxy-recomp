@@ -165,6 +165,9 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | C | 0x10e0-0x1e70 | `3689bac97cae3c73` | The toon outlines (`buildOutline`): edges as four offset lines; with TOP.x 19 a silhouette test from the two adjacent triangles. Packets only: `gpu` mode sends them as `skip` does |
 | A | 0x0320-0x04a8 | `0b1031aeb003ccb0` | The particle driver: header with PRIM 4, calls D only |
 | D | 0x1900-0x2890 | `8ecadb3a83d5e584` | The particles (`buildParticles`): camera-facing quads, scaled and turned (cosine and sine from a polynomial in a triangle wave), four vertices of ST, RGBA, XYZF2 each; one corner outside clip space hides all four. Packets only |
+| A | 0x0320-0x05c0 | `4beba151fbf23f60` | The projected texture driver: as the strip A, but C last and no D |
+| F | 0x39d0-0x3af8 | `15be21a50caaa048` | Projected UVs (position through quads 30-33 times the model, divided by w) and the color (128, 128, 128, 82.w * 81.w * 128) |
+| C | 0x10e0-0x1b00 | `3b890d00703404b6` | The projected texture's transform and kick (`buildProjector`): scaled, capped z; guard band and backfaces re-tested per vertex over its triangle; triangle lists declined. Packets only |
 | A | 0x0320-0x0500 | `821b638f42fcaa6e` | The shadow volume driver: header with PRIM 5 (fans), calls B and C |
 | C | 0x10e0-0x1938 | `dc8dbfe4905cb635` | The shadow volumes (`buildShadow`): each triangle lit (normal . light > 1e-4) and inside is extruded into five fans, each after the A+D packet at quad 38 (facing) or 35. Packets only |
 | C | 0x10e0-0x1240 | `91f542d069307d6c` | Lighting: four directional lights (lanes of quads 100-102) on the normal, each clamped at 0, colors 33-36 and ambient 37 times the material 82 (`Lights`) |

@@ -134,6 +134,12 @@ constexpr Piece kOverlayB = {0x0960u, 0x0b38u, 0x6e42dac662887054ull};
 constexpr Piece kParticleA = {0x0320u, 0x04a8u, 0x0b1031aeb003ccb0ull};
 constexpr Piece kParticleD = {0x1900u, 0x2890u, 0x8ecadb3a83d5e584ull};
 
+// The projected texture program: A 4beba151 (calls B, F, E with 81.x & 2,
+// then C), F 15be21a5 (the UVs and color) and C 3b890d00 (the rest).
+constexpr Piece kProjectorA = {0x0320u, 0x05c0u, 0x4beba151fbf23f60ull};
+constexpr Piece kProjectorF = {0x39d0u, 0x3af8u, 0x15be21a50caaa048ull};
+constexpr Piece kProjectorC = {0x10e0u, 0x1b00u, 0x3b890d00703404b6ull};
+
 // The shadow volume program's A (header with PRIM 5, fans; calls B, then C)
 // and C (dc8dbfe4).
 constexpr Piece kShadowA = {0x0320u, 0x0500u, 0x821b638f42fcaa6eull};
@@ -201,10 +207,12 @@ const Program *intern(const Program &shape)
                                            : shape.kind == Kind::Overlay ? "overlay sprites"
                                            : shape.kind == Kind::Base    ? "object setup"
                                            : shape.kind == Kind::Particles ? "particles"
+                                           : shape.kind == Kind::Projector ? "projected texture"
                                                                         : "strip");
-    name += shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
-            : shape.cull == Cull::GuardBand          ? ", guard band"
-                                                     : "";
+    name += shape.kind != Kind::Strip                  ? ""
+            : shape.cull == Cull::GuardBandAndBackface ? ", guard band and backfaces"
+            : shape.cull == Cull::GuardBand            ? ", guard band"
+                                                       : "";
     name += shape.depthBounds ? ", depth and bounds" : "";
     name += shape.color == Color::Material && shape.kind == Kind::Strip ? ", one color"
             : shape.color == Color::Lit                                  ? ", lit"
@@ -1110,6 +1118,99 @@ void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint
     }
 }
 
+// The projected texture program. F: each vertex's UV is its position through
+// quads 30-33 times the model rows (60-63; x, y and w lanes), divided by w,
+// and its color (128, 128, 128, 82.w * 81.w * 128), unclamped. C, a strip
+// D of its own: the transform (68-71), the divide, z times 87.z at most 1.y,
+// fog; vertex j's ADC from the guard band of j and of the two before it
+// (the origin before the first; the earlier two tested with their scaled
+// z), and the triangle's facing, skipped when cross * winding > 0. The
+// XYZF2 word w is then its low half with ADC: the fog's for every vertex
+// but the first, whose low half is what the buffer held.
+void buildProjector(const Program &program, const VuData &vu, uint32_t top,
+                    std::vector<std::vector<uint8_t>> &packets)
+{
+    Chunk chunk;
+    readChunk(program, vu, top, chunk);
+    packets.clear();
+    packets.push_back(std::move(chunk.fog));
+    std::vector<uint8_t> &packet = packets.emplace_back();
+    const uint32_t count = vu.half(top, 1);
+    packet.reserve(64u + count * 48u);
+    for (const auto &quad : chunk.header)
+    {
+        putQuad(packet, quad);
+    }
+    Vec4 model[4], projector[4], window[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        model[i] = vu.quad(60u + i);
+        projector[i] = vu.quad(30u + i);
+        window[i] = vu.quad(68u + i);
+    }
+    Vec4 texture[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        texture[i] = transform(projector, model[i]);
+    }
+    const uint32_t rgba[4] = {128u, 128u, 128u,
+                              static_cast<uint32_t>(gsNativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f))};
+    const Vec4 fog = vu.quad(40), viewport = vu.quad(16), band = vu.quad(17), offset = vu.quad(18);
+    const float bandScale[3] = {band.x * viewport.x, band.y * viewport.y, band.z};
+    const float bandOffset[3] = {offset.x * bandScale[0], offset.y * bandScale[1], offset.z * bandScale[2]};
+    const auto outside = [&](const float p[3]) {
+        bool out = false;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float g = p[i] * bandScale[i] + bandOffset[i];
+            out = out || g > 1.0f || g < -1.0f;
+        }
+        return out;
+    };
+    float winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? -1.0f : 1.0f);
+    const float depthScale = vu.quad(87).z, depthMax = vu.quad(1).y;
+    const uint32_t output = top + vu.half(76, 0) + 4u;
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    // The two vertices before (scaled z), and whether each is outside.
+    float before[2][3] = {};
+    bool outBefore[2] = {outside(before[0]), outside(before[1])};
+    for (uint32_t j = 0; j < count; ++j)
+    {
+        float position[3];
+        decodePosition(vu, top, j, bones, position);
+        const Vec4 point{position[0], position[1], position[2], 1.0f};
+        const Vec4 t = transform(texture, point);
+        const float tq = vuReciprocal(t.w);
+        const float u = t.x * tq, v = t.y * tq;
+        const Vec4 c = transform(window, point);
+        const float q = vuReciprocal(c.w);
+        const float raw[3] = {c.x * q, c.y * q, c.z * q};
+        const float scaled[3] = {raw[0], raw[1], std::fmin(raw[2] * depthScale, depthMax)};
+        const float f = std::fmax(std::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
+        const float ax = before[1][0] - before[0][0], ay = before[1][1] - before[0][1];
+        const float bx = scaled[0] - before[1][0], by = scaled[1] - before[1][1];
+        if (j != 0u)
+        {
+            winding = 0.0f - winding;
+        }
+        const float facing = (ax * by - bx * ay) * winding;
+        const bool hidden = outside(raw) || outBefore[0] || outBefore[1] || facing > 0.0f;
+        const uint32_t fogWord = static_cast<uint32_t>(gsNativeFtoi(f, 16.0f));
+        const uint32_t low = j == 0u ? static_cast<uint32_t>(vu.word(output + 2u, 3)) : fogWord;
+        const uint32_t w = (low & 0xFFFFu) | (hidden ? 0x8000u : 0u);
+        const float stq[4] = {u * q, v * q, 1.0f * q, 0.0f};
+        putQuad(packet, stq);
+        putQuad(packet, rgba);
+        putWords(packet, static_cast<uint32_t>(gsNativeFtoi(scaled[0], 16.0f)),
+                 static_cast<uint32_t>(gsNativeFtoi(scaled[1], 16.0f)),
+                 static_cast<uint32_t>(gsNativeFtoi(scaled[2], 16.0f)), w);
+        std::memcpy(before[0], before[1], sizeof(before[0]));
+        std::memcpy(before[1], scaled, sizeof(scaled));
+        outBefore[0] = outBefore[1];
+        outBefore[1] = outside(scaled);
+    }
+}
+
 // The overlay B (6e42dac6), run by its own MSCAL: screen sprites over the
 // bounds the last depth-and-bounds program left in quads 98 and 99, one
 // pixel wider each way, within the rectangle of quads 140 and 141, in
@@ -1190,6 +1291,17 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     if (startPC != kEntry)
     {
         return nullptr;
+    }
+    if (matches(code, kProjectorA) && matches(code, kProjectorF) && matches(code, kProjectorC))
+    {
+        const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
+        if (!decode)
+        {
+            return nullptr;
+        }
+        Program shape{nullptr, Cull::GuardBandAndBackface, Color::Material, false, decode->decode,
+                      decode->maxBones, Kind::Projector};
+        return intern(shape);
     }
     if (matches(code, kParticleA) && matches(code, kParticleD))
     {
@@ -1311,6 +1423,14 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     }
     if (program.kind == Kind::Particles)
         return vu.half(top, 1) == 0u ? "no particles" : nullptr;
+    if (program.kind == Kind::Projector)
+    {
+        if (vu.half(81, 0) & 2u)
+            return "clipping (slot E)";
+        if ((vu.half(top, 0) & 7u) == 3u)
+            return "triangle list (C's own path)";
+        return vu.half(top, 1) == 0u ? "no vertices" : nullptr;
+    }
     if ((vu.half(81, 0) & 2u) && !clips)
         return "clipping (slot E)";
     // PRIM from the chunk header. Only the backface piece reads it, with a
@@ -1465,6 +1585,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     if (program.kind == Kind::Particles)
     {
         buildParticles(VuData(data), top, packets);
+        return;
+    }
+    if (program.kind == Kind::Projector)
+    {
+        buildProjector(program, VuData(data), top, packets);
         return;
     }
     Chunk chunk;
