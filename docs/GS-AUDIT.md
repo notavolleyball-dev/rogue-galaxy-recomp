@@ -146,3 +146,38 @@ The alpha replays (dual-source now) were the one large cost that was a
 pure duplicate; the rest is work the frame does once. A GPU timer per pass
 (SDL 3.2 has no timestamp queries; it would be another patch to it) would
 say where the rest of the 20 ms goes better than skipping categories does.
+
+## Bandwidth (2026-10-29)
+
+Is the renderer limited by memory bandwidth, as bit packing (narrower
+targets, textures or vertices) would need it to be? Field walk, gpu mode,
+standing, 60 fps capped; the amdgpu's `mem_busy_percent` (the memory
+controller's busy share) and the clock states it chose, sampled every half
+second (`build/run/bw-perf.sh`, `native-perf.sh` with those columns):
+
+| Scale | GPU busy | Memory busy | Memory clock | Shader clock | Power |
+|---|---|---|---|---|---|
+| 1x | 53% | 5% | 96 MHz (its lowest state) | 500 MHz | 14.7 W |
+| 2x | 66% | 7% | 96 MHz (its lowest state) | 732 MHz | 19.0 W |
+| 3x | 65% | 2% | 456 MHz | 1150 MHz | 34.4 W |
+| 8x | 91% | 11% | 611 MHz | 2540 MHz | 150 W |
+
+The top memory state is 1000 MHz (16 Gbps, 384 GB/s). At 1x and 2x the
+driver leaves the memory at its lowest state, about a tenth of that, and it
+is still 5-7% busy: a few GB/s, a few percent of a Steam Deck's 88 GB/s even
+allowing that the Deck shares it with the CPU. Even at 8x the memory is 11%
+busy. What stores everything at full width today (RGBA8 targets and textures,
+indexed and CT16 textures expanded to 32 bits, D32 depth, 48-byte vertices)
+is not what limits the frame on RDNA2.
+
+What the 1x and 2x rows do show: the GPU busy half the time or more at a
+few hundred MHz for a frame of a quarter-million pixels. That is work that
+does not scale with pixels: about 600 draws, 195 render passes, 100 snapshot
+copies and the dependencies between them, a frame. Scaled by compute (8 CUs
+at 1.6 GHz against 40 CUs at the clocks above), the Deck would be busy for
+roughly 14 ms of a frame at 1x and over 16.7 at 2x; an estimate to be
+replaced by a measurement on a Deck.
+
+Not measured: the frame with the memory held at its lowest state at 3x and
+8x (`power_dpm_force_performance_level` manual, `pp_dpm_mclk` 0; needs
+root), which would show directly how much bandwidth the frame can lose.
