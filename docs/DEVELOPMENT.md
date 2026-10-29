@@ -85,6 +85,9 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_FORCE_ENCOUNTER=1` | A battle at the first steps wherever the field has enemies: the encounter countdown is cut before each tick (`src/debug/encounter.cpp`), and each battle's start is logged with its pad read; the battle bench (`walk.sh BATTLE=1`) sets it |
 | `RG_JUMP_TRACE=1` | Log the party leader's movement updates while off the ground (host time, position, step-scaled velocity, the motion's displacement, the action mode and the gravity flags, one line per `CharaMoveCollideMaybe`; `=2` logs the moves on the ground too, for the speed ramps; `=3` every character's, tagged with address and id, and for enemies every move with what drives it and every move request with its caller; `=4` every character's moves on the ground too, for a party following its leader): compares a jump's arc and timing between the 30 and 60 fps modes |
 | `RG_WIDESCREEN=1` | The game drawn for a wide screen of the window's shape (the menu's "Widescreen"; `src/widescreen.cpp`) |
+| `RG_MINIMAP_SIZE=N`, `RG_COMPASS_SIZE=N` | The field's minimap and compass, percent of the game's size, 50 to 100 (the menu's "Minimap size" and "Compass size"; `src/hud_size.h`) |
+| `RG_BUTTONS=xbox` | The game's text shows an Xbox controller's buttons whatever is connected (`src/button_glyphs.h`; the menu's "Controller's buttons" follows the controller in use); `RG_GAIJI_DUMP=FILE` writes the picture of special characters they are drawn in (gaiji2.img) as loaded |
+| `RG_UPDATE_AS=VERSION` | The check for a newer release (`src/update_check.h`, the menu's "Check for new versions") takes this build for that version, to see the notice; scripted runs (`RG_INPUT`) never check |
 | `RG_SKIP_OPENING=1` | The logos at boot give way to the title screen (the menu's "Skip the opening") |
 | `RG_FIELD_OF_VIEW=N` | The camera's field of view in the field and in battle, degrees across a 4:3 picture (the menu's "Field of view"; the game's is 52) |
 | `RG_CAMERA_DISTANCE=N` | The camera's distance from the party, percent of the game's (the menu's "Camera distance") |
@@ -98,6 +101,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_ACTION_GAUGE=N` | How fast the party's action gauge fills, percent of the game's (the menu's "Action gauge speed") |
 | `RG_FREE_CAMERA=1` | Starts with the free camera on (the menu's "Free camera"; `src/free_camera.h`) |
 | `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase, the main menu's state and the Revelation Flow's placing step (`[scene]` lines; the quick scenes go by the mode, the warp's script and the placing step) |
+| `RG_SHARP_LETTERS=0` | The letters as the game draws them, enlarged, whatever the menu's "Sharp letters" says (`=1` traced; `src/sharp_letters.h`, `src/font_trace.h`); the `[gfx]` stats line counts `larger regions` (glyphs drawn traced) and `borders` (round borders drawn for their copies); `RG_SHARP_LETTERS_TRACE=1` logs each text style's border mode and each glyph traced, `=DIR` also writes each glyph as found and as made there |
 | `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
 | `RG_MAP_CHESTS=1` | The chests not yet opened on the maps before a planet is complete (the menu's "Chests on the map"; `src/map_chests.h`) |
 | `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |

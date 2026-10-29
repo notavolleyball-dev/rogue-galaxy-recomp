@@ -92,6 +92,17 @@ int wrapAxis(int texel, uint mode, int size, int regionMin, int regionMax) {
     return texel & (size - 1);
 }
 
+// Where inside its GS texel a tap lands once a clamp moved it: at the edge's
+// outermost physical texel. Keeping the tap's place inside the clamped GS
+// texel read one well inside it: at 4x a bilinear tap one physical texel left
+// of a glyph's host version read three texels in, the glyph's own stroke,
+// and drew it again as a light line left of its border (Rogue Galaxy: added).
+float clampedSubTexel(uint mode, int texel, int wrapped, float subTexel) {
+    if (mode != WRAP_CLAMP && mode != WRAP_REGION_CLAMP)
+        return subTexel;
+    return texel < wrapped ? 0.0 : texel > wrapped ? 0.999 : subTexel;
+}
+
 // Wrapping is defined on GS texel indices, so it is applied in that space and
 // the result scaled afterwards. `subTexel` selects a point inside the GS texel
 // when the bound texture holds several physical texels per GS one, which is
@@ -109,12 +120,14 @@ vec4 fetchTexelAt(ivec2 texel, vec2 subTexel) {
     ivec2 wrapped = ivec2(wrapAxis(texel.x, wrapU, size.x, region.x, region.y),
                           wrapAxis(texel.y, wrapV, size.y, region.z, region.w));
     wrapped = clamp(wrapped, ivec2(0), size - 1);
+    const vec2 sub = vec2(clampedSubTexel(wrapU, texel.x, wrapped.x, subTexel.x),
+                          clampedSubTexel(wrapV, texel.y, wrapped.y, subTexel.y));
 
     const int scale = max(int(params.misc.y), 1);
     ivec2 physical = wrapped * scale;
     if (scale > 1)
         physical += g_plane.x >= 0.0 ? ivec2(g_plane)
-                                     : ivec2(clamp(subTexel, vec2(0.0), vec2(0.999)) * float(scale));
+                                     : ivec2(clamp(sub, vec2(0.0), vec2(0.999)) * float(scale));
     // Within the bound texture too: an upscaled target's sub-pixels past the
     // GS's last sample may reach a texel beyond the target, which the CPU
     // side does not pad when the GS itself never reads it.

@@ -690,6 +690,10 @@ void Overlay::drawAbout() {
             mutedText("Version %s", m_host.version.c_str());
         else
             mutedText("Version %s (%s)", m_host.version.c_str(), m_host.revision.c_str());
+        const auto newer = m_host.newerRelease ? m_host.newerRelease() : std::pair<std::string, std::string>{};
+        if (!newer.first.empty())
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(palette::kGold), "Version %s is out",
+                               newer.first.c_str());
         ImGui::EndGroup();
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::GetFrameHeight());
@@ -715,7 +719,12 @@ void Overlay::drawAbout() {
             endSettings();
         }
         ImGui::Dummy(ImVec2(0.0f, em(0.3f)));
-        if (iconButton("Project page", Icon::Link, true))
+        if (!newer.first.empty()) {
+            if (iconButton(("Get version " + newer.first).c_str(), Icon::Link, true))
+                SDL_OpenURL(newer.second.c_str());
+            ImGui::SameLine();
+        }
+        if (iconButton("Project page", Icon::Link, newer.first.empty()))
             SDL_OpenURL(kProjectUrl);
         ImGui::SameLine();
         if (iconButton("Report a problem", Icon::Warning))

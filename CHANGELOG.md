@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- With an Xbox controller, the game's text shows its buttons (A, B, X, Y,
+  LB, RB, LT, RT) instead of the PlayStation's (Game > Controller's
+  buttons, on by default).
+- The game says when a newer version is out, and the menu's About window
+  links to it (Game > Check for new versions, on by default).
+- Above 1x, the letters of the dialogue, menus and story are traced into
+  smooth outlines and drawn at the internal resolution, with a round black
+  border or a solid shadow, instead of enlarged as blocks; the Xbox
+  buttons in the text and the ® are drawn sharp too (Game > Sharp
+  letters, on by default).
+- A 3D program the game uses later in Salgin is compiled: it ran on the
+  slow path every frame, and the walk there was choppy.
+- The field's minimap and compass can be made smaller (Game > Minimap
+  size, Compass size, 50% to 100%).
+
 ## 0.1.0 (pre-release)
 
 First release: the source plus an installer that builds the game on your PC

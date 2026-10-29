@@ -69,12 +69,15 @@ add_executable(roguegalaxy
     main.cpp
     graphics.cpp
     battle_rates.cpp
+    button_art.cpp
+    button_glyphs.cpp
     camera_view.cpp
     depth_reads.cpp
     dev_tools.cpp
     draw_distance.cpp
     ee_fpu.cpp
     flip_pacing.cpp
+    font_trace.cpp
     free_camera.cpp
     movie_audio.cpp
     quick_scenes.cpp
@@ -85,8 +88,11 @@ add_executable(roguegalaxy
     map_chests.cpp
     opening.cpp
     widescreen.cpp
+    hud_size.cpp
+    update_check.cpp
     scene_timing.cpp
     settings_pages.cpp
+    sharp_letters.cpp
     shop_prices.cpp
     step_fixes.cpp
     stick_response.cpp
@@ -109,6 +115,10 @@ add_executable(roguegalaxy
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
+if(WIN32)
+    # update_check.cpp asks GitHub through WinHTTP.
+    target_link_libraries(roguegalaxy PRIVATE winhttp)
+endif()
 target_compile_definitions(roguegalaxy PRIVATE RG_APP_VERSION="${PROJECT_VERSION}")
 # The commit this build is from, for the menu's About window (as of the last
 # configure): the REVISION file of a release's source archive, which is no

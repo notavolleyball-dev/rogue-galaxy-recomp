@@ -1412,6 +1412,273 @@ disc (nothing of the game distributed). A clone of the pushed repository
   replaced on the release before any download. `setup.py tools` and
   `build` also give any source file dated after now now's time first.
 
+**Menus in 4:3 on a wide screen (2026-10-27).** After 0.1.0 the user
+picked five things to do next, the stretched menus first. The frame is 512
+wide and the presenter stretches it to the window, so the game's 2D, laid
+out for 4:3, came out a third wider at 16:9. Its drawing goes in groups,
+each opened by DrawListBeginPrim and closed by DrawListEndPrim, and nearly
+all of its vertices through six setters (GsPktSetXYZ*), after one of four
+for texture coordinates (GsPktSetUV/ST); the group's owner, BeginPrim's
+caller (or FontDrawText's, for a text), tells what it is. A trace of the
+owners (`RG_UI_FIT_TRACE=1`) in the item menu, the main menu, the town's
+talk and a battle showed the menus all in the widget system (UiDrawWidgets,
+UiDrawWidgetText, UiDrawSpriteTiled), the field's messages in MesWinDraw
+and MesWinDrawName, the battle's party panel and WARNING!! in widgets too,
+and the names over heads, damage and status icons in their own functions.
+`src/ui_fit.cpp` rewrites a closing group's vertices in guest memory (the
+frame goes to the VIF1 thread at GfxEndFrame, which closes any group left
+open first): the menus and messages about the frame's centre by 4:3 over
+the shape shown, the names and damage each about its own centre, the
+compass's letters each about their own. What it found on the way:
+- The main menu keeps its side list at x -74..46, past the frame's left
+  edge and under the column drawn over it: narrowed, it showed in the
+  side. Each sprite is cut to the 4:3 frame first, its texture coordinates
+  with it, and a scissor a group sets is narrowed with it (the whole
+  frame's stays, for the scene after).
+- At 4x, two-pixel light lines at every tile of the item panel: a sprite
+  starting on a half pixel starts a pixel late in the renderer while the
+  one before it ends on time. The narrowed positions are whole pixels.
+- A menu over nothing (the map not drawn: MapDrawPre not called in the
+  frame) showed the frame's clear at its sides, blue in the menus; it is
+  made black before the frame goes out. Showing such frames 4:3 instead,
+  with the presenter's Borders, was tried and dropped: the presenter reads
+  the flag later than the frame was drawn, so a menu's first and last
+  frames would come out stretched or narrowed twice.
+- The transporter menu draws the field's map and compass in its panel. In
+  the field they keep the game's wide layout (MinimapDrawEntries narrows
+  the map by 3/4, the compass is round by its view, both at the frame's
+  edges); with the menu's markers drawn the frame before, IsWidescreen
+  answers 0 to MinimapDrawEntries, the map's view and arrow are narrowed
+  with the panel (not its first group, which draws the map's tiles into a
+  texture of its own: narrowed, the map showed garbage), and the compass's
+  centre (ViewSetScreenMatrix from CompassHudRender, 1866.9 at 0x47D830)
+  moves in with them. In the menu's opening fade the scene shows bright at
+  the sides of the darkening panel.
+- Owners not in the list stay stretched, as before; shops, the factory,
+  Insectron and the Revelation Flow are listed or expected through the
+  widgets but not seen yet.
+The menu's Game page has "Menus in 4:3" under Widescreen, on by default
+(`RG_UI_FIT=0`), and the game's Settings screen a row for it. Only the
+groups to fit keep their vertices: with Widescreen off the 30 fps walk's
+frame is byte-identical to `mods30c`, and the battle bench with Widescreen
+on gave 49.1 and 48.3 fps (median of the heavy intervals) with it against
+47.8 and 52.2 without, within the runs' spread.
+
+Then (2026-10-28) the user asked for the backgrounds to reach the sides
+instead of the black bars, stretched, the rest staying 4:3. A group dump
+(`RG_UI_FIT_DUMP`) of the main menu showed its background as sheets wider
+than the frame (576x512, the texture drawn at twice its size, each drawn
+twice in the same place): one at -64,-64 and its neighbours right, above
+and below, past the frame; then one the frame's size, a darker shading at
+its edges. The save menu's (and the transporter menu's stone) is a group
+of 256-pixel tiles scrolling a pixel a frame. Stretched, the main menu's
+sheet took its hole off the circle the field shows in, a dark crescent
+beside the ring: the hole is in the 576-wide sheet, not the shading. So
+a group of large sprites (none under 128 pixels a side nor over the
+frame's width) covering the frame is left as drawn, stretched (the tiles,
+the shading), and a sprite wider than the frame is narrowed with the menu
+but not cut to the frame (the hole stays on the circle, the neighbours
+come in at the sides). The game draws only the sheets the 4:3 frame
+needs, so at 16:9 a strip about 3% of the width stays black on one side
+when the sheets sit at an edge (left in the main menu, right in the
+Revelation menu); `RG_UI_FIT_BACKGROUNDS=0` brings the black sides back.
+
+The user played with it and liked none of it, so it is gone: with
+Widescreen the 2D stretches across the picture again, as in 0.1.0, and
+the transporter menu's map is the game's wide one. `src/ui_fit.cpp` was
+never committed; what this section describes is the record of it.
+
+The same day the user asked for the minimap and compass to be made
+smaller. A dump of the field's groups found the map drawn by two owners
+alone in its corner (MinimapDrawEntry's view, a strip of the map's
+texture in its frame, at 310..470 by 274..418 in the wide layout, and
+the player's arrow; the tiles and chests go into the map's texture
+first), and the compass as a model under its own screen matrix
+(`CompassHudRender`: ViewSetScreenMatrix with ox, oy 1866.9, 2212.2 from
+0x47D830, then its four letters, sprites 26 pixels a side about points
+projected through that matrix). Game > Minimap size and Compass size (50
+to 100%) shrink the map's view and arrow toward the view's bottom right
+corner (not while the view is wider than 240 pixels, nor in the
+transporter menu), and the compass's matrix (sx, sy scaled, its centre
+moved toward a corner 46 pixels left and 44 down of it), its letters
+each about its own centre; wide or not, the letters stay on the dial.
+These stayed when the 4:3 menus went, in `src/hud_size.cpp`: the same
+groups and owners, recorded only for the map and the compass.
+
+**Weaker machines, and an Xbox controller's buttons (2026-10-27/28).**
+The second of the five: how the game fares with less. The battle bench
+with the instance held to fewer logical processors (`AFFINITY`): all 16,
+8 (four cores), 4 cores without their second threads, and 4 (two cores)
+gave 59.8, 59.8, 60.0 and 51.6 fps (median of the heavy intervals): four
+cores are enough, and what limits a slower machine is the game thread's
+own speed (71% busy here at 60 fps, `dispatchGuestBranch` the largest
+single part of it, 9.5%, already cut once). Two pairs of runs with
+Widescreen on had given 48-52 against 60 without, and a third pair 59.8
+and 59.9: the machine's other load, not the wider view. Nothing changed;
+a Steam Deck would run the Windows build through Proton, untried.
+
+The third: the buttons in the game's text are special characters drawn
+from one picture, gaiji2.img (an IM3 archive with a 256x256 8-bit TIM2,
+stored in the GS's PSMT8 order, its CLUT in CSM1's), which GaijiLoadImage
+copies to 0x4C3180 at boot and with each map's resources: L2, L1, R1 and
+R2 as 32x20 plates along its top, the four face buttons as 22x22 circles
+below (no Start or Select: the text spells them). `src/button_glyphs.cpp`
+keeps that corner as loaded and redraws it in place, in the game's style:
+the cross's circle emptied with a coloured letter (A green, B red, X
+blue, Y yellow, the colours of the menu's controller pictures), L1's
+plate emptied with LB, RB, LT or RT in white, each pixel the nearest of
+the picture's own 256 colours. `src/graphics.cpp` picks, twice a second,
+what the controller driving the game calls the button each PlayStation
+button is bound to first (Controls), an Xbox pad's or one SDL does not
+know; a PlayStation or Nintendo pad, or the keyboard alone, keeps the
+game's. The menu's Game page has "Controller's buttons", on by default
+(`RG_BUTTONS=xbox` for tests). Seen in the field ("A Use transporter").
+Not changed: the loading screen after a save is picked still shows the
+cross (its picture is uploaded before, and kept while it shows: redrawing
+on every special character drawn changed nothing there). The 30 fps walk
+with no controller is byte-identical to `mods30c`.
+
+**A notice of new versions (2026-10-28).** The fourth: once a run, four
+seconds in, unless the menu's "Check for new versions" is off by then,
+`src/update_check.cpp` asks GitHub's API for the project's releases
+(WinHTTP, one HTTPS GET with five-second timeouts, nothing sent but the
+request; `/releases`, since `/releases/latest` leaves out pre-releases,
+which 0.1.0 is) and compares the newest one's tag with `RG_APP_VERSION`,
+number by number. A newer one gets a toast ("Version X is out: F1, then
+Rogue Galaxy > About") and a line in the About window with a button to
+its page. Scripted runs (`RG_INPUT`) never ask. Tried: GitHub answered
+v0.1.0, and with `RG_UPDATE_AS=0.0.9` the check found it newer.
+
+**Sharp letters (2026-10-28).** The fifth: the letters at 8x. A search of
+how other projects do HD text found redrawn fonts (TTF) and AI-upscaled
+packs, both made off the player's machine; the user had found an
+UltraSharp/xBR pack of the glyphs soft (branch texture-pack). Tracing
+does it from the disc's own glyphs, on the player's machine: a glyph's 16
+alpha levels give its anti-aliased distance field (Gustavson and Strand),
+whose zero line is a contour accurate to a fraction of a texel; corners
+are found where it turns past 60 degrees and squared off, the runs
+between them smoothed and fitted with cubic Beziers (Schneider), and the
+outlines drawn back with exact coverage at the internal scale
+(`src/font_trace.cpp`; a Python prototype on 29 collected letters first,
+the C++ port matching it, 2-3 ms a glyph at 8x). The edge is moved 0.15
+texel in: at the half-covered line the letters looked bolder than the
+originals, whose edges are semi-transparent. The user judged the trace
+good, then asked why the black border did not go all round: the game
+borders its dialogue letters with four black copies a pixel up, down,
+right and left (FontDrawGlyphOutline mode 1, D_0047E968), which on
+smooth letters leave notches wherever an edge faces a diagonal. Shown
+four copies, eight and a round border side by side, the user chose the
+round one. `src/sharp_letters.cpp` marks mode 1's copies (the packet's y
+offset a sixteenth of a pixel up for the call; at a pixel's centre that
+changes no pixel and no texel) and dq8-gfx, given the host's pictures of
+regions (`sdlgpu_regions.h`, from the texture-pack branch's region
+replacement), draws the first copy where the glyph goes from a border
+version, the outline grown by a pen a pixel wide, and leaves the other
+three out; without one, the four are drawn as they were. Four fonts are
+traced, by their palette's hash: the dialogue's rounded letters, two
+narrow ones (smoothed harder and kept at full width: their strokes are a
+texel or so and came out wobbly), and the menus' small letters, grey in a
+dark border drawn in (traced twice, the border's edge from the alpha and
+the core's from the colour). Each glyph is made on three threads the
+first time it shows and drawn as it is meanwhile. Text in a gradient
+draws each glyph as two triangles, which take their rectangle whole. Not
+traced: the menus' labels, numbers and icons, which are pictures, some
+shaded. In the bench walk at 8x the load menu, its messages, the story
+recap and the strategy menu came out traced; the town held the same 48
+fps (hidden window) with the option on and off. `RG_SHARP_LETTERS=0` or
+`=1` overrides the menu.
+
+The user then saw a layer over the letters, out of place, a ghost, worst
+in the load menu. Three things made it. The bench walk runs without the
+menu's settings, so with the PS2's line blend (the menu's "sharper"
+option off): each line mixed with the one above by the frame's alpha,
+which smooth glyphs show as a second outline a line up; the user's game
+has it removed, and the captures since are made so (a bench settings
+file with `remove_line_blend = 1`, deleted after). The load menu draws
+its letters at vertex alpha 0xFF, a blend factor of two, so every texel
+at half coverage or more is opaque and the glyph comes out bolder than
+its half-covered line, and its black copies at 0x80, soft: traced at the
+half-covered line, the letters were thinner than the game shows them and
+their border took over. dq8-gfx now asks for a bold version of a region
+drawn past 0x80 (traced a quarter texel out), and the border goes about
+that bolder outline, 0.75 texel, which reaches as far as a pixel about
+the plain one. And the pictures took a glyph's own highest alpha for
+opaque: a thin glyph never reaches 0x80, and its border came out half
+transparent; 0x80 is opaque now. A frame log of the menu
+(`RG_GS_FRAMELOG`) showed each glyph as four marked copies then the
+glyph, and `RG_SHARP_LETTERS_TRACE` that the menu's letters are the
+narrow font, bold. With the line blend removed, the menu's letters are a
+grey glyph in one round black border.
+
+Then the battle (the bench's File 03) and the widescreen menus. Battle
+messages and the names over enemies (in a gradient) came out traced,
+squeezed with "Menus in 4:3" as the rest of the 2D, their borders in
+place; "CAMERA:HIGH" and the party's numbers are pictures. But a
+descender poked out under its border: a glyph's sprite spans a texel
+more than its pixels, the GS never shows that last row, and the font's
+descenders end in it. The trace took it in, and the draw, clamped to the
+shown texels, showed the last shown row a second time below it (the
+shader clamps the GS texel and keeps the position inside it). The host
+is now handed the texels a draw never shows transparent (the shown ones
+taken without the scissor, so a line scrolling out keeps its pictures;
+the border's from the first copy, not its grown quad), and the pictures
+are drawn whole. The "g" and "y" of the load menu end in their border.
+
+The user, at 4x, still saw a light bar beside some letters (h, a, E, l,
+o). A capture of the game's window showed a column a pixel wide, the
+glyph's grey, just left of its border: drawn by the glyph's quad, whose
+first pixel column takes a bilinear tap one physical texel left of the
+picture. The shader's REGION_CLAMP clamped that tap's GS texel to the
+first and kept its place inside it, three texels in at 4x, where a
+stroke touching the cell's left edge already is. A tap past a clamped
+edge now takes the edge's outermost physical texel (`clampedSubTexel` in
+`gs_draw.frag`; CLAMP and REGION_CLAMP, an upscaled source only); the
+bench's load menu at 4x has the same border both sides of the "l".
+
+Then two of the user's screenshots: "Use transporter" over a transporter
+and a townsman's dialogue in Salgin, the letters each with a grey and a
+black ghost down and right. Their style's border mode is 2
+(`FontDrawGlyphOutline`: a 0x40 grey copy a pixel down and right, then a
+black one two; mode 3 is the black one alone; 4 to 6 are wider borders
+the game was not seen to use). At 1x those copies join into a solid
+shadow, as the GS's blocks touch; traced, each showed its own outline a
+pixel from the next. `src/sharp_letters.cpp` now marks a shadow's copies
+two sixteenths up, and dq8-gfx draws each where it goes from the host's
+shadow version: the glyph swept a texel back up and left, with the
+border's margin, so each copy reaches the place of the one before. The
+prompt comes out with a whole black shadow, its grey only where the
+copies' ends differ, as the 1x frame has it.
+
+And the special characters (`gaiji2.img`): the ® and the Xbox buttons
+(`src/button_glyphs.cpp` draws them at the PS2's 22 pixels) stayed
+enlarged blocks. Its palette, 844F1E0969532C9D (found with
+`RG_SHARP_LETTERS_TRACE=palettes`, which names every small region's
+palette and place), is now known to `sharp_letters.cpp`, and dq8-gfx
+hands the host a region's place in its texture too: `src/button_art.cpp`
+tells the Xbox's buttons from the PlayStation's by their letters' texels,
+exactly as stamped, and draws them from their shapes at the target's
+scale (the circle's bevel taken about it from the texels, the plates'
+straight bevels texel by texel inside a rounded outline, the letters as
+pen strokes in their edges); the PlayStation's own and the rest of the
+picture stay as they are. The ® draws its oval, ring and R the same way:
+its region (18,236 15x20) ends a texel past the picture's bottom, the
+texel a sprite's UVs span past its pixels, and `spriteTexelRect` turned
+it down; a region a texel past its texture is now cut to it.
+
+**A VU1 program of later Salgin (2026-10-28).** The user found the walk
+choppy: their log had the field at 38-50 fps, the VIF1 thread 94% busy,
+and "vu1 interpreted" at 1-9% of the pairs from the moment the save
+loaded, where the bench walks show none. Their options (Field of view 64,
+widescreen, Developer tools) were not it: the town, square and waterway
+walks with them held 60 with nothing interpreted. Their newest save
+(File 04, 2026-10-26, copied to `build/run/mc0-file04`) was: a program
+at 0x39d0, 3% of the pairs every frame, missing from the manifest.
+Recorded with `PS2_VU_PROGRAM_PROFILE` (four code images, the same entry)
+and compiled, the same walk interprets nothing and the VIF1 thread is
+41.5% busy against 61.8% (hidden window, 4x). `setup.py vu1-manifest`
+folded it into `vu1-programs.txt` (51 images, 3 new), so a fresh install
+compiles it too.
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.

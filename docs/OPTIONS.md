@@ -30,11 +30,15 @@
 | Option | |
 |---|---|
 | 60 frames per second | On by default; off, the game's own 30. From the next start. |
-| Widescreen | A wider view that fills the window, from 4:3 to 32:9. Menus and text come out stretched. |
+| Widescreen | A wider view that fills the window, from 4:3 to 32:9. |
+| Minimap size | 50% to 100% of the game's, toward its corner. |
+| Compass size | 50% to 100% of the game's, toward its corner. |
 | Field of view | 40 to 90 degrees (the game's is 52). |
 | Camera distance | 70% to 160% of the game's. |
 | Faster camera rotation | The camera turns twice as fast. |
 | Draw distance | 100% to 400% of the game's, from the next map loaded. |
+| Controller's buttons | The buttons in the game's text follow an Xbox controller: A, B, X, Y, LB, RB, LT and RT, as bound in Controls. On by default. |
+| Sharp letters | Above 1x, the game's letters are traced into smooth outlines, with a round black border or a solid shadow, instead of enlarged pixels; the Xbox buttons and the ® are drawn sharp too. On by default. |
 | Free camera (F6) | The party stands still and the controller moves the camera. Start or F6 to leave. |
 
 **Convenience**
@@ -46,6 +50,7 @@
 | Instant text | Dialogue a page at a time instead of letter by letter. |
 | Chests on the map | Unopened chests show on the map in the parts explored. |
 | Fast transporters | Transporter warps play up to twice as fast. |
+| Check for new versions | At each start, asks GitHub for this project's releases and says when a newer one is out (Rogue Galaxy > About links to it). On by default. |
 | Fast Revelation Flow | Revelation Flow animations play up to twice as fast. |
 
 **Battles and rewards**

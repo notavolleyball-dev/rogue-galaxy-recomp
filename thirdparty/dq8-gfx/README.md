@@ -340,6 +340,40 @@ Five more fix results:
   zeros) or as noise ("28"), with the same draws as a good run's. The
   window thread's present waits for the lock no longer than one GS call;
   the town at 8x showed no difference beyond noise.
+- `sdlgpu_regions.h`, `sdlgpu_backend.cpp`, `sdlgpu_textures`: the host's
+  larger versions of the 2D art a UV sprite (or a triangle, half of a
+  quad) samples, for Rogue Galaxy's traced letters. A whole texture's
+  identity is no name for its glyphs: the font sheet declares 512x512
+  over rows of other data that change with the scene. The rectangle a
+  primitive samples is hashed as a whole texture is
+  (`GsTextureCache::regionIdentity`: the indices and the palette window);
+  the host says which palettes it wants (the rest are left before their
+  texels are hashed), is shown each new rectangle of those with its RGBA,
+  and answers with a larger picture, or "pending" while it makes one
+  (the region is drawn as it is meanwhile). That picture is a texture of
+  its own, kept by content (`GsTextureCache::replacement`; the least
+  recently drawn go past 512 MB), drawn bilinear at its own texels per GS
+  texel, the UVs moved to the rectangle's corner. A sprite's UVs often span
+  a texel more than its pixels, and that last row and column, never shown,
+  hold the next piece of art or a descender's end: the host is handed them
+  transparent, and the picture is drawn whole. Clamped to the shown texels
+  instead (REGION_CLAMP), the last shown row came out again below it, the
+  shader keeping the position inside a clamped GS texel. Only
+  into the frame (the buffer last shown, or the target last copied into
+  it), from indexed textures, above 1x. Borders: a glyph's four black
+  copies a pixel each way, marked by the host with their y a sixteenth of
+  a pixel up, are drawn as one, where the glyph goes, from the host's
+  border version (the outline grown round, with a margin about the
+  region), the other three left out; without one, the four as they are.
+  Shadows: a copy marked two sixteenths up, of any colour, is drawn where
+  it goes from the host's shadow version (the glyph swept back toward the
+  one before it, the same margin), so copies a pixel apart join as the
+  GS's blocks do. The host is told each region's place in its texture,
+  and a region a texel past its texture's edge (the texel a sprite's UVs
+  span past its pixels) is cut to it. The stats line counts `larger
+  regions`, `borders` and `shadows`. First written for
+  a pack of upscaled pictures (the `texture-pack` branch), from which
+  the frame-target test and the clamp come.
 
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window

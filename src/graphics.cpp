@@ -16,6 +16,8 @@
 #include "depth_reads.h"
 #include "flip_pacing.h"
 #include "battle_rates.h"
+#include "button_glyphs.h"
+#include "update_check.h"
 #include "camera_view.h"
 #include "dev_tools.h"
 #include "draw_distance.h"
@@ -27,8 +29,10 @@
 #include "quick_scenes.h"
 #include "scene_timing.h"
 #include "settings_pages.h"
+#include "sharp_letters.h"
 #include "shop_prices.h"
 #include "vif1_thread.h"
+#include "hud_size.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
@@ -97,6 +101,110 @@ void followQuickScenes()
     }
 }
 
+// The game's text shows the buttons of the controller driving it (the menu's
+// "Controller's buttons").
+std::atomic<bool> g_controllerButtons{true};
+
+// What a controller calls the button a PlayStation button is bound to, as a
+// picture the game's text can show: an Xbox pad's (or a pad SDL does not
+// know, taken as one); a PlayStation or Nintendo pad keeps the game's.
+rg::buttons::Glyph glyphFor(const dq8::gfx::PadBinding &binding, SDL_GamepadType type)
+{
+    using rg::buttons::Glyph;
+    if (binding.kind == dq8::gfx::PadBinding::Kind::Axis)
+    {
+        if (binding.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER)
+            return Glyph::LT;
+        if (binding.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
+            return Glyph::RT;
+        return Glyph::PlayStation;
+    }
+    if (binding.kind != dq8::gfx::PadBinding::Kind::Button)
+        return Glyph::PlayStation;
+    const auto button = static_cast<SDL_GamepadButton>(binding.code);
+    switch (button)
+    {
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
+        return Glyph::LB;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
+        return Glyph::RB;
+    case SDL_GAMEPAD_BUTTON_SOUTH:
+        return Glyph::A;
+    case SDL_GAMEPAD_BUTTON_EAST:
+        return Glyph::B;
+    case SDL_GAMEPAD_BUTTON_WEST:
+        return Glyph::X;
+    case SDL_GAMEPAD_BUTTON_NORTH:
+        return Glyph::Y;
+    default:
+        return Glyph::PlayStation;
+    }
+}
+
+bool xboxLike(SDL_GamepadType type)
+{
+    switch (type)
+    {
+    case SDL_GAMEPAD_TYPE_PS3:
+    case SDL_GAMEPAD_TYPE_PS4:
+    case SDL_GAMEPAD_TYPE_PS5:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return false;
+    default:
+        return true;
+    }
+}
+
+// Twice a second, the pictures for Cross, Circle, Square, Triangle, L1, R1,
+// L2 and R2: each one's first controller binding as the controller driving
+// the game names it, the PlayStation's with the keyboard alone.
+void updateButtonGlyphs(dq8::gfx::SdlGpuBackend &backend)
+{
+    static auto last = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::milliseconds(500))
+        return;
+    last = now;
+    rg::buttons::Glyphs glyphs{};
+    if (g_controllerButtons.load(std::memory_order_relaxed))
+    {
+        dq8::gfx::SdlPadInput &pad = backend.padInput();
+        bool active = false;
+        SDL_GamepadType type = SDL_GAMEPAD_TYPE_UNKNOWN;
+        for (const dq8::gfx::ControllerInfo &controller : pad.controllers())
+        {
+            if (controller.active)
+            {
+                active = true;
+                type = controller.type;
+                break;
+            }
+        }
+        if (active && xboxLike(type))
+        {
+            using dq8::gfx::PadInput;
+            constexpr PadInput kInputs[rg::buttons::kButtons] = {PadInput::Cross, PadInput::Circle, PadInput::Square,
+                                                                 PadInput::Triangle, PadInput::L1, PadInput::R1,
+                                                                 PadInput::L2, PadInput::R2};
+            for (size_t i = 0; i < rg::buttons::kButtons; ++i)
+            {
+                for (const dq8::gfx::PadBinding &binding : pad.config().slots(kInputs[i], false))
+                {
+                    if (binding.bound())
+                    {
+                        glyphs[i] = glyphFor(binding, type);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    rg::buttons::setGlyphs(glyphs);
+}
+
 // What the menu's game options switch, and the game's Settings screen's
 // pages of them too.
 void applyGameOption(const std::string &key, bool on)
@@ -106,12 +214,18 @@ void applyGameOption(const std::string &key, bool on)
         rg::timing::setSixtyFpsPreferred(on);
     else if (key == "widescreen")
         rg::widescreen::setEnabled(on);
+    else if (key == "controller_buttons")
+        g_controllerButtons.store(on, std::memory_order_relaxed);
+    else if (key == "check_updates")
+        rg::updates::setEnabled(on);
     else if (key == "skip_opening")
         rg::opening::setSkip(on);
     else if (key == "instant_loading_recap")
         rg::loading::setInstantRecap(on);
     else if (key == "instant_text")
         rg::instanttext::setEnabled(on);
+    else if (key == "sharp_letters")
+        rg::letters::setEnabled(on);
     else if (key == "map_chests")
         rg::mapchests::setEnabled(on);
     else if (key == "dev_tools")
@@ -135,6 +249,10 @@ void applyGameNumber(const std::string &key, int value)
         rg::cameraview::setDistance(value);
     else if (key == "draw_distance")
         rg::drawdistance::setPercent(value);
+    else if (key == "minimap_size")
+        rg::hudsize::setMinimapSize(value);
+    else if (key == "compass_size")
+        rg::hudsize::setCompassSize(value);
     else if (key == "encounter_rate")
         rg::battlerates::setEncounterRate(value);
     else if (key == "battle_experience")
@@ -222,6 +340,7 @@ bool pump(void *userData)
     {
         return false;
     }
+    updateButtonGlyphs(*backend);
     // The shape the picture takes with Widescreen on, for the game's camera:
     // under Auto the window's.
     int windowWidth = 0, windowHeight = 0;
@@ -301,6 +420,19 @@ bool pump(void *userData)
         {
             g_menu->notify(freeCamera ? "Free camera on: Start or F6 to leave" : "Free camera off",
                            dq8::ui::Icon::Camera);
+        }
+    }
+    // A newer release found by the check of this run: a toast, once.
+    static bool releaseTold = false;
+    static auto releaseAsked = std::chrono::steady_clock::time_point{};
+    if (!releaseTold && g_menu && std::chrono::steady_clock::now() - releaseAsked > std::chrono::seconds(1))
+    {
+        releaseAsked = std::chrono::steady_clock::now();
+        if (const rg::updates::Release newer = rg::updates::newer(); !newer.version.empty())
+        {
+            releaseTold = true;
+            g_menu->notify("Version " + newer.version + " is out: F1, then Rogue Galaxy > About", dq8::ui::Icon::Info,
+                           10.0);
         }
     }
     uint32_t held = 0u, pressed = 0u, sticks = 0u;
@@ -423,9 +555,15 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          true, 0, 0, 0, "", 1, true, true},
         {"widescreen", "Widescreen",
          "The game draws a wider view, and the HUD over the scene and the movies fit it; with Display > Aspect "
-         "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded. Menus and text "
-         "are drawn for 4:3 and come out stretched.",
+         "ratio on Auto the picture fills the window, whatever its shape, once a game is loaded.",
          false},
+        {"minimap_size", "Minimap size",
+         "The map in the field's corner, against the game's size (100%), smaller toward its corner. The "
+         "transporter menu's map stays as it is.",
+         false, 50, 100, 100, "%d%%", 5},
+        {"compass_size", "Compass size",
+         "The compass in the field's corner, against the game's size (100%), smaller toward its corner.", false, 50,
+         100, 100, "%d%%", 5},
         {"field_of_view", "Field of view",
          "How wide the camera sees while exploring and in battle, in degrees across a 4:3 picture (the game's is "
          "52); a wide picture adds to it. Scenes keep their own camera.",
@@ -447,6 +585,16 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "point and tilts it (R2 held, nearer and farther). Turn it off, or press F6, to play again. Off at every "
          "start.",
          false, 0, 0, 0, "", 1, false},
+        {"controller_buttons", "Controller's buttons",
+         "The buttons shown in the game's text follow the controller in use: an Xbox controller's A, B, X, Y, LB, "
+         "RB, LT and RT, as each button is bound in Controls. Off, or with a PlayStation or Nintendo controller "
+         "or the keyboard, the game's PlayStation buttons.",
+         true},
+        {"sharp_letters", "Sharp letters",
+         "Above 1x, the game's letters are traced into smooth outlines and drawn at the internal resolution, "
+         "with a round black border, instead of enlarged as blocks. Each new letter is made the first time it "
+         "shows, in a frame or two.",
+         true},
         {"skip_opening", "Skip the opening",
          "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
         {"instant_loading_recap", "Show the loading recap at once",
@@ -463,6 +611,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          false},
         {"fast_transporter", "Fast transporters",
          "A transporter's warp plays at up to twice the speed. The music and the sounds keep their pace.", false},
+        {"check_updates", "Check for new versions",
+         "At each start the game asks GitHub for this project's releases (nothing is sent but the request) and, "
+         "when a newer one is out, says so and links to it from the menu's About window.",
+         true},
         {"fast_revelation", "Fast Revelation Flow",
          "Items going into a Revelation Flow cell, the zoom, the glow and the ability won, play at up to twice "
          "the speed.",
@@ -516,6 +668,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     host.setGameOption = &applyGameOption;
     host.gameOptionState = [](const std::string &key) { return key == "free_camera" && rg::freecamera::enabled(); };
     host.setGameNumber = &applyGameNumber;
+    host.newerRelease = [] {
+        rg::updates::Release newer = rg::updates::newer();
+        return std::make_pair(std::move(newer.version), std::move(newer.url));
+    };
     auto menu = std::make_unique<dq8::ui::Overlay>(backend, std::move(settings), settingsPath, std::move(host));
     std::string error;
     if (!menu->initialize(backend.window(), backend.windowTextureFormat(), error))
@@ -525,6 +681,11 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     }
     menu->applySettings();
     backend.setOverlay(menu.get());
+    // Not in a scripted run: the benchmarks ask nothing of GitHub.
+    if (env("RG_INPUT", "").empty())
+    {
+        rg::updates::start(RG_APP_VERSION);
+    }
     return menu;
 }
 #endif
@@ -590,6 +751,7 @@ Setup::Setup(PS2Runtime &runtime)
         dq8::gfx::setPresentObserver(&debug::noteFrameTime);
         // Aspect ratio Auto follows the Widescreen option.
         sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
+        rg::letters::installRenderer(*sdl);
         sdl->setSideImageLoader(&loadBorderImage);
         if (noWindow)
         {

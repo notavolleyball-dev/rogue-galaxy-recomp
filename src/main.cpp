@@ -31,12 +31,15 @@
 #include "libc_rand.h"
 #include "loading_screen.h"
 #include "battle_rates.h"
+#include "button_glyphs.h"
 #include "camera_view.h"
 #include "dev_tools.h"
 #include "draw_distance.h"
 #include "free_camera.h"
 #include "instant_text.h"
+#include "sharp_letters.h"
 #include "map_chests.h"
+#include "hud_size.h"
 #include "opening.h"
 #include "widescreen.h"
 #include "quick_scenes.h"
@@ -160,6 +163,8 @@ int run(int argc, char **argv)
     rg::movie::install(runtime);
     rg::loading::install(runtime);
     rg::widescreen::install(runtime);
+    rg::hudsize::install(runtime);
+    rg::buttons::install(runtime);
     rg::opening::install(runtime);
     rg::devtools::install(runtime);
     rg::cameraview::install(runtime);
@@ -167,6 +172,7 @@ int run(int argc, char **argv)
     rg::battlerates::install(runtime);
     rg::shopprices::install(runtime);
     rg::instanttext::install(runtime);
+    rg::letters::install(runtime);
     rg::mapchests::install(runtime);
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);

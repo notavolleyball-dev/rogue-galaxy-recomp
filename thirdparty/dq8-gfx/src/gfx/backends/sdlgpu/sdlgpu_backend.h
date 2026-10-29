@@ -6,6 +6,7 @@
 #pragma once
 
 #include "runtime/gs/gs_backend.h"
+#include "gfx/backends/sdlgpu/sdlgpu_regions.h"
 #include "gfx/backends/sdlgpu/sdlgpu_window.h"
 
 #include <cstdint>
@@ -37,6 +38,12 @@ struct SdlGpuStats {
     // done in the shader from a snapshot, without framebuffer fetch (Rogue
     // Galaxy: added).
     uint64_t destinationReads = 0u;
+    // Primitives drawn from the host's larger versions of their regions,
+    // glyph borders drawn from its border versions and shadows from its
+    // shadow versions (Rogue Galaxy: added).
+    uint64_t regionsReplaced = 0u;
+    uint64_t bordersRounded = 0u;
+    uint64_t shadowsDrawn = 0u;
     // Local-to-local transfers done on the GPU, not through local memory.
     uint64_t gpuLocalCopies = 0u;
     // Frames shown straight from a render target, with no readback or CPU
@@ -211,6 +218,32 @@ public:
     // Galaxy: added).
     void setSideImageLoader(SdlGpuSideImageLoader loader);
     int gameWidescreen() const;
+    // The host's larger versions of the 2D art UV sprites sample
+    // (sdlgpu_regions.h): a UV sprite drawn from an indexed texture into the
+    // frame (the buffer last shown, or the one last copied into it) of an
+    // upscaled target is drawn from the host's picture of its region alone,
+    // bilinear and clamped to it, once the host has one.
+    //
+    // Borders: the host can mark the copies of a glyph the game draws as its
+    // border -- four, black, a pixel above, below, right and left of the
+    // glyph, in that order, before it -- by putting their y a sixteenth of a
+    // pixel above the whole pixel. The first is then drawn where the glyph
+    // goes, from the host's border version of the region (a margin of
+    // kRegionBorderMargin texels about it, its alpha the border's coverage),
+    // and the other three are left out; without one, the four are drawn as
+    // they are, at their own pixels.
+    //
+    // Shadows: a copy of a glyph the game draws down and right of it as its
+    // shadow, of any colour, its y marked two sixteenths of a pixel above
+    // the whole pixel, is drawn where it goes from the host's shadow version
+    // (the same margin), which reaches back up toward the glyph: copies a
+    // pixel apart, sharp, would show each its own outline.
+    //
+    // Called on the GS thread; set before the game runs (Rogue Galaxy:
+    // added).
+    void setRegionReplacements(RegionLookup lookup, RegionPalettes palettes);
+    // Any thread (Rogue Galaxy: added).
+    void setRegionReplacementsEnabled(bool on);
     // Pumps SDL events into the overlay and the pad, and redraws the overlay
     // over the last frame while the game shows none. Returns false when the
     // window wants to close.

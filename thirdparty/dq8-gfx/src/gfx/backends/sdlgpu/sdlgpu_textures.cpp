@@ -200,6 +200,17 @@ GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache
 
 GsTextureCache::~GsTextureCache() {
     reset();
+    releaseLarger();
+}
+
+void GsTextureCache::releaseLarger() {
+    if (m_device.valid())
+        for (auto &[key, larger] : m_larger) {
+            (void)key;
+            SDL_ReleaseGPUTexture(m_device.handle(), larger.texture);
+        }
+    m_larger.clear();
+    m_largerBytes = 0u;
 }
 
 void GsTextureCache::reset() {
@@ -280,6 +291,118 @@ GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
         m_lastSourceValid = true;
     }
     return m_lastSourcePages;
+}
+
+GsTextureIdentity GsTextureCache::regionIdentity(const GSDrawState &state, const GsRegion &region) {
+    const GsTextureKey key = keyFor(state);
+    GsTextureIdentity identity;
+    identity.texels = expand(key, region, true);
+    if (gsIsIndexedPsm(key.psm))
+        identity.clut = hashClutWindow(key);
+    return identity;
+}
+
+SDL_GPUTexture *GsTextureCache::replacement(const GSDrawState &state, const GsRegion &region, const GsRegion &sampled,
+                                            uint32_t wantedScale, bool border, bool shadow, bool bold,
+                                            uint32_t &scale, std::string &error) {
+    if (!m_regionLookup || region.empty())
+        return nullptr;
+    const GsTextureKey key = keyFor(state);
+    if (!gsIsIndexedPsm(key.psm))
+        return nullptr;
+    // The palette first: most regions drawn are art the host leaves alone,
+    // and their texels need no hash.
+    const uint64_t clut = hashClutWindow(key);
+    if (!m_lastPaletteValid || clut != m_lastPalette) {
+        m_lastPalette = clut;
+        m_lastPaletteWanted = !m_regionPalettes || m_regionPalettes(clut);
+        m_lastPaletteValid = true;
+    }
+    if (!m_lastPaletteWanted)
+        return nullptr;
+    const uint64_t texels = expand(key, region, true);
+    uint64_t id = kHashSeed;
+    for (const uint64_t value : {texels, clut, uint64_t(region.width()) << 32u | region.height(),
+                                 uint64_t(wantedScale) << 3u | (shadow ? 4u : 0u) | (border ? 2u : 0u) |
+                                     (bold ? 1u : 0u),
+                                 uint64_t(sampled.x0) << 48u | uint64_t(sampled.y0) << 32u |
+                                     uint64_t(sampled.x1) << 16u | sampled.y1}) {
+        id ^= value;
+        id *= 1099511628211ull;
+    }
+    if (const auto larger = m_larger.find(id); larger != m_larger.end()) {
+        larger->second.used = ++m_largerClock;
+        scale = larger->second.scale;
+        return larger->second.texture;
+    }
+    if (m_largerMissing.count(id))
+        return nullptr;
+    expand(key, region);
+    for (uint32_t y = region.y0; y < region.y1; ++y)
+        for (uint32_t x = region.x0; x < region.x1; ++x)
+            if (x < sampled.x0 || x >= sampled.x1 || y < sampled.y0 || y >= sampled.y1)
+                m_staging[(size_t(y - region.y0) * region.width() + (x - region.x0)) * 4u + 3u] = 0u;
+    RegionRequest request;
+    request.texels = texels;
+    request.clut = clut;
+    request.width = region.width();
+    request.height = region.height();
+    request.x = region.x0;
+    request.y = region.y0;
+    request.rgba = m_staging.data();
+    request.scale = wantedScale;
+    request.border = border;
+    request.shadow = shadow;
+    request.bold = bold;
+    uint32_t width = 0u, height = 0u;
+    const int answer = m_regionLookup(request, width, height, m_regionPixels);
+    if (answer == kRegionPending)
+        return nullptr;
+    const uint32_t margin = border || shadow ? 2u * kRegionBorderMargin : 0u;
+    const uint32_t baseWidth = region.width() + margin;
+    const uint32_t baseHeight = region.height() + margin;
+    const uint32_t factor = width / baseWidth;
+    if (answer != kRegionReady || factor < 2u || factor > 8u || width != baseWidth * factor ||
+        height != baseHeight * factor || m_regionPixels.size() != size_t(width) * height * 4u) {
+        m_largerMissing.insert(id);
+        return nullptr;
+    }
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture *texture = SDL_CreateGPUTexture(m_device.handle(), &info);
+    if (!texture) {
+        error = std::string("SDL_CreateGPUTexture(larger): ") + SDL_GetError();
+        return nullptr;
+    }
+    m_staging.swap(m_regionPixels);
+    if (!uploadRegion(texture, {0u, 0u, width, height}, error)) {
+        SDL_ReleaseGPUTexture(m_device.handle(), texture);
+        return nullptr;
+    }
+    // Past the budget the least recently drawn go; a queued draw of one
+    // lands first.
+    constexpr uint64_t kLargerBudget = 512ull << 20u;
+    m_largerBytes += uint64_t(width) * height * 4u;
+    while (m_largerBytes > kLargerBudget && !m_larger.empty()) {
+        auto oldest = m_larger.begin();
+        for (auto it = m_larger.begin(); it != m_larger.end(); ++it)
+            if (it->second.used < oldest->second.used)
+                oldest = it;
+        beforeRewrite(oldest->second.texture);
+        SDL_ReleaseGPUTexture(m_device.handle(), oldest->second.texture);
+        m_largerBytes -= oldest->second.bytes;
+        m_larger.erase(oldest);
+    }
+    m_larger[id] = {texture, factor, uint64_t(width) * height * 4u, ++m_largerClock};
+    scale = factor;
+    return texture;
 }
 
 GsTextureKey GsTextureCache::keyFor(const GSDrawState &state) {

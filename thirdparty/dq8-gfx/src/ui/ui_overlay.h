@@ -83,6 +83,9 @@ struct HostServices {
     std::function<void(const std::string &key, bool on)> setGameOption;
     std::function<void(const std::string &key, int value)> setGameNumber;
     std::function<bool(const std::string &key)> gameOptionState;
+    // A newer release than this build, its version and page, empty while
+    // none is known: the About window says so (Rogue Galaxy: added).
+    std::function<std::pair<std::string, std::string>()> newerRelease;
 };
 
 // Game: Rogue Galaxy's own switches (added).

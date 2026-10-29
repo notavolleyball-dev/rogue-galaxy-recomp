@@ -113,6 +113,9 @@ constexpr Row kNumbers[] = {
 constexpr Row kScenes[] = {
     {"fast_transporter", "Fast Transporters", Kind::Switch, ""},
     {"fast_revelation", "Fast Revelation", Kind::Switch, ""},
+    {"sharp_letters", "Sharp Letters", Kind::Switch, ""},
+    {"minimap_size", "Minimap Size", Kind::Number, "%"},
+    {"compass_size", "Compass Size", Kind::Number, "%"},
 };
 
 struct Page

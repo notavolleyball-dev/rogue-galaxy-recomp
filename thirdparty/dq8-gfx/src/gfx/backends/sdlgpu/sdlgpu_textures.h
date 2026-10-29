@@ -9,6 +9,7 @@
 // local-memory page, so transfers refresh only affected texels on next use.
 #pragma once
 
+#include "gfx/backends/sdlgpu/sdlgpu_regions.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "gfx/gs/gs_vram.h"
 
@@ -21,6 +22,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace dq8::gfx {
@@ -136,6 +138,34 @@ public:
     // Pages a draw state's texture would be built from, so a caller can tell
     // whether queued work still owes it content.
     GsPageSet sourcePagesFor(const GSDrawState &state) const;
+
+    // A region of a draw state's texture by content, as a whole texture's
+    // identity is hashed: its texels (indices for an indexed format) and the
+    // palette window (Rogue Galaxy: added; sdlgpu_regions.h).
+    GsTextureIdentity regionIdentity(const GSDrawState &state, const GsRegion &region);
+    // The host's larger versions of regions (sdlgpu_regions.h).
+    void setRegionLookup(RegionLookup lookup, RegionPalettes palettes) {
+        m_regionLookup = std::move(lookup);
+        m_regionPalettes = std::move(palettes);
+    }
+    bool hasRegionLookup() const { return static_cast<bool>(m_regionLookup); }
+    // The host's version of what `region` of an indexed texture holds now,
+    // for a target at `wantedScale` (its border version with `border`, its
+    // shadow version with `shadow`, its version for a draw past 0x80 alpha
+    // with `bold`): a
+    // texture of its own at `scale` texels per GS texel, or null (none, or
+    // not made yet). Kept by content, so a region whose content alternates
+    // costs a hash, and the least recently drawn go past a budget. The
+    // region is hashed at every call: a memo kept until the texture's next
+    // update went stale in the item menu, whose tabs' digits then came out
+    // as another picture (Rogue Galaxy: added).
+    // `sampled`: the texels the draw shows (within `region`); the rest are
+    // handed over transparent: a glyph's sprite spans a texel more than its
+    // pixels, and that last row and column, never shown, can hold a
+    // descender's end, which traced and bordered stuck out below.
+    SDL_GPUTexture *replacement(const GSDrawState &state, const GsRegion &region, const GsRegion &sampled,
+                                uint32_t wantedScale, bool border, bool shadow, bool bold, uint32_t &scale,
+                                std::string &error);
 
 private:
     struct Entry {
@@ -254,6 +284,27 @@ private:
     std::array<std::vector<Entry *>, kGsPageCount> m_entriesByPage{};
     uint64_t m_invalidateGeneration = 0u;
     std::vector<uint8_t> m_staging;
+    // replacement(): the host's lookup, the picture it last handed over, the
+    // versions on the GPU by content and the contents it has none for (Rogue
+    // Galaxy: added).
+    RegionLookup m_regionLookup;
+    RegionPalettes m_regionPalettes;
+    std::vector<uint8_t> m_regionPixels;
+    struct Larger {
+        SDL_GPUTexture *texture = nullptr;
+        uint32_t scale = 0u;
+        uint64_t bytes = 0u;
+        uint64_t used = 0u;
+    };
+    std::unordered_map<uint64_t, Larger> m_larger;
+    std::unordered_set<uint64_t> m_largerMissing;
+    uint64_t m_largerBytes = 0u;
+    uint64_t m_largerClock = 0u;
+    // The palette last asked about, and the answer.
+    uint64_t m_lastPalette = 0u;
+    bool m_lastPaletteWanted = false;
+    bool m_lastPaletteValid = false;
+    void releaseLarger();
     // Expand scratch: raw texels for one row (indices for indexed PSMs, whole
     // words when the indices ride inside a 32-bit layout), and the palette
     // resolved to final RGBA so the texel loop is one lookup per pixel.
