@@ -26,9 +26,13 @@ the main checkout does the same with power; this one reads frame rate.
 | Source-alpha blends in one pass (dual-source) | d1c6a8c | 44.2 | 38,397 | 56% |
 | Upscaled texture taps without integer divides | 000e310 | 48.8 | 38,393 | 56% |
 | Upscaled taps read directly inside a clamp | 1a8b8b8 | 55.9 | 38,404 | 55% |
+| The fast path for CT24 and CT16 views too | 4e48219 | (timed: 53.5 -> 55.4) | | |
+| A texture at its own size: each axis wraps once | 24792e0 | 59.9 (the 60 fps cap) | 38,393 | 53% |
 
-The VU1's own mode (`0`) gets the last four as well: 55.6 fps at 8x.
-At 3x the GPU's power went 61.3 -> 48.7 W over the day. At 3x both modes hold 60 fps; `gpu` keeps the VIF1
+The VU1's own mode (`0`) gets the GS-side ones as well (55.6 fps at 8x
+before the last two). At 3x the GPU's power went 61.3 -> 46.1 W over the
+day. At 8x the walk now holds 60 fps with the GPU still 99% busy, so the
+GPU timer, not the frame rate, measures what follows. At 3x both modes hold 60 fps; `gpu` keeps the VIF1
 thread at 18% of the wall against 45%, and the GS backend at 56%
 against 66%.
 
@@ -64,6 +68,20 @@ After them, 8x, standing, about 53 fps with the timestamps (ms a frame):
 | feedback copies of sampled targets | 0.7 |
 | patches from local memory | 0.9 |
 | draw data upload | 0.3 |
+
+After all four shader commits, 8x, about 57 fps with the timestamps
+(about 17.4 ms of GPU a frame with their cost):
+
+| Label | ms |
+|---|---|
+| blur and bloom: feedback draws 2.0, their snapshot copies 0.9 | 2.9 |
+| full-frame textured blends into the frame (7) | 1.4 |
+| per-object composites (CT24 view) | 1.2 |
+| shadow volumes | 1.1 |
+| importing pages between aliased targets | 1.05 |
+| scene meshes | 1.4 |
+| feedback copies of sampled targets | 0.7 |
+| patches from local memory | 0.9 |
 
 The tables below come from before the shader commits, by skipping
 categories; their proportions have moved since.
