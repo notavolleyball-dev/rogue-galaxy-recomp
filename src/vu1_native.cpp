@@ -94,8 +94,8 @@ constexpr UvPiece kUvs[] = {
 };
 
 // The B pieces. A calls B at 0x960, or with quad 76.z set at 0x960 plus
-// the chunk's TOP+1.w pairs: af62ff64 has the one entry; 26a933a5 has three,
-// 0 one bone, 2 two bones, 4 four (skin()).
+// the chunk's TOP+1.w pairs: af62ff64 has the one entry; 26a933a5 has four,
+// 0 one bone, 2 two bones, 4 and 6 four (skin()).
 // 542b235c (the outlines') has the first two, its one-bone path positions
 // only.
 struct DecodePiece
@@ -121,10 +121,10 @@ constexpr Piece kShadowA = {0x0320u, 0x0500u, 0x821b638f42fcaa6eull};
 constexpr Piece kShadowC = {0x10e0u, 0x1938u, 0xdc8dbfe4905cb635ull};
 
 // The C pieces: both build the material color, quad 82 * 42 + 83 * 128
-// (82.w scaled by 81.w); 70362be4 multiplies it by each vertex's int16
-// color / 32768 * 256 (and has paths of its own with 87.y & 0x100 or
-// 0x200, not read yet), 780d503e gives it to every vertex as it is (with
-// 0x200, 82 * 43 and no ambient).
+// (82.w scaled by 81.w), or with 87.y & 0x200 82 * 43 and no ambient;
+// 70362be4 multiplies it by each vertex's int16 color / 32768 * 256 (and
+// has a loop of its own with 87.y & 0x100, not read yet), 780d503e gives
+// it to every vertex as it is.
 struct ColorPiece
 {
     Piece c;
@@ -260,11 +260,12 @@ float fromBits(uint32_t bits)
 }
 
 // How many bones the skinning B's entry sums (A enters B at 0x960 plus
-// TOP+1.w pairs when quad 76.z is set): 1, 2 or 4, or 0 for another entry.
+// TOP+1.w pairs when quad 76.z is set): 1, 2 or 4 (entries 4 and 6 branch
+// to the same code), or 0 for another entry.
 uint32_t bonesOf(const Program &program, const VuData &vu, uint32_t top)
 {
     const uint32_t entry = vu.half(76, 2) != 0u ? vu.half(top + 1u, 3) : 0u;
-    const uint32_t bones = entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u ? 4u : 0u;
+    const uint32_t bones = entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u || entry == 6u ? 4u : 0u;
     return bones <= program.maxBones ? bones : 0u;
 }
 
@@ -516,8 +517,8 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
     const Vec4 ambient = vu.quad(83);
     Vec4 colorBase{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
                    material.z * light.z + ambient.z * 128.0f, material.w * light.w};
-    // The one-color C with 87.y & 0x200: quad 82 times 43, no ambient.
-    if (program.color == Color::Material && (vu.half(87, 1) & 0x200u))
+    // Either C with 87.y & 0x200: quad 82 times 43, no ambient.
+    if (program.color != Color::Lit && (vu.half(87, 1) & 0x200u))
     {
         const Vec4 other = vu.quad(43);
         colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
@@ -977,8 +978,6 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     if (primType != 3u && primType != 4u)
         return "neither strip nor triangle list";
     const uint32_t flags = vu.half(87, 1);
-    if ((flags & 0x200u) && program.color == Color::PerVertex)
-        return "quad 87.y & 0x200 (C's other color)";
     if ((flags & 0x100u) && program.color == Color::PerVertex)
         return "quad 87.y & 0x100 (C's other loop)";
     if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f))
