@@ -118,7 +118,15 @@ add_executable(roguegalaxy
     debug/vu1_replay.cpp
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # GNU ld reads each archive once, in order: the function table defined in
+    # rg_generated_main is first needed by ps2_runtime, listed after it, so the
+    # member would never be pulled in. Rescan them as a group.
+    target_link_libraries(roguegalaxy PRIVATE
+        "$<LINK_GROUP:RESCAN,rg_generated_main,${RG_OVERLAY_LIBS},ps2_runtime>")
+else()
+    target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
+endif()
 if(WIN32)
     # update_check.cpp asks GitHub through WinHTTP.
     target_link_libraries(roguegalaxy PRIVATE winhttp)
