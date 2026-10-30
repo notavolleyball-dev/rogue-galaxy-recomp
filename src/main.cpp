@@ -39,6 +39,7 @@
 #include "instant_text.h"
 #include "voice_language.h"
 #include "map_chests.h"
+#include "native_renderer.h"
 #include "hud_size.h"
 #include "inventory.h"
 #include "opening.h"
@@ -179,6 +180,10 @@ int run(int argc, char **argv)
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);
     rg::quickscenes::install(runtime);
+    // Read here, after the menu's settings and before anything native sets
+    // itself up, so the whole run sees one answer.
+    if (rg::nativerenderer::enabled())
+        std::fprintf(stderr, "[rg] native renderer on\n");
     rg::debug::installCallTrace(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);
