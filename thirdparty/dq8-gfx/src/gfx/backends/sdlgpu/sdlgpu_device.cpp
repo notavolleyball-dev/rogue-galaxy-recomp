@@ -3,6 +3,7 @@
 #include "gs_draw.frag.spv.h"
 #include "gs_draw.frag.dstcopy.spv.h"
 #include "gs_draw.vert.spv.h"
+#include "gs_native.vert.spv.h"
 #include "gs_index8.frag.spv.h"
 #include "gs_local_copy.frag.spv.h"
 #include "gs_reinterpret.frag.spv.h"
@@ -11,6 +12,7 @@
 #include "gs_draw.frag.msl.h"
 #include "gs_draw.frag.fetch.msl.h"
 #include "gs_draw.vert.msl.h"
+#include "gs_native.vert.msl.h"
 #include "gs_index8.frag.msl.h"
 #include "gs_local_copy.frag.msl.h"
 #include "gs_reinterpret.frag.msl.h"
@@ -165,7 +167,8 @@ size_t GsPipelineKeyHash::operator()(const GsPipelineKey &key) const {
         (static_cast<uint64_t>(key.sourceFactor) << 40u) |
         (static_cast<uint64_t>(key.destinationFactor) << 48u) |
         (static_cast<uint64_t>(key.blendOperation) << 56u));
-    mix(key.destinationCopy);
+    mix(key.destinationCopy | (static_cast<uint64_t>(key.nativeMesh) << 8u) |
+        (static_cast<uint64_t>(key.cullMode) << 16u));
     return static_cast<size_t>(hash);
 }
 
@@ -213,6 +216,21 @@ bool SdlGpuDevice::create(std::string &error) {
     m_vertexShader = SDL_CreateGPUShader(m_device, &vertexInfo);
     if (!m_vertexShader) {
         error = std::string("SDL_CreateGPUShader(vertex): ") + SDL_GetError();
+        destroy();
+        return false;
+    }
+    // The native strips' (Rogue Galaxy: added), with the same bindings.
+    vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsNativeVertSpirv);
+    vertexInfo.code_size = sizeof(kGsNativeVertSpirv);
+#ifdef DQ8_GFX_HAS_MSL
+    if (metal) {
+        vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsNativeVertSpirvMsl);
+        vertexInfo.code_size = sizeof(kGsNativeVertSpirvMsl);
+    }
+#endif
+    m_nativeVertexShader = SDL_CreateGPUShader(m_device, &vertexInfo);
+    if (!m_nativeVertexShader) {
+        error = std::string("SDL_CreateGPUShader(native vertex): ") + SDL_GetError();
         destroy();
         return false;
     }
@@ -320,6 +338,9 @@ void SdlGpuDevice::destroy() {
     m_destinationShader = nullptr;
     if (m_vertexShader)
         SDL_ReleaseGPUShader(m_device, m_vertexShader);
+    if (m_nativeVertexShader)
+        SDL_ReleaseGPUShader(m_device, m_nativeVertexShader);
+    m_nativeVertexShader = nullptr;
     m_sampler = nullptr;
     m_fragmentShader = nullptr;
     m_vertexShader = nullptr;
@@ -865,16 +886,19 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     colorTarget.blend_state = blend;
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
-    info.vertex_shader = m_vertexShader;
+    info.vertex_shader = key.nativeMesh ? m_nativeVertexShader : m_vertexShader;
     info.fragment_shader = key.destinationCopy ? m_destinationShader : m_fragmentShader;
     info.vertex_input_state.vertex_buffer_descriptions = &bufferDescription;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = kAttributes.data();
     info.vertex_input_state.num_vertex_attributes =
         static_cast<uint32_t>(kAttributes.size());
-    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    // A native strip (Rogue Galaxy: added) is a strip, and culls the
+    // backfaces its program skipped.
+    info.primitive_type =
+        key.nativeMesh == 1u ? SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP : SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     // The GS has no backface culling; every primitive it is given is drawn.
-    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.rasterizer_state.cull_mode = static_cast<SDL_GPUCullMode>(key.cullMode);
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;

@@ -376,6 +376,24 @@ Five more fix results:
   a pack of upscaled pictures (the `texture-pack` branch), from which
   the frame-target test and the clamp come.
 
+Native strips (Rogue Galaxy: added). `SdlGpuBackend::SubmitNativeMesh`
+takes a `GSNativeMesh` (a strip a VU1 program would have drawn, as its
+inputs; patch 0021) through `submit()` as a stand-in primitive covering the
+scissor and sampling the whole texture, with the strip's alpha, so the
+target, texture, flush and page decisions are those of any primitive there;
+where the stand-in's vertices would go, the strip's go instead, in
+`GsGpuVertex` slots read another way (`appendNative`), in a batch of its own
+drawn as a triangle strip by `shaders/gs_native.vert`: the program's
+transform, its 12.4 and whole-Z fixed point, fog and color clamp, then the
+same outputs as `gs_draw.vert`, with the position homogeneous so the GPU
+clips where the program dropped triangles at its guard band or clipped them
+in software. Backfaces are culled by the pipeline (`GsPipelineKey::cullMode`);
+the GPU's strip alternates winding as the program's sign does. A draw that
+reads its target per primitive (a snapshot, feedback, a destination read)
+gets the triangles expanded on the CPU instead. The stats line counts
+`native strips`. Salgin, 1x: 54 of 229,376 pixels differ by more than 8
+levels from the VU1's frame.
+
 The target trace numbers the batches from each present (`[target] batch N`),
 as a frame log numbers them. `DQ8_GFX_HIDDEN_WINDOW=1` creates the window
 hidden and never raises it, for scripted runs that should leave the desktop

@@ -21,6 +21,8 @@
 #include <xmmintrin.h>
 
 #include "ThreadNaming.h"
+#include "debug/vu1_replay.h"
+#include "vu1_native.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "runtime/ee_scheduler.h"
@@ -36,10 +38,25 @@ std::atomic<uint64_t> g_gifBusyNanos{0u};
 // Set on the VIF1 thread: its GS packets go to the GIF stage.
 thread_local bool t_onVif1Thread = false;
 // The VU1 program the VIF1 thread is running, as DQ8_GFX_PROFILE_CYCLE names
-// it for the draw tables (0 outside one, and unless the cycle is armed):
+// it for the draw tables (0 outside one, and unless the cycle is armed or
+// RG_JITTER is set):
 // 0x80000000 | its entry (a pair index) << 16 | a hash of the microcode there.
 thread_local uint32_t t_vu1Tag = 0;
-const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr;
+// And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
+thread_local uint32_t t_vu1Camera = 0;
+// RG_VU1_NATIVE (src/vu1_native.h): while a chunk done natively runs on the
+// VU1, its packets are collected (check) or dropped (replace).
+thread_local std::vector<std::vector<uint8_t>> *t_vu1Packets = nullptr;
+thread_local bool t_dropVu1Packets = false;
+const rg::vu1native::Mode g_nativeMode = rg::vu1native::modeFromEnvironment();
+// RG_VU1_NATIVE_CHECK_EVERY=N: check mode compares one chunk in N (each costs
+// the VU1's run, the native build and two decodes, on this thread).
+const uint32_t g_checkEvery = [] {
+    const char *value = std::getenv("RG_VU1_NATIVE_CHECK_EVERY");
+    const unsigned long every = value ? std::strtoul(value, nullptr, 10) : 1ul;
+    return static_cast<uint32_t>(every == 0ul ? 1ul : every);
+}();
+const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
 // RG_VU1_CAPTURE=<file> records the VU1 data memory each program starts with
 // (16 KiB a start), for tools/vu1/capture_report.py; RG_VU1_CAPTURE_MAX caps
 // the starts kept.
@@ -261,6 +278,19 @@ public:
     // VU reuses its XGKICK buffer, the list its bytes).
     void packet(const uint8_t *data, uint32_t size) { append(Kind::Packet, data, size); }
     void image(const uint8_t *data, uint32_t size) { append(Kind::Image, data, size); }
+    // A strip of a VU1 program done natively (RG_VU1_NATIVE=gpu): its header,
+    // then its vertices, for GS::submitNativeMesh.
+    void mesh(const GSNativeMesh &mesh)
+    {
+        m_meshBytes.resize(sizeof(GSNativeMesh::Header) + mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+        std::memcpy(m_meshBytes.data(), &mesh.header, sizeof(mesh.header));
+        if (!mesh.vertices.empty())
+        {
+            std::memcpy(m_meshBytes.data() + sizeof(mesh.header), mesh.vertices.data(),
+                        mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+        }
+        append(Kind::Mesh, m_meshBytes.data(), static_cast<uint32_t>(m_meshBytes.size()));
+    }
 
     // From the VIF1 thread, at the end of each list and as a list fills a
     // buffer: hands over what it staged.
@@ -326,8 +356,9 @@ private:
     {
         Packet,
         Image,
+        Mesh,
     };
-    // Sixteen bytes, so the data after it stays quadword aligned.
+    // A multiple of sixteen bytes, so the data after it stays quadword aligned.
     struct Header
     {
         Kind kind;
@@ -340,8 +371,11 @@ private:
         uint32_t mxcsr;
         // t_vu1Tag when the VIF1 thread handed the packet over.
         uint32_t tag;
+        // t_vu1Camera likewise.
+        uint32_t camera;
+        uint32_t reserved[3];
     };
-    static_assert(sizeof(Header) == 16u);
+    static_assert(sizeof(Header) == 32u);
 
     void append(Kind kind, const uint8_t *data, uint32_t size)
     {
@@ -349,7 +383,7 @@ private:
         {
             return;
         }
-        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag};
+        const Header header{kind, size, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag, t_vu1Camera, {}};
         const auto *raw = reinterpret_cast<const uint8_t *>(&header);
         m_staged.insert(m_staged.end(), raw, raw + sizeof(header));
         m_staged.insert(m_staged.end(), data, data + size);
@@ -390,11 +424,23 @@ private:
                     mxcsr = header.mxcsr;
                 }
                 ps2_gs_detail::t_sourceTag = header.tag;
+                ps2_gs_detail::t_sourceCamera = header.camera;
                 try
                 {
                     if (header.kind == Kind::Packet)
                     {
                         m_gs.processGIFPacket(data, header.size);
+                    }
+                    else if (header.kind == Kind::Mesh)
+                    {
+                        std::memcpy(&m_mesh.header, data, sizeof(m_mesh.header));
+                        m_mesh.vertices.resize((header.size - sizeof(m_mesh.header)) / sizeof(GSNativeMesh::Vertex));
+                        if (!m_mesh.vertices.empty())
+                        {
+                            std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header),
+                                        m_mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+                        }
+                        m_gs.submitNativeMesh(m_mesh);
                     }
                     else
                     {
@@ -443,6 +489,8 @@ private:
     std::deque<std::vector<uint8_t>> m_buffers; // guarded by m_mutex
     std::vector<std::vector<uint8_t>> m_pool;   // guarded by m_mutex
     std::vector<uint8_t> m_staged;              // the VIF1 thread's
+    std::vector<uint8_t> m_meshBytes;           // the VIF1 thread's
+    GSNativeMesh m_mesh;                        // the stage's
     size_t m_outstanding = 0u;
     uint64_t m_published = 0u;
     uint64_t m_done = 0u;
@@ -450,6 +498,10 @@ private:
 };
 
 GifStage *g_stage = nullptr;
+// A GS packet on its way, as the memory's GIF callback sends it (below).
+void deliverPacket(GS &gs, const uint8_t *data, uint32_t size);
+// A native strip likewise, in order with the packets.
+void deliverMesh(GS &gs, const GSNativeMesh &mesh);
 // For busyReport's VU1 pair counts.
 PS2Runtime *g_runtime = nullptr;
 
@@ -619,18 +671,140 @@ public:
                 m_programTag = programTag(memory, startPC);
             }
             t_vu1Tag = m_programTag;
+            // The matrices this program transforms with: viewport (4-7),
+            // projection (8-11) and view (24-27). Quads are 16-byte rows.
+            ps2_gs_detail::SceneCamera camera;
+            const uint8_t *data = memory.getVU1Data();
+            std::memcpy(camera.viewport, data + 4u * 16u, sizeof(camera.viewport));
+            std::memcpy(camera.projection, data + 8u * 16u, sizeof(camera.projection));
+            std::memcpy(camera.view, data + 24u * 16u, sizeof(camera.view));
+            t_vu1Camera = ps2_gs_detail::CameraRegistry::add(camera);
         }
-        if (resume)
+        // RG_VU1_NATIVE: the chunk of a program done natively, built from the
+        // data memory before the VU1 changes it. The MSCAL names the program
+        // (once per code image and entry), its MSCNTs run the chunks; or the
+        // MSCAL is the chunk (drawsAtCall).
+        const rg::vu1native::Program *native = nullptr;
+        if (g_nativeMode != rg::vu1native::Mode::Off)
         {
-            vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                       m_runtime.gs(), &memory, top, itop, 65536);
+            if (!resume)
+            {
+                if (memory.getVU1CodeGeneration() != m_nativeGeneration || startPC != m_nativePC)
+                {
+                    m_nativeGeneration = memory.getVU1CodeGeneration();
+                    m_nativePC = startPC;
+                    m_nativeProgram = rg::vu1native::identify(memory.getVU1Code(), startPC);
+                }
+            }
+            else if (memory.getVU1CodeGeneration() != m_nativeGeneration)
+            {
+                // An MPG between the MSCAL and its MSCNTs: the code the
+                // program was identified in is gone.
+                m_nativeProgram = nullptr;
+            }
+            if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
+            {
+                const bool gpu = g_nativeMode == rg::vu1native::Mode::Gpu;
+                // The chunks that clip go to the VU1 in every mode: the GPU's
+                // clipping of triangles across the eye plane does not match
+                // the VU1's on every driver.
+                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, false);
+                if (reason)
+                {
+                    m_nativeMonitor.declined(*m_nativeProgram, reason);
+                }
+                else if (g_nativeMode == rg::vu1native::Mode::Check && m_checkCount++ % g_checkEvery != 0u)
+                {
+                    // Not this one: the VU1 runs it, unchecked.
+                }
+                else
+                {
+                    native = m_nativeProgram;
+                    if (gpu)
+                    {
+                        rg::vu1native::buildMesh(*native, memory.getVU1Data(), top, m_nativePackets, m_nativeMesh);
+                    }
+                    else
+                    {
+                        rg::vu1native::buildChunk(*native, memory.getVU1Data(), top, m_nativePackets);
+                    }
+                    m_nativeMonitor.native(*native);
+                }
+            }
+            m_nativeMonitor.tick();
         }
-        else
+        if (!native || (g_nativeMode != rg::vu1native::Mode::Skip && g_nativeMode != rg::vu1native::Mode::Gpu))
         {
-            vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                        m_runtime.gs(), &memory, startPC, top, itop, 65536);
+            if (native && g_nativeMode == rg::vu1native::Mode::Check)
+            {
+                m_vu1Packets.clear();
+                t_vu1Packets = &m_vu1Packets;
+                // Its inputs, to save it if it differs.
+                m_checkData.assign(memory.getVU1Data(), memory.getVU1Data() + PS2_VU1_DATA_SIZE);
+                m_checkState = vu1.state();
+            }
+            t_dropVu1Packets = native && g_nativeMode == rg::vu1native::Mode::Replace;
+            static const bool replay = rg::vu1replay::enabled();
+            if (replay)
+            {
+                rg::vu1replay::begin(resume, startPC, top, itop, m_current.number, memory.getVU1Code(),
+                                     memory.getVU1CodeGeneration(), memory.getVU1Data(), vu1.state());
+            }
+            if (resume)
+            {
+                vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                           m_runtime.gs(), &memory, top, itop, 65536);
+            }
+            else
+            {
+                vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                            m_runtime.gs(), &memory, startPC, top, itop, 65536);
+            }
+            if (replay)
+            {
+                rg::vu1replay::end(vu1.state(), memory.getVU1Data());
+            }
+            t_vu1Packets = nullptr;
+            t_dropVu1Packets = false;
+        }
+        if (native)
+        {
+            if (g_nativeMode == rg::vu1native::Mode::Check)
+            {
+                const char *kind = m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets);
+                if (!kind && !rg::vu1native::memoryEffectsMatch(*native, m_checkData.data(), top,
+                                                                memory.getVU1Data()))
+                {
+                    kind = "VU1 memory";
+                    m_nativeMonitor.noteKind(*native, kind);
+                }
+                if (kind)
+                {
+                    rg::vu1replay::saveChunk(native->name, kind, memory.getVU1Code(), m_nativePC, top, itop,
+                                             m_current.number, m_checkData.data(), m_checkState, m_vu1Packets,
+                                             vu1.state(), rg::vu1native::drawsAtCall(*native),
+                                             memory.getVU1Data());
+                }
+            }
+            else
+            {
+                for (const auto &packet : m_nativePackets)
+                {
+                    deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                }
+                if (g_nativeMode == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
+                {
+                    deliverMesh(m_runtime.gs(), m_nativeMesh);
+                }
+                // What the VU1 would have left in its memory, where it did not run.
+                if (g_nativeMode != rg::vu1native::Mode::Replace)
+                {
+                    rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
+                }
+            }
         }
         t_vu1Tag = 0u;
+        t_vu1Camera = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
     }
@@ -782,6 +956,18 @@ private:
     // The VIF1 thread's: the running program's tag, and the tags by entry for
     // the current contents of the code memory (programTag).
     uint32_t m_programTag = 0u;
+    // RG_VU1_NATIVE: the program the last MSCAL started, for its MSCNTs, the
+    // code image it was found in, and the packets of a chunk.
+    const rg::vu1native::Program *m_nativeProgram = nullptr;
+    uint64_t m_nativeGeneration = ~0ull;
+    uint32_t m_nativePC = 0u;
+    uint32_t m_checkCount = 0u;
+    rg::vu1native::Monitor m_nativeMonitor{g_nativeMode};
+    std::vector<std::vector<uint8_t>> m_nativePackets;
+    GSNativeMesh m_nativeMesh;
+    std::vector<std::vector<uint8_t>> m_vu1Packets;
+    std::vector<uint8_t> m_checkData;
+    VU1State m_checkState{};
     uint64_t m_tagGeneration = 0u;
     std::unordered_map<uint32_t, uint32_t> m_tagCache;
     uint64_t m_submitted = 0u;
@@ -791,6 +977,38 @@ private:
 };
 
 Vif1Thread *g_thread = nullptr;
+
+void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
+{
+    if (g_stage && t_onVif1Thread)
+    {
+        g_stage->packet(data, size);
+        return;
+    }
+    if (g_stage)
+    {
+        // The lists in flight too, not only what they handed the stage:
+        // every DMA start drains them already, this keeps it so.
+        g_thread->drain();
+    }
+    ps2_gs_detail::t_sourceTag = t_onVif1Thread ? t_vu1Tag : 0u;
+    ps2_gs_detail::t_sourceCamera = t_onVif1Thread ? t_vu1Camera : 0u;
+    gs.processGIFPacket(data, size);
+}
+
+void deliverMesh(GS &gs, const GSNativeMesh &mesh)
+{
+    if (g_stage && t_onVif1Thread)
+    {
+        g_stage->mesh(mesh);
+        return;
+    }
+    if (g_stage)
+    {
+        g_thread->drain();
+    }
+    gs.submitNativeMesh(mesh);
+}
 // The thread that runs guest code, as the first hooked DMA call sees it.
 std::thread::id g_gameThread;
 PS2Runtime::RecompiledFunction g_dmaSend = nullptr;
@@ -967,19 +1185,22 @@ void install(PS2Runtime &runtime)
     // game's own GIF transfers, after the drain every DMA start does) straight
     // to the GS, behind whatever the stage still holds.
     memory.setGifPacketCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
-        if (g_stage && t_onVif1Thread)
+        // A program's XGKICK, while RG_VU1_REPLAY records the run.
+        static const bool replay = rg::vu1replay::enabled();
+        if (replay && t_onVif1Thread)
         {
-            g_stage->packet(data, size);
+            rg::vu1replay::kick(data, size);
+        }
+        // RG_VU1_NATIVE: a chunk done natively, whose own packets go instead.
+        if (t_vu1Packets)
+        {
+            t_vu1Packets->emplace_back(data, data + size);
+        }
+        if (t_dropVu1Packets)
+        {
             return;
         }
-        if (g_stage)
-        {
-            // The lists in flight too, not only what they handed the stage:
-            // every DMA start drains them already, this keeps it so.
-            g_thread->drain();
-        }
-        ps2_gs_detail::t_sourceTag = t_onVif1Thread ? t_vu1Tag : 0u;
-        gs.processGIFPacket(data, size);
+        deliverPacket(gs, data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.

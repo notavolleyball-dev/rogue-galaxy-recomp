@@ -46,6 +46,7 @@ target_link_libraries(dq8_gfx_sdlgpu PUBLIC dq8_gfx_gs SDL3::SDL3-static)
 
 foreach(shader IN ITEMS
         "gs_draw.vert;vert;kGsDrawVertSpirv"
+        "gs_native.vert;vert;kGsNativeVertSpirv"
         "gs_draw.frag;frag;kGsDrawFragSpirv"
         "gs_reinterpret.vert;vert;kGsReinterpretVertSpirv"
         "gs_reinterpret.frag;frag;kGsReinterpretFragSpirv"
