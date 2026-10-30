@@ -110,6 +110,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_FULL_BAG_TO_STORAGE=1` | An item the bag has no room for goes to the transporter's item storage (the menu's "Full bag to storage"; `src/inventory.h`) |
 | `RG_STACK_LIMIT_99=1` | Every item that stacks can be carried up to 99 in the bag (the menu's "Item limit 99"; `src/inventory.h`) |
 | `RG_BIGGER_BAG=1` | The bag has a seventh page, 280 spaces, from the start (the menu's "Seventh bag page"; `0` turns it off; `src/inventory.h`) |
+| `RG_NATIVE_RENDERER=1` | The native renderer for this run, whatever the menu's "Native renderer" says (`0` turns it off; `src/native_renderer.h`): the switch the native rendering work goes behind as it lands, off by default; nothing reads it yet. Logs `[rg] native renderer on` |
 | `RG_DEV_TOOLS=1` | The developers' tools left in the game come back (the menu's "Developer tools"; `src/dev_tools.h`) |
 | `RG_GS_CAPTURE=DIR` | F7 writes the next frame's batches, GS memory and the renderer's target trace (`RG_GS_FRAMELOG`'s files, as `DIR/capture-N.txt`); `debug\RogueGalaxy-capture.bat` sets it to `build\captures`, for a picture that looks wrong |
 | `RG_CROP=N` | GS pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |

@@ -25,6 +25,7 @@
 #include "instant_text.h"
 #include "voice_language.h"
 #include "map_chests.h"
+#include "native_renderer.h"
 #include "loading_screen.h"
 #include "opening.h"
 #include "quick_scenes.h"
@@ -237,6 +238,8 @@ void applyGameOption(const std::string &key, bool on)
         rg::mapchests::setEnabled(on);
     else if (key == "dev_tools")
         rg::devtools::setEnabled(on);
+    else if (key == "native_renderer")
+        rg::nativerenderer::setPreferred(on);
     else if (key == "free_camera")
         rg::freecamera::setEnabled(on);
     else if (key == "faster_camera")
@@ -677,6 +680,11 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "once and pick your Japanese disc image. Without them the voices stay English. A few lines have no "
          "Japanese voice and play silent. Takes effect the next time the game starts.",
          false, 0, 0, 0, "", 1, true, true, true},
+        {"native_renderer", "Native renderer",
+         "Experimental, for development: the models and the post effects drawn by the PC's renderer instead of "
+         "through the emulation of the PS2's graphics chip, as that work lands; for now it changes nothing. Off, "
+         "everything goes through the emulation. Takes effect the next time the game starts.",
+         false, 0, 0, 0, "", 1, true, true},
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
          "icon, R1 + R3 a list of them, and Cross gives one of the one picked. Help pages and info list: R1 + "
@@ -689,6 +697,7 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"sixty_fps", "Camera and view"},
         {"skip_opening", "Convenience"},
         {"encounter_rate", "Battles and rewards"},
+        {"native_renderer", "Rendering"},
         {"dev_tools", "Developers"},
     };
     // The game's own Settings screen shows them on pages of its own.
