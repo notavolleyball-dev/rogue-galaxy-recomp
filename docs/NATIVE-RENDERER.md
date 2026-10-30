@@ -380,7 +380,13 @@ the effect's first A+D tag counts 14 and its DIRECT holds 8, and the GS drops
 the rest. On the 30 fps walk at 1x it is drawn every frame, the render
 passes fall from 180 to 111 a frame and the draws from 716 to 632, and the
 field's screenshots match the GS path's (the bright sky to the pixel).
-Not yet measured: the GPU's power, and the 60 fps mode at higher scales.
+In the 60 fps mode at 3x (`bw-perf.sh`, two pairs, the last 25 s standing
+in the street): still 60 fps, passes 199 to 127 a frame, feedback copies 121
+to 52, draws 644 to 569, GPU busy unchanged at 63-66%, the power 32.1-32.3 W
+to 31.0-31.3 W. The threads' CPU time (`/proc`, 20 s) is the same (GS worker
+43% and 42% of a core); the `[gfx]` line's "backend % of wall" rises from
+47-49% to 58-60%, which is waiting, not work: `submitEffect` itself takes
+about 6 ms a second (the `[gfx]` line's "ms flush, buffers, sprites").
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured

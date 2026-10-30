@@ -2259,8 +2259,10 @@ struct SdlGpuBackend::Impl {
         if (!device.valid() || effect.bufferCount == 0u || effect.bufferCount > GSNativeEffect::kMaxBuffers ||
             effect.opCount > GSNativeEffect::kMaxOps)
             return false;
+        const auto t0 = std::chrono::steady_clock::now();
         if (!flushDraws())
             return false;
+        const auto t1 = std::chrono::steady_clock::now();
         std::string error;
         const uint32_t sceneScale = std::max(targets->scale(), 1u);
         const uint32_t ownScale =
@@ -2298,6 +2300,7 @@ struct SdlGpuBackend::Impl {
                     return setError(std::move(error));
             }
         }
+        const auto t2 = std::chrono::steady_clock::now();
         for (uint32_t n = 0; n < effect.opCount; ++n) {
             const GSNativeEffect::Op &op = effect.ops[n];
             if (op.target >= effect.bufferCount || op.source >= int32_t(effect.bufferCount))
@@ -2361,6 +2364,13 @@ struct SdlGpuBackend::Impl {
             ++stats.nativeEffectOps;
         }
         ++stats.nativeEffects;
+        const auto t3 = std::chrono::steady_clock::now();
+        const auto ns = [](auto a, auto b) {
+            return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+        };
+        stats.nativeEffectNanos[0] += ns(t0, t1);
+        stats.nativeEffectNanos[1] += ns(t1, t2);
+        stats.nativeEffectNanos[2] += ns(t2, t3);
         return true;
     }
 
@@ -3752,7 +3762,7 @@ struct SdlGpuBackend::Impl {
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
                      "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
-                     "draws %llu, off screen %llu) | native effects=%llu (%llu sprites)\n",
+                     "draws %llu, off screen %llu) | native effects=%llu (%llu sprites; ms flush %.2f buffers %.2f sprites %.2f)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3767,7 +3777,10 @@ struct SdlGpuBackend::Impl {
                      d(stats.nativeDraws, previousReasons.nativeDraws),
                      d(stats.nativeMeshesCulled, previousReasons.nativeMeshesCulled),
                      d(stats.nativeEffects, previousReasons.nativeEffects),
-                     d(stats.nativeEffectOps, previousReasons.nativeEffectOps));
+                     d(stats.nativeEffectOps, previousReasons.nativeEffectOps),
+                     d(stats.nativeEffectNanos[0], previousReasons.nativeEffectNanos[0]) / 1e6,
+                     d(stats.nativeEffectNanos[1], previousReasons.nativeEffectNanos[1]) / 1e6,
+                     d(stats.nativeEffectNanos[2], previousReasons.nativeEffectNanos[2]) / 1e6);
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;

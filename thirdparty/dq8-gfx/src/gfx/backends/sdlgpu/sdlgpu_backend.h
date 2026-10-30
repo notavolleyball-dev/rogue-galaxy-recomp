@@ -73,6 +73,7 @@ struct SdlGpuStats {
     // GSNativeEffects drawn, and their sprites (Rogue Galaxy: added).
     uint64_t nativeEffects = 0u;
     uint64_t nativeEffectOps = 0u;
+    uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
     // Drawn through the same-state fast path (Rogue Galaxy: added).
     uint64_t sameStatePrimitives = 0u;
     uint64_t trianglesDrawn = 0u;
