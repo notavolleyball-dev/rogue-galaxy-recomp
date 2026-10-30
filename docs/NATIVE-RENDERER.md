@@ -436,6 +436,38 @@ present, display filters and menu stay.
 - MSAA on the scene, anisotropic filtering, higher-resolution shadows.
 - An HDR intermediate for bloom.
 
+### Stage E, why offscreen (2026-10-29)
+
+From `ModelDrawOffscreenCompositeMaybe_16aac0`'s code and
+`RG_COMPOSITE_CENSUS` on the walk. Its only way in is
+`ModelDrawOffscreenCompositeAtMaybe_16b8a0`, which jumps into it past the
+function table (a hook on the inner function never runs). Its arguments: a0
+the object's settings, f12 a glow alpha, f13 the alpha the object is laid
+over the frame with.
+
+- Nothing is drawn when the settings' +0x50 or +0x5C is 0. When +0x24 (a
+  strength) is negative, or +0x20 (the offscreen buffer) is 0, the parts are
+  drawn straight into the scene.
+- Otherwise offscreen: the parts' screen bounds grown by 8 pixels are
+  cleared, the parts drawn there, then laid back over the frame by
+  `ScreenTexOverlayDrawSingle` with alpha `0x80 f13` (alpha tested >= 1),
+  and, only when f13 is 1, by `ScreenTexOverlayDrawMulti`: copies of the
+  object around itself at a radius of 16 `+0x24 min(f12, 1)^2` (1/16 pixel).
+- Of 13,133 calls: 96% offscreen at f13 = 1 with a strength of 1.7 or 2 (the
+  copies drawn); about 40 fading (f13 stepping from 0.1 to 0.9 as an object
+  appears); 516 direct; 511 nothing.
+- `RG_COMPOSITE_DIRECT=1` takes the direct path for all: the characters'
+  insides are the same and only a thin rim along their silhouettes differs,
+  and the passes fall from 180 to 142 a frame at 1x.
+
+So the offscreen pass is for a soft edge around each object, and the fade's
+use of it is rare. The native form: the objects drawn directly, and their
+edges softened in one pass over all of them by a mask of where they are
+(their coverage in their own target, or a stencil), at
+`ScreenTexOverlayDrawMulti`'s radius and weights (not yet read); the few
+fading objects keep an offscreen pass, or take the same mask with their
+alpha.
+
 ## Sizes and order
 
 Relative sizes from the shape of the work, not estimates in days. Phase 1 is
@@ -480,9 +512,9 @@ FSR's upscaler needs as its input.
 
 - The families: their count, vertex formats, GIF tag templates, and which do
   lighting, skinning or clipping (phase 0, then the harness).
-- Why the game draws about 20 objects a frame offscreen and blends them back
-  (stage E): a fade's alpha over the whole object is the likely reason, which
-  decides whether the native form needs the offscreen pass at all.
+- ~~Why the game draws about 20 objects a frame offscreen~~ (stage E):
+  answered 2026-10-29, mostly for a soft edge, see "Stage E, why offscreen"
+  below.
 - Whether the lens flare's occlusion is right today (the depth-probe question
   above).
 - The 2D layer's end state: keep translating `GsPkt` packets, or hook the

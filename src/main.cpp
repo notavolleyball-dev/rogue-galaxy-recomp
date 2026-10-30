@@ -15,6 +15,7 @@
 #include <string>
 
 #include "debug/call_trace.h"
+#include "debug/composite_census.h"
 #include "debug/crash_report.h"
 #include "debug/draw_origins.h"
 #include "debug/hw_watch.h"
@@ -189,6 +190,7 @@ int run(int argc, char **argv)
     rg::debug::installCallTrace(runtime);
     rg::debug::installDrawOrigins(runtime);
     rg::nativefx::install(runtime);
+    rg::debug::installCompositeCensus(runtime);
     rg::debug::installHardwareWatch(runtime);
     rg::debug::installPosTrace(runtime);
     rg::debug::installJumpTrace(runtime);
