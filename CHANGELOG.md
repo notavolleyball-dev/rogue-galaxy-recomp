@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Undub: the Japanese voices and movies from your own Japanese Director's Cut disc
+  (Settings > Language). Run `Install-Undub.bat` first and pick the disc image. The
+  text stays English.
 - With an Xbox controller, the game's text shows its buttons (A, B, X, Y,
   LB, RB, LT, RT) instead of the PlayStation's (Game > Controller's
   buttons, on by default).

@@ -58,6 +58,14 @@ If it stops, `install.log` says why; running `Install.bat` again continues
 where it stopped. If an antivirus removes the compiler, restore it and run
 it again. To uninstall, delete the folder (your saves are in `disc\mc0`).
 
+### Undub (optional)
+
+To play with the Japanese voices and movies, you also need your own image of
+the Japanese Director's Cut (SCPS-17013). After `Install.bat`, double-click
+`Install-Undub.bat` and choose that image (or drop it onto the file). It copies
+the voices and movies, about 3 GB, into the folder. Then turn the undub on in
+the game: F1 > Settings > Language.
+
 ## Controls
 
 The game window takes a keyboard or a gamepad (PlayStation layout).

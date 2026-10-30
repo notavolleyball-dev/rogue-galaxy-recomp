@@ -37,6 +37,7 @@
 #include "draw_distance.h"
 #include "free_camera.h"
 #include "instant_text.h"
+#include "voice_language.h"
 #include "sharp_letters.h"
 #include "map_chests.h"
 #include "hud_size.h"
@@ -176,6 +177,7 @@ int run(int argc, char **argv)
     rg::battlerates::install(runtime);
     rg::shopprices::install(runtime);
     rg::instanttext::install(runtime);
+    rg::voicelanguage::install(runtime);
     rg::letters::install(runtime);
     rg::mapchests::install(runtime);
     rg::freecamera::install(runtime);

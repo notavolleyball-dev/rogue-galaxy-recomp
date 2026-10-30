@@ -69,6 +69,12 @@
 | Shop prices | 10% to 200%. |
 | Action gauge speed | 25% to 400%. |
 
+**Language** (its own page in Settings)
+
+| Option | |
+|---|---|
+| Undub (Japanese voices) | The voices in scenes and the movies come from your own Japanese Director's Cut (SCPS-17013) instead of the English ones; the text stays as it is. Needs that disc's files in `disc/JA`: double-click `Install-Undub.bat` (after `Install.bat`) and pick your Japanese disc image, or drop it onto the file; by hand, `python setup.py extract-japanese --iso "<your Japanese disc>"`. A few lines (63) have no Japanese voice and play silent. Takes effect at the next start. |
+
 **Developers**
 
 | Option | |

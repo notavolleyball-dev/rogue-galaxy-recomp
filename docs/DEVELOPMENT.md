@@ -106,6 +106,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_SCENE_TRACE=1` | Prints each change of the game's mode and phase, the main menu's state and the Revelation Flow's placing step (`[scene]` lines; the quick scenes go by the mode, the warp's script and the placing step) |
 | `RG_SHARP_LETTERS=0` | The letters as the game draws them, enlarged, whatever the menu's "Sharp letters" says (`=1` traced; `src/sharp_letters.h`, `src/font_trace.h`); the `[gfx]` stats line counts `larger regions` (glyphs drawn traced) and `borders` (round borders drawn for their copies); `RG_SHARP_LETTERS_TRACE=1` logs each text style's border mode and each glyph traced, `=DIR` also writes each glyph as found and as made there |
 | `RG_INSTANT_TEXT=1` | Text in the message windows a page at a time (the menu's "Instant text"; `src/instant_text.h`) |
+| `RG_VOICE_LANG=JA` | Voices (and the movies that differ) from `disc/JA`, whatever the menu's "Undub (Japanese voices)" says; any language of the game's table works for the voice token (`src/voice_language.h`). Logs `[rg] voice <path>` for each voice asked |
 | `RG_MAP_CHESTS=1` | The chests not yet opened on the maps before a planet is complete (the menu's "Chests on the map"; `src/map_chests.h`) |
 | `RG_SAVE_ANYWHERE=1` | In the field, R1 + Triangle opens the transporter's menu (the menu's "Save anywhere"; `src/save_anywhere.h`) |
 | `RG_FULL_BAG_TO_STORAGE=1` | An item the bag has no room for goes to the transporter's item storage (the menu's "Full bag to storage"; `src/inventory.h`) |
