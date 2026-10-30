@@ -4,9 +4,11 @@ A plan for retiring the GS emulation (local memory, page ownership, feedback
 snapshots, readbacks, the register-level state machine) and drawing the game
 with a renderer that knows what it is drawing: models with their matrices,
 named effect buffers, and a 2D layer. Proposed 2026-10-28. Since then
-(2026-10-29) phase 1 is done for every VU1 program the recordings hold
-([VU1-NATIVE.md](VU1-NATIVE.md)), and phase 0's census of the effects is in
-"Phase 0" below; the rest is a plan.
+phase 1 is done for every VU1 program the recordings hold
+([VU1-NATIVE.md](VU1-NATIVE.md), 2026-10-29), phase 0's census of the
+effects is in "Phase 0" below, and phase 3 has its first three effects: the
+glare, the plane shadow and the per-object composites (2026-10-30; see
+"Phase 3"). The rest is a plan.
 
 ## Why
 
@@ -154,9 +156,9 @@ order to port them:
 
 | Function | Stage, per frame | Native form |
 |---|---|---|
-| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size |
-| `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | a direct draw; one offscreen pass per object only when its alpha is below 1 (to confirm) |
-| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size |
+| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form done: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE=1`, off by default) |
+| `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on by default) |
+| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW=1`, off by default) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
 | `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
 | `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass |
@@ -196,7 +198,10 @@ widescreen.
 Each phase ends with a measurement on the reference scenes and leaves the game
 fully playable. `RG_RENDER=gs` keeps the whole GS path selectable until phase
 5. `RG_NATIVE=models,post,ui,...` turns the native categories on one at a
-time, and a debug key flips them live on the same frame.
+time, and a debug key flips them live on the same frame. (Planned; none of
+the three exists yet. Today each piece has its own switch: `RG_VU1_NATIVE`,
+`RG_NATIVE_GLARE`, `RG_NATIVE_SHADOW`, `RG_NATIVE_COMPOSITE`; see
+[DEVELOPMENT.md](DEVELOPMENT.md).)
 
 **Reference scenes:** Salgin's first scene, the town square (`TOWN=1
 walk.sh`), a forced battle (battle bench), the boss gate, an event with an
@@ -216,7 +221,7 @@ item message and a battle dissolve (screen captures), the item menu, a movie.
   Z buffer as texture), readbacks by reason, CLUT sources, any `MARK` the game
   sends.
 - Open questions to settle here: what stage E's per-object offscreen pairs
-  are for (what they are is answered below; why, not yet); whether a depth-probe read through `depth_reads.cpp` sees the depth
+  are for (answered: a soft edge, see "Stage E, why offscreen"); whether a depth-probe read through `depth_reads.cpp` sees the depth
   the GPU drew (the GS backend never reads depth back, so local memory may hold
   a stale Z); what the screen overlay sprite (`ScreenTexOverlayWriteSpriteMaybe_16a890`,
   an `MSCAL` into slot B) relies on in VU1 memory.
@@ -287,10 +292,9 @@ What it says for phases 3 and 4:
   offscreen: a clear of the object's region of `02a00`
   (`ModelDrawOffscreenComposite`), its strips and outline drawn there against
   the scene's depth, then the overlay sprite program blends its bounds into
-  the frame. Why the game draws them offscreen (a fade's alpha over the whole
-  object, so it does not show its own overlaps, is the likely reason) is
-  still open; a native form is one pass per object only when its alpha is
-  below 1, and a direct draw otherwise.
+  the frame. Why: a soft edge around each object, the fade's use of it
+  rare (answered later, see "Stage E, why offscreen"); done in object
+  layers ("Stage E in object layers").
 - **The shadow is the plane shadow pass**, not `ShadowMapRender` (not seen in
   these scenes): volumes into `02a00`, a 48-sprite feedback blur in
   `03800`, then onto the frame. Native: stencil volumes, a blur at the
@@ -322,8 +326,9 @@ piece (`src/vu1_native.cpp`), the strips go to the backend as `GSNativeMesh`
 (object-space vertices and a transform record, merged per draw state and
 culled on the CPU), and the oracle (`tools/vu1/oracle`) is the harness. In
 `gpu` mode no VU1 program runs on the walk. Still packets, not meshes: the
-outlines, shadow volumes, overlay sprites, particles and the projected
-texture. The plan as written:
+outlines, shadow volumes, particles and the projected texture; the overlay
+sprites too, though with the object layers their sprites become a
+`kObjectTail` effect the renderer draws (phase 3). The plan as written:
 
 - `NativeDrawSink`, a narrow interface on the SDL GPU backend that accepts
   `NativeMesh` and `NativePass` commands into the same target cache and pass
@@ -404,6 +409,17 @@ the last step shows them). At 3x in the 60 fps mode, with the glare: passes
 199 to 86 a frame, feedback copies 121 to 12, draws 644 to 527, still 60 fps,
 GPU busy unchanged.
 
+**The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on by
+default:** see "Stage E in object layers" below.
+
+**Where it stands (2026-10-30):** with all three on, the walk's last 25 s at
+3x and 8x take about 53 passes a frame (from about 199) and about 16
+feedback copies a frame (8x, `bw-perf.sh`); GPU busy and power are
+unchanged on the RX 6700 XT. Left from the census: the depth of field,
+CBlur, the frame copies (`CharaDrawTranslucentPass`, `GfxBlitTexRectPixels`)
+and the game thread's 32-strip transfer at the frame's end; which of them
+make the remaining feedback copies is not yet counted.
+
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
 with `gpubusy.sh` falls by an amount recorded in the ledger.
@@ -476,7 +492,8 @@ tested As > 0. The two shifted copies smear the silhouette's colours about
 half a pixel outward at about 54%, under the sharp copy: anti-aliasing of
 the object's edge.
 
-The native form: the objects drawn directly into the scene and also into
+The native form first planned (superseded by "Stage E in object layers"
+below, which says why): the objects drawn directly into the scene and also into
 one object layer (colour and coverage, all of them); then one pass that,
 outside each covered pixel, lays the layer's two bilinear samples at those
 offsets over the scene, as the copies do. The overlap of objects differs
@@ -507,7 +524,8 @@ meet, so each still reads only itself. Its tail becomes a `kObjectTail`
 (the builder in `src/native_effects.cpp`, its kicks withheld), and the
 waiting tails go in one pass, in order (`compositeLayers`), when anything
 else reaches the GS or every slot is taken. Uploads and TEXFLUSHes between
-objects go on: the layers are not GS memory, and `02a00` is never drawn.
+objects go on: the layers are not GS memory, and the objects never draw
+`02a00` (the shadow volumes and the other effects still use it).
 
 What parity took:
 
@@ -556,13 +574,15 @@ the long pole and needs phase 0's family count.
 |---|---|---|
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
-| 2 TAA | M | now ([FSR.md](FSR.md)) |
+| 2 TAA | M | groundwork built (jitter, camera registry, [FSR.md](FSR.md)); after phases 3 and 4, a fallback for low-end hardware |
 | 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow and the per-object composites (object layers, on by default) done (2026-10-30) |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 
-Phases 2 and 3 run in parallel, and meet: phase 3's scene/post split is what
-FSR's upscaler needs as its input.
+Phase 2 was to run beside phase 3; it now waits (2026-10-29: effects stay
+exact natively, and the upscaler is for hardware that cannot keep up
+without it). Phase 3's scene/post split is still what it needs as its
+input.
 
 ## Risks
 
@@ -593,7 +613,7 @@ FSR's upscaler needs as its input.
   lighting, skinning or clipping (phase 0, then the harness).
 - ~~Why the game draws about 20 objects a frame offscreen~~ (stage E):
   answered 2026-10-29, mostly for a soft edge, see "Stage E, why offscreen"
-  below.
+  above.
 - Whether the lens flare's occlusion is right today (the depth-probe question
   above).
 - The 2D layer's end state: keep translating `GsPkt` packets, or hook the
