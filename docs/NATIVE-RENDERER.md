@@ -388,6 +388,22 @@ to 31.0-31.3 W. The threads' CPU time (`/proc`, 20 s) is the same (GS worker
 47-49% to 58-60%, which is waiting, not work: `submitEffect` itself takes
 about 6 ms a second (the `[gfx]` line's "ms flush, buffers, sprites").
 
+**The plane shadow (2026-10-29), behind `RG_NATIVE_SHADOW=1`.** The same
+way, from `DrawListEndPlaneShadowPass`'s packets; `DrawListBeginPlaneShadowPass`'s
+go on as they are, and the registers they set (`XYOFFSET_1`, `SCISSOR_1`)
+are where the shadow's sprites start from. Its five steps: `02a00` (the
+volumes' counts) less 128; down to `03800` (192x192), read as CT24 with
+HIGHLIGHT2; 36 feedback adds of blur; a channel copy through the CT16 view of
+`03800` (12 strips of 8 pixels, R and G masked: alpha bits 2-7 from green's),
+now one `kGreenToAlpha` op; and laid over the frame by that alpha with the
+frame's alpha masked. The effect path gained CT24 and the HIGHLIGHT modes,
+the subtract and the lay-over blends onto GS targets, and the alpha mask. On
+the walk at 1x the field's screenshot matches the GS path's to at most 6 a
+channel where the shadows fall (they are faint there; a control run without
+the last step shows them). At 3x in the 60 fps mode, with the glare: passes
+199 to 86 a frame, feedback copies 121 to 12, draws 644 to 527, still 60 fps,
+GPU busy unchanged.
+
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
 with `gpubusy.sh` falls by an amount recorded in the ledger.
@@ -430,7 +446,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | now ([FSR.md](FSR.md)) |
-| 3 Post | M-L (about ten effects, each S-M) | the glare done (2026-10-29); the per-object composites next |
+| 3 Post | M-L (about ten effects, each S-M) | the glare and the plane shadow done (2026-10-29); the per-object composites next |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 

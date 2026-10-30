@@ -60,8 +60,8 @@ void SdlGpuDevice::releaseEffects() {
     m_effectLinearSampler = nullptr;
 }
 
-bool SdlGpuDevice::effectPipeline(bool add, std::string &error) {
-    SDL_GPUGraphicsPipeline *&pipeline = m_effectPipelines[add ? 1 : 0];
+bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
+    SDL_GPUGraphicsPipeline *&pipeline = m_effectPipelines[index];
     if (pipeline)
         return true;
     if (!m_effectLinearSampler) {
@@ -105,15 +105,24 @@ bool SdlGpuDevice::effectPipeline(bool add, std::string &error) {
     }
     SDL_GPUColorTargetDescription colorTarget{};
     colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    if (add) {
-        // The GS's Cs + Cd, clamped as the target clamps; the alpha is As.
-        colorTarget.blend_state.enable_blend = true;
-        colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-        colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        colorTarget.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
-        colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    const EffectBlend blend = EffectBlend(index / 2u);
+    if (blend != EffectBlend::Write) {
+        // The GS's blends with D = Cd, clamped as the target clamps; the
+        // alpha written is As.
+        SDL_GPUColorTargetBlendState &state = colorTarget.blend_state;
+        state.enable_blend = true;
+        state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_color_blendfactor =
+            blend == EffectBlend::Over ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_GPU_BLENDFACTOR_ONE;
+        state.color_blend_op = blend == EffectBlend::Subtract ? SDL_GPU_BLENDOP_REVERSE_SUBTRACT : SDL_GPU_BLENDOP_ADD;
+        state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    }
+    if (index & 1u) {
+        colorTarget.blend_state.enable_color_write_mask = true;
+        colorTarget.blend_state.color_write_mask =
+            SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B;
     }
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = vertex;
@@ -135,9 +144,10 @@ bool SdlGpuDevice::effectPipeline(bool add, std::string &error) {
 }
 
 bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source,
-                            bool linear, SDL_GPUTexture *previous, bool add, const SDL_Rect *scissor,
-                            const GsEffectUniforms &uniforms, std::string &error) {
-    if (!effectPipeline(add, error))
+                            bool linear, SDL_GPUTexture *previous, EffectBlend blend, bool writeAlpha,
+                            const SDL_Rect *scissor, const GsEffectUniforms &uniforms, std::string &error) {
+    const uint32_t index = uint32_t(blend) * 2u + (writeAlpha ? 0u : 1u);
+    if (!effectPipeline(index, error))
         return false;
     SDL_GPUCommandBuffer *commands = pendingCommands(error, "native effect");
     if (!commands)
@@ -153,7 +163,7 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
         error = std::string("SDL_BeginGPURenderPass(effect): ") + SDL_GetError();
         return false;
     }
-    SDL_BindGPUGraphicsPipeline(pass, m_effectPipelines[add ? 1 : 0]);
+    SDL_BindGPUGraphicsPipeline(pass, m_effectPipelines[index]);
     const SDL_GPUViewport viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
     SDL_SetGPUViewport(pass, &viewport);
     const SDL_Rect whole{0, 0, int(width), int(height)};
@@ -162,6 +172,13 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
     // what the op uses.
     SDL_GPUTexture *sourceTexture = source ? source : previous;
     SDL_GPUTexture *previousTexture = previous ? previous : source;
+    if (!sourceTexture) {
+        sourceTexture = previousTexture = effectTexture(uint32_t(m_effectTextures.size() - 1u), 1u, 1u, error);
+        if (!sourceTexture) {
+            SDL_EndGPURenderPass(pass);
+            return false;
+        }
+    }
     const SDL_GPUTextureSamplerBinding bindings[2] = {
         {sourceTexture, linear ? m_effectLinearSampler : m_sampler},
         {previousTexture, m_sampler},

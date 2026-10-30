@@ -6,7 +6,9 @@
 // alpha test keeps the buffer, it copies `previous` (the buffer before the
 // sprite), and the blend reads its destination there, so a sprite may read
 // the buffer it draws. Into an external target (the frame) it covers the
-// sprite alone and gives the source colour; the pipeline's blend adds it.
+// sprite alone and gives the blend's Cs C term (A - B being Cs, -Cs or
+// Cs - Cd), which the pipeline adds, subtracts or lays over Cd; for the last
+// the alpha it gives is C.
 
 layout(set = 2, binding = 0) uniform sampler2D source;
 layout(set = 2, binding = 1) uniform sampler2D previous;
@@ -14,7 +16,7 @@ layout(set = 3, binding = 0) uniform EffectParams {
     vec4 rect;    // x0, y0, x1, y1 in GS pixels
     vec4 uv;      // u0, v0, u1, v1 in texels of the source
     vec4 scissor; // x0, y0, x1, y1, inclusive
-    vec4 misc;    // x: the target's scale; yz: the source's size in GS texels
+    vec4 misc;    // x: the target's scale; yz: the source's size in GS texels; w: TEXA's TA0 + 256 AEM
     uvec4 rgba;   // the vertex colour
     // x: flags (GSNativeEffect's, and 256 for an external target, 512 for
     // a textured sprite); y: ALPHA's A, B, C, D (2 bits each); z: its FIX;
@@ -27,6 +29,10 @@ const uint kBlend = 1u;
 const uint kDecal = 4u;
 const uint kColClamp = 8u;
 const uint kTextureAlpha = 16u;
+const uint kCt24 = 32u;
+const uint kHighlight = 64u;
+const uint kHighlight2 = 128u;
+const uint kGreenToAlpha = 1024u;
 const uint kExternal = 256u;
 const uint kTextured = 512u;
 
@@ -71,14 +77,28 @@ void main() {
         return;
     }
 
+    if ((flags & kGreenToAlpha) != 0u) {
+        outColor = vec4(vec3(dst.rgb), float((dst.g & 0xFCu) | (dst.a & 3u))) / 255.0;
+        return;
+    }
+
     uvec4 v = params.rgba;
     uvec4 c = v;
     if ((flags & kTextured) != 0u) {
         vec2 uv = params.uv.xy + (g - params.rect.xy) * (params.uv.zw - params.uv.xy) / (params.rect.zw - params.rect.xy);
         uvec4 t = bytes(texture(source, uv / params.misc.yz));
+        if ((flags & kCt24) != 0u) {
+            // TA0, or 0 for black under AEM.
+            uint texa = uint(params.misc.w);
+            t.a = (texa >= 256u && all(equal(t.rgb, uvec3(0u)))) ? 0u : (texa & 255u);
+        }
         if ((flags & kDecal) != 0u) {
             c.rgb = t.rgb;
             c.a = (flags & kTextureAlpha) != 0u ? t.a : v.a;
+        } else if ((flags & (kHighlight | kHighlight2)) != 0u) {
+            c.rgb = min(((t.rgb * v.rgb) >> 7u) + v.a, uvec3(255u));
+            c.a = (flags & kTextureAlpha) == 0u ? v.a
+                : ((flags & kHighlight) != 0u ? min(t.a + v.a, 255u) : t.a);
         } else {
             c.rgb = min((t.rgb * v.rgb) >> 7u, uvec3(255u));
             c.a = (flags & kTextureAlpha) != 0u ? min((t.a * v.a) >> 7u, 255u) : v.a;
@@ -101,12 +121,20 @@ void main() {
     }
 
     ivec3 rgb = ivec3(c.rgb);
-    if (!toFrame && (flags & kBlend) != 0u) {
-        uint alpha = params.control.y;
+    uint alpha = params.control.y;
+    uint selectC = (alpha >> 4u) & 3u;
+    int factor = selectC == 0u ? int(c.a) : (selectC == 1u ? int(dst.a) : int(params.control.z));
+    if (toFrame && (flags & kBlend) != 0u) {
+        // The pipeline adds this to Cd, takes it from Cd, or (A - B being
+        // Cs - Cd) adds it to Cd (1 - C).
+        rgb = clamp((ivec3(c.rgb) * factor) >> 7, ivec3(0), ivec3(255));
+        bool over = (alpha & 0xFu) == 0x4u;
+        outColor = vec4(vec3(rgb) / 255.0, over ? min(float(factor) / 128.0, 1.0) : float(c.a) / 255.0);
+        return;
+    }
+    if ((flags & kBlend) != 0u) {
         ivec3 cs = ivec3(c.rgb);
         ivec3 cd = ivec3(dst.rgb);
-        uint selectC = (alpha >> 4u) & 3u;
-        int factor = selectC == 0u ? int(c.a) : (selectC == 1u ? int(dst.a) : int(params.control.z));
         ivec3 a = colorTerm(alpha & 3u, cs, cd);
         ivec3 b = colorTerm((alpha >> 2u) & 3u, cs, cd);
         ivec3 d = colorTerm((alpha >> 6u) & 3u, cs, cd);

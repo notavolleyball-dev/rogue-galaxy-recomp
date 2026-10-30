@@ -210,13 +210,18 @@ public:
     bool supportsEffects() const;
     // An effect's buffer, by slot, kept from one effect to the next.
     SDL_GPUTexture *effectTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error);
+    // How a sprite into an external target meets what is there: the
+    // shader's colour written, added, subtracted from it (Cd - Cs), or laid
+    // over it by the shader's alpha (Cs + Cd (1 - As), Cs premultiplied).
+    enum class EffectBlend : uint32_t { Write, Add, Subtract, Over };
     // One sprite into `target` (width x height). Without `scissor`, into an
     // effect's own buffer: the whole of it, from `previous` where the sprite
-    // does not draw. With it, into an external target, written or (`add`)
-    // added. `source` is the sprite's texture, null when untextured.
+    // does not draw. With it, into an external target, by `blend`, its alpha
+    // kept when not `writeAlpha`. `source` is the sprite's texture, null when
+    // untextured.
     bool effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source, bool linear,
-                  SDL_GPUTexture *previous, bool add, const SDL_Rect *scissor, const GsEffectUniforms &uniforms,
-                  std::string &error);
+                  SDL_GPUTexture *previous, EffectBlend blend, bool writeAlpha, const SDL_Rect *scissor,
+                  const GsEffectUniforms &uniforms, std::string &error);
 
     bool composeDisplay(SDL_GPUTexture *circuit1, SDL_GPUTexture *circuit2,
                         SDL_GPUTexture *destination, uint32_t width, uint32_t height,
@@ -309,11 +314,14 @@ private:
         uint32_t width = 0u;
         uint32_t height = 0u;
     };
-    bool effectPipeline(bool add, std::string &error);
+    bool effectPipeline(uint32_t index, std::string &error);
     void releaseEffects();
-    SDL_GPUGraphicsPipeline *m_effectPipelines[2] = {};
+    // By EffectBlend * 2, plus 1 with the alpha kept.
+    SDL_GPUGraphicsPipeline *m_effectPipelines[8] = {};
     SDL_GPUSampler *m_effectLinearSampler = nullptr;
-    std::array<EffectTexture, 8> m_effectTextures{};
+    // 4 buffers of 2 textures each, then a 1x1 one bound where a sprite
+    // samples nothing.
+    std::array<EffectTexture, 9> m_effectTextures{};
 
     SDL_GPUGraphicsPipeline *m_reinterpretPipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_localCopyPipeline = nullptr;

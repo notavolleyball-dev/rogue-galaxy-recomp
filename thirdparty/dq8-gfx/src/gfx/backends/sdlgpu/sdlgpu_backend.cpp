@@ -2323,6 +2323,7 @@ struct SdlGpuBackend::Impl {
             uniforms.misc[0] = float(target.scale);
             uniforms.misc[1] = source ? float(source->width) : 1.0f;
             uniforms.misc[2] = source ? float(source->height) : 1.0f;
+            uniforms.misc[3] = float((op.texa & 0xffu) + ((op.texa & 0x8000u) ? 256u : 0u));
             uniforms.control[0] = op.flags | (target.surface ? 256u : 0u) | (source ? 512u : 0u);
             uniforms.control[1] = uint32_t(op.alpha & 0xffu);
             uniforms.control[2] = uint32_t((op.alpha >> 32u) & 0xffu);
@@ -2345,9 +2346,20 @@ struct SdlGpuBackend::Impl {
                 const uint32_t scale = target.scale;
                 const SDL_Rect scissor{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale),
                                        int((y1 - y0) * scale)};
+                // The GS's (A - B) C + D with D = Cd, as the effect's builder
+                // allows them: A = Cs and B = 0 adds, A = 0 and B = Cs
+                // subtracts, A = Cs and B = Cd lays the source over.
+                using Blend = SdlGpuDevice::EffectBlend;
+                Blend blend = Blend::Write;
+                if (op.flags & GSNativeEffect::kBlend) {
+                    const uint32_t ab = uint32_t(op.alpha & 0xfu);
+                    blend = ab == 0x8u ? Blend::Add : ab == 0x2u ? Blend::Subtract : ab == 0x4u ? Blend::Over : Blend::Write;
+                    if (blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u)
+                        return setError("native effect: a blend into a GS target it cannot draw");
+                }
                 if (!device.effectOp(target.surface->texture, target.width * scale, target.height * scale,
-                                     sourceTexture, linear, nullptr, (op.flags & GSNativeEffect::kBlend) != 0u,
-                                     &scissor, uniforms, error))
+                                     sourceTexture, linear, nullptr, blend,
+                                     (op.flags & GSNativeEffect::kKeepAlpha) == 0u, &scissor, uniforms, error))
                     return setError(std::move(error));
                 targets->markDrawn(*target.surface, GsRegion{x0, y0, x1, y1});
             } else {
@@ -2356,8 +2368,8 @@ struct SdlGpuBackend::Impl {
                 if (source == &target)
                     sourceTexture = previous;
                 if (!device.effectOp(target.textures[next], target.width * target.scale,
-                                     target.height * target.scale, sourceTexture, linear, previous, false, nullptr,
-                                     uniforms, error))
+                                     target.height * target.scale, sourceTexture, linear, previous,
+                                     SdlGpuDevice::EffectBlend::Write, true, nullptr, uniforms, error))
                     return setError(std::move(error));
                 target.current = next;
             }

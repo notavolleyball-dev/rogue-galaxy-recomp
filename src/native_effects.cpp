@@ -19,6 +19,8 @@ namespace
 {
 
 constexpr uint32_t kGlareFilterDraw = 0x0017A0D0u; // GlareFilterDrawMaybe
+constexpr uint32_t kPlaneShadowEnd = 0x00146CC0u;   // DrawListEndPlaneShadowPass
+constexpr uint32_t kPlaneShadowBegin = 0x00147B80u; // DrawListBeginPlaneShadowPass
 constexpr uint32_t kDrawListFrameBegin = 0x001425D0u;
 
 // The draw context (GetDrawCtx_15de80 reads it at gp-0x40cc): the frame's
@@ -143,6 +145,33 @@ void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     rg::hooks::callThen(g_glareOriginal, rdram, ctx, runtime, &afterGlare, stackTop());
 }
+
+PS2Runtime::RecompiledFunction g_shadowOriginal = nullptr;
+
+void afterShadow(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::Shadow);
+}
+
+void planeShadowEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_shadowOriginal, rdram, ctx, runtime, &afterShadow, stackTop());
+}
+
+PS2Runtime::RecompiledFunction g_shadowBeginOriginal = nullptr;
+
+void afterShadowBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::ShadowSetup);
+}
+
+void planeShadowBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_shadowBeginOriginal, rdram, ctx, runtime, &afterShadowBegin, stackTop());
+}
+
+bool g_glare = false;
+bool g_shadow = false;
 
 // --- Packets -----------------------------------------------------------
 
@@ -270,9 +299,12 @@ struct Registers
     }
 };
 
+// The VIF1 thread's: what the last shadow setup's packets wrote.
+thread_local Registers t_shadowSetup;
+
 constexpr uint8_t kTex0 = 0x06u, kXyoffset = 0x18u, kPrmodecont = 0x1Au, kPrmode = 0x1Bu,
                   kTex1 = 0x14u, kScissor = 0x40u, kAlpha = 0x42u, kDthe = 0x45u, kColclamp = 0x46u,
-                  kTest = 0x47u, kPabe = 0x49u, kFba = 0x4Au, kFrame = 0x4Cu, kZbuf = 0x4Eu;
+                  kTest = 0x47u, kPabe = 0x49u, kTexa = 0x3Bu, kFba = 0x4Au, kFrame = 0x4Cu, kZbuf = 0x4Eu;
 
 struct BufferKey
 {
@@ -292,11 +324,19 @@ struct Builder
     std::array<int, GSNativeEffect::kMaxBuffers> firstWrite{};
     std::array<int, GSNativeEffect::kMaxBuffers> firstRead{};
     std::array<float, GSNativeEffect::kMaxBuffers> readBottom{};
+    std::string missing;
+    bool failed = false;
+    // Per op: how many CT16 strips a kGreenToAlpha op stands for.
+    std::array<uint32_t, GSNativeEffect::kMaxOps> strips{};
 
     bool fail(const char *reason)
     {
-        why = reason;
-        return false;
+        if (!failed)
+            why = reason;
+        failed = true;
+        if (trace)
+            std::fprintf(stderr, "[nativefx]   (refused: %s)\n", reason);
+        return trace; // tracing goes on past a refusal, to show every sprite
     }
 
     int buffer(const BufferKey &key)
@@ -324,9 +364,20 @@ struct Builder
     }
 
     // A sprite from v0 to v1 under `r`.
+    bool trace = false;
     bool sprite(const Registers &r, uint16_t prim, const rg::gif::GifEvent &v0, const rg::gif::GifEvent &v1)
     {
         const uint32_t ctxt = (prim >> 9) & 1u;
+        if (trace)
+            std::fprintf(stderr,
+                         "[nativefx]   sprite prim %03x frame %llx tex0 %llx tex1 %llx alpha %llx test %llx texa %llx "
+                         "xyoff %llx scissor %llx xy %u,%u-%u,%u uv %u,%u-%u,%u rgba %02x%02x%02x%02x\n",
+                         prim, (unsigned long long)r.value[kFrame + ctxt], (unsigned long long)r.value[kTex0 + ctxt],
+                         (unsigned long long)r.value[kTex1 + ctxt], (unsigned long long)r.value[kAlpha + ctxt],
+                         (unsigned long long)r.value[kTest + ctxt], (unsigned long long)r.value[kTexa],
+                         (unsigned long long)r.value[kXyoffset + ctxt], (unsigned long long)r.value[kScissor + ctxt],
+                         v0.x, v0.y, v1.x, v1.y, v0.u, v0.v, v1.u, v1.v, v1.rgba[0], v1.rgba[1], v1.rgba[2],
+                         v1.rgba[3]);
         const bool tme = (prim >> 4) & 1u;
         const bool abe = (prim >> 6) & 1u;
         if ((prim >> 5) & 1u || (prim >> 7) & 1u)
@@ -336,7 +387,14 @@ struct Builder
         const auto need = [&](uint8_t reg) { return r.set[reg]; };
         if (!need(kFrame + ctxt) || !need(kScissor + ctxt) || !need(kXyoffset + ctxt) || !need(kTest + ctxt) ||
             !need(kZbuf + ctxt))
-            return fail("a sprite under a draw environment set before the effect");
+        {
+            missing = "a sprite under a draw environment set before the effect (context " + std::to_string(ctxt) + ":";
+            for (uint8_t reg : {kFrame, kScissor, kXyoffset, kTest, kZbuf})
+                if (!need(reg + ctxt))
+                    missing += " " + std::to_string(reg + ctxt);
+            missing += ")";
+            return fail(missing.c_str());
+        }
         if (tme && (!need(kTex0 + ctxt) || !need(kTex1 + ctxt)))
             return fail("a sprite under a texture set before the effect");
         if (abe && !need(kAlpha + ctxt))
@@ -344,8 +402,13 @@ struct Builder
         const uint64_t frame = r.value[kFrame + ctxt];
         const uint64_t test = r.value[kTest + ctxt];
         const uint64_t zbuf = r.value[kZbuf + ctxt];
-        if (((frame >> 24) & 0x3Fu) != 0u || (frame >> 32) != 0u)
-            return fail("a sprite into a target not CT32, or masked");
+        if (((frame >> 24) & 0x3Fu) == 2u && (frame >> 32) == 0xFFFFu)
+            return greenToAlpha(r, prim, ctxt, v0, v1);
+        if (((frame >> 24) & 0x3Fu) != 0u || ((frame >> 32) != 0u && (frame >> 32) != 0xFF000000u))
+        {
+            missing = "a sprite into a target not CT32, or masked (FRAME " + std::to_string(frame) + ")";
+            return fail(missing.c_str());
+        }
         if ((test >> 14) & 1u)
             return fail("a sprite with the destination alpha test");
         if (((test >> 16) & 1u) && ((test >> 17) & 3u) != 1u)
@@ -356,6 +419,7 @@ struct Builder
             return fail("a sprite with dithering, FBA or PABE");
 
         GSNativeEffect::Op op;
+        op.flags |= (frame >> 32) != 0u ? GSNativeEffect::kKeepAlpha : 0u;
         const BufferKey target{static_cast<uint32_t>(frame & 0x1FFu) << 5u, static_cast<uint32_t>((frame >> 16) & 0x3Fu),
                                0u};
         const int targetIndex = buffer(target);
@@ -366,8 +430,21 @@ struct Builder
         {
             const uint64_t tex0 = r.value[kTex0 + ctxt];
             const uint32_t tfx = static_cast<uint32_t>((tex0 >> 35) & 3u);
-            if (((tex0 >> 20) & 0x3Fu) != 0u || tfx > 1u)
-                return fail("a texture not CT32, or not modulated or decal");
+            const uint32_t psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
+            if (psm == 1u)
+            {
+                if (!r.set[kTexa])
+                    return fail("a CT24 texture under a TEXA set before the effect");
+                const uint64_t texa = r.value[kTexa];
+                op.flags |= GSNativeEffect::kCt24;
+                op.texa = static_cast<uint32_t>(texa & 0xFFu) | static_cast<uint32_t>(texa & 0x8000u);
+            }
+            if (psm > 1u)
+            {
+                missing = "a texture not CT32 or CT24 (TEX0 " + std::to_string(tex0) + ", psm " +
+                          std::to_string((tex0 >> 20) & 0x3Fu) + ", tfx " + std::to_string(tfx) + ")";
+                return fail(missing.c_str());
+            }
             const BufferKey source{static_cast<uint32_t>(tex0 & 0x3FFFu), static_cast<uint32_t>((tex0 >> 14) & 0x3Fu),
                                    0u};
             const int sourceIndex = buffer(source);
@@ -378,7 +455,10 @@ struct Builder
             const uint32_t mmag = static_cast<uint32_t>((tex1 >> 5) & 1u);
             const uint32_t mmin = static_cast<uint32_t>((tex1 >> 6) & 7u);
             op.flags |= (mmag != 0u || mmin == 1u || (mmin & 4u) != 0u) ? GSNativeEffect::kLinear : 0u;
-            op.flags |= tfx == 1u ? GSNativeEffect::kDecal : 0u;
+            op.flags |= tfx == 1u ? GSNativeEffect::kDecal
+                        : tfx == 2u ? GSNativeEffect::kHighlight
+                        : tfx == 3u ? GSNativeEffect::kHighlight2
+                                    : 0u;
             op.flags |= ((tex0 >> 34) & 1u) ? GSNativeEffect::kTextureAlpha : 0u;
         }
         if (abe)
@@ -419,6 +499,72 @@ struct Builder
         return add(op);
     }
 
+    // A strip of the CT16 view of a CT32 buffer (192 x 384 for 192 x 192):
+    // in each 16 pixels of a row, the 8 that hold the BA halves of 8 CT32
+    // pixels drawn from the 8 that hold their RG halves, the same row, with
+    // R and G masked, so CT16's B5 and A1 take G's bits 2-7 into A's. The
+    // strips together, every BA half of the buffer, are one kGreenToAlpha.
+    bool greenToAlpha(const Registers &r, uint16_t prim, uint32_t ctxt, const rg::gif::GifEvent &v0,
+                      const rg::gif::GifEvent &v1)
+    {
+        const uint64_t frame = r.value[kFrame + ctxt];
+        const uint64_t tex0 = r.value[kTex0 + ctxt];
+        const uint32_t base = static_cast<uint32_t>(frame & 0x1FFu) << 5u;
+        const uint32_t fbw = static_cast<uint32_t>((frame >> 16) & 0x3Fu);
+        const bool tme = (prim >> 4) & 1u, abe = (prim >> 6) & 1u;
+        if (!tme || abe || static_cast<uint32_t>(tex0 & 0x3FFFu) != base ||
+            static_cast<uint32_t>((tex0 >> 14) & 0x3Fu) != fbw || ((tex0 >> 20) & 0x3Fu) != 2u ||
+            ((tex0 >> 35) & 3u) > 1u)
+            return fail("a CT16 sprite other than a channel copy");
+        if (((tex0 >> 35) & 3u) == 0u && (v1.rgba[0] != 0x80u || v1.rgba[1] != 0x80u || v1.rgba[2] != 0x80u))
+            return fail("a CT16 channel copy with a colour");
+        if (r.value[kTest + ctxt] & 1u)
+            return fail("a CT16 channel copy with the alpha test");
+        const uint64_t offset = r.value[kXyoffset + ctxt];
+        const int32_t ox = static_cast<int32_t>(offset & 0xFFFFu), oy = static_cast<int32_t>((offset >> 32) & 0xFFFFu);
+        const int32_t x0 = static_cast<int32_t>(v0.x) - ox, x1 = static_cast<int32_t>(v1.x) - ox;
+        const int32_t y0 = static_cast<int32_t>(v0.y) - oy, y1 = static_cast<int32_t>(v1.y) - oy;
+        // In 1/16 pixel: 8 wide at the second 8 of 16; the texels the first
+        // 8 of the same rows (at their centres).
+        if (x1 - x0 != 128 || (x0 & 255) != 128 || y0 != 0 || static_cast<int32_t>(v0.u) != x0 - 128 + 8 ||
+            static_cast<int32_t>(v0.v) != y0 + 8 || static_cast<int32_t>(v1.u) != x1 - 128 + 8)
+            return fail("a CT16 channel copy of another shape");
+        const uint64_t scissor = r.value[kScissor + ctxt];
+        const uint32_t rows = static_cast<uint32_t>(y1 / 16);
+        if ((scissor & 0x7FFu) != 0u || ((scissor >> 32) & 0x7FFu) != 0u ||
+            ((scissor >> 16) & 0x7FFu) + 1u < fbw * 64u || ((scissor >> 48) & 0x7FFu) + 1u < rows ||
+            y1 % 16 != 0 || rows % 2u != 0u)
+            return fail("a CT16 channel copy under a scissor");
+        const int index = buffer(BufferKey{base, fbw, 0u});
+        if (index < 0)
+            return fail("more buffers than an effect has");
+        if (out.opCount != 0u)
+        {
+            GSNativeEffect::Op &last = out.ops[out.opCount - 1u];
+            if ((last.flags & GSNativeEffect::kGreenToAlpha) && last.target == static_cast<uint32_t>(index) &&
+                last.rect[3] == static_cast<float>(rows / 2u))
+            {
+                ++strips[out.opCount - 1u];
+                return true;
+            }
+        }
+        GSNativeEffect::Op op;
+        op.target = static_cast<uint32_t>(index);
+        op.source = index;
+        op.flags = GSNativeEffect::kGreenToAlpha;
+        op.rect[2] = static_cast<float>(fbw * 64u);
+        op.rect[3] = static_cast<float>(rows / 2u);
+        op.uv[2] = op.rect[2];
+        op.uv[3] = op.rect[3];
+        op.scissor[2] = fbw * 64u - 1u;
+        op.scissor[3] = rows / 2u - 1u;
+        op.test = r.value[kTest + ctxt];
+        if (!add(op))
+            return false;
+        strips[out.opCount - 1u] = 1u;
+        return true;
+    }
+
     static bool sameDrawing(const GSNativeEffect::Op &a, const GSNativeEffect::Op &b)
     {
         return a.target == b.target && a.source == b.source && a.flags == b.flags && a.alpha == b.alpha &&
@@ -452,7 +598,8 @@ struct Builder
 
     bool add(const GSNativeEffect::Op &op)
     {
-        if (out.opCount != 0u && join(out.ops[out.opCount - 1u], op))
+        if (out.opCount != 0u && !(op.flags & GSNativeEffect::kGreenToAlpha) &&
+            !(out.ops[out.opCount - 1u].flags & GSNativeEffect::kGreenToAlpha) && join(out.ops[out.opCount - 1u], op))
             return true;
         if (out.opCount == GSNativeEffect::kMaxOps)
             return fail("more sprites than an effect has");
@@ -488,7 +635,10 @@ struct Builder
         for (uint32_t i = 0; i < out.bufferCount; ++i)
         {
             GSNativeEffect::Buffer &buffer = out.buffers[i];
-            const bool external = firstWrite[i] < 0 || (firstRead[i] >= 0 && firstRead[i] <= firstWrite[i]);
+            // The GS's: never drawn here, read first, or first drawn over
+            // what it holds.
+            const bool external = firstWrite[i] < 0 || (firstRead[i] >= 0 && firstRead[i] <= firstWrite[i]) ||
+                                  readsDestination(out.ops[firstWrite[i]]);
             buffer.external = external ? 1u : 0u;
             uint32_t width = 0u, height = 0u;
             for (uint32_t n = 0; n < out.opCount; ++n)
@@ -517,28 +667,58 @@ struct Builder
         for (uint32_t n = 0; n < out.opCount; ++n)
         {
             const GSNativeEffect::Op &op = out.ops[n];
-            if (!out.buffers[op.target].external)
+            if (op.flags & GSNativeEffect::kGreenToAlpha)
+            {
+                const GSNativeEffect::Buffer &buffer = out.buffers[op.target];
+                if (buffer.external || strips[n] != buffer.fbw * 64u / 16u ||
+                    op.rect[3] < static_cast<float>(buffer.height))
+                    return fail("a CT16 channel copy of part of a buffer");
                 continue;
-            if (op.source < 0 || out.buffers[op.source].external)
-                return fail("a sprite into the frame not from an effect buffer");
-            // Cs + Cd: A = Cs, B = 0, C = FIX (1.0), D = Cd.
-            if ((op.flags & GSNativeEffect::kBlend) && ((op.alpha & 0xFFu) != 0x68u || ((op.alpha >> 32) & 0xFFu) != 0x80u))
-                return fail("a sprite into the frame with a blend other than an add");
+            }
+            if (!out.buffers[op.target].external)
+            {
+                if (op.flags & GSNativeEffect::kKeepAlpha)
+                    return fail("an effect buffer drawn with its alpha masked");
+                continue;
+            }
+            if (op.source >= 0 && out.buffers[op.source].external)
+                return fail("a sprite into a GS target from another");
             if (op.test & 1u)
-                return fail("a sprite into the frame with the alpha test");
+                return fail("a sprite into a GS target with the alpha test");
+            if (!(op.flags & GSNativeEffect::kBlend))
+                continue;
+            // (A - B) C + D with D = Cd and C not Ad: A = Cs and B = 0 (an
+            // add), A = 0 and B = Cs (a subtract), A = Cs and B = Cd (laid
+            // over, its alpha masked: the pipeline blends by the shader's).
+            const uint32_t ab = static_cast<uint32_t>(op.alpha & 0xFu);
+            const uint32_t c = static_cast<uint32_t>((op.alpha >> 4) & 3u);
+            if (((op.alpha >> 6) & 3u) != 1u || c == 1u || (ab != 0x8u && ab != 0x2u && ab != 0x4u))
+                return fail("a sprite into a GS target with a blend it cannot draw");
+            if (ab == 0x4u && !(op.flags & GSNativeEffect::kKeepAlpha))
+                return fail("a sprite laid over a GS target that writes its alpha");
         }
-        return true;
+        return !failed;
     }
 };
 
 } // namespace
 
+const char *name(Effect effect)
+{
+    return effect == Effect::Glare ? "glare" : effect == Effect::Shadow ? "shadow" : "none";
+}
+
 bool enabled()
 {
     static const bool on = [] {
-        const char *glare = std::getenv("RG_NATIVE_GLARE");
+        const auto flag = [](const char *name) {
+            const char *value = std::getenv(name);
+            return value && std::strcmp(value, "0") != 0;
+        };
         g_log = std::getenv("RG_NATIVE_EFFECTS_LOG") != nullptr;
-        return glare && std::strcmp(glare, "0") != 0;
+        g_glare = flag("RG_NATIVE_GLARE");
+        g_shadow = flag("RG_NATIVE_SHADOW");
+        return g_glare || g_shadow;
     }();
     return on;
 }
@@ -550,10 +730,19 @@ void install(PS2Runtime &runtime)
         return;
     }
     g_rdram = runtime.memory().getRDRAM();
-    if (!rg::timing::hookFunction(runtime, kDrawListFrameBegin, &drawListFrameBegin, g_frameBeginOriginal) ||
-        !rg::timing::hookFunction(runtime, kGlareFilterDraw, &glareFilterDraw, g_glareOriginal))
+    if (!rg::timing::hookFunction(runtime, kDrawListFrameBegin, &drawListFrameBegin, g_frameBeginOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the effects stay GS packets\n");
+        return;
+    }
+    if (g_glare && !rg::timing::hookFunction(runtime, kGlareFilterDraw, &glareFilterDraw, g_glareOriginal))
     {
         std::fprintf(stderr, "[nativefx] the glare stays GS packets\n");
+    }
+    if (g_shadow && (!rg::timing::hookFunction(runtime, kPlaneShadowBegin, &planeShadowBegin, g_shadowBeginOriginal) ||
+                     !rg::timing::hookFunction(runtime, kPlaneShadowEnd, &planeShadowEnd, g_shadowOriginal)))
+    {
+        std::fprintf(stderr, "[nativefx] the plane shadow stays GS packets\n");
     }
 }
 
@@ -571,18 +760,46 @@ Effect effectAt(uint32_t address)
     return Effect::None;
 }
 
+void observe(Effect effect, const uint8_t *data, uint32_t size)
+{
+    if (effect != Effect::ShadowSetup)
+        return;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    rg::gif::GifState state;
+    events.clear();
+    eachPacket(data, size, [&](uint32_t at, uint32_t piece) { rg::gif::decodeGifPacket(data + at, piece, state, events); });
+    for (const rg::gif::GifEvent &event : events)
+        if (event.kind == rg::gif::GifEvent::Kind::Register)
+            t_shadowSetup.write(event.reg, event.value);
+    if (g_log)
+    {
+        static int shown = 0;
+        if (shown++ < 3)
+        {
+            std::fprintf(stderr, "[nativefx] shadow setup packet, %u bytes:", size);
+            for (const rg::gif::GifEvent &event : events)
+                if (event.kind == rg::gif::GifEvent::Kind::Register)
+                    std::fprintf(stderr, " %02x=%llx", event.reg, static_cast<unsigned long long>(event.value));
+            std::fprintf(stderr, "\n");
+        }
+    }
+}
+
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why)
 {
     out = GSNativeEffect{};
     withheld.clear();
-    if (effect != Effect::Glare)
+    if (effect != Effect::Glare && effect != Effect::Shadow)
     {
         why = "no such effect";
         return false;
     }
     Builder builder{out, why};
-    Registers registers;
+    static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
+    static int traced = 0;
+    builder.trace = traceShadow && effect == Effect::Shadow && traced++ == 0;
+    Registers registers = effect == Effect::Shadow ? t_shadowSetup : Registers{};
     rg::gif::GifState state;
     std::vector<rg::gif::GifEvent> events;
     uint32_t queued = 0u;
@@ -640,16 +857,16 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
         withheld.push_back(packet);
         withholdKicks(withheld.back());
     }
-    if (!builder.finish())
+    if (!builder.finish() || builder.failed)
         return false;
     if (g_log)
     {
-        static bool shown = false;
-        if (!shown)
+        static bool shown[3] = {};
+        if (!shown[static_cast<int>(effect)])
         {
-            shown = true;
-            std::fprintf(stderr, "[nativefx] glare: %u buffers, %u sprites, %u DIRECTs ending inside a GIF tag\n",
-                         out.bufferCount, out.opCount, cut);
+            shown[static_cast<int>(effect)] = true;
+            std::fprintf(stderr, "[nativefx] %s: %u buffers, %u sprites, %u DIRECTs ending inside a GIF tag\n",
+                         name(effect), out.bufferCount, out.opCount, cut);
             for (uint32_t i = 0; i < out.bufferCount; ++i)
             {
                 const auto &b = out.buffers[i];

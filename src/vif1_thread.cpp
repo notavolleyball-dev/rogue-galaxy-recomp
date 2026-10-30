@@ -1095,6 +1095,7 @@ void flushEffect()
             sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
         }
         static std::vector<std::string> told;
+        why = std::string(rg::nativefx::name(t_held.effect)) + ": " + why;
         if (told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
         {
             told.push_back(why);
@@ -1121,7 +1122,11 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
         {
             flushEffect();
         }
-        if (effect != rg::nativefx::Effect::None)
+        if (effect == rg::nativefx::Effect::ShadowSetup)
+        {
+            rg::nativefx::observe(effect, data, size);
+        }
+        else if (effect != rg::nativefx::Effect::None)
         {
             t_held.effect = effect;
             t_held.gs = &gs;

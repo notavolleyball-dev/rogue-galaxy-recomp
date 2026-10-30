@@ -21,8 +21,9 @@ class PS2Runtime;
 //
 // RG_NATIVE_GLARE=1: GlareFilterDrawMaybe (stage A: the frame's bright parts
 // down to 192x192, 20 shifted adds of that buffer onto itself, back onto the
-// frame). RG_NATIVE_EFFECTS_LOG=1 prints the first effect built and why any
-// was not.
+// frame). RG_NATIVE_SHADOW=1: DrawListEndPlaneShadowPass (stage F: the
+// shadow volumes' mask, blurred, onto the frame). RG_NATIVE_EFFECTS_LOG=1
+// prints the first of each effect built and why any was not.
 namespace rg::nativefx
 {
 
@@ -30,9 +31,14 @@ enum class Effect : uint8_t
 {
     None,
     Glare,
+    Shadow,
+    // DrawListBeginPlaneShadowPass: its packets go on as they are; the
+    // registers they set are where the shadow's sprites start from.
+    ShadowSetup,
 };
 
 bool enabled();
+const char *name(Effect effect);
 
 // After loadELF(): hooks the effects' functions.
 void install(PS2Runtime &runtime);
@@ -43,6 +49,9 @@ Effect effectAt(uint32_t address);
 // From the packets an effect's function wrote, in order: the effect, and
 // the packets with their kicks withheld. False, with `why`, when they are
 // not the sprites expected.
+// A ShadowSetup packet: the registers it writes, for the next shadow.
+void observe(Effect effect, const uint8_t *data, uint32_t size);
+
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why);
 

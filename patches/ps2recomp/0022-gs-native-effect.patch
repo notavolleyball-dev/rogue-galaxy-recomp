@@ -45,10 +45,10 @@ index 27c0456..9625575 100644
      void UploadImage(const uint8_t *data, uint32_t size) override;
      void Flush() override;
 diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
-index f175e0d..3988c75 100644
+index f175e0d..0d2a86b 100644
 --- a/ps2xRuntime/include/runtime/gs/gs_types.h
 +++ b/ps2xRuntime/include/runtime/gs/gs_types.h
-@@ -328,6 +328,49 @@ struct GSPrimitiveBatch
+@@ -328,6 +328,58 @@ struct GSPrimitiveBatch
      uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
  };
  
@@ -81,12 +81,21 @@ index f175e0d..3988c75 100644
 +        uint64_t alpha = 0u; // ALPHA, when kBlend
 +        uint64_t test = 0u;  // TEST (its alpha test)
 +        uint32_t flags = 0u;
++        uint32_t texa = 0u;  // TEXA's TA0 (bits 0-7) and AEM (bit 15), for kCt24
 +    };
 +    static constexpr uint32_t kBlend = 1u;     // ABE
 +    static constexpr uint32_t kLinear = 2u;    // bilinear (TEX1)
 +    static constexpr uint32_t kDecal = 4u;     // TFX DECAL rather than MODULATE
 +    static constexpr uint32_t kColClamp = 8u;  // COLCLAMP
 +    static constexpr uint32_t kTextureAlpha = 16u; // TCC
++    static constexpr uint32_t kCt24 = 32u;         // the texture read as CT24: its alpha from TEXA
++    static constexpr uint32_t kHighlight = 64u;    // TFX HIGHLIGHT
++    static constexpr uint32_t kHighlight2 = 128u;  // TFX HIGHLIGHT2
++    // The target's alpha bits 2-7 from its green ones, the rest kept: the
++    // GS's CT16 view of a CT32 buffer copying each RG half onto its BA half
++    // with R and G masked (the source is the target).
++    static constexpr uint32_t kGreenToAlpha = 1024u;
++    static constexpr uint32_t kKeepAlpha = 2048u;  // FBMSK 0xFF000000: the target's alpha not written
 +    static constexpr uint32_t kMaxBuffers = 4u;
 +    static constexpr uint32_t kMaxOps = 64u;
 +    uint32_t bufferCount = 0u;
