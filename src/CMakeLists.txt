@@ -77,7 +77,6 @@ add_executable(roguegalaxy
     draw_distance.cpp
     ee_fpu.cpp
     flip_pacing.cpp
-    font_trace.cpp
     free_camera.cpp
     movie_audio.cpp
     quick_scenes.cpp
@@ -91,11 +90,9 @@ add_executable(roguegalaxy
     widescreen.cpp
     hud_size.cpp
     inventory.cpp
-    save_anywhere.cpp
     update_check.cpp
     scene_timing.cpp
     settings_pages.cpp
-    sharp_letters.cpp
     shop_prices.cpp
     step_fixes.cpp
     stick_response.cpp

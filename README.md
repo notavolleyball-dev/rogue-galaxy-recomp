@@ -104,10 +104,9 @@ See [docs/OPTIONS.md](docs/OPTIONS.md) for each one.
 
 **In progress**
 
-- Xbox buttons in the game's text, and sharp letters (the game's font
-  traced into smooth outlines above 1x)
-- Save anywhere (R1 + Triangle), new options (weapon growth, minimap and
-  compass size) and a notice when a new version is out
+- Xbox buttons in the game's text
+- New options (weapon growth, minimap and compass size) and a notice when a
+  new version is out
 - Fixes: the free camera getting the game stuck, a choppy walk in the later
   parts of Salgin
 - Improving performance: the heaviest battles and some bosses still drop
@@ -121,7 +120,6 @@ See [docs/OPTIONS.md](docs/OPTIONS.md) for each one.
 **Planned**
 
 - Turning the camera with the mouse
-- Save anywhere loading at the exact spot, not at the area's transporter
 - Faster Factory scenes, as with the transporters
 
 ## More

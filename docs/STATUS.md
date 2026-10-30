@@ -1820,6 +1820,22 @@ exact place is left for later.
   loading recap, the field), the battle bench and the town bench. None:
   the game does not send them there, so nothing was brought over.
 
+**Save anywhere and Sharp letters taken out (2026-10-30).** The user asked
+for both to go, to be looked at again some day: `src/save_anywhere.cpp`,
+`src/sharp_letters.cpp` and `src/font_trace.cpp`, their options in the F1
+menu and in the game's Settings screen (`save_anywhere` and
+`sharp_letters`, which an older settings.ini may still hold: the loader
+keeps any key under [game] and the menu asks only for the ones it knows),
+`RG_SAVE_ANYWHERE`, `RG_SHARP_LETTERS` and `RG_SHARP_LETTERS_TRACE`, and
+the button art's drawing of the Xbox buttons and the registered mark from
+their shapes (`drawLarger`, `drawLoadingLarger`, with the loading cross's
+cell and palette `button_glyphs.cpp` kept for them), which only the
+letters' region replacements called. dq8-gfx's region replacements
+(`setRegionReplacements`, the round border) stay in the backend with no
+user here. The Xbox buttons in the text and the loading screen's cross
+are still redrawn into their pictures at the PS2's size. The sources as
+they were are in the history at b55f0ea.
+
 **A launcher without the terminal (2026-10-23).** The user asked for
 RogueGalaxy.bat not to open a terminal. A batch file always opens one, and
 this one stays the whole game, waiting to keep the log and show an error.

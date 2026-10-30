@@ -30,12 +30,10 @@
 #include "quick_scenes.h"
 #include "scene_timing.h"
 #include "settings_pages.h"
-#include "sharp_letters.h"
 #include "shop_prices.h"
 #include "vif1_thread.h"
 #include "hud_size.h"
 #include "inventory.h"
-#include "save_anywhere.h"
 #include "widescreen.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
@@ -229,10 +227,6 @@ void applyGameOption(const std::string &key, bool on)
         rg::instanttext::setEnabled(on);
     else if (key == "japanese_voices")
         rg::voicelanguage::setEnabled(on);
-    else if (key == "sharp_letters")
-        rg::letters::setEnabled(on);
-    else if (key == "save_anywhere")
-        rg::saveanywhere::setEnabled(on);
     else if (key == "full_bag_to_storage")
         rg::inventory::setFullBagToStorage(on);
     else if (key == "stack_limit_99")
@@ -613,11 +607,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "RB, LT and RT, as each button is bound in Controls. Off, or with a PlayStation or Nintendo controller "
          "or the keyboard, the game's PlayStation buttons.",
          true},
-        {"sharp_letters", "Sharp letters",
-         "Above 1x, the game's letters are traced into smooth outlines and drawn at the internal resolution, "
-         "with a round black border, instead of enlarged as blocks. Each new letter is made the first time it "
-         "shows, in a frame or two.",
-         true},
         {"skip_opening", "Skip the opening",
          "At boot, the Sony and Level-5 logos and the opening movie give way to the title screen at once.", false},
         {"instant_loading_recap", "Show the loading recap at once",
@@ -631,11 +620,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"map_chests", "Chests on the map",
          "The chests not yet opened show on the maps in the parts you have explored, as the game shows them once "
          "every save point of a planet is activated. Nothing is saved: the planet's own completion still comes.",
-         false},
-        {"save_anywhere", "Save anywhere (R1 + Triangle)",
-         "In the field, Triangle with R1 held opens the transporter's menu wherever the main menu could open: save, "
-         "teleport, exchange points and item storage. A save made away from a transporter loads at the area's "
-         "transporter.",
          false},
         {"fast_transporter", "Fast transporters",
          "A transporter's warp plays at up to twice the speed. The music and the sounds keep their pace.", false},
@@ -814,7 +798,6 @@ Setup::Setup(PS2Runtime &runtime)
         dq8::gfx::setPresentObserver(&debug::noteFrameTime);
         // Aspect ratio Auto follows the Widescreen option.
         sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
-        rg::letters::installRenderer(*sdl);
         sdl->setSideImageLoader(&loadBorderImage);
         if (noWindow)
         {

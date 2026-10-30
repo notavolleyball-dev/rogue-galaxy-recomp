@@ -38,11 +38,9 @@
 #include "free_camera.h"
 #include "instant_text.h"
 #include "voice_language.h"
-#include "sharp_letters.h"
 #include "map_chests.h"
 #include "hud_size.h"
 #include "inventory.h"
-#include "save_anywhere.h"
 #include "opening.h"
 #include "widescreen.h"
 #include "quick_scenes.h"
@@ -167,7 +165,6 @@ int run(int argc, char **argv)
     rg::loading::install(runtime);
     rg::widescreen::install(runtime);
     rg::hudsize::install(runtime);
-    rg::saveanywhere::install(runtime);
     rg::inventory::install(runtime);
     rg::buttons::install(runtime);
     rg::opening::install(runtime);
@@ -178,7 +175,6 @@ int run(int argc, char **argv)
     rg::shopprices::install(runtime);
     rg::instanttext::install(runtime);
     rg::voicelanguage::install(runtime);
-    rg::letters::install(runtime);
     rg::mapchests::install(runtime);
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);

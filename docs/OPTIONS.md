@@ -38,7 +38,6 @@
 | Faster camera rotation | The camera turns twice as fast. |
 | Draw distance | 100% to 400% of the game's, from the next map loaded. |
 | Controller's buttons | The buttons in the game's text follow an Xbox controller: A, B, X, Y, LB, RB, LT and RT, as bound in Controls. On by default. |
-| Sharp letters | Above 1x, the game's letters are traced into smooth outlines, with a round black border or a solid shadow, instead of enlarged pixels; the Xbox buttons and the ® are drawn sharp too. On by default. |
 | Free camera (F6) | The party stands still and the controller moves the camera. Start or F6 to leave. |
 
 **Convenience**
@@ -49,7 +48,6 @@
 | Show the loading recap at once | The story so far appears whole, and you can go on as soon as it has loaded. |
 | Instant text | Dialogue a page at a time instead of letter by letter. |
 | Chests on the map | Unopened chests show on the map in the parts explored. |
-| Save anywhere (R1 + Triangle) | In the field, Triangle with R1 held opens the transporter's menu (save, teleport, exchange points, item storage) wherever the main menu could open. A save made there loads at the area's transporter. |
 | Full bag to storage | An item found when the bag has no room for it goes to the transporter's item storage, instead of the overflow you have to sort out (or losing it when that is full too). Shops and the Factory still need room in the bag. |
 | Item limit 99 | Every item that stacks can be carried up to 99 in the bag; the game holds some (healing items, boosts) to 20, 30 or 50. |
 | Seventh bag page | The bag holds 280 items instead of 240; the transporter's storage keeps its 320. A save made with it loads without it too, the seventh page's items kept out of sight until it is back on. From the next start. |
