@@ -678,7 +678,7 @@ void buildOutline(const Program &program, const VuData &vu, uint32_t top,
             {
                 clip[i] = p[0] * m[0][i] + p[1] * m[1][i] + p[2] * m[2][i] + m[3][i];
             }
-            const float q = 1.0f / clip[3];
+            const float q = gsNativeReciprocal(clip[3]);
             for (int i = 0; i < 3; ++i)
             {
                 s[j][i] = clip[i] * q;
@@ -867,7 +867,7 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
         for (uint32_t j = 0; j < 6u; ++j)
         {
             Vec4 &s = screen[j] = transform(projection, corners[j]);
-            const float q = 1.0f / s.w;
+            const float q = gsNativeReciprocal(s.w);
             s.x *= q;
             s.y *= q;
             s.z *= q;
@@ -997,11 +997,7 @@ float vuReciprocalRoot(float x)
 // 1 / x, as the runtime's DIV gives it.
 float vuReciprocal(float x)
 {
-    if (x != 0.0f)
-    {
-        return 1.0f / x;
-    }
-    return std::signbit(x) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
+    return gsNativeReciprocal(x);
 }
 
 void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets)

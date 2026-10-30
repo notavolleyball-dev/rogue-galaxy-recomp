@@ -696,10 +696,19 @@ public:
                     m_nativeProgram = rg::vu1native::identify(memory.getVU1Code(), startPC);
                 }
             }
+            else if (memory.getVU1CodeGeneration() != m_nativeGeneration)
+            {
+                // An MPG between the MSCAL and its MSCNTs: the code the
+                // program was identified in is gone.
+                m_nativeProgram = nullptr;
+            }
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = g_nativeMode == rg::vu1native::Mode::Gpu;
-                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, gpu);
+                // The chunks that clip go to the VU1 in every mode: the GPU's
+                // clipping of triangles across the eye plane does not match
+                // the VU1's on every driver.
+                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, false);
                 if (reason)
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
