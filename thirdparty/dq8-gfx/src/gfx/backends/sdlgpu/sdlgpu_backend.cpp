@@ -2343,6 +2343,8 @@ struct SdlGpuBackend::Impl {
         if (!flushDraws())
             return false;
         std::string error;
+        if (device.gpuTimes())
+            device.effectLabel = "fx composite layers";
         std::vector<SdlGpuDevice::EffectDraw> draws;
         GsSurface *drawing = nullptr;
         auto send = [&]() {
@@ -2419,6 +2421,9 @@ struct SdlGpuBackend::Impl {
                 draw.scissor = SDL_Rect{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale), int((y1 - y0) * scale)};
                 // A lay over whose alpha the GS stores: the colour with the
                 // alpha kept, then As alone where the colour went.
+                // With dual-source blending both in one draw.
+                if (draw.blend == Blend::Over && draw.writeAlpha && device.effectDualSource())
+                    draw.blend = Blend::OverExact;
                 const bool alphaAfter = draw.blend == Blend::Over && draw.writeAlpha;
                 if (alphaAfter)
                     draw.writeAlpha = false;
@@ -2633,11 +2638,24 @@ struct SdlGpuBackend::Impl {
                     return setError(std::move(error));
             }
         }
+        // DQ8_GFX_GPU_TIMES: each op under the effect's buffers (o: its
+        // own) and the op's number; the patched SDL keeps 47 characters.
+        std::string labelStem;
+        if (device.gpuTimes()) {
+            labelStem = "fx";
+            for (uint32_t i = 0; i < effect.bufferCount; ++i) {
+                char one[16];
+                std::snprintf(one, sizeof(one), " %05x%s", effect.buffers[i].base, effect.buffers[i].external ? "" : "o");
+                labelStem += one;
+            }
+        }
         const auto t2 = std::chrono::steady_clock::now();
         for (uint32_t n = 0; n < effect.opCount; ++n) {
             const GSNativeEffect::Op &op = effect.ops[n];
             if (op.target >= effect.bufferCount || op.source >= int32_t(effect.bufferCount))
                 return setError("native effect: no such buffer");
+            if (device.gpuTimes())
+                device.effectLabel = labelStem + " #" + std::to_string(n);
             Live &target = live[op.target];
             Live *source = op.source >= 0 ? &live[op.source] : nullptr;
             SDL_GPUTexture *sourceTexture = nullptr;

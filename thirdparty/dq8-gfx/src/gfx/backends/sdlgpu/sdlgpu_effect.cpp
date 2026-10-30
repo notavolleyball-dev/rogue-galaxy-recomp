@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 
+#include "gs_effect.frag.dual.spv.h"
 #include "gs_effect.frag.spv.h"
 #include "gs_reinterpret.vert.spv.h"
 
@@ -119,9 +120,12 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     vertexInfo.entrypoint = "main";
     vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    const EffectBlend blend = EffectBlend(index / 2u);
+    const bool dual = blend == EffectBlend::OverExact;
     SDL_GPUShaderCreateInfo fragmentInfo{};
-    fragmentInfo.code = reinterpret_cast<const uint8_t *>(kGsEffectFragSpirv);
-    fragmentInfo.code_size = sizeof(kGsEffectFragSpirv);
+    fragmentInfo.code = dual ? reinterpret_cast<const uint8_t *>(kGsEffectDualFragSpirv)
+                             : reinterpret_cast<const uint8_t *>(kGsEffectFragSpirv);
+    fragmentInfo.code_size = dual ? sizeof(kGsEffectDualFragSpirv) : sizeof(kGsEffectFragSpirv);
     fragmentInfo.entrypoint = "main";
     fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
@@ -140,7 +144,6 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     }
     SDL_GPUColorTargetDescription colorTarget{};
     colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    const EffectBlend blend = EffectBlend(index / 2u);
     if (blend == EffectBlend::AlphaOnly) {
         colorTarget.blend_state.enable_color_write_mask = true;
         colorTarget.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_A;
@@ -151,7 +154,9 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
         state.enable_blend = true;
         state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         state.dst_color_blendfactor =
-            blend == EffectBlend::Over ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_GPU_BLENDFACTOR_ONE;
+            blend == EffectBlend::Over        ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA
+            : blend == EffectBlend::OverExact ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC1_ALPHA
+                                              : SDL_GPU_BLENDFACTOR_ONE;
         state.color_blend_op = blend == EffectBlend::Subtract ? SDL_GPU_BLENDOP_REVERSE_SUBTRACT : SDL_GPU_BLENDOP_ADD;
         state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
@@ -187,7 +192,7 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
     const uint32_t index = uint32_t(blend) * 2u + (writeAlpha ? 0u : 1u);
     if (!effectPipeline(index, error))
         return false;
-    SDL_GPUCommandBuffer *commands = pendingCommands(error, "native effect");
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, effectLabel.c_str());
     if (!commands)
         return false;
     SDL_GPUColorTargetInfo info{};
@@ -242,7 +247,7 @@ bool SdlGpuDevice::effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t 
         if (!dummy)
             return false;
     }
-    SDL_GPUCommandBuffer *commands = pendingCommands(error, "native effect");
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, effectLabel.c_str());
     if (!commands)
         return false;
     SDL_GPUColorTargetInfo info{};

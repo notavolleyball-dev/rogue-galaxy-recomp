@@ -221,8 +221,11 @@ public:
     // shader's colour written, added, subtracted from it (Cd - Cs), or laid
     // over it by the shader's alpha (Cs + Cd (1 - As), Cs premultiplied).
     // AlphaOnly: the shader's alpha written alone (the GS's As after a lay
-    // over, whose blend factor takes the output alpha).
-    enum class EffectBlend : uint32_t { Write, Add, Subtract, Over, AlphaOnly };
+    // over, whose blend factor takes the output alpha). OverExact: a lay
+    // over by the shader's second output, its alpha the GS's As, in one draw
+    // (dual-source blending, where effectDualSource()).
+    enum class EffectBlend : uint32_t { Write, Add, Subtract, Over, AlphaOnly, OverExact };
+    bool effectDualSource() const { return m_dualSourceBlend; }
     // One sprite into `target` (width x height). Without `scissor`, into an
     // effect's own buffer: the whole of it, from `previous` where the sprite
     // does not draw. With it, into an external target, by `blend`, its alpha
@@ -317,6 +320,9 @@ public:
     // DQ8_GFX_GPU_TIMES=1 (Rogue Galaxy: added): the backend labels its GPU
     // work, and the patched SDL logs the GPU's time by label ("[gputime]").
     bool gpuTimes() const { return m_gpuTimes; }
+    // What effectOp and effectDraws file their GPU time under; the backend
+    // names the effect it is drawing (Rogue Galaxy: added).
+    std::string effectLabel = "native effect";
 
 private:
     SDL_GPUDevice *m_device = nullptr;
@@ -347,7 +353,7 @@ private:
     bool effectPipeline(uint32_t index, std::string &error);
     void releaseEffects();
     // By EffectBlend * 2, plus 1 with the alpha kept.
-    SDL_GPUGraphicsPipeline *m_effectPipelines[10] = {};
+    SDL_GPUGraphicsPipeline *m_effectPipelines[12] = {};
     SDL_GPUSampler *m_effectLinearSampler = nullptr;
     // 4 buffers of 2 textures each, then a 1x1 one bound where a sprite
     // samples nothing.

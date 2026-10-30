@@ -605,6 +605,15 @@ What parity took:
   colour with the factor and its alpha in the replay, as on hosts without
   dual-source blending (which more than one target rules out). No object
   blends by destination alpha, which would read A/255 as its factor.
+  The tails go into the frame alone, so where the device has dual-source
+  blending (2026-10-30) a lay over is one draw: `gs_effect.frag`'s
+  `DQ8_DUAL_SOURCE` variant gives C/128 as the blend's second output and
+  As as the alpha (`EffectBlend::OverExact`); the replay stays the
+  fallback. The walk's tails fall from 6 draws an object to 3. The frame at
+  pad 3000 at 1x is byte for byte the replay's (`DQ8_GFX_NO_DUAL_SOURCE=1`);
+  with the throttled box of the issue #10 comment at 4x, the composite
+  layers take 1.41 ms a frame of GPU instead of 2.31 and the walk runs at
+  56.7 fps instead of 55.5.
 - Objects wholly off the frame have tails with no sprites: dropped.
 - Half-float layers were tried, for factors past one: a weapon's additive
   glow then went past one under its next lay over, where the GS clamps.

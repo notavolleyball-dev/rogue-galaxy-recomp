@@ -24,6 +24,11 @@ layout(set = 3, binding = 0) uniform EffectParams {
     uvec4 control;
 } params;
 layout(location = 0) out vec4 outColor;
+#ifdef DQ8_DUAL_SOURCE
+// A lay over's factor, C/128, for SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC1_ALPHA;
+// outColor's alpha is then the As the GS stores, with no alpha pass after.
+layout(location = 0, index = 1) out vec4 outFactor;
+#endif
 
 const uint kBlend = 1u;
 const uint kLinear = 2u;
@@ -76,6 +81,9 @@ ivec3 colorTerm(uint select, ivec3 cs, ivec3 cd) {
 }
 
 void main() {
+#ifdef DQ8_DUAL_SOURCE
+    outFactor = vec4(0.0);
+#endif
     uint flags = params.control.x;
     bool toFrame = (flags & kExternal) != 0u;
     float scale = params.misc.x;
@@ -167,6 +175,11 @@ void main() {
         // Cs - Cd) adds it to Cd (1 - C).
         rgb = clamp((ivec3(c.rgb) * factor) >> 7, ivec3(0), ivec3(255));
         bool over = (alpha & 0xFu) == 0x4u && (flags & kAlphaOnly) == 0u;
+#ifdef DQ8_DUAL_SOURCE
+        outFactor = vec4(min(float(factor) / 128.0, 1.0));
+        outColor = vec4(vec3(rgb) / 255.0, float(c.a) / 255.0);
+        return;
+#endif
         outColor = vec4(vec3(rgb) / 255.0, over ? min(float(factor) / 128.0, 1.0) : float(c.a) / 255.0);
         return;
     }
