@@ -138,6 +138,10 @@ struct GsPipelineKey {
     // A source-alpha blend whose factor comes from the shader's second
     // output, the alpha written exact in the same pass (Rogue Galaxy: added).
     uint8_t dualSource = 0u;
+    // Into Rogue Galaxy's object layers (added): layerCount colour targets,
+    // only layerSlot's written (gs_draw.frag's DQ8_LAYERS variant).
+    uint8_t layerCount = 0u;
+    uint8_t layerSlot = 0u;
 
     bool operator==(const GsPipelineKey &other) const = default;
 };
@@ -213,7 +217,9 @@ public:
     // How a sprite into an external target meets what is there: the
     // shader's colour written, added, subtracted from it (Cd - Cs), or laid
     // over it by the shader's alpha (Cs + Cd (1 - As), Cs premultiplied).
-    enum class EffectBlend : uint32_t { Write, Add, Subtract, Over };
+    // AlphaOnly: the shader's alpha written alone (the GS's As after a lay
+    // over, whose blend factor takes the output alpha).
+    enum class EffectBlend : uint32_t { Write, Add, Subtract, Over, AlphaOnly };
     // One sprite into `target` (width x height). Without `scissor`, into an
     // effect's own buffer: the whole of it, from `previous` where the sprite
     // does not draw. With it, into an external target, by `blend`, its alpha
@@ -222,6 +228,26 @@ public:
     bool effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source, bool linear,
                   SDL_GPUTexture *previous, EffectBlend blend, bool writeAlpha, const SDL_Rect *scissor,
                   const GsEffectUniforms &uniforms, std::string &error);
+    // Sprites into one external target, one after another in one pass.
+    struct EffectDraw {
+        SDL_GPUTexture *source = nullptr;
+        bool linear = false;
+        EffectBlend blend = EffectBlend::Write;
+        bool writeAlpha = true;
+        SDL_Rect scissor{};
+        GsEffectUniforms uniforms{};
+    };
+    bool effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t height, const EffectDraw *draws, size_t count,
+                     std::string &error);
+    // Rogue Galaxy's object layers, by slot (at most kMaxLayers), kept from
+    // one frame to the next.
+    static constexpr uint32_t kMaxLayers = 8u;
+    // 8 bits, which clamp each blend as the GS does (half floats did not:
+    // a weapon's additive glow went past one under its next lay over). A
+    // blend weighted past one saturates, as on the GS path.
+    static constexpr SDL_GPUTextureFormat kLayerFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUTexture *layerTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error);
+    bool layers() const { return m_layersShader != nullptr; }
 
     bool composeDisplay(SDL_GPUTexture *circuit1, SDL_GPUTexture *circuit2,
                         SDL_GPUTexture *destination, uint32_t width, uint32_t height,
@@ -296,6 +322,7 @@ private:
     SDL_GPUShader *m_fragmentShader = nullptr;
     SDL_GPUShader *m_destinationShader = nullptr;
     SDL_GPUShader *m_dualSourceShader = nullptr;
+    SDL_GPUShader *m_layersShader = nullptr;
     bool m_dualSourceBlend = false;
     const bool m_gpuTimes = [] {
         const char *value = std::getenv("DQ8_GFX_GPU_TIMES");
@@ -317,11 +344,12 @@ private:
     bool effectPipeline(uint32_t index, std::string &error);
     void releaseEffects();
     // By EffectBlend * 2, plus 1 with the alpha kept.
-    SDL_GPUGraphicsPipeline *m_effectPipelines[8] = {};
+    SDL_GPUGraphicsPipeline *m_effectPipelines[10] = {};
     SDL_GPUSampler *m_effectLinearSampler = nullptr;
     // 4 buffers of 2 textures each, then a 1x1 one bound where a sprite
     // samples nothing.
     std::array<EffectTexture, 9> m_effectTextures{};
+    std::array<EffectTexture, kMaxLayers> m_layerTextures{};
 
     SDL_GPUGraphicsPipeline *m_reinterpretPipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_localCopyPipeline = nullptr;

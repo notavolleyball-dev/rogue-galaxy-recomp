@@ -44,6 +44,36 @@ SDL_GPUTexture *SdlGpuDevice::effectTexture(uint32_t slot, uint32_t width, uint3
     return entry.texture;
 }
 
+SDL_GPUTexture *SdlGpuDevice::layerTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error) {
+    if (slot >= m_layerTextures.size()) {
+        error = "layerTexture: no such slot";
+        return nullptr;
+    }
+    EffectTexture &entry = m_layerTextures[slot];
+    if (entry.texture && (entry.width != width || entry.height != height)) {
+        SDL_ReleaseGPUTexture(m_device, entry.texture);
+        entry.texture = nullptr;
+    }
+    if (!entry.texture) {
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = kLayerFormat;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        entry.texture = SDL_CreateGPUTexture(m_device, &info);
+        if (!entry.texture) {
+            error = std::string("SDL_CreateGPUTexture(object layer): ") + SDL_GetError();
+            return nullptr;
+        }
+        entry.width = width;
+        entry.height = height;
+    }
+    return entry.texture;
+}
+
 void SdlGpuDevice::releaseEffects() {
     for (SDL_GPUGraphicsPipeline *&pipeline : m_effectPipelines) {
         if (pipeline)
@@ -51,6 +81,11 @@ void SdlGpuDevice::releaseEffects() {
         pipeline = nullptr;
     }
     for (EffectTexture &entry : m_effectTextures) {
+        if (entry.texture)
+            SDL_ReleaseGPUTexture(m_device, entry.texture);
+        entry = {};
+    }
+    for (EffectTexture &entry : m_layerTextures) {
         if (entry.texture)
             SDL_ReleaseGPUTexture(m_device, entry.texture);
         entry = {};
@@ -106,7 +141,10 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     SDL_GPUColorTargetDescription colorTarget{};
     colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     const EffectBlend blend = EffectBlend(index / 2u);
-    if (blend != EffectBlend::Write) {
+    if (blend == EffectBlend::AlphaOnly) {
+        colorTarget.blend_state.enable_color_write_mask = true;
+        colorTarget.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_A;
+    } else if (blend != EffectBlend::Write) {
         // The GS's blends with D = Cd, clamped as the target clamps; the
         // alpha written is As.
         SDL_GPUColorTargetBlendState &state = colorTarget.blend_state;
@@ -186,6 +224,57 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
     SDL_BindGPUFragmentSamplers(pass, 0u, bindings, 2u);
     SDL_PushGPUFragmentUniformData(commands, 0u, &uniforms, sizeof(uniforms));
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+bool SdlGpuDevice::effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t height, const EffectDraw *draws,
+                              size_t count, std::string &error) {
+    if (count == 0u)
+        return true;
+    for (size_t n = 0; n < count; ++n)
+        if (!effectPipeline(uint32_t(draws[n].blend) * 2u + (draws[n].writeAlpha ? 0u : 1u), error))
+            return false;
+    // Something is bound to each slot the shader declares.
+    SDL_GPUTexture *dummy = nullptr;
+    if (std::any_of(draws, draws + count, [](const EffectDraw &draw) { return !draw.source; })) {
+        dummy = effectTexture(uint32_t(m_effectTextures.size() - 1u), 1u, 1u, error);
+        if (!dummy)
+            return false;
+    }
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, "native effect");
+    if (!commands)
+        return false;
+    SDL_GPUColorTargetInfo info{};
+    info.texture = target;
+    info.load_op = SDL_GPU_LOADOP_LOAD;
+    info.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, nullptr);
+    if (!pass) {
+        cancelPending();
+        error = std::string("SDL_BeginGPURenderPass(effect): ") + SDL_GetError();
+        return false;
+    }
+    const SDL_GPUViewport viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
+    SDL_SetGPUViewport(pass, &viewport);
+    uint32_t bound = ~0u;
+    for (size_t n = 0; n < count; ++n) {
+        const EffectDraw &draw = draws[n];
+        const uint32_t index = uint32_t(draw.blend) * 2u + (draw.writeAlpha ? 0u : 1u);
+        if (index != bound) {
+            SDL_BindGPUGraphicsPipeline(pass, m_effectPipelines[index]);
+            bound = index;
+        }
+        SDL_SetGPUScissor(pass, &draw.scissor);
+        SDL_GPUTexture *source = draw.source ? draw.source : dummy;
+        const SDL_GPUTextureSamplerBinding bindings[2] = {
+            {source, draw.linear ? m_effectLinearSampler : m_sampler},
+            {source, m_sampler},
+        };
+        SDL_BindGPUFragmentSamplers(pass, 0u, bindings, 2u);
+        SDL_PushGPUFragmentUniformData(commands, 0u, &draw.uniforms, sizeof(draw.uniforms));
+        SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    }
     SDL_EndGPURenderPass(pass);
     return true;
 }

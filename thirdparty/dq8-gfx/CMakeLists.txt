@@ -85,6 +85,11 @@ dq8_add_shader(dq8_gfx_sdlgpu
 dq8_add_shader(dq8_gfx_sdlgpu
     SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/gs_draw.frag"
     STAGE frag SYMBOL kGsDrawDualFragSpirv DUAL_SOURCE)
+# The draw shader writing every object layer bound, its pipeline's write
+# masks choosing the one it draws into (Rogue Galaxy: added).
+dq8_add_shader(dq8_gfx_sdlgpu
+    SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/gs_draw.frag"
+    STAGE frag SYMBOL kGsDrawLayersFragSpirv LAYERS)
 
 # The in-game menu (src/ui), drawn with Dear ImGui over the backend's window.
 # Dear ImGui is the submodule at thirdparty/imgui, the commit DQ8 pins.

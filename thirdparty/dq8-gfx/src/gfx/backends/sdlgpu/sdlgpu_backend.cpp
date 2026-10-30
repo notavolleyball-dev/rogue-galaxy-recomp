@@ -2251,11 +2251,326 @@ struct SdlGpuBackend::Impl {
     // they are drawn as they are, at their own pixels. A marked shadow copy
     // is drawn from the shadow version where it goes, or as it is without
     // one (Rogue Galaxy: added).
+    // Rogue Galaxy's object layers (added; GSNativeEffect::kRouteLayer). The
+    // game draws each of about twenty objects a frame into the same
+    // offscreen buffer, clearing its box there first, then lays the box over
+    // the frame with a soft edge: two render passes an object. Routed, an
+    // object's draws into that buffer go to a slot of its own here, all the
+    // slots bound to one pass as colour targets (the pipeline's write masks
+    // choose the slot), the scene's depth as before; its sprites over the
+    // frame (kObjectTail) wait, and go in one pass, in order, from the slots
+    // (compositeLayers). An object takes the first slot whose waiting boxes
+    // its own does not meet, so each still reads only itself, as from the
+    // GS's buffer; with none free, the waiting objects are laid over first.
+    struct HeldObject {
+        uint32_t slot = 0u;
+        int32_t box[4] = {};
+        bool tail = false;
+        std::vector<GSNativeEffect::Buffer> buffers;
+        std::vector<GSNativeEffect::Op> ops;
+    };
+    struct ObjectLayers {
+        bool routing = false;
+        uint32_t base = 0u;
+        uint32_t fbw = 0u;
+        uint32_t slot = 0u;
+        uint32_t count = 0u; // slots made
+        GsSurface surface;   // what the routed draws see as their target
+        SDL_GPUTexture *textures[SdlGpuDevice::kMaxLayers] = {};
+        // A slot not cleared this frame. Each object clears its own box (the
+        // game's first draw into it); the frame's first clear leaves black
+        // around the boxes, where the sprites' bilinear taps reach a texel.
+        bool stale[SdlGpuDevice::kMaxLayers] = {};
+        std::vector<HeldObject> held;
+    } layers;
+    // DQ8_GFX_LAYER_MB: the most the slots may take, 96 MB unless set; at
+    // least 4 slots (256 MB at 8x) and at most 8 whatever the scale.
+    const uint32_t layerBudget = [] {
+        const char *value = std::getenv("DQ8_GFX_LAYER_MB");
+        return (value ? uint32_t(std::strtoul(value, nullptr, 10)) : 96u) * 1024u * 1024u;
+    }();
+
+    // The slots for a buffer `fbw` wide, at the scene's scale: 512 GS rows,
+    // the tallest frame the game draws.
+    bool prepareLayers(uint32_t base, uint32_t fbw) {
+        const uint32_t scale = std::max(targets->scale(), 1u);
+        const uint32_t width = std::max(fbw, 1u) * 64u, height = 512u;
+        if (layers.count != 0u && layers.surface.width == width && layers.surface.height == height &&
+            layers.surface.scale == scale) {
+            layers.surface.base = base;
+            layers.surface.bufferWidth = fbw;
+            return true;
+        }
+        if (!compositeLayers())
+            return false;
+        const uint64_t bytes = uint64_t(width) * height * scale * scale * 4u;
+        const uint32_t count = uint32_t(std::clamp<uint64_t>(layerBudget / std::max<uint64_t>(bytes, 1u), 4u,
+                                                             SdlGpuDevice::kMaxLayers));
+        std::string error;
+        for (uint32_t i = 0; i < count; ++i) {
+            layers.textures[i] = device.layerTexture(i, width * scale, height * scale, error);
+            if (!layers.textures[i]) {
+                layers.count = 0u;
+                return setError(std::move(error));
+            }
+            layers.stale[i] = true;
+        }
+        layers.count = count;
+        layers.surface = GsSurface{};
+        layers.surface.base = base;
+        layers.surface.bufferWidth = fbw;
+        layers.surface.psm = GS_PSM_CT32;
+        layers.surface.width = width;
+        layers.surface.height = height;
+        layers.surface.scale = scale;
+        layers.surface.texture = layers.textures[0];
+        layers.surface.undefined = false;
+        return true;
+    }
+
+    bool boxesMeet(const int32_t *a, const int32_t *b) const {
+        return a[0] < b[2] + 2 && b[0] < a[2] + 2 && a[1] < b[3] + 2 && b[1] < a[3] + 2;
+    }
+
+    // The waiting objects' sprites over the frame, in order, in a pass a
+    // target; an object still drawing (no tail yet) keeps its slot.
+    bool compositeLayers() {
+        bool any = false;
+        for (const HeldObject &object : layers.held)
+            any = any || object.tail;
+        if (!any)
+            return true;
+        if (!flushDraws())
+            return false;
+        std::string error;
+        std::vector<SdlGpuDevice::EffectDraw> draws;
+        GsSurface *drawing = nullptr;
+        auto send = [&]() {
+            if (drawing && !draws.empty()) {
+                if (!device.effectDraws(drawing->texture, drawing->width * drawing->scale,
+                                        drawing->height * drawing->scale, draws.data(), draws.size(), error))
+                    return setError(std::move(error));
+                ++stats.layerComposites;
+            }
+            draws.clear();
+            return true;
+        };
+        std::vector<HeldObject> still;
+        for (HeldObject &object : layers.held) {
+            if (!object.tail) {
+                still.push_back(std::move(object));
+                continue;
+            }
+            for (const GSNativeEffect::Op &op : object.ops) {
+                const GSNativeEffect::Buffer &target = object.buffers[op.target];
+                const GSNativeEffect::Buffer *source = op.source >= 0 ? &object.buffers[op.source] : nullptr;
+                GsSurface *surface;
+                {
+                    ResolveReasonScope scope(*targets, GsResolveReason::View);
+                    surface = targets->acquire(target.base, target.fbw, target.psm, false, target.width,
+                                               target.height, error);
+                    if (!surface || !targets->prepareColorView(*surface, error))
+                        return setError(std::move(error));
+                }
+                if (surface != drawing && !send())
+                    return false;
+                drawing = surface;
+                SdlGpuDevice::EffectDraw draw{};
+                SdlGpuDevice::GsEffectUniforms &uniforms = draw.uniforms;
+                for (int k = 0; k < 4; ++k) {
+                    uniforms.rect[k] = op.rect[k];
+                    uniforms.uv[k] = op.uv[k];
+                    uniforms.scissor[k] = float(op.scissor[k]);
+                    uniforms.rgba[k] = op.rgba[k];
+                }
+                const uint32_t scale = std::max(surface->scale, 1u);
+                uniforms.misc[0] = float(scale);
+                uniforms.misc[1] = source ? float(layers.surface.width) : 1.0f;
+                uniforms.misc[2] = source ? float(layers.surface.height) : 1.0f;
+                uniforms.misc[3] = float((op.texa & 0xffu) + ((op.texa & 0x8000u) ? 256u : 0u));
+                // 16384: the source is a layer.
+                uniforms.control[0] = op.flags | 256u | (source ? 512u | 16384u : 0u);
+                uniforms.control[1] = uint32_t(op.alpha & 0xffu);
+                uniforms.control[2] = uint32_t((op.alpha >> 32u) & 0xffu);
+                uniforms.control[3] = uint32_t(op.test & 0x3fffu);
+                draw.source = source ? layers.textures[object.slot] : nullptr;
+                draw.linear = (op.flags & GSNativeEffect::kLinear) != 0u;
+                draw.writeAlpha = (op.flags & GSNativeEffect::kKeepAlpha) == 0u;
+                using Blend = SdlGpuDevice::EffectBlend;
+                draw.blend = Blend::Write;
+                if (op.flags & GSNativeEffect::kBlend) {
+                    const uint32_t ab = uint32_t(op.alpha & 0xfu);
+                    draw.blend = ab == 0x8u ? Blend::Add : ab == 0x2u ? Blend::Subtract : ab == 0x4u ? Blend::Over : Blend::Write;
+                    if (draw.blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u)
+                        return setError("object layers: a blend into a GS target it cannot draw");
+                }
+                const auto first = [](float edge, uint32_t bound) {
+                    return std::max(uint32_t(std::max(std::ceil(edge), 0.0f)), bound);
+                };
+                const auto last = [](float edge, uint32_t bound) {
+                    return std::min(uint32_t(std::max(std::ceil(edge), 0.0f)), bound);
+                };
+                const uint32_t x0 = first(op.rect[0], op.scissor[0]);
+                const uint32_t y0 = first(op.rect[1], op.scissor[1]);
+                const uint32_t x1 = std::min(last(op.rect[2], op.scissor[2] + 1u), surface->width);
+                const uint32_t y1 = std::min(last(op.rect[3], op.scissor[3] + 1u), surface->height);
+                if (x1 <= x0 || y1 <= y0)
+                    continue;
+                draw.scissor = SDL_Rect{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale), int((y1 - y0) * scale)};
+                // A lay over whose alpha the GS stores: the colour with the
+                // alpha kept, then As alone where the colour went.
+                const bool alphaAfter = draw.blend == Blend::Over && draw.writeAlpha;
+                if (alphaAfter)
+                    draw.writeAlpha = false;
+                draws.push_back(draw);
+                if (alphaAfter) {
+                    draw.blend = Blend::AlphaOnly;
+                    draw.writeAlpha = true;
+                    draw.uniforms.control[0] |= 8192u;
+                    draws.push_back(draw);
+                }
+                targets->markDrawn(*surface, GsRegion{x0, y0, x1, y1});
+                ++stats.nativeEffectOps;
+            }
+        }
+        if (!send())
+            return false;
+        layers.held = std::move(still);
+        last.valid = false;
+        return true;
+    }
+
+    // A tail the game's side could not make sprites of: the waiting objects
+    // laid over, then this one's layer copied into the GS buffer it stands
+    // for, where the tail's packets read it.
+    bool layerToBuffer(const GSNativeEffect::Buffer &buffer) {
+        if (!compositeLayers())
+            return false;
+        HeldObject object = layers.held.back();
+        layers.held.pop_back();
+        std::string error;
+        GsSurface *surface;
+        {
+            ResolveReasonScope scope(*targets, GsResolveReason::View);
+            surface = targets->acquire(buffer.base, buffer.fbw, GS_PSM_CT32, false, layers.surface.width,
+                                       uint32_t(std::clamp(object.box[3], 1, int32_t(layers.surface.height))), error);
+            if (!surface || !targets->prepareColorView(*surface, error))
+                return setError(std::move(error));
+        }
+        const uint32_t x0 = uint32_t(std::max(object.box[0], 0)), y0 = uint32_t(std::max(object.box[1], 0));
+        const uint32_t x1 = std::min(uint32_t(std::max(object.box[2], 0)), std::min(surface->width, layers.surface.width));
+        const uint32_t y1 = std::min(uint32_t(std::max(object.box[3], 0)), std::min(surface->height, layers.surface.height));
+        if (x1 > x0 && y1 > y0) {
+            SdlGpuDevice::EffectDraw draw{};
+            const uint32_t scale = std::max(surface->scale, 1u);
+            const float half = 0.5f / float(scale);
+            const float rect[4] = {float(x0), float(y0), float(x1), float(y1)};
+            for (int k = 0; k < 4; ++k) {
+                draw.uniforms.rect[k] = rect[k];
+                draw.uniforms.uv[k] = rect[k] + half;
+                draw.uniforms.rgba[k] = 0x80u;
+            }
+            draw.uniforms.scissor[0] = rect[0];
+            draw.uniforms.scissor[1] = rect[1];
+            draw.uniforms.scissor[2] = rect[2] - 1.0f;
+            draw.uniforms.scissor[3] = rect[3] - 1.0f;
+            draw.uniforms.misc[0] = float(scale);
+            draw.uniforms.misc[1] = float(layers.surface.width);
+            draw.uniforms.misc[2] = float(layers.surface.height);
+            draw.uniforms.control[0] = GSNativeEffect::kDecal | GSNativeEffect::kTextureAlpha | 256u | 512u | 16384u;
+            draw.source = layers.textures[object.slot];
+            draw.scissor = SDL_Rect{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale), int((y1 - y0) * scale)};
+            if (!device.effectDraws(surface->texture, surface->width * scale, surface->height * scale, &draw, 1u, error))
+                return setError(std::move(error));
+            targets->markDrawn(*surface, GsRegion{x0, y0, x1, y1});
+        }
+        last.valid = false;
+        return true;
+    }
+
+    // GSNativeEffect's commands besides sprites (the object layers).
+    bool layerCommand(const GSNativeEffect &effect) {
+        last.valid = false;
+        if (effect.command == GSNativeEffect::kRouteEnd) {
+            layers.routing = false;
+            return true;
+        }
+        if (effect.command == GSNativeEffect::kComposite)
+            return compositeLayers();
+        if (effect.command == GSNativeEffect::kObjectTail) {
+            if (layers.held.empty() || layers.held.back().tail) {
+                ++stats.layerLost;
+                return true;
+            }
+            // No sprites: an object wholly off the frame, or (a buffer named)
+            // one whose tail stays GS packets, which read the GS's buffer.
+            if (effect.opCount == 0u && effect.bufferCount == 0u) {
+                layers.held.pop_back();
+                return true;
+            }
+            if (effect.opCount == 0u)
+                return layerToBuffer(effect.buffers[0]);
+            HeldObject &object = layers.held.back();
+            object.tail = true;
+            object.buffers.assign(effect.buffers, effect.buffers + effect.bufferCount);
+            object.ops.assign(effect.ops, effect.ops + effect.opCount);
+            for (const GSNativeEffect::Op &op : object.ops) {
+                const bool ok = op.target < effect.bufferCount && op.source < int32_t(effect.bufferCount) &&
+                                effect.buffers[op.target].external != 0u && effect.buffers[op.target].layer == 0u &&
+                                (op.source < 0 || effect.buffers[op.source].layer != 0u);
+                if (!ok) {
+                    object.ops.clear();
+                    ++stats.layerLost;
+                    return setError("object layers: a tail's sprite is not from its layer onto the frame");
+                }
+            }
+            return true;
+        }
+        if (effect.command != GSNativeEffect::kRouteLayer || effect.bufferCount == 0u)
+            return true;
+        const GSNativeEffect::Buffer &buffer = effect.buffers[0];
+        if (!device.layers() || !prepareLayers(buffer.base, buffer.fbw))
+            return false;
+        // An object still drawing (its tail never came) is laid over by
+        // nothing.
+        if (!layers.held.empty() && !layers.held.back().tail) {
+            layers.held.pop_back();
+            ++stats.layerLost;
+        }
+        int32_t slot = -1;
+        for (uint32_t s = 0; s < layers.count && slot < 0; ++s) {
+            bool meets = false;
+            for (const HeldObject &object : layers.held)
+                meets = meets || (object.slot == s && boxesMeet(object.box, effect.box));
+            if (!meets)
+                slot = int32_t(s);
+        }
+        if (slot < 0) {
+            ++stats.layerOverflows;
+            if (!compositeLayers())
+                return false;
+            slot = 0;
+        }
+        HeldObject &object = layers.held.emplace_back();
+        object.slot = uint32_t(slot);
+        std::copy(effect.box, effect.box + 4, object.box);
+        layers.routing = true;
+        layers.base = buffer.base;
+        layers.fbw = buffer.fbw;
+        layers.slot = uint32_t(slot);
+        ++stats.layerObjects;
+        return true;
+    }
+
     // A GSNativeEffect: its sprites in order, its own buffers at the effect
     // scale (as the GS path keeps DQ8_GFX_EFFECT_BASES), each sprite into a
     // buffer one pass from the buffer before it, so a sprite that reads what
     // it draws needs no snapshot; external buffers are the GS's targets.
     bool submitEffect(const GSNativeEffect &effect) {
+        if (effect.command != GSNativeEffect::kSprites)
+            return device.valid() && layerCommand(effect);
+        if (!compositeLayers())
+            return false;
         if (!device.valid() || effect.bufferCount == 0u || effect.bufferCount > GSNativeEffect::kMaxBuffers ||
             effect.opCount > GSNativeEffect::kMaxOps)
             return false;
@@ -2504,9 +2819,16 @@ struct SdlGpuBackend::Impl {
         }
 
         std::string error;
-        GsSurface *color = targets->acquire(context.frame.fbp << 5u, context.frame.fbw,
-                                            context.frame.psm, false, neededWidth,
-                                            neededHeight, error);
+        // An object's draw into the buffer routed to its layer (Rogue Galaxy:
+        // added; see ObjectLayers). Anything else first lays the waiting
+        // objects over the frame.
+        const bool routed = layers.routing && (context.frame.fbp << 5u) == layers.base &&
+                            context.frame.fbw == layers.fbw && context.frame.psm == GS_PSM_CT32;
+        if (!routed && !compositeLayers())
+            return;
+        GsSurface *color = routed ? &layers.surface
+                                  : targets->acquire(context.frame.fbp << 5u, context.frame.fbw,
+                                                     context.frame.psm, false, neededWidth, neededHeight, error);
         if (!color) {
             setError(std::move(error));
             return;
@@ -2526,7 +2848,8 @@ struct SdlGpuBackend::Impl {
         const GsRegion overwritten = opaqueSpriteBounds(batch, *color, test);
         const bool clearsWhole =
             !noWholeClaim && opaqueSpriteBounds(batch, *color, test, true).contains(color->wholeRegion());
-        if (clearsWhole) {
+        if (routed) {
+        } else if (clearsWhole) {
             targets->claimWhole(*color);
         } else {
             ResolveReasonScope scope(*targets, GsResolveReason::View);
@@ -2574,8 +2897,9 @@ struct SdlGpuBackend::Impl {
         draw.depth = depth;
         draw.written = written;
         draw.overwritten = overwritten;
-        gsMarkPages(draw.writtenPages, color->base, color->bufferWidth, color->psm,
-                    written.width(), written.height(), written.x0, written.y0);
+        if (!routed)
+            gsMarkPages(draw.writtenPages, color->base, color->bufferWidth, color->psm,
+                        written.width(), written.height(), written.x0, written.y0);
 
         GsAlphaState alpha = gsDecodeAlpha(context.alpha);
         // A constant factor leaves the shader free to store the original alpha.
@@ -2608,7 +2932,8 @@ struct SdlGpuBackend::Impl {
         if (blend.enabled && alpha.c == kBlendAlphaSource && (!state.prim.tme || !context.tex0.tcc))
             for (uint8_t index = 0u; index < batch.vertexCount && !overOne; ++index)
                 overOne = batch.vertices[index].a > 0x80u;
-        const bool destinationRead = !framebufferFetch && device.destinationCopy() &&
+        // A layer has no snapshot; the objects' draws never ask one.
+        const bool destinationRead = !routed && !framebufferFetch && device.destinationCopy() &&
             (test.destinationAlphaTestEnabled || (blend.enabled && alpha.c == kBlendAlphaDest) || overOne);
         if (!framebufferFetch && !destinationRead && blend.enabled && !blend.exact)
             ++stats.inexactBlends;
@@ -2640,7 +2965,11 @@ struct SdlGpuBackend::Impl {
         // as a second output and stores the exact alpha itself, in the one
         // pass (Rogue Galaxy: added): the replay drew every such primitive
         // twice, a sixth of the frame at 8x.
-        const bool dualSource = scaleAlpha && device.dualSourceBlend();
+        // A layer has more than one target, which dual-source blending does
+        // not allow: its draws take the replay. Its alpha outlives the
+        // object: the sharp copy lays it over the frame, and what the frame
+        // draws later reads it (a weapon's glow has alpha up to 0xE8).
+        const bool dualSource = !routed && scaleAlpha && device.dualSourceBlend();
         const bool alphaPass = scaleAlpha && !dualSource && (writeMask & SDL_GPU_COLORCOMPONENT_A) != 0u;
         if (scaleAlpha) {
             if (!dualSource)
@@ -2667,6 +2996,10 @@ struct SdlGpuBackend::Impl {
         draw.pipeline.blendEnabled = fixedBlend && blend.enabled ? 1u : 0u;
         draw.pipeline.destinationCopy = destinationRead ? 1u : 0u;
         draw.pipeline.dualSource = dualSource ? 1u : 0u;
+        draw.pipeline.layerCount = routed ? static_cast<uint8_t>(layers.count) : 0u;
+        if (routed)
+            draw.pipeline.colorFormat = SdlGpuDevice::kLayerFormat;
+        draw.pipeline.layerSlot = routed ? static_cast<uint8_t>(layers.slot) : 0u;
         draw.pipeline.sourceFactor = static_cast<uint8_t>(blend.sourceFactor);
         draw.pipeline.destinationFactor = static_cast<uint8_t>(blend.destinationFactor);
         draw.pipeline.blendOperation = static_cast<uint8_t>(blend.operation);
@@ -3270,9 +3603,10 @@ struct SdlGpuBackend::Impl {
         std::string error;
         for (DrawBatch &batch : batches) {
             // The first queued primitive can replace every pixel an upload would supply.
-            if (batch.color && batch.overwritten.contains(batch.color->needsUpload))
+            const bool real = batch.color && batch.color != &layers.surface;
+            if (real && batch.overwritten.contains(batch.color->needsUpload))
                 batch.color->needsUpload.clear();
-            if (batch.color && !targets->refresh(*batch.color, error))
+            if (real && !targets->refresh(*batch.color, error))
                 return setError(std::move(error));
             // A sampled target that grew since the batch was queued reloads here too.
             if (batch.source && !targets->refresh(*batch.source, error))
@@ -3344,8 +3678,21 @@ struct SdlGpuBackend::Impl {
                     batch.depth->undefined = false;
                 }
 
-                pass = SDL_BeginGPURenderPass(commands, &colorInfo, 1u,
-                                              batch.depth ? &depthInfo : nullptr);
+                // The object layers, all bound: those laid over since they
+                // were drawn start black.
+                std::array<SDL_GPUColorTargetInfo, SdlGpuDevice::kMaxLayers> layerInfos{};
+                const bool layered = batch.color == &layers.surface;
+                if (layered) {
+                    for (uint32_t i = 0; i < layers.count; ++i) {
+                        layerInfos[i].texture = layers.textures[i];
+                        layerInfos[i].load_op = layers.stale[i] ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+                        layerInfos[i].clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
+                        layerInfos[i].store_op = SDL_GPU_STOREOP_STORE;
+                        layers.stale[i] = false;
+                    }
+                }
+                pass = SDL_BeginGPURenderPass(commands, layered ? layerInfos.data() : &colorInfo,
+                                              layered ? layers.count : 1u, batch.depth ? &depthInfo : nullptr);
                 if (!pass) {
                     return setError(std::string("SDL_BeginGPURenderPass: ") + SDL_GetError());
                 }
@@ -3430,7 +3777,8 @@ struct SdlGpuBackend::Impl {
                     batch.scissor.x, batch.scissor.y, batch.scissor.w, batch.scissor.h);
             }
 
-            targets->markDrawn(*batch.color, batch.written);
+            if (batch.color != &layers.surface)
+                targets->markDrawn(*batch.color, batch.written);
             drawnPages |= batch.writtenPages;
         }
 
@@ -3774,7 +4122,8 @@ struct SdlGpuBackend::Impl {
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
                      "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
-                     "draws %llu, off screen %llu) | native effects=%llu (%llu sprites; ms flush %.2f buffers %.2f sprites %.2f)\n",
+                     "draws %llu, off screen %llu) | native effects=%llu (%llu sprites; ms flush %.2f buffers %.2f sprites %.2f)"
+                     " | layers objects=%llu composites=%llu (full %llu, lost %llu)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
                      d(stats.flushSettle, previousReasons.flushSettle),
                      d(stats.transferFlushes, previousReasons.transferFlushes),
@@ -3792,7 +4141,11 @@ struct SdlGpuBackend::Impl {
                      d(stats.nativeEffectOps, previousReasons.nativeEffectOps),
                      d(stats.nativeEffectNanos[0], previousReasons.nativeEffectNanos[0]) / 1e6,
                      d(stats.nativeEffectNanos[1], previousReasons.nativeEffectNanos[1]) / 1e6,
-                     d(stats.nativeEffectNanos[2], previousReasons.nativeEffectNanos[2]) / 1e6);
+                     d(stats.nativeEffectNanos[2], previousReasons.nativeEffectNanos[2]) / 1e6,
+                     d(stats.layerObjects, previousReasons.layerObjects),
+                     d(stats.layerComposites, previousReasons.layerComposites),
+                     d(stats.layerOverflows, previousReasons.layerOverflows),
+                     d(stats.layerLost, previousReasons.layerLost));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -4698,8 +5051,10 @@ struct SdlGpuBackend::Impl {
         tracedBatch = 0u;
         if (gsTargetTraceEnabled())
             std::fprintf(stderr, "[target] present #%llu\n", static_cast<unsigned long long>(stats.presents));
-        if (!flushFor(stats.flushPresent) || !device.valid())
+        if (!compositeLayers() || !flushFor(stats.flushPresent) || !device.valid())
             return;
+        // The object layers start the next frame black.
+        std::fill(std::begin(layers.stale), std::end(layers.stale), true);
         stage.gsActive = stats.drawCalls != previousPresentDraws ||
                          stats.transferBytes != previousPresentTransfers;
         previousPresentDraws = stats.drawCalls;

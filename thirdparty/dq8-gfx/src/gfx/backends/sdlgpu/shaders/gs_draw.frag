@@ -57,6 +57,18 @@ layout(location = 0) out vec4 outColor;
 // outColor keeps the exact alpha the GS stores (Rogue Galaxy: added).
 layout(location = 0, index = 1) out vec4 outFactor;
 #endif
+#ifdef DQ8_LAYERS
+// Rogue Galaxy's object layers (added): each object draws into one of them,
+// chosen by the pipeline's write masks, so all go in one pass. Their alpha is
+// never read: it keeps the blend factor.
+layout(location = 1) out vec4 outLayer1;
+layout(location = 2) out vec4 outLayer2;
+layout(location = 3) out vec4 outLayer3;
+layout(location = 4) out vec4 outLayer4;
+layout(location = 5) out vec4 outLayer5;
+layout(location = 6) out vec4 outLayer6;
+layout(location = 7) out vec4 outLayer7;
+#endif
 
 const uint FLAG_TME = 1u << 0u;
 const uint FLAG_FST = 1u << 1u;
@@ -427,5 +439,14 @@ void main() {
     // draw's alpha replay stores it.
     if ((params.blend.w & 8u) != 0u && (params.blend.w >> 8u) != 1u && exactAlpha)
         outColor.a = float(uint(round(outColor.a * 255.0)) | 128u) / 255.0;
+#endif
+#ifdef DQ8_LAYERS
+    outLayer1 = outColor;
+    outLayer2 = outColor;
+    outLayer3 = outColor;
+    outLayer4 = outColor;
+    outLayer5 = outColor;
+    outLayer6 = outColor;
+    outLayer7 = outColor;
 #endif
 }

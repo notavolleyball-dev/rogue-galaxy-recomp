@@ -26,6 +26,7 @@ layout(set = 3, binding = 0) uniform EffectParams {
 layout(location = 0) out vec4 outColor;
 
 const uint kBlend = 1u;
+const uint kLinear = 2u;
 const uint kDecal = 4u;
 const uint kColClamp = 8u;
 const uint kTextureAlpha = 16u;
@@ -35,6 +36,10 @@ const uint kHighlight2 = 128u;
 const uint kGreenToAlpha = 1024u;
 const uint kExternal = 256u;
 const uint kTextured = 512u;
+// The alpha pass after a lay over: the alpha the GS stores, As (the backend's).
+const uint kAlphaOnly = 8192u;
+// The source is an object layer (the backend's).
+const uint kLayerSource = 16384u;
 
 uvec4 bytes(vec4 color) {
     return uvec4(round(clamp(color, 0.0, 1.0) * 255.0));
@@ -54,6 +59,15 @@ bool alphaPasses(uint alpha, uint test) {
     case 6u: return alpha > ref;
     default: return alpha != ref;
     }
+}
+
+// A source texel as the sprite reads it: CT24's alpha from TEXA (TA0, or
+// 0 for black under AEM).
+uvec4 texel(vec4 color, uint flags, uint texa) {
+    uvec4 raw = bytes(color);
+    if ((flags & kCt24) != 0u)
+        raw.a = (texa >= 256u && all(equal(raw.rgb, uvec3(0u)))) ? 0u : (texa & 255u);
+    return raw;
 }
 
 ivec3 colorTerm(uint select, ivec3 cs, ivec3 cd) {
@@ -86,11 +100,34 @@ void main() {
     uvec4 c = v;
     if ((flags & kTextured) != 0u) {
         vec2 uv = params.uv.xy + (g - params.rect.xy) * (params.uv.zw - params.uv.xy) / (params.rect.zw - params.rect.xy);
-        uvec4 t = bytes(texture(source, uv / params.misc.yz));
-        if ((flags & kCt24) != 0u) {
-            // TA0, or 0 for black under AEM.
-            uint texa = uint(params.misc.w);
-            t.a = (texa >= 256u && all(equal(t.rgb, uvec3(0u)))) ? 0u : (texa & 255u);
+        uvec4 t;
+        uint texa = uint(params.misc.w);
+        if ((flags & kLinear) != 0u && (flags & (kCt24 | kLayerSource)) != 0u) {
+            // Each texel's alpha (from TEXA) before the four
+            // are weighed, as the GS (and the GS path's sampleTexture)
+            // filters: under AEM black ones count as transparent, so a
+            // silhouette's alpha falls off.
+            int sourceScale = max(int(round(float(textureSize(source, 0).x) / params.misc.y)), 1);
+            ivec2 bound = textureSize(source, 0) - 1;
+            vec2 base;
+            vec2 weight;
+            ivec2 first;
+            if (sourceScale > 1) {
+                base = uv * float(sourceScale) - 0.5;
+                first = ivec2(floor(base));
+                weight = base - vec2(first);
+            } else {
+                base = floor((uv - 0.5) * 16.0 + 0.002) / 16.0;
+                first = ivec2(floor(base));
+                weight = fract(base);
+            }
+            vec4 taps[4];
+            for (int i = 0; i < 4; ++i)
+                taps[i] = vec4(texel(texelFetch(source, clamp(first + ivec2(i & 1, i >> 1), ivec2(0), bound), 0),
+                                     flags, texa)) / 255.0;
+            t = bytes(mix(mix(taps[0], taps[1], weight.x), mix(taps[2], taps[3], weight.x), weight.y));
+        } else {
+            t = texel(texture(source, uv / params.misc.yz), flags, texa);
         }
         if ((flags & kDecal) != 0u) {
             c.rgb = t.rgb;
@@ -128,7 +165,7 @@ void main() {
         // The pipeline adds this to Cd, takes it from Cd, or (A - B being
         // Cs - Cd) adds it to Cd (1 - C).
         rgb = clamp((ivec3(c.rgb) * factor) >> 7, ivec3(0), ivec3(255));
-        bool over = (alpha & 0xFu) == 0x4u;
+        bool over = (alpha & 0xFu) == 0x4u && (flags & kAlphaOnly) == 0u;
         outColor = vec4(vec3(rgb) / 255.0, over ? min(float(factor) / 128.0, 1.0) : float(c.a) / 255.0);
         return;
     }

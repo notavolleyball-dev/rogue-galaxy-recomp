@@ -74,6 +74,14 @@ struct SdlGpuStats {
     uint64_t nativeEffects = 0u;
     uint64_t nativeEffectOps = 0u;
     uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
+    // Objects drawn into object layers (GSNativeEffect::kRouteLayer), the
+    // passes that laid them over the frame, those started because every
+    // slot was taken, and the objects laid over by nothing (Rogue Galaxy:
+    // added).
+    uint64_t layerObjects = 0u;
+    uint64_t layerComposites = 0u;
+    uint64_t layerOverflows = 0u;
+    uint64_t layerLost = 0u;
     // Drawn through the same-state fast path (Rogue Galaxy: added).
     uint64_t sameStatePrimitives = 0u;
     uint64_t trianglesDrawn = 0u;

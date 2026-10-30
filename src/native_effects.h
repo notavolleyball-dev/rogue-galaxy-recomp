@@ -52,7 +52,7 @@ struct Place
 
 bool enabled();
 const char *name(Effect effect);
-// RG_NATIVE_COMPOSITE=1: the VIF1 thread batches stage E's objects.
+// RG_NATIVE_COMPOSITE (on unless 0): the VIF1 thread batches stage E's objects.
 bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.
@@ -77,6 +77,8 @@ struct Box
     int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 };
 bool clearBox(const std::vector<std::vector<uint8_t>> &packets, Box &box);
+// Debugging: the registers and primitives of `packets`, one line each.
+void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets);
 // The 8 KiB pages of GS memory (block address / 32) a box covers.
 void boxPages(const Box &box, uint32_t &first, uint32_t &last);
 // When a packet starts a transfer into GS memory: the pages it may write.

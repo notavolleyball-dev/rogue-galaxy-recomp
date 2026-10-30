@@ -485,27 +485,67 @@ object). The few fading objects keep the offscreen pass, or take their
 alpha in the layer. A temporal upscaler (phase 2) would also cover this
 edge; until then the pass keeps parity.
 
-### Stage E batched by reordering (2026-10-29, `RG_NATIVE_COMPOSITE=1`, off)
+### Stage E in object layers (2026-10-29, `RG_NATIVE_COMPOSITE`, on by default 2026-10-30)
 
-A first, exact form of the batching: the GS gets the objects' heads (the
-clear of the box in `02a00`, the model) one after another and then their
-tails (the composite over the frame), so it switches target once a batch;
-the VIF1 thread still runs everything in order (`src/vif1_thread.cpp`,
-`compositePacket`). The head and tail are the packet memory before and after
-the composite's last `ModelEmitDrawPackets`; what a VU1 program kicks goes
-by the list position of its MSCAL (`PS2Memory::vif1Cursor`, patch 0022);
-the tail's fixed DMA call, a TEXFLUSH between objects and CLUT uploads that
-miss the held boxes go with the batch. A batch closes when the next box
-comes within 2 pixels of a held one, or anything else reaches the GS.
+A first try reordered what the GS gets (the objects' heads, then their
+tails) and saved almost nothing (passes 180 to 177 a frame at 1x):
+consecutive objects overlap, and each closed the batch. A merged layer with
+an object index beside the colour would not be exact either: half the
+objects' strips blend by alpha (a census of the draws into `02a00`), and an
+object drawn over an earlier one in one layer blends with it, where the
+game's blends with the black of its cleared box.
 
-On the walk it saves almost nothing (passes 180 to 177 a frame at 1x): of
-9,939 batches, 7,718 closed on an overlapping box and 2,206 on something
-else drawn between objects; consecutive objects overlap (a character's
-parts, the party walking together). So batching stage E means the merged
-layer with the objects' order kept per pixel (an object index beside the
-colour, the halo of each object applied over the earlier ones), which needs
-the backend to write that index while the objects draw: a second colour
-target, or array layers, in the native mesh and GS paths. Not built.
+So each object gets a slot of its own. The VIF1 thread
+(`src/vif1_thread.cpp`, `compositePacket`) sends a `kRouteLayer` with the
+object's box before its head; the backend sends the head's draws into the
+buffer to that slot instead (`ObjectLayers` in `sdlgpu_backend.cpp`). The
+slots are 4 to 8 RGBA8 textures (`DQ8_GFX_LAYER_MB`, 96 MB unless set), all
+bound to one pass as colour targets; the pipeline's write masks pick the
+slot (`gs_draw.frag`'s `DQ8_LAYERS` variant), and the scene's depth is the
+same. An object takes the first slot whose waiting boxes its own does not
+meet, so each still reads only itself. Its tail becomes a `kObjectTail`
+(the builder in `src/native_effects.cpp`, its kicks withheld), and the
+waiting tails go in one pass, in order (`compositeLayers`), when anything
+else reaches the GS or every slot is taken. Uploads and TEXFLUSHes between
+objects go on: the layers are not GS memory, and `02a00` is never drawn.
+
+What parity took:
+
+- The halo copies read CT24 under AEM, bilinear: each texel's alpha from
+  TEXA before the four are weighed (`gs_effect.frag`), as the GS path's
+  `sampleTexture` does; filtering first gave every edge full alpha.
+- TEXA is set before the tail (TA0 128, AEM 1): the GS frontend fills it in
+  (`kTexaFromGs`, patch 0022).
+- The tails write the frame's alpha (FBMSK 0): each lay over is followed by
+  an alpha-only draw of As.
+- Some objects' sharp copy reads the buffer as CT32, keeps the pixels whose
+  alpha is at least 1 (a weapon drawn with FBA) and lays their alpha over
+  the frame, which reads it later: a weapon's glow, alpha up to 0xE8, was
+  10% darker when layers stored A/128 (the blend's factor) and saturated at
+  0x80. A layer stores the GS's A/255; a blend by source alpha draws its
+  colour with the factor and its alpha in the replay, as on hosts without
+  dual-source blending (which more than one target rules out). No object
+  blends by destination alpha, which would read A/255 as its factor.
+- Objects wholly off the frame have tails with no sprites: dropped.
+- Half-float layers were tried, for factors past one: a weapon's additive
+  glow then went past one under its next lay over, where the GS clamps.
+
+On the walk at 1x with the glare and the shadow native: 25,000 objects, all
+in layers, no tail refused; passes 76 to 53 a frame. The logged frame (pad
+3000, `tools/bench/vram2png.py`) matches the GS path's: no pixel more than 3
+levels apart, the same noise as without the layers.
+
+| 60 fps mode, last 25 s standing | fps | passes/frame | GPU busy | power |
+|---|---|---|---|---|
+| 3x, glare + shadow | 59.9 | 85.8 | 61% | 29.8 W |
+| 3x, + object layers | 59.9 | 52.6 | 66% | 29.9 W |
+| 8x, glare + shadow | 59.9 | 85.3 | 78% | 151.3 W |
+| 8x, + object layers | 59.9 | 53.4 | 79% | 153.8 W |
+| 8x, + object layers, exact alpha | 59.9 | unchanged | 80% | 152.4 W |
+
+A first 8x run cleared every slot after each composite (64 MB textures, a
+dozen times a frame) and had 2 slots: 87% busy, 159.7 W. Now a slot is
+cleared once a frame (each object clears its own box), with at least 4.
 
 ## Sizes and order
 
@@ -517,7 +557,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | now ([FSR.md](FSR.md)) |
-| 3 Post | M-L (about ten effects, each S-M) | the glare and the plane shadow done (2026-10-29); the per-object composites next |
+| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow and the per-object composites (object layers, on by default) done (2026-10-30) |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 

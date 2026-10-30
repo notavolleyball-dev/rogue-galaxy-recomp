@@ -446,6 +446,9 @@ struct Builder
     std::array<float, GSNativeEffect::kMaxBuffers> readBottom{};
     std::string missing;
     bool failed = false;
+    // A composite's tail: sprites from the object's buffer (its layer, not
+    // the GS's) over the frame, alpha tested.
+    bool tail = false;
     // Per op: how many CT16 strips a kGreenToAlpha op stands for.
     std::array<uint32_t, GSNativeEffect::kMaxOps> strips{};
 
@@ -553,10 +556,10 @@ struct Builder
             const uint32_t psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
             if (psm == 1u)
             {
-                if (!r.set[kTexa])
+                if (!r.set[kTexa] && !tail)
                     return fail("a CT24 texture under a TEXA set before the effect");
                 const uint64_t texa = r.value[kTexa];
-                op.flags |= GSNativeEffect::kCt24;
+                op.flags |= GSNativeEffect::kCt24 | (r.set[kTexa] ? 0u : GSNativeEffect::kTexaFromGs);
                 op.texa = static_cast<uint32_t>(texa & 0xFFu) | static_cast<uint32_t>(texa & 0x8000u);
             }
             if (psm > 1u)
@@ -801,9 +804,9 @@ struct Builder
                     return fail("an effect buffer drawn with its alpha masked");
                 continue;
             }
-            if (op.source >= 0 && out.buffers[op.source].external)
+            if (op.source >= 0 && out.buffers[op.source].external && !tail)
                 return fail("a sprite into a GS target from another");
-            if (op.test & 1u)
+            if ((op.test & 1u) && (!tail || ((op.test >> 12) & 3u) != 0u))
                 return fail("a sprite into a GS target with the alpha test");
             if (!(op.flags & GSNativeEffect::kBlend))
                 continue;
@@ -814,7 +817,7 @@ struct Builder
             const uint32_t c = static_cast<uint32_t>((op.alpha >> 4) & 3u);
             if (((op.alpha >> 6) & 3u) != 1u || c == 1u || (ab != 0x8u && ab != 0x2u && ab != 0x4u))
                 return fail("a sprite into a GS target with a blend it cannot draw");
-            if (ab == 0x4u && !(op.flags & GSNativeEffect::kKeepAlpha))
+            if (ab == 0x4u && !(op.flags & GSNativeEffect::kKeepAlpha) && !tail)
                 return fail("a sprite laid over a GS target that writes its alpha");
         }
         return !failed;
@@ -844,14 +847,14 @@ bool compositesBatched()
 bool enabled()
 {
     static const bool on = [] {
-        const auto flag = [](const char *name) {
+        const auto flag = [](const char *name, bool otherwise) {
             const char *value = std::getenv(name);
-            return value && std::strcmp(value, "0") != 0;
+            return value ? std::strcmp(value, "0") != 0 : otherwise;
         };
         g_log = std::getenv("RG_NATIVE_EFFECTS_LOG") != nullptr;
-        g_glare = flag("RG_NATIVE_GLARE");
-        g_shadow = flag("RG_NATIVE_SHADOW");
-        g_composites = flag("RG_NATIVE_COMPOSITE");
+        g_glare = flag("RG_NATIVE_GLARE", false);
+        g_shadow = flag("RG_NATIVE_SHADOW", false);
+        g_composites = flag("RG_NATIVE_COMPOSITE", true);
         return g_glare || g_shadow || g_composites;
     }();
     return on;
@@ -1015,6 +1018,29 @@ bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &
     return true;
 }
 
+void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets)
+{
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> events;
+    for (const std::vector<uint8_t> &packet : packets)
+    {
+        events.clear();
+        eachPacket(packet.data(), static_cast<uint32_t>(packet.size()),
+                   [&](uint32_t at, uint32_t size) { rg::gif::decodeGifPacket(packet.data() + at, size, state, events); });
+        std::fprintf(stderr, "[%s] packet %zu bytes:", what, packet.size());
+        for (const rg::gif::GifEvent &event : events)
+        {
+            if (event.kind == rg::gif::GifEvent::Kind::Register)
+                std::fprintf(stderr, " %02x=%llx", event.reg, static_cast<unsigned long long>(event.value));
+            else
+                std::fprintf(stderr, " V(prim %x %d,%d uv %d,%d rgba %02x%02x%02x%02x%s)", event.prim, event.x, event.y,
+                             event.u, event.v, event.rgba[0], event.rgba[1], event.rgba[2], event.rgba[3],
+                             event.drawing ? " kick" : "");
+        }
+        std::fprintf(stderr, "\n");
+    }
+}
+
 void observe(Effect effect, const uint8_t *data, uint32_t size)
 {
     if (effect != Effect::ShadowSetup)
@@ -1045,15 +1071,17 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
 {
     out = GSNativeEffect{};
     withheld.clear();
-    if (effect != Effect::Glare && effect != Effect::Shadow)
+    if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CompositeTail)
     {
         why = "no such effect";
         return false;
     }
     Builder builder{out, why};
+    builder.tail = effect == Effect::CompositeTail;
     static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
-    static int traced = 0;
-    builder.trace = traceShadow && effect == Effect::Shadow && traced++ == 0;
+    static int traced[8] = {};
+    builder.trace = traceShadow && (effect == Effect::Shadow || effect == Effect::CompositeTail) &&
+                    traced[static_cast<int>(effect)]++ == 0;
     Registers registers = effect == Effect::Shadow ? t_shadowSetup : Registers{};
     rg::gif::GifState state;
     std::vector<rg::gif::GifEvent> events;
@@ -1116,7 +1144,7 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
         return false;
     if (g_log)
     {
-        static bool shown[3] = {};
+        static bool shown[8] = {};
         if (!shown[static_cast<int>(effect)])
         {
             shown[static_cast<int>(effect)] = true;

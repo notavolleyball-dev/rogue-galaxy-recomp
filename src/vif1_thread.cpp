@@ -64,7 +64,7 @@ const uint32_t g_checkEvery = [] {
 const bool g_drawOrigins = rg::debug::drawOriginsEnabled();
 // RG_NATIVE_GLARE (src/native_effects.h): effects the renderer draws itself.
 const bool g_nativeEffects = rg::nativefx::enabled();
-// RG_NATIVE_COMPOSITE: stage E's objects batched (deliverPacket, below).
+// RG_NATIVE_COMPOSITE: stage E's objects in object layers (deliverPacket, below).
 const bool g_composites = rg::nativefx::compositesBatched();
 // For the VIF code a VU1 program's packets came from (vif1Cursor).
 PS2Memory *g_vif1Memory = nullptr;
@@ -311,7 +311,9 @@ public:
     // A post effect the renderer draws itself, for GS::submitNativeEffect.
     void effect(const GSNativeEffect &effect)
     {
-        append(Kind::Effect, reinterpret_cast<const uint8_t *>(&effect), sizeof(effect));
+        // The ops it uses: a route command has none.
+        const size_t used = offsetof(GSNativeEffect, ops) + effect.opCount * sizeof(GSNativeEffect::Op);
+        append(Kind::Effect, reinterpret_cast<const uint8_t *>(&effect), static_cast<uint32_t>(used));
     }
 
     // From the VIF1 thread, at the end of each list and as a list fills a
@@ -467,7 +469,7 @@ private:
                     }
                     else if (header.kind == Kind::Effect)
                     {
-                        std::memcpy(&m_effect, data, sizeof(m_effect));
+                        std::memcpy(&m_effect, data, std::min<size_t>(header.size, sizeof(m_effect)));
                         m_gs.submitNativeEffect(m_effect);
                     }
                     else
@@ -1116,14 +1118,14 @@ void flushEffect()
 
 // RG_NATIVE_COMPOSITE: stage E's objects, each drawn into the offscreen
 // buffer (its head: a clear of its box, its model) and then laid over the
-// frame (its tail), go to the GS as their heads one after another and then
-// their tails, so the GS switches target once a batch instead of twice an
-// object. The VIF1 thread still runs everything in order; only what the GS
-// receives is reordered, and only where nothing can tell: a head's box is
-// apart from the held tails' boxes (by 2 pixels, for the tails' bilinear
-// copies), the rows an upload writes into the buffer are kept clear of, and
-// anything else that reaches the GS sends the held tails first. Each head and
-// tail sets the GS state it draws with (its draw environment and packets).
+// frame (its tail), drawn by the renderer into object layers of its own
+// (GSNativeEffect::kRouteLayer): the head's draws into the buffer go to the
+// object's layer, the tail's sprites become a kObjectTail from that layer,
+// their kicks withheld, and the waiting tails are drawn together
+// (kComposite) before anything else reaches the GS. Uploads and TEXFLUSHes
+// between objects go on: the layers are not GS memory. So the GS's buffer is
+// never drawn, and the renderer switches target twice a run of objects
+// instead of twice an object.
 struct CompositeBatch
 {
     enum class State : uint8_t
@@ -1134,141 +1136,215 @@ struct CompositeBatch
     };
     State state = State::Outside;
     uint32_t unit = 0u;
-    bool decided = false;     // the head's box known and its packets sent
-    bool batched = false;     // its tail held
-    bool uploading = false;   // an upload into memory no held tail reads goes ahead of them
+    bool decided = false;   // the head's box known and its packets sent
+    bool routed = false;    // its draws go to a layer, its tail held
+    bool waiting = false;   // tails sent that no kComposite has drawn yet
+    bool uploading = false; // an upload's data goes on too
     GS *gs = nullptr;
+    rg::nativefx::Box box;
     std::vector<std::vector<uint8_t>> head; // the head's packets until its box is known
-    std::vector<rg::nativefx::Box> boxes;   // the held tails' and the current head's
-    std::vector<std::vector<uint8_t>> tails;
+    std::vector<std::vector<uint8_t>> tail;
 };
 thread_local CompositeBatch t_batch;
-std::atomic<uint64_t> g_compositeUnits{0u};
-std::atomic<uint64_t> g_compositeBatched{0u};
-std::atomic<uint64_t> g_compositeFlushes{0u};
-std::atomic<uint64_t> g_compositeConflicts{0u};
-std::atomic<uint64_t> g_flushByBox{0u}, g_flushByUnsafe{0u}, g_flushByOther{0u}, g_flushByMesh{0u}, g_flushByImage{0u},
-    g_flushByListEnd{0u};
+std::atomic<uint64_t> g_compositeUnits{0u}, g_compositeRouted{0u}, g_compositeRuns{0u}, g_compositeRefused{0u};
 
-// The held tails, in order. (Before anything newer: a head's packets set the
-// state its model draws with.)
-void flushTails()
+void sendEffect(GS &gs, const GSNativeEffect &effect)
+{
+    if (g_stage)
+        g_stage->effect(effect);
+    else
+        gs.submitNativeEffect(effect);
+}
+
+void sendCommand(GS &gs, uint32_t command)
+{
+    thread_local GSNativeEffect effect;
+    effect = GSNativeEffect{};
+    effect.command = command;
+    sendEffect(gs, effect);
+}
+
+// The waiting tails drawn, before what comes next.
+void compositeRun()
 {
     CompositeBatch &batch = t_batch;
-    if (!batch.tails.empty())
-    {
-        ++g_compositeFlushes;
-        for (const std::vector<uint8_t> &packet : batch.tails)
-            sendPacket(*batch.gs, packet.data(), static_cast<uint32_t>(packet.size()));
-    }
-    batch.tails.clear();
-    batch.boxes.clear();
+    if (!batch.waiting)
+        return;
+    batch.waiting = false;
+    ++g_compositeRuns;
+    sendCommand(*batch.gs, GSNativeEffect::kComposite);
 }
 
-// At a list's end: the held tails, then a head still being read, its tail
-// to go as it comes.
-void flushComposites()
-{
-    CompositeBatch &batch = t_batch;
-    if (!batch.tails.empty())
-        ++g_flushByListEnd;
-    flushTails();
-    if (batch.state == CompositeBatch::State::Head && !batch.decided)
-    {
-        for (const std::vector<uint8_t> &packet : batch.head)
-            sendPacket(*batch.gs, packet.data(), static_cast<uint32_t>(packet.size()));
-        batch.head.clear();
-        batch.decided = true;
-        batch.batched = false;
-    }
-    if (batch.state != CompositeBatch::State::Head)
-        batch.state = CompositeBatch::State::Outside;
-}
-
-bool boxesMeet(const rg::nativefx::Box &a, const rg::nativefx::Box &b)
-{
-    if (a.base == b.base && a.fbw == b.fbw)
-        return a.x0 < b.x1 + 2 && b.x0 < a.x1 + 2 && a.y0 < b.y1 + 2 && b.y0 < a.y1 + 2;
-    uint32_t af, al, bf, bl;
-    rg::nativefx::boxPages(a, af, al);
-    rg::nativefx::boxPages(b, bf, bl);
-    return af <= bl && bf <= al;
-}
-
-// The head's box is known (or will not be): send its packets, its tail held
-// when it can join the batch.
+// The head's box is known (or will not be): routed to a layer with it, or,
+// without one, drawn as the game draws it, after the waiting tails.
 void decideHead()
 {
     CompositeBatch &batch = t_batch;
-    rg::nativefx::Box box;
-    const bool found = rg::nativefx::clearBox(batch.head, box);
-    // The buffer's first two rows of pages take texture uploads mid-frame.
-    const bool safe = found && box.y0 >= 66;
-    bool meets = !safe;
-    for (const rg::nativefx::Box &held : batch.boxes)
-        meets = meets || boxesMeet(held, box);
+    batch.routed = rg::nativefx::clearBox(batch.head, batch.box);
+    if (batch.routed)
     {
-        static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
-        static int traced = 0;
-        if (trace && traced < 40 && meets && !batch.tails.empty())
-        {
-            ++traced;
-            std::fprintf(stderr, "[composite]   flushed by a box: %s %x/%u %d,%d-%d,%d\n", found ? "found" : "none",
-                         box.base, box.fbw, box.x0, box.y0, box.x1, box.y1);
-        }
+        thread_local GSNativeEffect route;
+        route = GSNativeEffect{};
+        route.command = GSNativeEffect::kRouteLayer;
+        route.bufferCount = 1u;
+        route.buffers[0].base = batch.box.base;
+        route.buffers[0].fbw = batch.box.fbw;
+        route.box[0] = batch.box.x0;
+        route.box[1] = batch.box.y0;
+        route.box[2] = batch.box.x1;
+        route.box[3] = batch.box.y1;
+        sendEffect(*batch.gs, route);
+        ++g_compositeRouted;
     }
-    if (meets && !batch.tails.empty())
-        ++(safe ? g_flushByBox : g_flushByUnsafe);
-    if (meets)
-        flushTails();
+    else
+    {
+        compositeRun();
+    }
     for (const std::vector<uint8_t> &packet : batch.head)
         sendPacket(*batch.gs, packet.data(), static_cast<uint32_t>(packet.size()));
     batch.head.clear();
     batch.decided = true;
-    batch.batched = safe;
-    if (safe)
-        batch.boxes.push_back(box);
-    ++g_compositeUnits;
-    if (safe)
-        ++g_compositeBatched;
-    const uint64_t units = g_compositeUnits.load();
-    if (units == 1u || units % 2000u == 0u)
-        std::fprintf(stderr,
-                     "[composite] %llu objects, %llu batched, %llu batches sent (box %llu, top rows %llu, other %llu, "
-                     "mesh %llu, image %llu, list end %llu), %llu upload conflicts\n",
-                     static_cast<unsigned long long>(units), static_cast<unsigned long long>(g_compositeBatched.load()),
-                     static_cast<unsigned long long>(g_compositeFlushes.load()),
-                     static_cast<unsigned long long>(g_flushByBox.load()),
-                     static_cast<unsigned long long>(g_flushByUnsafe.load()),
-                     static_cast<unsigned long long>(g_flushByOther.load()),
-                     static_cast<unsigned long long>(g_flushByMesh.load()),
-                     static_cast<unsigned long long>(g_flushByImage.load()),
-                     static_cast<unsigned long long>(g_flushByListEnd.load()),
-                     static_cast<unsigned long long>(g_compositeConflicts.load()));
+    const uint64_t units = ++g_compositeUnits;
+    if (units == 1u || units % 5000u == 0u)
+        std::fprintf(stderr, "[composite] %llu objects, %llu in layers, %llu runs drawn, %llu tails refused\n",
+                     static_cast<unsigned long long>(units), static_cast<unsigned long long>(g_compositeRouted.load()),
+                     static_cast<unsigned long long>(g_compositeRuns.load()),
+                     static_cast<unsigned long long>(g_compositeRefused.load()));
 }
 
-// What the GS gets next is no composite's: the held tails go first.
+// A routed object's tail, whole: its sprites to the renderer, from the
+// layer, and its packets to the GS with their kicks withheld. Refused, the
+// object's layer goes back into the GS's buffer first (kObjectTail without
+// sprites) and the packets as they are.
+void finishTail()
+{
+    CompositeBatch &batch = t_batch;
+    if (batch.tail.empty())
+        return;
+    GS &gs = *batch.gs;
+    thread_local GSNativeEffect effect;
+    thread_local std::vector<std::vector<uint8_t>> withheld;
+    std::string why;
+    bool ok = rg::nativefx::build(rg::nativefx::Effect::CompositeTail, batch.tail, effect, withheld, why);
+    if (ok)
+    {
+        bool fromLayer = false;
+        for (uint32_t i = 0; i < effect.bufferCount; ++i)
+        {
+            GSNativeEffect::Buffer &buffer = effect.buffers[i];
+            if (buffer.base == batch.box.base && buffer.fbw == batch.box.fbw)
+            {
+                buffer.layer = 1u;
+                fromLayer = true;
+            }
+        }
+        ok = fromLayer;
+        why = ok ? why : "no sprite from the object's buffer";
+    }
+    if (ok)
+    {
+        static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
+        static int dumped = 0;
+        bool other = false;
+        for (uint32_t n = 0; n < effect.opCount; ++n)
+            other = other || (effect.ops[n].source >= 0 && !(effect.ops[n].flags & GSNativeEffect::kCt24));
+        if (trace && other && dumped++ < 3)
+        {
+            std::fprintf(stderr, "[composite] a tail reading CT32, box %d,%d-%d,%d:\n", batch.box.x0, batch.box.y0,
+                         batch.box.x1, batch.box.y1);
+            rg::nativefx::dumpPackets("composite", batch.tail);
+        }
+        for (const std::vector<uint8_t> &packet : withheld)
+            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        effect.command = GSNativeEffect::kObjectTail;
+        sendEffect(gs, effect);
+        batch.waiting = true;
+    }
+    else
+    {
+        const bool nothing = why == "no sprites";
+        static std::vector<std::string> told;
+        if (!nothing && told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
+        {
+            told.push_back(why);
+            std::fprintf(stderr, "[composite] a tail stays packets: %s\n", why.c_str());
+        }
+        if (!nothing)
+            ++g_compositeRefused;
+        static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
+        static int dumped = 0;
+        if (trace && !nothing && dumped++ < 3)
+        {
+            std::fprintf(stderr, "[composite] refused (%s), box %d,%d-%d,%d:\n", why.c_str(), batch.box.x0, batch.box.y0,
+                         batch.box.x1, batch.box.y1);
+            rg::nativefx::dumpPackets("composite", batch.tail);
+        }
+        effect = GSNativeEffect{};
+        effect.command = GSNativeEffect::kObjectTail;
+        effect.bufferCount = nothing ? 0u : 1u;
+        effect.buffers[0].base = batch.box.base;
+        effect.buffers[0].fbw = batch.box.fbw;
+        sendEffect(gs, effect);
+        batch.waiting = false;
+        for (const std::vector<uint8_t> &packet : batch.tail)
+            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+    }
+    batch.tail.clear();
+}
+
+// The object being read is over (what comes next is not its).
+void endObject()
+{
+    CompositeBatch &batch = t_batch;
+    if (batch.state == CompositeBatch::State::Head && !batch.decided)
+        decideHead();
+    if (batch.state == CompositeBatch::State::Head && batch.routed)
+        sendCommand(*batch.gs, GSNativeEffect::kRouteEnd);
+    finishTail();
+    batch.state = CompositeBatch::State::Outside;
+    batch.routed = false;
+}
+
+// At a list's end, or before anything that is no composite's.
+void flushComposites()
+{
+    if (!t_batch.gs)
+        return;
+    endObject();
+    compositeRun();
+    t_batch.uploading = false;
+}
+
 void compositeOther(const char *what = "?", uint32_t address = ~0u, uint32_t cursor = ~0u)
 {
     static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
     static int traced = 0;
-    if (trace && traced < 40 && !t_batch.tails.empty())
+    if (trace && traced < 40 && (t_batch.waiting || t_batch.state != CompositeBatch::State::Outside))
     {
         ++traced;
-        std::fprintf(stderr, "[composite]   flushed by %s @%08x cursor %08x (state %d)\n", what, address, cursor,
+        std::fprintf(stderr, "[composite]   run ended by %s @%08x cursor %08x (state %d)\n", what, address, cursor,
                      int(t_batch.state));
     }
-    if (!t_batch.tails.empty())
-        ++(what[0] == 'a' && what[1] == ' ' && what[2] == 'm' ? g_flushByMesh
-           : what[0] == 'a' && what[1] == 'n'                 ? g_flushByImage
-                                                              : g_flushByOther);
-    if (t_batch.state != CompositeBatch::State::Outside || !t_batch.tails.empty())
-    {
-        if (t_batch.state == CompositeBatch::State::Head && !t_batch.decided)
-            decideHead();
-        t_batch.state = CompositeBatch::State::Outside;
-        flushTails();
-    }
+    flushComposites();
+}
+
+bool uploadOrFlush(const uint8_t *data, uint32_t size)
+{
+    uint32_t first, last;
+    if (rg::nativefx::uploadPages(data, size, first, last))
+        return true;
+    // A packet that only flushes the texture cache (TEXFLUSH: no state, no
+    // drawing).
+    if (size < 32u)
+        return false;
+    uint64_t tag, regs;
+    std::memcpy(&tag, data, 8);
+    std::memcpy(&regs, data + 8, 8);
+    const uint32_t nloop = static_cast<uint32_t>(tag & 0x7FFFu);
+    bool flushOnly = (tag >> 58) == 0x4u && (regs & 0xFu) == 0xEu && nloop != 0u && 16u + nloop * 16u <= size;
+    for (uint32_t i = 0; flushOnly && i < nloop; ++i)
+        flushOnly = data[16u + i * 16u + 8u] == 0x3Fu;
+    return flushOnly;
 }
 
 // A packet of a composite (its place in the list's EE memory, or for what a
@@ -1283,20 +1359,14 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     if (address == ~0u && g_vif1Memory)
         cursor = listAddress(g_vif1Memory->vif1Cursor());
     if (address != ~0u)
-    {
         place = rg::nativefx::placeAt(address);
-    }
     else if (cursor != ~0u)
-    {
         place = rg::nativefx::placeAt(cursor);
-    }
     // Until its tail, a head goes on through what it refers to: the model's
     // packets from the model's memory, and what its VU1 programs kick.
     // (Every object marked has a tail.)
     if (batch.state == CompositeBatch::State::Head && place.effect == rg::nativefx::Effect::None)
-    {
         place = {rg::nativefx::Effect::CompositeHead, batch.unit};
-    }
     {
         static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
         static int traced = 0;
@@ -1312,13 +1382,12 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     {
         if (batch.state != CompositeBatch::State::Head || batch.unit != place.unit)
         {
-            if (batch.state == CompositeBatch::State::Head && !batch.decided)
-                decideHead();
+            endObject();
             batch.state = CompositeBatch::State::Head;
             batch.unit = place.unit;
             batch.decided = false;
-            batch.batched = false;
         }
+        batch.uploading = false;
         if (!batch.decided)
         {
             if (address != ~0u && rg::nativefx::placeAt(address).effect == rg::nativefx::Effect::CompositeHead)
@@ -1328,21 +1397,6 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             }
             decideHead();
         }
-        uint32_t first, last;
-        if (!batch.tails.empty() && rg::nativefx::uploadPages(data, size, first, last))
-        {
-            for (const rg::nativefx::Box &box : batch.boxes)
-            {
-                uint32_t boxFirst, boxLast;
-                rg::nativefx::boxPages(box, boxFirst, boxLast);
-                if (first <= boxLast && boxFirst <= last)
-                {
-                    if (g_compositeConflicts++ == 0u)
-                        std::fprintf(stderr, "[composite] an upload into a held object's pages mid-head\n");
-                    break;
-                }
-            }
-        }
         sendPacket(gs, data, size);
         return true;
     }
@@ -1350,11 +1404,16 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     if (place.effect == rg::nativefx::Effect::CompositeTail && (place.unit == batch.unit || place.unit == 0u) &&
         (batch.state == CompositeBatch::State::Head || batch.state == CompositeBatch::State::Tail))
     {
-        if (batch.state == CompositeBatch::State::Head && !batch.decided)
-            decideHead();
-        batch.state = CompositeBatch::State::Tail;
-        if (batch.batched)
-            batch.tails.emplace_back(data, data + size);
+        if (batch.state == CompositeBatch::State::Head)
+        {
+            if (!batch.decided)
+                decideHead();
+            if (batch.routed)
+                sendCommand(gs, GSNativeEffect::kRouteEnd);
+            batch.state = CompositeBatch::State::Tail;
+        }
+        if (batch.routed)
+            batch.tail.emplace_back(data, data + size);
         else
             sendPacket(gs, data, size);
         return true;
@@ -1371,63 +1430,17 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
         }
     }
     batch.uploading = false;
-    // Between objects the caller uploads textures (CLUTs): ahead of the held
-    // tails when they write no page a held box is in (the tails read their
-    // boxes alone; their own packets set every register they use).
-    uint32_t first, last;
-    if (batch.state == CompositeBatch::State::Tail && !batch.tails.empty() &&
-        rg::nativefx::uploadPages(data, size, first, last))
+    // Between objects the caller uploads textures (CLUTs) and flushes the
+    // texture cache: on ahead of the waiting tails, which read only their
+    // layers (each tail's packets set every register it draws with).
+    if (batch.state != CompositeBatch::State::Head && (batch.waiting || batch.state == CompositeBatch::State::Tail) &&
+        uploadOrFlush(data, size))
     {
-        bool meets = false;
-        for (const rg::nativefx::Box &box : batch.boxes)
-        {
-            uint32_t boxFirst, boxLast;
-            rg::nativefx::boxPages(box, boxFirst, boxLast);
-            meets = meets || (first <= boxLast && boxFirst <= last);
-        }
-        if (!meets)
-        {
-            batch.uploading = true;
-            sendPacket(gs, data, size);
-            return true;
-        }
-    }
-    // A packet that only flushes the texture cache (TEXFLUSH: no state, no
-    // drawing) goes with what is being read; the caller sends one between
-    // objects.
-    if (batch.state != CompositeBatch::State::Outside && size >= 32u)
-    {
-        uint64_t tag, regs;
-        std::memcpy(&tag, data, 8);
-        std::memcpy(&regs, data + 8, 8);
-        const uint32_t nloop = static_cast<uint32_t>(tag & 0x7FFFu);
-        bool flushOnly = (tag >> 58) == 0x4u && (regs & 0xFu) == 0xEu && nloop != 0u && 16u + nloop * 16u <= size;
-        for (uint32_t i = 0; flushOnly && i < nloop; ++i)
-            flushOnly = data[16u + i * 16u + 8u] == 0x3Fu;
-        if (flushOnly)
-        {
-            if (batch.state == CompositeBatch::State::Tail && batch.batched)
-                batch.tails.emplace_back(data, data + size);
-            else
-                sendPacket(gs, data, size);
-            return true;
-        }
-    }
-    {
-        static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
-        static int dumped = 0;
-        if (trace && dumped < 3 && !batch.tails.empty() && address != ~0u)
-        {
-            ++dumped;
-            for (uint32_t q = 0; q * 16u < size && q < 8u; ++q)
-            {
-                uint64_t lo, hi;
-                std::memcpy(&lo, data + q * 16u, 8);
-                std::memcpy(&hi, data + q * 16u + 8, 8);
-                std::fprintf(stderr, "[composite]     @%08x qw %u: %016llx %016llx\n", address, q,
-                             (unsigned long long)hi, (unsigned long long)lo);
-            }
-        }
+        endObject();
+        uint32_t first, last;
+        batch.uploading = rg::nativefx::uploadPages(data, size, first, last);
+        sendPacket(gs, data, size);
+        return true;
     }
     compositeOther(rg::nativefx::name(place.effect), address, cursor);
     return false;

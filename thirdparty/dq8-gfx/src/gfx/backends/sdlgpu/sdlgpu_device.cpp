@@ -3,6 +3,7 @@
 #include "gs_draw.frag.spv.h"
 #include "gs_draw.frag.dstcopy.spv.h"
 #include "gs_draw.frag.dual.spv.h"
+#include "gs_draw.frag.layers.spv.h"
 #include "gs_draw.vert.spv.h"
 #include "gs_native.vert.spv.h"
 #include "gs_index8.frag.spv.h"
@@ -169,7 +170,8 @@ size_t GsPipelineKeyHash::operator()(const GsPipelineKey &key) const {
         (static_cast<uint64_t>(key.destinationFactor) << 48u) |
         (static_cast<uint64_t>(key.blendOperation) << 56u));
     mix(key.destinationCopy | (static_cast<uint64_t>(key.nativeMesh) << 8u) |
-        (static_cast<uint64_t>(key.cullMode) << 16u) | (static_cast<uint64_t>(key.dualSource) << 24u));
+        (static_cast<uint64_t>(key.cullMode) << 16u) | (static_cast<uint64_t>(key.dualSource) << 24u) |
+        (static_cast<uint64_t>(key.layerCount) << 32u) | (static_cast<uint64_t>(key.layerSlot) << 40u));
     return static_cast<size_t>(hash);
 }
 
@@ -311,6 +313,17 @@ bool SdlGpuDevice::create(std::string &error) {
         }
     }
 
+    // Rogue Galaxy's object layers (added): SPIR-V only; without it the
+    // objects keep their offscreen round trips.
+    if (fragmentInfo.format == SDL_GPU_SHADERFORMAT_SPIRV) {
+        SDL_GPUShaderCreateInfo layersInfo = fragmentInfo;
+        layersInfo.code = reinterpret_cast<const uint8_t *>(kGsDrawLayersFragSpirv);
+        layersInfo.code_size = sizeof(kGsDrawLayersFragSpirv);
+        m_layersShader = SDL_CreateGPUShader(m_device, &layersInfo);
+        if (!m_layersShader)
+            std::fprintf(stderr, "[gfx] no object layers shader: %s\n", SDL_GetError());
+    }
+
     SDL_GPUSamplerCreateInfo samplerInfo{};
     samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
     samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -372,6 +385,9 @@ void SdlGpuDevice::destroy() {
         SDL_ReleaseGPUShader(m_device, m_dualSourceShader);
     m_dualSourceShader = nullptr;
     m_dualSourceBlend = false;
+    if (m_layersShader)
+        SDL_ReleaseGPUShader(m_device, m_layersShader);
+    m_layersShader = nullptr;
     if (m_vertexShader)
         SDL_ReleaseGPUShader(m_device, m_vertexShader);
     if (m_nativeVertexShader)
@@ -927,15 +943,25 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     blend.color_write_mask = key.colorWriteMask;
     blend.enable_color_write_mask = true;
 
-    SDL_GPUColorTargetDescription colorTarget{};
-    colorTarget.format = static_cast<SDL_GPUTextureFormat>(key.colorFormat);
-    colorTarget.blend_state = blend;
+    // Object layers: the one drawn into as the key says, the others kept.
+    std::array<SDL_GPUColorTargetDescription, kMaxLayers> colorTargets{};
+    const uint32_t targetCount = key.layerCount != 0u ? std::min<uint32_t>(key.layerCount, kMaxLayers) : 1u;
+    for (uint32_t i = 0; i < targetCount; ++i) {
+        colorTargets[i].format = static_cast<SDL_GPUTextureFormat>(key.colorFormat);
+        if (key.layerCount == 0u || i == key.layerSlot) {
+            colorTargets[i].blend_state = blend;
+        } else {
+            colorTargets[i].blend_state.enable_color_write_mask = true;
+            colorTargets[i].blend_state.color_write_mask = 0u;
+        }
+    }
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = key.nativeMesh ? m_nativeVertexShader : m_vertexShader;
-    info.fragment_shader = key.destinationCopy ? m_destinationShader
-                           : key.dualSource            ? m_dualSourceShader
-                                                       : m_fragmentShader;
+    info.fragment_shader = key.layerCount != 0u    ? m_layersShader
+                           : key.destinationCopy ? m_destinationShader
+                           : key.dualSource      ? m_dualSourceShader
+                                                 : m_fragmentShader;
     info.vertex_input_state.vertex_buffer_descriptions = &bufferDescription;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = kAttributes.data();
@@ -952,8 +978,8 @@ SDL_GPUGraphicsPipeline *SdlGpuDevice::pipeline(const GsPipelineKey &key, std::s
     info.depth_stencil_state.compare_op = static_cast<SDL_GPUCompareOp>(key.depthCompare);
     info.depth_stencil_state.enable_depth_test = key.hasDepth != 0u;
     info.depth_stencil_state.enable_depth_write = key.hasDepth != 0u && key.depthWrite != 0u;
-    info.target_info.color_target_descriptions = &colorTarget;
-    info.target_info.num_color_targets = 1u;
+    info.target_info.color_target_descriptions = colorTargets.data();
+    info.target_info.num_color_targets = targetCount;
     info.target_info.has_depth_stencil_target = key.hasDepth != 0u;
     info.target_info.depth_stencil_format = static_cast<SDL_GPUTextureFormat>(key.depthFormat);
 
