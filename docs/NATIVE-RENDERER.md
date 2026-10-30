@@ -485,6 +485,28 @@ object). The few fading objects keep the offscreen pass, or take their
 alpha in the layer. A temporal upscaler (phase 2) would also cover this
 edge; until then the pass keeps parity.
 
+### Stage E batched by reordering (2026-10-29, `RG_NATIVE_COMPOSITE=1`, off)
+
+A first, exact form of the batching: the GS gets the objects' heads (the
+clear of the box in `02a00`, the model) one after another and then their
+tails (the composite over the frame), so it switches target once a batch;
+the VIF1 thread still runs everything in order (`src/vif1_thread.cpp`,
+`compositePacket`). The head and tail are the packet memory before and after
+the composite's last `ModelEmitDrawPackets`; what a VU1 program kicks goes
+by the list position of its MSCAL (`PS2Memory::vif1Cursor`, patch 0022);
+the tail's fixed DMA call, a TEXFLUSH between objects and CLUT uploads that
+miss the held boxes go with the batch. A batch closes when the next box
+comes within 2 pixels of a held one, or anything else reaches the GS.
+
+On the walk it saves almost nothing (passes 180 to 177 a frame at 1x): of
+9,939 batches, 7,718 closed on an overlapping box and 2,206 on something
+else drawn between objects; consecutive objects overlap (a character's
+parts, the party walking together). So batching stage E means the merged
+layer with the objects' order kept per pixel (an object index beside the
+colour, the halo of each object applied over the earlier ones), which needs
+the backend to write that index while the objects draw: a second colour
+target, or array layers, in the native mesh and GS paths. Not built.
+
 ## Sizes and order
 
 Relative sizes from the shape of the work, not estimates in days. Phase 1 is

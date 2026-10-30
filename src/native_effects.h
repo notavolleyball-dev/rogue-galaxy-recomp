@@ -35,22 +35,52 @@ enum class Effect : uint8_t
     // DrawListBeginPlaneShadowPass: its packets go on as they are; the
     // registers they set are where the shadow's sprites start from.
     ShadowSetup,
+    // ModelDrawOffscreenComposite (stage E), an object at a time: the head
+    // draws it into the offscreen buffer (its clear, its model), the tail
+    // lays that over the frame (src/vif1_thread.cpp batches the tails).
+    CompositeHead,
+    CompositeTail,
+};
+
+// What an EE address of the frame's packet memory holds: an effect's
+// packets, and for the composites the object's number.
+struct Place
+{
+    Effect effect = Effect::None;
+    uint32_t unit = 0u;
 };
 
 bool enabled();
 const char *name(Effect effect);
+// RG_NATIVE_COMPOSITE=1: the VIF1 thread batches stage E's objects.
+bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.
 void install(PS2Runtime &runtime);
 
 // The effect whose packets the EE address holds (any of RDRAM's windows).
 Effect effectAt(uint32_t address);
+Place placeAt(uint32_t address);
 
 // From the packets an effect's function wrote, in order: the effect, and
 // the packets with their kicks withheld. False, with `why`, when they are
 // not the sprites expected.
 // A ShadowSetup packet: the registers it writes, for the next shadow.
 void observe(Effect effect, const uint8_t *data, uint32_t size);
+
+// A composite's head: the box its clear sprites cover in the offscreen
+// buffer (CT32 at `base`, `fbw`), in pixels, x1 and y1 exclusive.
+struct Box
+{
+    uint32_t base = 0u;
+    uint32_t fbw = 0u;
+    int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+};
+bool clearBox(const std::vector<std::vector<uint8_t>> &packets, Box &box);
+// The 8 KiB pages of GS memory (block address / 32) a box covers.
+void boxPages(const Box &box, uint32_t &first, uint32_t &last);
+// When a packet starts a transfer into GS memory: the pages it may write.
+bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &last);
 
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why);

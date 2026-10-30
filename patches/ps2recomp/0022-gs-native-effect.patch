@@ -107,6 +107,28 @@ index f175e0d..0d2a86b 100644
  // A strip a VU1 program would have drawn, as the program's inputs (Rogue
  // Galaxy: added; the game's src/vu1_native.h builds it). A renderer that can
  // transforms the vertices itself (SdlGpuBackend, on the GPU); any other gets
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 0e719e0..6b23502 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -383,6 +383,9 @@ public:
+     void processVIF0Data(const uint8_t *data, uint32_t sizeBytes);
+     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
++    // The VIF code processVIF1Data is at, for the callbacks it makes (an
++    // MSCAL's position in its data; Rogue Galaxy: added).
++    const uint8_t *vif1Cursor() const { return m_vif1Cursor; }
+     void processPendingTransfers();
+     std::vector<uint32_t> consumeCompletedDmacCauses();
+ 
+@@ -447,6 +450,7 @@ public:
+     DmaStartObserver m_dmaStartObserver;
+     GifArbiter *m_gifArbiter = nullptr;
+     Vu1MscalCallback m_vu1MscalCallback;
++    const uint8_t *m_vif1Cursor = nullptr;
+     Vu1MscntCallback m_vu1MscntCallback;
+     GifPacketCallback m_gifImageCallback;
+ 
 diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 index a948a2e..89a70c1 100644
 --- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
@@ -189,3 +211,15 @@ index efdf14b..f325fd1 100644
  void GSThreadedBackend::BeginTransfer(const GSTransferCommand &command)
  {
      m_impl->enqueue({Impl::Op::Transfer, command});
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 29a04e1..294a2d0 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -327,6 +327,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+     {
+         uint32_t cmd;
+         memcpy(&cmd, data + pos, 4);
++        m_vif1Cursor = data + pos;
+         pos += 4;
+ 
+         uint8_t opcode = (cmd >> 24) & 0x7F;
