@@ -22,7 +22,9 @@ class PS2Runtime;
 // RG_NATIVE_GLARE (on unless 0): GlareFilterDrawMaybe (stage A: the frame's bright parts
 // down to 192x192, 20 shifted adds of that buffer onto itself, back onto the
 // frame). RG_NATIVE_SHADOW (on unless 0): DrawListEndPlaneShadowPass (stage F: the
-// shadow volumes' mask, blurred, onto the frame). RG_NATIVE_EFFECTS_LOG=1
+// shadow volumes' mask, blurred, onto the frame). RG_NATIVE_CBLUR (on unless
+// 0): CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
+// draws). RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx
 {
@@ -32,6 +34,9 @@ enum class Effect : uint8_t
     None,
     Glare,
     Shadow,
+    // CBlurTexBlurMaybe: the 64x64 buffer at 03f80 decayed, added to and
+    // its alpha taken from its green, a frame at a time.
+    CBlur,
     // DrawListBeginPlaneShadowPass: its packets go on as they are; the
     // registers they set are where the shadow's sprites start from.
     ShadowSetup,

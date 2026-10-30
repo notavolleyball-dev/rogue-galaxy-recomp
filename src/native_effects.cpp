@@ -26,6 +26,7 @@ constexpr uint32_t kPlaneShadowBegin = 0x00147B80u; // DrawListBeginPlaneShadowP
 constexpr uint32_t kCompositeAt = 0x0016B8A0u;
 constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u; // ModelEmitDrawPacketsMaybe
 constexpr uint32_t kDrawListFrameBegin = 0x001425D0u;
+constexpr uint32_t kCBlurTexBlur = 0x001789E0u; // CBlurTexBlurMaybe
 
 // The draw context (GetDrawCtx_15de80 reads it at gp-0x40cc): the frame's
 // buffer index at +0 and its memory stacks at +8, each 8 bytes into the
@@ -170,6 +171,18 @@ void planeShadowBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_shadowBeginOriginal, rdram, ctx, runtime, &afterShadowBegin, stackTop());
 }
 
+PS2Runtime::RecompiledFunction g_cblurOriginal = nullptr;
+
+void afterCBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::CBlur);
+}
+
+void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_cblurOriginal, rdram, ctx, runtime, &afterCBlur, stackTop());
+}
+
 // Stage E, an object at a time. The composite draws offscreen when its
 // settings (a0) have +0x50 and +0x5C, a buffer at +0x20 and a strength at
 // +0x24 not negative (docs/NATIVE-RENDERER.md, "Stage E, why offscreen"):
@@ -292,6 +305,7 @@ void modelEmitDrawPackets(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
 bool g_glare = false;
 bool g_shadow = false;
 bool g_composites = false;
+bool g_cblur = false;
 
 // --- Packets -----------------------------------------------------------
 
@@ -787,40 +801,55 @@ struct Builder
                 std::ceil(first.rect[3]) < static_cast<float>(height) || (first.test & 1u))
                 return fail("an effect buffer read before it is wholly drawn");
         }
+        // A GS buffer drawn in a way the pipeline cannot is taken over
+        // (kTakenOver): drawn as the effect's own from what it holds, and
+        // what it ends with put back.
+        for (uint32_t n = 0; n < out.opCount && !tail; ++n)
+        {
+            GSNativeEffect::Buffer &target = out.buffers[out.ops[n].target];
+            if (target.external && intoGs(out.ops[n]) != nullptr)
+                target.external = GSNativeEffect::kTakenOver;
+        }
         for (uint32_t n = 0; n < out.opCount; ++n)
         {
             const GSNativeEffect::Op &op = out.ops[n];
+            const GSNativeEffect::Buffer &buffer = out.buffers[op.target];
             if (op.flags & GSNativeEffect::kGreenToAlpha)
             {
-                const GSNativeEffect::Buffer &buffer = out.buffers[op.target];
-                if (buffer.external || strips[n] != buffer.fbw * 64u / 16u ||
+                if (buffer.external == 1u || strips[n] != buffer.fbw * 64u / 16u ||
                     op.rect[3] < static_cast<float>(buffer.height))
                     return fail("a CT16 channel copy of part of a buffer");
                 continue;
             }
-            if (!out.buffers[op.target].external)
-            {
-                if (op.flags & GSNativeEffect::kKeepAlpha)
-                    return fail("an effect buffer drawn with its alpha masked");
+            if (buffer.external != 1u)
                 continue;
-            }
-            if (op.source >= 0 && out.buffers[op.source].external && !tail)
-                return fail("a sprite into a GS target from another");
-            if ((op.test & 1u) && (!tail || ((op.test >> 12) & 3u) != 0u))
-                return fail("a sprite into a GS target with the alpha test");
-            if (!(op.flags & GSNativeEffect::kBlend))
-                continue;
-            // (A - B) C + D with D = Cd and C not Ad: A = Cs and B = 0 (an
-            // add), A = 0 and B = Cs (a subtract), A = Cs and B = Cd (laid
-            // over, its alpha masked: the pipeline blends by the shader's).
-            const uint32_t ab = static_cast<uint32_t>(op.alpha & 0xFu);
-            const uint32_t c = static_cast<uint32_t>((op.alpha >> 4) & 3u);
-            if (((op.alpha >> 6) & 3u) != 1u || c == 1u || (ab != 0x8u && ab != 0x2u && ab != 0x4u))
-                return fail("a sprite into a GS target with a blend it cannot draw");
-            if (ab == 0x4u && !(op.flags & GSNativeEffect::kKeepAlpha) && !tail)
-                return fail("a sprite laid over a GS target that writes its alpha");
+            if (const char *problem = intoGs(op))
+                return fail(problem);
         }
         return !failed;
+    }
+
+    // Why the pipeline cannot draw a sprite into a GS target, or null.
+    const char *intoGs(const GSNativeEffect::Op &op) const
+    {
+        if (op.flags & GSNativeEffect::kGreenToAlpha)
+            return "a CT16 channel copy of a GS buffer";
+        if (op.source >= 0 && out.buffers[op.source].external && !tail)
+            return "a sprite into a GS target from another";
+        if ((op.test & 1u) && (!tail || ((op.test >> 12) & 3u) != 0u))
+            return "a sprite into a GS target with the alpha test";
+        if (!(op.flags & GSNativeEffect::kBlend))
+            return nullptr;
+        // (A - B) C + D with D = Cd and C not Ad: A = Cs and B = 0 (an
+        // add), A = 0 and B = Cs (a subtract), A = Cs and B = Cd (laid
+        // over, its alpha masked: the pipeline blends by the shader's).
+        const uint32_t ab = static_cast<uint32_t>(op.alpha & 0xFu);
+        const uint32_t c = static_cast<uint32_t>((op.alpha >> 4) & 3u);
+        if (((op.alpha >> 6) & 3u) != 1u || c == 1u || (ab != 0x8u && ab != 0x2u && ab != 0x4u))
+            return "a sprite into a GS target with a blend it cannot draw";
+        if (ab == 0x4u && !(op.flags & GSNativeEffect::kKeepAlpha) && !tail)
+            return "a sprite laid over a GS target that writes its alpha";
+        return nullptr;
     }
 };
 
@@ -832,6 +861,7 @@ const char *name(Effect effect)
     {
     case Effect::Glare: return "glare";
     case Effect::Shadow: return "shadow";
+    case Effect::CBlur: return "cblur";
     case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
@@ -855,7 +885,8 @@ bool enabled()
         g_glare = flag("RG_NATIVE_GLARE", true);
         g_shadow = flag("RG_NATIVE_SHADOW", true);
         g_composites = flag("RG_NATIVE_COMPOSITE", true);
-        return g_glare || g_shadow || g_composites;
+        g_cblur = flag("RG_NATIVE_CBLUR", true);
+        return g_glare || g_shadow || g_composites || g_cblur;
     }();
     return on;
 }
@@ -880,6 +911,10 @@ void install(PS2Runtime &runtime)
                      !rg::timing::hookFunction(runtime, kPlaneShadowEnd, &planeShadowEnd, g_shadowOriginal)))
     {
         std::fprintf(stderr, "[nativefx] the plane shadow stays GS packets\n");
+    }
+    if (g_cblur && !rg::timing::hookFunction(runtime, kCBlurTexBlur, &cblurTexBlur, g_cblurOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the CBlur stays GS packets\n");
     }
     if (g_composites &&
         (!rg::timing::hookFunction(runtime, kCompositeAt, &compositeAt, g_compositeOriginal) ||
@@ -1071,7 +1106,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
 {
     out = GSNativeEffect{};
     withheld.clear();
-    if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CompositeTail)
+    if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur &&
+        effect != Effect::CompositeTail)
     {
         why = "no such effect";
         return false;
@@ -1154,7 +1190,10 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
             {
                 const auto &b = out.buffers[i];
                 std::fprintf(stderr, "[nativefx]   buffer %u: %05x fbw %u %ux%u%s\n", i, b.base, b.fbw, b.width,
-                             b.height, b.external ? " (the GS's)" : "");
+                             b.height,
+                             b.external == GSNativeEffect::kTakenOver ? " (the GS's, taken over)"
+                             : b.external                             ? " (the GS's)"
+                                                                      : "");
             }
             for (uint32_t n = 0; n < out.opCount; ++n)
             {

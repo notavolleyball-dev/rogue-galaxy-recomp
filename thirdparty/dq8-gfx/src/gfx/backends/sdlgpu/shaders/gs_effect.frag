@@ -34,6 +34,7 @@ const uint kCt24 = 32u;
 const uint kHighlight = 64u;
 const uint kHighlight2 = 128u;
 const uint kGreenToAlpha = 1024u;
+const uint kKeepAlpha = 2048u;
 const uint kExternal = 256u;
 const uint kTextured = 512u;
 // The alpha pass after a lay over: the alpha the GS stores, As (the backend's).
@@ -178,6 +179,7 @@ void main() {
         rgb = (((a - b) * factor) >> 7) + d;
     }
     rgb = (flags & kColClamp) != 0u ? clamp(rgb, ivec3(0), ivec3(255)) : (rgb & ivec3(255));
-    uint outAlpha = writeAlpha ? c.a : dst.a;
+    // Into an external target the pipeline masks the alpha.
+    uint outAlpha = writeAlpha && (flags & kKeepAlpha) == 0u ? c.a : dst.a;
     outColor = vec4(vec3(rgb), float(outAlpha)) / 255.0;
 }

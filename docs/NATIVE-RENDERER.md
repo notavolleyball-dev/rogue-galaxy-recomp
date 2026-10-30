@@ -161,7 +161,7 @@ order to port them:
 | `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on by default) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
 | `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
-| `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass |
+| `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form of `CBlurTexBlur` done (`RG_NATIVE_CBLUR`, on by default); `CBlurDraw` stays GS packets |
 | `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
 | `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; not seen | as the glare |
 | `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
@@ -200,7 +200,7 @@ fully playable. `RG_RENDER=gs` keeps the whole GS path selectable until phase
 5. `RG_NATIVE=models,post,ui,...` turns the native categories on one at a
 time, and a debug key flips them live on the same frame. (Planned; none of
 the three exists yet. Today each piece has its own switch: `RG_VU1_NATIVE`,
-`RG_NATIVE_GLARE`, `RG_NATIVE_SHADOW`, `RG_NATIVE_COMPOSITE`; see
+`RG_NATIVE_GLARE`, `RG_NATIVE_SHADOW`, `RG_NATIVE_COMPOSITE`, `RG_NATIVE_CBLUR`; see
 [DEVELOPMENT.md](DEVELOPMENT.md).)
 
 **Reference scenes:** Salgin's first scene, the town square (`TOWN=1
@@ -412,6 +412,25 @@ GPU busy unchanged.
 **The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on by
 default:** see "Stage E in object layers" below.
 
+**CBlur (2026-10-30), `RG_NATIVE_CBLUR`, on by default.**
+`CBlurTexBlurMaybe`'s packets (with the `GfxBlitTexRectPixelsAt` it calls)
+are five ops on the 64x64 `03f80`, which keeps its state from frame to
+frame: copied to `02a00`; its colour set to white with the alpha masked;
+that times Ad (alpha 0x98, which reads the destination's alpha); the copy
+added back tinted 0x79; and its alpha taken from its green (the CT16 channel
+copy, as the shadow's). `CBlurDraw` later lays `02a40` over the frame by
+`03f80`'s alpha, from GS packets as before. `03f80` is the GS's, so the
+effect path gained a way to draw into a GS buffer what the pipeline cannot
+blend: such a buffer is taken over (`GSNativeEffect::kTakenOver`). It is
+drawn as an own buffer, through two textures at its surface's scale; the
+first op reads the surface and the last writes it, so nothing is copied.
+Own buffers honour the alpha mask in the shader now. At pad 3000 at 1x the
+frame and `03f80` match the GS path's exactly. At 3x, 475 pixels differ
+where `03f80`'s alpha is laid over the frame; the native frame there
+matches the 1x frame and the GS path's does not (one is 93 against the GS
+path's 50, and 93 at 1x). Over 60 frames at 1x it saves 5 passes, 2
+feedback copies and 1 destination read a frame.
+
 **Where the GS path is wrong: the glare (2026-10-30).** The logged frame
 at pad 3000 (the save point and its sign in view) differs from the GS
 path's in 8% of its pixels, up to 241 levels: the native glare shows on the
@@ -433,9 +452,11 @@ by default.
 3x and 8x take about 53 passes a frame (from about 199) and about 16
 feedback copies a frame (8x, `bw-perf.sh`); GPU busy and power are
 unchanged on the RX 6700 XT. Left from the census: the depth of field,
-CBlur, the frame copies (`CharaDrawTranslucentPass`, `GfxBlitTexRectPixels`)
-and the game thread's 32-strip transfer at the frame's end; which of them
-make the remaining feedback copies is not yet counted.
+`CBlurDraw`, the frame copies (`CharaDrawTranslucentPass`,
+`GfxBlitTexRectPixels`) and the game thread's 32-strip transfer at the
+frame's end. With CBlur native too, about 12 feedback copies and 8
+destination reads a frame remain at 1x (`DQ8_GFX_STATS_EVERY`); which draws
+make them is not yet counted.
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured

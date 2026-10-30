@@ -48,7 +48,7 @@ diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/run
 index f175e0d..8760824 100644
 --- a/ps2xRuntime/include/runtime/gs/gs_types.h
 +++ b/ps2xRuntime/include/runtime/gs/gs_types.h
-@@ -328,6 +328,79 @@ struct GSPrimitiveBatch
+@@ -328,6 +328,83 @@ struct GSPrimitiveBatch
      uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
  };
  
@@ -102,6 +102,10 @@ index f175e0d..8760824 100644
 +    // kCt24's TEXA the GS's when the effect reaches it (GS::submitNativeEffect
 +    // fills `texa` in): set before the packets the effect was made of.
 +    static constexpr uint32_t kTexaFromGs = 4096u;
++    // Buffer::external for a GS buffer drawn as the effect's own (sprites
++    // into it the pipeline cannot blend): from what it holds, and what it
++    // ends with put back.
++    static constexpr uint32_t kTakenOver = 2u;
 +    static constexpr uint32_t kMaxBuffers = 12u;
 +    static constexpr uint32_t kMaxOps = 96u;
 +    // What else it is, instead of sprites: Rogue Galaxy's per-object
