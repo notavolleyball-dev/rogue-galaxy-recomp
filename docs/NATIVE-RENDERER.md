@@ -6,9 +6,62 @@ with a renderer that knows what it is drawing: models with their matrices,
 named effect buffers, and a 2D layer. Proposed 2026-10-28. Since then
 phase 1 is done for every VU1 program the recordings hold
 ([VU1-NATIVE.md](VU1-NATIVE.md), 2026-10-29), phase 0's census of the
-effects is in "Phase 0" below, and phase 3 has its first three effects: the
-glare, the plane shadow and the per-object composites (2026-10-30; see
-"Phase 3"). The rest is a plan.
+effects is in "Phase 0" below, and phase 3 has five effects: the glare, the
+plane shadow, the per-object composites, CBlur's texture blur and the bloom
+(2026-10-30; see "Phase 3"). All of it sits behind the F1 menu's "Native
+renderer" switch. "Where it stands" is the summary for picking the work up;
+the rest is the plan and its record.
+
+## Where it stands (2026-10-30)
+
+**Done, behind the switch:** every recorded VU1 program native, the strips
+drawn as GPU meshes (phase 1); the glare, the plane shadow, the per-object
+composites (object layers, their lay overs one draw with dual-source
+blending), CBlur's texture blur and the bloom drawn by the renderer
+(phase 3). Each is checked byte for byte at 1x against the GS path or its
+replay, and at 1x and 3x in VRAM. Speed: 8x holds 60 fps on the RX 6700 XT;
+"deck mode" (a throttled desktop: 4 cores at 2.9 GHz, the GPU's shader clock
+at 500 MHz, memory at 674 MHz) went from 24.4 fps at 4x (`f53f358`, before
+any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
+(victor-takai/rogue-galaxy-recomp#10).
+
+**Left before the GS can go, in the order to take it:**
+
+1. **The field's remaining post and offscreen work** (phase 3, the census
+   table in "Effects: hook the function"): `TexAnimeTableApply`'s animated
+   textures (render-to-texture the scene samples), the depth of field,
+   `CBlurDraw`, the frame copies (`CharaDrawTranslucentPass` for the
+   refraction material, `GfxBlitTexRectPixels`), the map pieces
+   `MapDrawGroupRange` draws offscreen, the frame clear, the game thread's
+   32-strip transfer at the frame's end, the effects drawn as geometry
+   (sword trails, the sun light, battle bursts, effect nodes), the fades,
+   and whether the lens flare's depth probe is right.
+2. **Native draws for the VU1 programs still on packets:** outlines (about
+   17% of the field's vertices), shadow volumes (5%), particles, the
+   projected texture, the object set-up. They are computed natively but
+   still kick GS packets.
+3. **Censuses not run yet:** the town, menus, events with item messages,
+   battle dissolves, movies (`tools/bench/origins-run.sh`). Each may add
+   effects to item 1.
+4. **Textures without local memory** (phase 4): the address table (a page
+   names its latest upload, decoded once and keyed by content, or the
+   target that last drew there; CLUT loads through it), about 4 MB of
+   uploads a frame recognized again rather than decoded again, the
+   reinterpretations that survive the effects as explicit cases.
+5. **2D and UI** (phase 4): the GS packets no hooked function or VU1
+   program made (about 4,800 `GsPkt*` call sites) to a sprite batcher with
+   the GS's integer colour arithmetic and no local memory behind it; then
+   reversed float depth.
+6. **Remove the GS path** (phase 5) once `gs_vram` is not allocated in a
+   native run and a playthrough route passes the frame tools.
+
+**The VU1 tail** runs alongside: 17 pieces never recorded, a program with
+one of them left to the VU1 (speed, not correctness, until phase 4).
+[VU1-NATIVE.md](VU1-NATIVE.md) "Status" has which table row each belongs
+to and a checklist of places to play with harvest mode on; a GameFAQs save
+at the end of the game (`build/run/mc0-late`, untracked) gave four of them
+on Zerard. Row 6 (refraction, the transporter's beam) has its samples and
+is ready to port.
 
 ## Why
 
@@ -67,6 +120,17 @@ people expect from a modern port all need data the GS never sees:
 - **The oracle is this project's GS path.** It renders correctly, and its
   frame tools (`RG_GS_FRAMELOG`, `RG_GS_CAPTURE`, `RG_SELFTEST=gs`,
   byte-identical frames at 1x) are how every native piece is checked.
+- **RGDecomp's port branch** (`Dorgengoa/RGDecomp`, branch `port`,
+  2026-10-28, CC0): the decompilation compiled as a native Windows game,
+  D3D11 / Vulkan, a native-only build with no GS model (its
+  `docs/NATIVE-RENDER.md`, "Checkpoint 10"). It still consumes the game's
+  GIF packets and keeps GS local memory on the GPU, and is not exact by
+  design (hardware clipping, float depth; its gate is 31-45 dB PSNR against
+  its own emulated build). Useful as notes to check here, as RGDecomp's:
+  VU1 semantics of row 6 (refraction) and row 9 (reflection map, the
+  Insectron floors), row 7's UV wave (reads a VU memory word nothing
+  writes), and the order it took off the GS (meshes, immediates, local
+  memory on the GPU, CLUT loads on the GPU, then the model dropped).
 - **RGDecomp gives names and addresses only.** `functions_*.csv` derive from
   it, and every function this plan hooks is in them. Its descriptions of what
   code does (VU1 row meanings, effect parameters, the native port's design) are
@@ -156,14 +220,14 @@ order to port them:
 
 | Function | Stage, per frame | Native form |
 |---|---|---|
-| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form done: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE`, on by default; exact where the GS path is not, see "Phase 3") |
-| `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on by default) |
-| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on by default) |
+| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form done: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE`, on with the native renderer; exact where the GS path is not, see "Phase 3") |
+| `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on with the native renderer) |
+| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on with the native renderer) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
 | `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
-| `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form of `CBlurTexBlur` done (`RG_NATIVE_CBLUR`, on by default); `CBlurDraw` stays GS packets |
+| `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form of `CBlurTexBlur` done (`RG_NATIVE_CBLUR`, on with the native renderer); `CBlurDraw` stays GS packets |
 | `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
-| `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare. Parity form of the bloom done (`RG_NATIVE_BLOOM`, on by default) |
+| `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare. Parity form of the bloom done (`RG_NATIVE_BLOOM`, on with the native renderer) |
 | `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
 | `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | native depth sampled in a small compute pass, read a frame late |
 | `ScreenColorFilterMaybe_179c60`, `ScreenFade*`, `ScreenFadeBlockCaptureFrame_177ed0` | fades (the battle's start) | full-screen tint or fade; capture kept on the GPU |
@@ -196,12 +260,18 @@ widescreen.
 ## Phases
 
 Each phase ends with a measurement on the reference scenes and leaves the game
-fully playable. `RG_RENDER=gs` keeps the whole GS path selectable until phase
-5. `RG_NATIVE=models,post,ui,...` turns the native categories on one at a
-time, and a debug key flips them live on the same frame. (Planned; none of
-the three exists yet. Today each piece has its own switch: `RG_VU1_NATIVE`,
-`RG_NATIVE_GLARE`, `RG_NATIVE_SHADOW`, `RG_NATIVE_COMPOSITE`, `RG_NATIVE_CBLUR`, `RG_NATIVE_BLOOM`; see
-[DEVELOPMENT.md](DEVELOPMENT.md).)
+fully playable. The GS path stays selectable until phase 5: the F1 menu's
+"Native renderer" (`native_renderer` in settings.ini, `RG_NATIVE_RENDERER=0`
+or `1` for a run; `src/native_renderer.h`) is the one switch, off unless set,
+read once at start (a change takes effect at the next start). On, it sets
+`RG_VU1_NATIVE=gpu` and every effect of `src/native_effects.h`; each of
+`RG_VU1_NATIVE`, `RG_NATIVE_GLARE`, `RG_NATIVE_SHADOW`, `RG_NATIVE_COMPOSITE`,
+`RG_NATIVE_CBLUR` and `RG_NATIVE_BLOOM` still overrides its own piece
+([DEVELOPMENT.md](DEVELOPMENT.md)). Code that sets itself up once must read
+the switch lazily, not in a static initializer: those run before the menu
+hands its setting over. Upstream, the switch alone is victor-takai's PR #15
+(branch `native-renderer-flag`), so native work can go behind it. A debug
+key that flips native pieces live on the same frame is still planned.
 
 **Reference scenes:** Salgin's first scene, the town square (`TOWN=1
 walk.sh`), a forced battle (battle bench), the boss gate, an event with an
@@ -375,7 +445,7 @@ besides drawing (timers, work-texture registration, the `GfxEndFrame` probe
 bookkeeping) is reproduced in the hook. The diff of the function's
 non-graphics side effects is part of the review.
 
-**The glare (2026-10-29), `RG_NATIVE_GLARE`, on by default 2026-10-30.** It went another
+**The glare (2026-10-29), `RG_NATIVE_GLARE`, on with the native renderer (2026-10-30).** It went another
 way than planned above: the game's function still runs, and the VIF1 thread
 holds the packets it wrote (`src/native_effects.cpp`), builds a
 `GSNativeEffect` from their sprites (3 buffers, 29 sprites) and sends the
@@ -393,7 +463,7 @@ to 31.0-31.3 W. The threads' CPU time (`/proc`, 20 s) is the same (GS worker
 47-49% to 58-60%, which is waiting, not work: `submitEffect` itself takes
 about 6 ms a second (the `[gfx]` line's "ms flush, buffers, sprites").
 
-**The plane shadow (2026-10-29), `RG_NATIVE_SHADOW`, on by default 2026-10-30.** The same
+**The plane shadow (2026-10-29), `RG_NATIVE_SHADOW`, on with the native renderer (2026-10-30).** The same
 way, from `DrawListEndPlaneShadowPass`'s packets; `DrawListBeginPlaneShadowPass`'s
 go on as they are, and the registers they set (`XYOFFSET_1`, `SCISSOR_1`)
 are where the shadow's sprites start from. Its five steps: `02a00` (the
@@ -409,10 +479,10 @@ the last step shows them). At 3x in the 60 fps mode, with the glare: passes
 199 to 86 a frame, feedback copies 121 to 12, draws 644 to 527, still 60 fps,
 GPU busy unchanged.
 
-**The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on by
-default:** see "Stage E in object layers" below.
+**The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on with
+the native renderer:** see "Stage E in object layers" below.
 
-**CBlur (2026-10-30), `RG_NATIVE_CBLUR`, on by default.**
+**CBlur (2026-10-30), `RG_NATIVE_CBLUR`, on with the native renderer.**
 `CBlurTexBlurMaybe`'s packets (with the `GfxBlitTexRectPixelsAt` it calls)
 are five ops on the 64x64 `03f80`, which keeps its state from frame to
 frame: copied to `02a00`; its colour set to white with the alpha masked;
@@ -446,7 +516,7 @@ memory just before the add onto the frame; by the GS's arithmetic on its
 `02a00`, 706 pixels survive the second step alone. So the GS path is no
 oracle where a blend's factor comes from a texture's alpha above 0x80 (its
 destination copy takes only vertex alpha above it); the native glare is on
-by default.
+with the native renderer.
 
 **Where it stands (2026-10-30):** with all three on, the walk's last 25 s at
 3x and 8x take about 53 passes a frame (from about 199) and about 16
@@ -461,7 +531,7 @@ the last input walks into (pad 3400 on): there `BloomExtractBlurMaybe` runs
 in the field, 14 sprites a frame on `02a00`, `02c40` and the frame, and
 with it about 6 to 12 feedback copies and 2 to 8 destination reads a frame.
 
-**The bloom (2026-10-30), `RG_NATIVE_BLOOM`, on by default.** The builder
+**The bloom (2026-10-30), `RG_NATIVE_BLOOM`, on with the native renderer.** The builder
 took `BloomExtractBlurMaybe`'s packets as they were: `02a00` cleared, the
 frame's alpha-tested pixels down to it, times their alpha (Cs Ad), then four
 shifted adds into `02c40`, four back into `02a00`, and that added onto the
@@ -563,7 +633,7 @@ object). The few fading objects keep the offscreen pass, or take their
 alpha in the layer. A temporal upscaler (phase 2) would also cover this
 edge; until then the pass keeps parity.
 
-### Stage E in object layers (2026-10-29, `RG_NATIVE_COMPOSITE`, on by default 2026-10-30)
+### Stage E in object layers (2026-10-29, `RG_NATIVE_COMPOSITE`, on with the native renderer)
 
 A first try reordered what the GS gets (the objects' heads, then their
 tails) and saved almost nothing (passes 180 to 177 a frame at 1x):
@@ -645,7 +715,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | groundwork built (jitter, camera registry, [FSR.md](FSR.md)); after phases 3 and 4, a fallback for low-end hardware |
-| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow and the per-object composites (object layers, on by default) done (2026-10-30) |
+| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow, the per-object composites (object layers), CBlur's texture blur and the bloom done (2026-10-30); the rest in "Where it stands" |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 
