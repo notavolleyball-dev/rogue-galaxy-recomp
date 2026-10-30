@@ -163,7 +163,7 @@ order to port them:
 | `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
 | `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form of `CBlurTexBlur` done (`RG_NATIVE_CBLUR`, on by default); `CBlurDraw` stays GS packets |
 | `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
-| `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; not seen | as the glare |
+| `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare |
 | `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
 | `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | native depth sampled in a small compute pass, read a frame late |
 | `ScreenColorFilterMaybe_179c60`, `ScreenFade*`, `ScreenFadeBlockCaptureFrame_177ed0` | fades (the battle's start) | full-screen tint or fade; capture kept on the GPU |
@@ -454,9 +454,12 @@ feedback copies a frame (8x, `bw-perf.sh`); GPU busy and power are
 unchanged on the RX 6700 XT. Left from the census: the depth of field,
 `CBlurDraw`, the frame copies (`CharaDrawTranslucentPass`,
 `GfxBlitTexRectPixels`) and the game thread's 32-strip transfer at the
-frame's end. With CBlur native too, about 12 feedback copies and 8
-destination reads a frame remain at 1x (`DQ8_GFX_STATS_EVERY`); which draws
-make them is not yet counted.
+frame's end. With CBlur native too, the walk at 1x makes no feedback
+copies and no destination reads (`DQ8_GFX_STATS_EVERY`, every 60 frames)
+except a burst of about 150 copies where it starts (pad 2900) and the area
+the last input walks into (pad 3400 on): there `BloomExtractBlurMaybe` runs
+in the field, 14 sprites a frame on `02a00`, `02c40` and the frame, and
+with it about 6 to 12 feedback copies and 2 to 8 destination reads a frame.
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
