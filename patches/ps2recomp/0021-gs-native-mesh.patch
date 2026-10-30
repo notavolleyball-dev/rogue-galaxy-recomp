@@ -70,7 +70,7 @@ index 4014e39..f175e0d 100644
  #include <cstdint>
  #include <cstring>
  #include <limits>
-@@ -327,6 +328,185 @@ struct GSPrimitiveBatch
+@@ -327,6 +328,212 @@ struct GSPrimitiveBatch
      uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
  };
  
@@ -137,6 +137,25 @@ index 4014e39..f175e0d 100644
 +    bool outside = false;
 +};
 +
++// The product-sums below must round as the VU1's separate multiply and add
++// do: no fused multiply-add, whatever -march the build has.
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#elif defined(_MSC_VER)
++#pragma fp_contract(off)
++#elif defined(__GNUC__)
++#pragma GCC push_options
++#pragma GCC optimize("fp-contract=off")
++#endif
++
++// 1 / x as the VU1's DIV gives it: at 0 the most float, with x's sign.
++inline float gsNativeReciprocal(float x)
++{
++    if (x != 0.0f)
++        return 1.0f / x;
++    return std::signbit(x) ? -std::numeric_limits<float>::max() : std::numeric_limits<float>::max();
++}
++
 +// FTOI0 and FTOI4: truncation toward zero, saturated.
 +inline int32_t gsNativeFtoi(float value, float scale)
 +{
@@ -155,7 +174,7 @@ index 4014e39..f175e0d 100644
 +    for (int i = 0; i < 4; ++i)
 +        clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
 +    GSNativeMeshPoint p;
-+    p.q = 1.0f / clip[3];
++    p.q = gsNativeReciprocal(clip[3]);
 +    p.px = clip[0] * p.q;
 +    p.py = clip[1] * p.q;
 +    const float z = clip[2] * p.q;
@@ -187,7 +206,7 @@ index 4014e39..f175e0d 100644
 +    const auto &m = h.matrix;
 +    const float z = v.x * m[0][2] + v.y * m[1][2] + v.z * m[2][2] + m[3][2];
 +    const float w = v.x * m[0][3] + v.y * m[1][3] + v.z * m[2][3] + m[3][3];
-+    const float pz = std::fmin(z * (1.0f / w) * h.depthScale, h.depthMax);
++    const float pz = std::fmin(z * gsNativeReciprocal(w) * h.depthScale, h.depthMax);
 +    return static_cast<float>((static_cast<uint32_t>(gsNativeFtoi(pz, 16.0f)) >> 4) & 0xFFFFFFu);
 +}
 +
@@ -252,6 +271,14 @@ index 4014e39..f175e0d 100644
 +        }
 +    }
 +}
++
++#if defined(__clang__)
++#pragma clang fp contract(on)
++#elif defined(_MSC_VER)
++#pragma fp_contract(on)
++#elif defined(__GNUC__)
++#pragma GCC pop_options
++#endif
 +
  struct GSTransferCommand
  {
