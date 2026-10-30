@@ -19,7 +19,7 @@ class PS2Runtime;
 // registers end as they would have), then the effect. Packets that are not
 // the shape expected go on as they are.
 //
-// RG_NATIVE_GLARE=1: GlareFilterDrawMaybe (stage A: the frame's bright parts
+// RG_NATIVE_GLARE (on unless 0): GlareFilterDrawMaybe (stage A: the frame's bright parts
 // down to 192x192, 20 shifted adds of that buffer onto itself, back onto the
 // frame). RG_NATIVE_SHADOW (on unless 0): DrawListEndPlaneShadowPass (stage F: the
 // shadow volumes' mask, blurred, onto the frame). RG_NATIVE_EFFECTS_LOG=1

@@ -156,7 +156,7 @@ order to port them:
 
 | Function | Stage, per frame | Native form |
 |---|---|---|
-| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form built: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE=1`, off by default: brighter than the GS path's, see "Phase 3") |
+| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form done: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE`, on by default; exact where the GS path is not, see "Phase 3") |
 | `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on by default) |
 | `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on by default) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
@@ -375,7 +375,7 @@ besides drawing (timers, work-texture registration, the `GfxEndFrame` probe
 bookkeeping) is reproduced in the hook. The diff of the function's
 non-graphics side effects is part of the review.
 
-**The glare (2026-10-29), behind `RG_NATIVE_GLARE=1`.** It went another
+**The glare (2026-10-29), `RG_NATIVE_GLARE`, on by default 2026-10-30.** It went another
 way than planned above: the game's function still runs, and the VIF1 thread
 holds the packets it wrote (`src/native_effects.cpp`), builds a
 `GSNativeEffect` from their sprites (3 buffers, 29 sprites) and sends the
@@ -412,13 +412,22 @@ GPU busy unchanged.
 **The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on by
 default:** see "Stage E in object layers" below.
 
-**The glare is not exact (2026-10-30).** The logged frame at pad 3000
-(the save point and its sign in view) differs from the GS path's in 8% of
-its pixels, up to 241 levels: the native glare is brighter on the sign's
-emblem, the sword and the save point. The shadow and the object layers
-alone match it to the pixel, so the glare stays off by default until this
-is found. The match noted above was the field's screenshots at other
-moments.
+**Where the GS path is wrong: the glare (2026-10-30).** The logged frame
+at pad 3000 (the save point and its sign in view) differs from the GS
+path's in 8% of its pixels, up to 241 levels: the native glare shows on the
+sign's emblem, the sword and the save point, and the GS path's shows
+nothing. The glare's second step draws `02a00` (the frame's pixels whose
+alpha is above 0x80) into `02c40` as Cs As, then takes Cs away: what is
+left is Cs (As - 128) / 128, the glow. Here As reaches 243 (716 pixels
+above 0x80; the two paths' `02a00` agree). The GS path blends with a
+fixed-function factor, which clamps As / 128 at one, so it is left with 0
+everywhere; the native effect does the GS's integer arithmetic in its
+shader. With the glare's GS packets, `02c40` was black in the GS path's
+memory just before the add onto the frame; by the GS's arithmetic on its
+`02a00`, 706 pixels survive the second step alone. So the GS path is no
+oracle where a blend's factor comes from a texture's alpha above 0x80 (its
+destination copy takes only vertex alpha above it); the native glare is on
+by default.
 
 **Where it stands (2026-10-30):** with all three on, the walk's last 25 s at
 3x and 8x take about 53 passes a frame (from about 199) and about 16
