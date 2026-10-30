@@ -27,6 +27,7 @@ constexpr uint32_t kCompositeAt = 0x0016B8A0u;
 constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u; // ModelEmitDrawPacketsMaybe
 constexpr uint32_t kDrawListFrameBegin = 0x001425D0u;
 constexpr uint32_t kCBlurTexBlur = 0x001789E0u; // CBlurTexBlurMaybe
+constexpr uint32_t kBloom = 0x00179360u;        // BloomExtractBlurMaybe
 
 // The draw context (GetDrawCtx_15de80 reads it at gp-0x40cc): the frame's
 // buffer index at +0 and its memory stacks at +8, each 8 bytes into the
@@ -183,6 +184,18 @@ void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_cblurOriginal, rdram, ctx, runtime, &afterCBlur, stackTop());
 }
 
+PS2Runtime::RecompiledFunction g_bloomOriginal = nullptr;
+
+void afterBloom(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::Bloom);
+}
+
+void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
+}
+
 // Stage E, an object at a time. The composite draws offscreen when its
 // settings (a0) have +0x50 and +0x5C, a buffer at +0x20 and a strength at
 // +0x24 not negative (docs/NATIVE-RENDERER.md, "Stage E, why offscreen"):
@@ -306,6 +319,7 @@ bool g_glare = false;
 bool g_shadow = false;
 bool g_composites = false;
 bool g_cblur = false;
+bool g_bloom = false;
 
 // --- Packets -----------------------------------------------------------
 
@@ -862,6 +876,7 @@ const char *name(Effect effect)
     case Effect::Glare: return "glare";
     case Effect::Shadow: return "shadow";
     case Effect::CBlur: return "cblur";
+    case Effect::Bloom: return "bloom";
     case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
@@ -886,7 +901,8 @@ bool enabled()
         g_shadow = flag("RG_NATIVE_SHADOW", true);
         g_composites = flag("RG_NATIVE_COMPOSITE", true);
         g_cblur = flag("RG_NATIVE_CBLUR", true);
-        return g_glare || g_shadow || g_composites || g_cblur;
+        g_bloom = flag("RG_NATIVE_BLOOM", true);
+        return g_glare || g_shadow || g_composites || g_cblur || g_bloom;
     }();
     return on;
 }
@@ -915,6 +931,10 @@ void install(PS2Runtime &runtime)
     if (g_cblur && !rg::timing::hookFunction(runtime, kCBlurTexBlur, &cblurTexBlur, g_cblurOriginal))
     {
         std::fprintf(stderr, "[nativefx] the CBlur stays GS packets\n");
+    }
+    if (g_bloom && !rg::timing::hookFunction(runtime, kBloom, &bloomExtractBlur, g_bloomOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the bloom stays GS packets\n");
     }
     if (g_composites &&
         (!rg::timing::hookFunction(runtime, kCompositeAt, &compositeAt, g_compositeOriginal) ||
@@ -1106,7 +1126,7 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
 {
     out = GSNativeEffect{};
     withheld.clear();
-    if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur &&
+    if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
         effect != Effect::CompositeTail)
     {
         why = "no such effect";
@@ -1116,7 +1136,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     builder.tail = effect == Effect::CompositeTail;
     static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
     static int traced[8] = {};
-    builder.trace = traceShadow && (effect == Effect::Shadow || effect == Effect::CompositeTail) &&
+    builder.trace = traceShadow &&
+                    (effect == Effect::Shadow || effect == Effect::Bloom || effect == Effect::CompositeTail) &&
                     traced[static_cast<int>(effect)]++ == 0;
     Registers registers = effect == Effect::Shadow ? t_shadowSetup : Registers{};
     rg::gif::GifState state;
