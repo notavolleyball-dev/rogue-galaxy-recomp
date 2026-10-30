@@ -115,6 +115,9 @@ inline constexpr uint32_t kFragFlagLinear = 1u << 5u;
 // the GS would, at the native pixel's sample point. The target's scale sits
 // at kFragTargetScaleShift.
 inline constexpr uint32_t kFragFlagNativeGrid = 1u << 6u;
+// Cs As + Cd with As (the vertex's) past 0x80 (Rogue Galaxy: added): the
+// shader gives Cs As / 128 as the GS computes it, the pipeline adds it.
+inline constexpr uint32_t kFragFlagScaledAdd = 1u << 7u;
 inline constexpr uint32_t kFragTargetScaleShift = 24u;
 
 struct GsPipelineKey {

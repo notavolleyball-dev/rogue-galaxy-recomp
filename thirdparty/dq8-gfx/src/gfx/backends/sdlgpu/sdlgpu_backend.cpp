@@ -2972,6 +2972,20 @@ struct SdlGpuBackend::Impl {
                 alpha.fix = a;
             }
         }
+        // Cs As + Cd with the vertex's alpha past 0x80 (the town's sparkles
+        // and light shafts, and the field's past the walk's end): the shader
+        // scales Cs as the GS does and the blend adds it, so it needs no
+        // destination read (Rogue Galaxy: added).
+        bool scaledAdd = false;
+        if (!device.framebufferFetch() && state.prim.abe && alpha.c == kBlendAlphaSource &&
+            alpha.a == kBlendSource && alpha.b == kBlendZero && alpha.d == kBlendDest &&
+            (!state.prim.tme || !context.tex0.tcc) &&
+            std::any_of(batch.vertices.begin(), batch.vertices.begin() + batch.vertexCount,
+                        [](const GSVertex &v) { return v.a > 0x80u; })) {
+            alpha.c = kBlendAlphaFixed;
+            alpha.fix = 0x80u;
+            scaledAdd = true;
+        }
         const GsBlendTranslation blend = gsTranslateBlend(alpha, state.prim.abe);
         const bool framebufferFetch = device.framebufferFetch();
         // Without framebuffer fetch, a draw whose result depends on the
@@ -3098,6 +3112,8 @@ struct SdlGpuBackend::Impl {
             control |= kFragFlagFge;
         if (test.alphaTestEnabled)
             control |= kFragFlagAte;
+        if (scaledAdd)
+            control |= kFragFlagScaledAdd;
 
         float textureWidth = 1.0f;
         float textureHeight = 1.0f;

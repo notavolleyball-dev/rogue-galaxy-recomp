@@ -77,6 +77,7 @@ const uint FLAG_FGE = 1u << 3u;
 const uint FLAG_ATE = 1u << 4u;
 const uint FLAG_LINEAR = 1u << 5u;
 const uint FLAG_NATIVE_GRID = 1u << 6u;
+const uint FLAG_SCALED_ADD = 1u << 7u;
 
 const uint WRAP_REPEAT = 0u;
 const uint WRAP_CLAMP = 1u;
@@ -432,6 +433,13 @@ void main() {
     outColor = vec4(color.rgb, min(color.a * params.misc.x, 1.0));
     bool exactAlpha = params.misc.x == 1.0;
 #endif
+    // Cs As / 128 on the GS's integers, clamped: with Cd added after, the
+    // same as the GS's clamp of the sum, both being positive.
+    if ((params.control.x & FLAG_SCALED_ADD) != 0u) {
+        uvec3 cs = uvec3(round(clamp(color.rgb, 0.0, 1.0) * 255.0));
+        uint as = uint(round(clamp(color.a, 0.0, 1.0) * 255.0));
+        outColor.rgb = vec3(min((cs * as) >> 7u, uvec3(255u))) / 255.0;
+    }
     // FBA: the stored alpha gets its top bit (CT24 stores none). Rogue
     // Galaxy: added; it draws a weapon with alpha 0 and FBA into a layer,
     // then copies only the layer's pixels whose alpha is set. Only an exact

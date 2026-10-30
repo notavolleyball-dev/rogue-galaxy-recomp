@@ -467,8 +467,19 @@ frame's alpha-tested pixels down to it, times their alpha (Cs Ad), then four
 shifted adds into `02c40`, four back into `02a00`, and that added onto the
 frame (14 sprites, 3 buffers). At pad 3450 at 1x the frame matches the GS
 path's exactly. In that area at 1x, per 60 frames: passes 2845-3271 to
-2347-2717, feedback copies 378-714 to 60-396; which draws make the rest is
-not yet counted.
+2347-2717, feedback copies 378-714 to 60-396.
+
+**The rest there (2026-10-30): the scene's additive blends past one.** A
+trace of every copy by surface put nearly all that was left on VU1 strips
+textured from a page at `02c40` (T8), blended Cs As + Cd with vertex alpha
+above 0x80: a fixed-function factor clamps at one, so the GS path read the
+destination for each (a frame snapshot apiece). The shader now gives
+Cs As / 128 on the GS's integers and the pipeline adds Cd
+(`kFragFlagScaledAdd`); clamping before the add is the same as after, both
+being positive. GS memory at pad 3450 is byte for byte the same, and in
+that area 60 copies per 60 frames remain: the depth of field's
+destination alpha test on the frame. The minimap's (on `02ca0`) comes
+before the walk.
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
