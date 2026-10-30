@@ -53,7 +53,12 @@ thread_local const char *t_vu1Name = nullptr;
 // VU1, its packets are collected (check) or dropped (replace).
 thread_local std::vector<std::vector<uint8_t>> *t_vu1Packets = nullptr;
 thread_local bool t_dropVu1Packets = false;
-const rg::vu1native::Mode g_nativeMode = rg::vu1native::modeFromEnvironment();
+// Read when the thread starts, after the menu's native renderer setting.
+rg::vu1native::Mode nativeMode()
+{
+    static const rg::vu1native::Mode mode = rg::vu1native::modeFromEnvironment();
+    return mode;
+}
 // RG_VU1_NATIVE_CHECK_EVERY=N: check mode compares one chunk in N (each costs
 // the VU1's run, the native build and two decodes, on this thread).
 const uint32_t g_checkEvery = [] {
@@ -62,10 +67,19 @@ const uint32_t g_checkEvery = [] {
     return static_cast<uint32_t>(every == 0ul ? 1ul : every);
 }();
 const bool g_drawOrigins = rg::debug::drawOriginsEnabled();
-// RG_NATIVE_GLARE (src/native_effects.h): effects the renderer draws itself.
-const bool g_nativeEffects = rg::nativefx::enabled();
+// The native renderer's effects (src/native_effects.h), drawn by the
+// renderer itself; read at first use, after the menu's setting.
+bool nativeEffects()
+{
+    static const bool on = rg::nativefx::enabled();
+    return on;
+}
 // RG_NATIVE_COMPOSITE: stage E's objects in object layers (deliverPacket, below).
-const bool g_composites = rg::nativefx::compositesBatched();
+bool composites()
+{
+    static const bool on = rg::nativefx::compositesBatched();
+    return on;
+}
 // For the VIF code a VU1 program's packets came from (vif1Cursor).
 PS2Memory *g_vif1Memory = nullptr;
 // The VIF1 thread's list: its bytes and where each piece came from.
@@ -727,7 +741,7 @@ public:
         // (once per code image and entry), its MSCNTs run the chunks; or the
         // MSCAL is the chunk (drawsAtCall).
         const rg::vu1native::Program *native = nullptr;
-        if (g_nativeMode != rg::vu1native::Mode::Off)
+        if (nativeMode() != rg::vu1native::Mode::Off)
         {
             if (!resume)
             {
@@ -746,7 +760,7 @@ public:
             }
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
-                const bool gpu = g_nativeMode == rg::vu1native::Mode::Gpu;
+                const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
                 // The chunks that clip go to the VU1 in every mode: the GPU's
                 // clipping of triangles across the eye plane does not match
                 // the VU1's on every driver.
@@ -755,7 +769,7 @@ public:
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
                 }
-                else if (g_nativeMode == rg::vu1native::Mode::Check && m_checkCount++ % g_checkEvery != 0u)
+                else if (nativeMode() == rg::vu1native::Mode::Check && m_checkCount++ % g_checkEvery != 0u)
                 {
                     // Not this one: the VU1 runs it, unchecked.
                 }
@@ -775,9 +789,9 @@ public:
             }
             m_nativeMonitor.tick();
         }
-        if (!native || (g_nativeMode != rg::vu1native::Mode::Skip && g_nativeMode != rg::vu1native::Mode::Gpu))
+        if (!native || (nativeMode() != rg::vu1native::Mode::Skip && nativeMode() != rg::vu1native::Mode::Gpu))
         {
-            if (native && g_nativeMode == rg::vu1native::Mode::Check)
+            if (native && nativeMode() == rg::vu1native::Mode::Check)
             {
                 m_vu1Packets.clear();
                 t_vu1Packets = &m_vu1Packets;
@@ -785,7 +799,7 @@ public:
                 m_checkData.assign(memory.getVU1Data(), memory.getVU1Data() + PS2_VU1_DATA_SIZE);
                 m_checkState = vu1.state();
             }
-            t_dropVu1Packets = native && g_nativeMode == rg::vu1native::Mode::Replace;
+            t_dropVu1Packets = native && nativeMode() == rg::vu1native::Mode::Replace;
             static const bool replay = rg::vu1replay::enabled();
             if (replay)
             {
@@ -811,7 +825,7 @@ public:
         }
         if (native)
         {
-            if (g_nativeMode == rg::vu1native::Mode::Check)
+            if (nativeMode() == rg::vu1native::Mode::Check)
             {
                 const char *kind = m_nativeMonitor.check(*native, m_vu1Packets, m_nativePackets);
                 if (!kind && !rg::vu1native::memoryEffectsMatch(*native, m_checkData.data(), top,
@@ -834,12 +848,12 @@ public:
                 {
                     deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
                 }
-                if (g_nativeMode == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
+                if (nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
                 {
                     deliverMesh(m_runtime.gs(), m_nativeMesh);
                 }
                 // What the VU1 would have left in its memory, where it did not run.
-                if (g_nativeMode != rg::vu1native::Mode::Replace)
+                if (nativeMode() != rg::vu1native::Mode::Replace)
                 {
                     rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
                 }
@@ -1015,7 +1029,7 @@ private:
     uint64_t m_nativeGeneration = ~0ull;
     uint32_t m_nativePC = 0u;
     uint32_t m_checkCount = 0u;
-    rg::vu1native::Monitor m_nativeMonitor{g_nativeMode};
+    rg::vu1native::Monitor m_nativeMonitor{nativeMode()};
     std::vector<std::vector<uint8_t>> m_nativePackets;
     GSNativeMesh m_nativeMesh;
     std::vector<std::vector<uint8_t>> m_vu1Packets;
@@ -1452,11 +1466,11 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
     {
         rg::debug::drawOriginsPacket(data, size, t_onVif1Thread ? t_vu1Tag : 0u, t_onVif1Thread ? t_vu1Name : nullptr);
     }
-    if (g_composites && t_onVif1Thread && compositePacket(gs, data, size, listAddress(data)))
+    if (composites() && t_onVif1Thread && compositePacket(gs, data, size, listAddress(data)))
     {
         return;
     }
-    if (g_nativeEffects && t_onVif1Thread)
+    if (nativeEffects() && t_onVif1Thread)
     {
         const uint32_t address = listAddress(data);
         const rg::nativefx::Effect effect =
@@ -1500,7 +1514,7 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
 
 void deliverMesh(GS &gs, const GSNativeMesh &mesh)
 {
-    if (g_composites && t_onVif1Thread)
+    if (composites() && t_onVif1Thread)
     {
         t_batch.gs = &gs;
         if (t_batch.state == CompositeBatch::State::Head)
@@ -1513,7 +1527,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh)
             compositeOther("a mesh");
         }
     }
-    if (g_nativeEffects && t_onVif1Thread)
+    if (nativeEffects() && t_onVif1Thread)
     {
         flushEffect();
     }
@@ -1605,7 +1619,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         {
             list.data.reserve(qwc * 16u);
             appendBytes(memory, list.data, address, qwc * 16u);
-            if (g_drawOrigins || g_nativeEffects)
+            if (g_drawOrigins || nativeEffects())
             {
                 list.origins.emplace_back(0u, address);
             }
@@ -1620,7 +1634,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         static uint32_t listNumber = 0u;
         list.number = ++listNumber;
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
-                    (g_capture || g_drawOrigins || g_nativeEffects) ? &list.origins : nullptr);
+                    (g_capture || g_drawOrigins || nativeEffects()) ? &list.origins : nullptr);
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
@@ -1733,7 +1747,7 @@ void install(PS2Runtime &runtime)
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
-        if (g_composites && t_onVif1Thread)
+        if (composites() && t_onVif1Thread)
         {
             t_batch.gs = &gs;
             if (t_batch.state == CompositeBatch::State::Head)
@@ -1746,7 +1760,7 @@ void install(PS2Runtime &runtime)
                 compositeOther("an image");
             }
         }
-        if (g_nativeEffects && t_onVif1Thread)
+        if (nativeEffects() && t_onVif1Thread)
         {
             flushEffect();
         }

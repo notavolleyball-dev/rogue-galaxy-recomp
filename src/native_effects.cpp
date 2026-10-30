@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "gif_events.h"
+#include "native_renderer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
@@ -897,11 +898,12 @@ bool enabled()
             return value ? std::strcmp(value, "0") != 0 : otherwise;
         };
         g_log = std::getenv("RG_NATIVE_EFFECTS_LOG") != nullptr;
-        g_glare = flag("RG_NATIVE_GLARE", true);
-        g_shadow = flag("RG_NATIVE_SHADOW", true);
-        g_composites = flag("RG_NATIVE_COMPOSITE", true);
-        g_cblur = flag("RG_NATIVE_CBLUR", true);
-        g_bloom = flag("RG_NATIVE_BLOOM", true);
+        const bool native = rg::nativerenderer::enabled();
+        g_glare = flag("RG_NATIVE_GLARE", native);
+        g_shadow = flag("RG_NATIVE_SHADOW", native);
+        g_composites = flag("RG_NATIVE_COMPOSITE", native);
+        g_cblur = flag("RG_NATIVE_CBLUR", native);
+        g_bloom = flag("RG_NATIVE_BLOOM", native);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom;
     }();
     return on;

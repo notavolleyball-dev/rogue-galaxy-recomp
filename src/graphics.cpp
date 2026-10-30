@@ -681,9 +681,10 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "Japanese voice and play silent. Takes effect the next time the game starts.",
          false, 0, 0, 0, "", 1, true, true, true},
         {"native_renderer", "Native renderer",
-         "Experimental, for development: the models and the post effects drawn by the PC's renderer instead of "
-         "through the emulation of the PS2's graphics chip, as that work lands; for now it changes nothing. Off, "
-         "everything goes through the emulation. Takes effect the next time the game starts.",
+         "The models and the post effects (the glare, the bloom, the shadows, the soft edges of characters) are "
+         "drawn by the PC's renderer instead of through an emulation of the PS2's graphics chip, which is much "
+         "faster above 1x. Off, everything goes through the emulation, as before. Experimental. Takes effect the "
+         "next time the game starts.",
          false, 0, 0, 0, "", 1, true, true},
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "

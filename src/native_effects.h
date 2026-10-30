@@ -19,12 +19,12 @@ class PS2Runtime;
 // registers end as they would have), then the effect. Packets that are not
 // the shape expected go on as they are.
 //
-// RG_NATIVE_GLARE (on unless 0): GlareFilterDrawMaybe (stage A: the frame's bright parts
+// RG_NATIVE_GLARE (with the native renderer unless set): GlareFilterDrawMaybe (stage A: the frame's bright parts
 // down to 192x192, 20 shifted adds of that buffer onto itself, back onto the
-// frame). RG_NATIVE_SHADOW (on unless 0): DrawListEndPlaneShadowPass (stage F: the
-// shadow volumes' mask, blurred, onto the frame). RG_NATIVE_CBLUR (on unless
-// 0): CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
-// draws). RG_NATIVE_BLOOM (on unless 0): BloomExtractBlurMaybe, as the
+// frame). RG_NATIVE_SHADOW (likewise): DrawListEndPlaneShadowPass (stage F: the
+// shadow volumes' mask, blurred, onto the frame). RG_NATIVE_CBLUR (likewise):
+// CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
+// draws). RG_NATIVE_BLOOM (likewise): BloomExtractBlurMaybe, as the
 // glare. RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx
@@ -61,7 +61,7 @@ struct Place
 
 bool enabled();
 const char *name(Effect effect);
-// RG_NATIVE_COMPOSITE (on unless 0): the VIF1 thread batches stage E's objects.
+// RG_NATIVE_COMPOSITE (likewise): the VIF1 thread batches stage E's objects.
 bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.

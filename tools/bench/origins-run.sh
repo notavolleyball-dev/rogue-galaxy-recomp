@@ -11,6 +11,8 @@ export RG_INPUT="${RG_INPUT:-909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,12
 export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_GS_SCALE=1
 export RG_MC0_DIR=build/run/mc0-bench RG_SETTINGS_FILE=build/run/bench-settings.ini DQ8_GFX_STATS_EVERY=60
 export RG_VU1_NATIVE=0 RG_DRAW_ORIGINS="build/run/$NAME.origins" RG_DRAW_ORIGINS_FROM=$FROM RG_DRAW_ORIGINS_SEQ=$SEQ
+# The F1 menu's native renderer is off unless set: the effects on, as before it (RG_VU1_NATIVE above still sets the VU1's mode).
+export RG_NATIVE_RENDERER=${RG_NATIVE_RENDERER:-1}
 for kv in "$@"; do export "$kv"; done
 unset RG_VU1_REPLAY RG_GS_FRAMELOG
 cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1

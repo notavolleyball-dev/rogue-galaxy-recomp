@@ -100,6 +100,7 @@ add_executable(roguegalaxy
     vif1_thread.cpp
     vu1_native.cpp
     native_effects.cpp
+    native_renderer.cpp
     gif_events.cpp
     vu0_flags.cpp
     overlay/overlay_manager.cpp
