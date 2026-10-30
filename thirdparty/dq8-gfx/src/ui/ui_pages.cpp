@@ -19,8 +19,8 @@ namespace {
 using gfx::PadInput;
 
 constexpr const char *kTimes = "\xC3\x97"; // U+00D7, spelled out for compilers without /utf-8
-constexpr const char *kPageNames[] = {"Display", "Sound", "Controls", "Game", "Interface"};
-constexpr Icon kPageIcons[] = {Icon::Display, Icon::Sound, Icon::Controls, Icon::Disc, Icon::Interface};
+constexpr const char *kPageNames[] = {"Display", "Sound", "Controls", "Game", "Language", "Interface"};
+constexpr Icon kPageIcons[] = {Icon::Display, Icon::Sound, Icon::Controls, Icon::Disc, Icon::Info, Icon::Interface};
 constexpr const char *kProjectUrl = "https://github.com/victor-takai/rogue-galaxy-recomp";
 constexpr const char *kIssuesUrl = "https://github.com/victor-takai/rogue-galaxy-recomp/issues";
 
@@ -153,7 +153,8 @@ void Overlay::drawSettingsWindow() {
         case SettingsPage::Display: drawDisplayPage(); break;
         case SettingsPage::Sound: drawSoundPage(); break;
         case SettingsPage::Controls: drawControlsPage(); break;
-        case SettingsPage::Game: drawGamePage(); break;
+        case SettingsPage::Game: drawGamePage(false); break;
+        case SettingsPage::Language: drawGamePage(true); break;
         case SettingsPage::Interface: drawInterfacePage(); break;
         case SettingsPage::Count: break;
         }
@@ -392,19 +393,22 @@ void Overlay::drawInterfacePage() {
 }
 
 // The game's own switches, in the host's sections (Rogue Galaxy: added).
-void Overlay::drawGamePage() {
-    if (m_host.gameOptions.empty()) {
-        mutedText("The game has no options of its own.");
+void Overlay::drawGamePage(bool language) {
+    if (std::none_of(m_host.gameOptions.begin(), m_host.gameOptions.end(),
+                     [&](const GameOption &option) { return option.language == language; })) {
+        mutedText(language ? "There are no language options." : "The game has no options of its own.");
         return;
     }
     bool started = false, table = false;
     for (const GameOption &option : m_host.gameOptions) {
+        if (option.language != language)
+            continue;
         const auto section = std::find_if(m_host.gameSections.begin(), m_host.gameSections.end(),
                                           [&](const auto &entry) { return entry.first == option.key; });
         if (!started || section != m_host.gameSections.end()) {
             if (table)
                 endSettings();
-            sectionHeader(section != m_host.gameSections.end() ? section->second.c_str() : "Game");
+            sectionHeader(section != m_host.gameSections.end() ? section->second.c_str() : language ? "Language" : "Game");
             table = beginSettings(("game." + option.key).c_str());
             started = true;
         }

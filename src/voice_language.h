@@ -12,6 +12,9 @@ class PS2Runtime;
 namespace rg::voicelanguage
 {
 
+// The menu's switch: Japanese voices and movies at the next start.
+void setEnabled(bool on);
+
 // After loadELF().
 void install(PS2Runtime &runtime);
 

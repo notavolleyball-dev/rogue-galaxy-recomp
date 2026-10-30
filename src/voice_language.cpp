@@ -1,5 +1,6 @@
 #include "voice_language.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +36,7 @@ PS2Runtime::RecompiledFunction g_originalStreamOpen = nullptr;
 PS2Runtime::RecompiledFunction g_originalStartChan = nullptr;
 PS2Runtime::RecompiledFunction g_originalMakePath = nullptr;
 bool g_japaneseVoices = false;
+std::atomic<bool> g_requested{false}; // the menu's switch, read at boot
 
 bool startsWithNoCase(const std::string &text, const std::string &prefix)
 {
@@ -63,10 +65,27 @@ void staticInitLangCodeTables(uint8_t *rdram, R5900Context *ctx, PS2Runtime *run
 {
     g_original(rdram, ctx, runtime);
 
+    // RG_VOICE_LANG names any language of the game's table (a developer's
+    // switch); the menu's switch means Japanese.
     const char *wanted = std::getenv("RG_VOICE_LANG");
     if (!wanted || !*wanted)
     {
+        wanted = g_requested.load() ? "JA" : nullptr;
+    }
+    if (!wanted)
+    {
         return;
+    }
+    if (std::strcmp(wanted, "JA") == 0)
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(PS2Runtime::getIoPaths().cdRoot / kJapaneseFolder / "DATA0_1.HD6", ec))
+        {
+            std::fprintf(stderr,
+                         "[rg] Japanese voices need the Japanese disc's files in disc/JA: "
+                         "python setup.py extract-japanese --iso <your Japanese Director's Cut>\n");
+            return;
+        }
     }
     for (int i = 0; i < kLanguageTableSize; ++i)
     {
@@ -197,6 +216,11 @@ void eventVoiceMakePath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 } // namespace
+
+void setEnabled(bool on)
+{
+    g_requested.store(on);
+}
 
 void install(PS2Runtime &runtime)
 {
