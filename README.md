@@ -42,7 +42,7 @@ it again. To uninstall, delete the folder (your saves are in `disc\mc0`).
 To play with the Japanese voices and movies, you also need your own image of
 the Japanese Director's Cut (SCPS-17013). After `Install.bat`, double-click
 `Install-Undub.bat` and choose that image (or drop it onto the file). It copies
-the voices and movies, about 2 GB, into the folder. Then turn the undub on in
+the voices and movies, about 3 GB, into the folder. Then turn the undub on in
 the game: F1 > Settings > Language.
 
 ## Controls

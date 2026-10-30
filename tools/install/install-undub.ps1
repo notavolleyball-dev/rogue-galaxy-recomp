@@ -75,7 +75,7 @@ foreach ($name in @("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP")) {
 }
 
 Write-Host ""
-Write-Host "Copying the voices and movies (about 2 GB); it takes a few minutes."
+Write-Host "Copying the voices and movies (about 3 GB); it takes a few minutes."
 $ErrorActionPreference = "Continue"
 Push-Location -LiteralPath $Root
 try {
