@@ -10,20 +10,12 @@
   buttons, on by default).
 - The game says when a newer version is out, and the menu's About window
   links to it (Game > Check for new versions, on by default).
-- Above 1x, the letters of the dialogue, menus and story are traced into
-  smooth outlines and drawn at the internal resolution, with a round black
-  border or a solid shadow, instead of enlarged as blocks; the Xbox
-  buttons in the text and the ® are drawn sharp too (Game > Sharp
-  letters, on by default).
 - A 3D program the game uses later in Salgin is compiled: it ran on the
   slow path every frame, and the walk there was choppy.
 - The field's minimap and compass can be made smaller (Game > Minimap
   size, Compass size, 50% to 100%).
 - Weapons can grow faster in battle (Game > Weapon growth, up to 1000%).
 - The loading screen's "Press X" shows the Xbox controller's A too.
-- Save anywhere: in the field, R1 + Triangle opens the transporter's menu
-  (Game > Save anywhere, off by default). Such a save loads at the area's
-  transporter.
 - The free camera no longer lets a button pressed to move it reach a scene
   waiting for one, and gives the controller back at once when turned off.
 - Full bag to storage: an item found when the bag is full goes to the
