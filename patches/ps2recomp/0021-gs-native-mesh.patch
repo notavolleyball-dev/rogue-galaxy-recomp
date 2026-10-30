@@ -352,12 +352,14 @@ diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/li
 index 5f1f3fa..efdf14b 100644
 --- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
-@@ -68,20 +68,27 @@ struct GSThreadedBackend::Impl
+@@ -68,20 +68,29 @@ struct GSThreadedBackend::Impl
          GSPresentationRequest request;
          std::shared_ptr<PresentationResult> result;
      };
 -    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare, Sync };
 +    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare, Sync, Native };
++    // Out of line: a mesh in the variant would grow every command, and with it
++    // the copy each primitive makes.
 +    struct Native
 +    {
 +        GSNativeMesh mesh;
@@ -369,7 +371,7 @@ index 5f1f3fa..efdf14b 100644
          Op op;
          std::variant<std::monostate, GSPrimitiveBatch, GSTransferCommand,
 -                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason> data;
-+                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason, Native> data;
++                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason, std::shared_ptr<Native>> data;
          // The VIF1 thread queues one command per primitive; std::fegetround
          // goes through the CRT (x87 and SSE control words both) and was 3%
          // of that thread. The VU math is SSE, so MXCSR alone names the mode.
@@ -378,7 +380,7 @@ index 5f1f3fa..efdf14b 100644
          {
 -            return sizeof(Command) + (op == Op::Upload ? std::get<std::vector<uint8_t>>(data).size() : 0u);
 +            return sizeof(Command) + (op == Op::Upload ? std::get<std::vector<uint8_t>>(data).size() : 0u) +
-+                   (op == Op::Native ? std::get<Native>(data).mesh.vertices.size() * sizeof(GSNativeMesh::Vertex)
++                   (op == Op::Native ? std::get<std::shared_ptr<Native>>(data)->mesh.vertices.size() * sizeof(GSNativeMesh::Vertex)
 +                                     : 0u);
          }
      };
@@ -389,7 +391,7 @@ index 5f1f3fa..efdf14b 100644
          case Op::Submit: backend->Submit(std::get<GSPrimitiveBatch>(command.data)); break;
 +        case Op::Native:
 +        {
-+            const auto &native = std::get<Native>(command.data);
++            const auto &native = *std::get<std::shared_ptr<Native>>(command.data);
 +            backend->SubmitNativeMesh(native.mesh, native.state);
 +            break;
 +        }
@@ -402,7 +404,7 @@ index 5f1f3fa..efdf14b 100644
  }
 +void GSThreadedBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state)
 +{
-+    m_impl->enqueue({Impl::Op::Native, Impl::Native{mesh, state}});
++    m_impl->enqueue({Impl::Op::Native, std::make_shared<Impl::Native>(Impl::Native{mesh, state})});
 +}
  void GSThreadedBackend::BeginTransfer(const GSTransferCommand &command)
  {
