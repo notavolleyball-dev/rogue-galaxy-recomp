@@ -657,11 +657,11 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"action_gauge", "Action gauge speed",
          "How fast the party's action gauge fills again in battle, against the game's (100%).",
          false, 25, 400, 100, "%d%%", 25},
-        {"japanese_voices", "Japanese voices and movies",
+        {"japanese_voices", "Undub (Japanese voices)",
          "The voices in scenes and the movies come from your Japanese Director's Cut disc instead of the English "
-         "ones; the text stays as it is. It needs that disc's files in disc/JA: python setup.py extract-japanese "
-         "--iso <your disc>. Without them the voices stay English. A few lines have no Japanese voice and play "
-         "silent. Takes effect the next time the game starts.",
+         "ones; the text stays as it is. It needs that disc's files: run Install-Undub.bat in the game's folder "
+         "once and pick your Japanese disc image. Without them the voices stay English. A few lines have no "
+         "Japanese voice and play silent. Takes effect the next time the game starts.",
          false, 0, 0, 0, "", 1, true, true, true},
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
