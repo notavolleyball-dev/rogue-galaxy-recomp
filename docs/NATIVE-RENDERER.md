@@ -461,12 +461,29 @@ over the frame with.
   and the passes fall from 180 to 142 a frame at 1x.
 
 So the offscreen pass is for a soft edge around each object, and the fade's
-use of it is rare. The native form: the objects drawn directly, and their
-edges softened in one pass over all of them by a mask of where they are
-(their coverage in their own target, or a stencil), at
-`ScreenTexOverlayDrawMulti`'s radius and weights (not yet read); the few
-fading objects keep an offscreen pass, or take the same mask with their
-alpha.
+use of it is rare.
+
+What the soft edge is (`ScreenTexOverlayDrawMulti_16a510` and the walk's
+frame log): `Multi(packet, rect, texture, rgba, mode, offset)` draws the
+object's copy once unshifted (mode 1), twice at plus and minus 3/4 of the
+offset (mode 2), or four times at plus and minus dx and dy (mode 3); the
+mode is the settings' +0x64 unless a global (gp-0x7200) overrides it. On the
+walk it is mode 2: per object, `02a00` laid over the frame twice, shifted
+by plus and minus (3/16, 4/16) of a pixel, with vertex alpha 0x45, then once
+unshifted at 0x80. Each copy reads `02a00` as CT24 with TA0 128 and AEM
+(black is transparent), bilinear, blended by lerp(Cd, Cs, As) and alpha
+tested As > 0. The two shifted copies smear the silhouette's colours about
+half a pixel outward at about 54%, under the sharp copy: anti-aliasing of
+the object's edge.
+
+The native form: the objects drawn directly into the scene and also into
+one object layer (colour and coverage, all of them); then one pass that,
+outside each covered pixel, lays the layer's two bilinear samples at those
+offsets over the scene, as the copies do. The overlap of objects differs
+slightly from one pass per object (a later object's rim over an earlier
+object). The few fading objects keep the offscreen pass, or take their
+alpha in the layer. A temporal upscaler (phase 2) would also cover this
+edge; until then the pass keeps parity.
 
 ## Sizes and order
 
