@@ -21,7 +21,7 @@ class PS2Runtime;
 //
 // RG_NATIVE_GLARE=1: GlareFilterDrawMaybe (stage A: the frame's bright parts
 // down to 192x192, 20 shifted adds of that buffer onto itself, back onto the
-// frame). RG_NATIVE_SHADOW=1: DrawListEndPlaneShadowPass (stage F: the
+// frame). RG_NATIVE_SHADOW (on unless 0): DrawListEndPlaneShadowPass (stage F: the
 // shadow volumes' mask, blurred, onto the frame). RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx

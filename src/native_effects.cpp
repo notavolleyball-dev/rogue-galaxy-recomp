@@ -853,7 +853,7 @@ bool enabled()
         };
         g_log = std::getenv("RG_NATIVE_EFFECTS_LOG") != nullptr;
         g_glare = flag("RG_NATIVE_GLARE", false);
-        g_shadow = flag("RG_NATIVE_SHADOW", false);
+        g_shadow = flag("RG_NATIVE_SHADOW", true);
         g_composites = flag("RG_NATIVE_COMPOSITE", true);
         return g_glare || g_shadow || g_composites;
     }();

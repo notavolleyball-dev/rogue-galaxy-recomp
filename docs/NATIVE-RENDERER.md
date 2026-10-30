@@ -156,9 +156,9 @@ order to port them:
 
 | Function | Stage, per frame | Native form |
 |---|---|---|
-| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form done: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE=1`, off by default) |
+| `GlareFilterDrawMaybe_17a0d0` | A: 159 sprites, 120 of them feedback adds in the 192x192 `02c40` | downsample + separable blur at the buffer's own size. Parity form built: the game's sprites drawn by the renderer (`RG_NATIVE_GLARE=1`, off by default: brighter than the GS path's, see "Phase 3") |
 | `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on by default) |
-| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW=1`, off by default) |
+| `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on by default) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
 | `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
 | `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass |
@@ -393,7 +393,7 @@ to 31.0-31.3 W. The threads' CPU time (`/proc`, 20 s) is the same (GS worker
 47-49% to 58-60%, which is waiting, not work: `submitEffect` itself takes
 about 6 ms a second (the `[gfx]` line's "ms flush, buffers, sprites").
 
-**The plane shadow (2026-10-29), behind `RG_NATIVE_SHADOW=1`.** The same
+**The plane shadow (2026-10-29), `RG_NATIVE_SHADOW`, on by default 2026-10-30.** The same
 way, from `DrawListEndPlaneShadowPass`'s packets; `DrawListBeginPlaneShadowPass`'s
 go on as they are, and the registers they set (`XYOFFSET_1`, `SCISSOR_1`)
 are where the shadow's sprites start from. Its five steps: `02a00` (the
@@ -411,6 +411,14 @@ GPU busy unchanged.
 
 **The per-object composites (2026-10-30), `RG_NATIVE_COMPOSITE`, on by
 default:** see "Stage E in object layers" below.
+
+**The glare is not exact (2026-10-30).** The logged frame at pad 3000
+(the save point and its sign in view) differs from the GS path's in 8% of
+its pixels, up to 241 levels: the native glare is brighter on the sign's
+emblem, the sword and the save point. The shadow and the object layers
+alone match it to the pixel, so the glare stays off by default until this
+is found. The match noted above was the field's screenshots at other
+moments.
 
 **Where it stands (2026-10-30):** with all three on, the walk's last 25 s at
 3x and 8x take about 53 passes a frame (from about 199) and about 16
