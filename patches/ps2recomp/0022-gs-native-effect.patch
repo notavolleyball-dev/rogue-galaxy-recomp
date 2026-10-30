@@ -1,0 +1,182 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_backend.h b/ps2xRuntime/include/runtime/gs/gs_backend.h
+index f1660e0..6f24b08 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_backend.h
+@@ -46,6 +46,12 @@ public:
+         });
+     }
+ 
++    // A chain of sprites on buffers of the renderer's own (GSNativeEffect;
++    // Rogue Galaxy: added). Sent only to a backend that says it draws them:
++    // the sender withholds the sprites' own kicks.
++    virtual bool SupportsNativeEffects() const { return false; }
++    virtual void SubmitNativeEffect(const GSNativeEffect &) {}
++
+     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
+     virtual void UploadImage(const uint8_t *data, uint32_t sizeBytes) = 0;
+ 
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index fabffc5..fbfb4c9 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -110,6 +110,11 @@ public:
+     // A strip a VU1 program would have drawn (GSNativeMesh), under the draw
+     // state of now, in order with the packets (Rogue Galaxy: added).
+     void submitNativeMesh(const GSNativeMesh &mesh);
++    // A chain of sprites the backend draws by itself (GSNativeEffect), in
++    // order with the packets; only when supportsNativeEffects() (Rogue
++    // Galaxy: added).
++    bool supportsNativeEffects() const;
++    void submitNativeEffect(const GSNativeEffect &effect);
+     // Image data continuing the open transfer, as an IMAGE GIFtag's payload
+     // would: the VIF1 thread hands over a DIRECT's bytes in place instead of
+     // copying them behind a synthesized tag (Rogue Galaxy: added).
+diff --git a/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h b/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+index 27c0456..9625575 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+@@ -18,6 +18,8 @@ public:
+     void Reset() override;
+     void Submit(const GSPrimitiveBatch &batch) override;
+     void SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state) override;
++    bool SupportsNativeEffects() const override;
++    void SubmitNativeEffect(const GSNativeEffect &effect) override;
+     void BeginTransfer(const GSTransferCommand &command) override;
+     void UploadImage(const uint8_t *data, uint32_t size) override;
+     void Flush() override;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
+index f175e0d..3988c75 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -328,6 +328,49 @@ struct GSPrimitiveBatch
+     uint32_t sourceCamera = 0; // ps2_gs_detail::t_sourceCamera, likewise
+ };
+ 
++// A chain of sprites that a renderer can draw by itself, on buffers of its
++// own (Rogue Galaxy: added; the game's src/native_effects.h builds it from
++// the packets of a post effect, whose kicks it then withholds). Each op is
++// one sprite as the GS would draw it, its strips joined; `external` buffers
++// are the GS's own (the frame, read and drawn into), the rest belong to the
++// effect: written before they are read, and read by nothing after it.
++// Trivially copyable.
++struct GSNativeEffect
++{
++    struct Buffer
++    {
++        uint32_t base = 0u; // 256-byte block address (FBP << 5)
++        uint32_t fbw = 0u;  // in units of 64 pixels
++        uint32_t psm = 0u;
++        uint32_t width = 0u; // GS pixels the effect uses
++        uint32_t height = 0u;
++        uint32_t external = 0u;
++    };
++    struct Op
++    {
++        uint32_t target = 0u; // index into buffers
++        int32_t source = -1;  // likewise, or -1 for an untextured sprite
++        float rect[4] = {};   // x0, y0, x1, y1: window coordinates less XYOFFSET
++        float uv[4] = {};     // u0, v0, u1, v1: texels at those corners
++        uint32_t scissor[4] = {}; // x0, y0, x1, y1, inclusive
++        uint8_t rgba[4] = {};
++        uint64_t alpha = 0u; // ALPHA, when kBlend
++        uint64_t test = 0u;  // TEST (its alpha test)
++        uint32_t flags = 0u;
++    };
++    static constexpr uint32_t kBlend = 1u;     // ABE
++    static constexpr uint32_t kLinear = 2u;    // bilinear (TEX1)
++    static constexpr uint32_t kDecal = 4u;     // TFX DECAL rather than MODULATE
++    static constexpr uint32_t kColClamp = 8u;  // COLCLAMP
++    static constexpr uint32_t kTextureAlpha = 16u; // TCC
++    static constexpr uint32_t kMaxBuffers = 4u;
++    static constexpr uint32_t kMaxOps = 64u;
++    uint32_t bufferCount = 0u;
++    uint32_t opCount = 0u;
++    Buffer buffers[kMaxBuffers];
++    Op ops[kMaxOps];
++};
++
+ // A strip a VU1 program would have drawn, as the program's inputs (Rogue
+ // Galaxy: added; the game's src/vu1_native.h builds it). A renderer that can
+ // transforms the vertices itself (SdlGpuBackend, on the GPU); any other gets
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index a948a2e..89a70c1 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1881,6 +1881,19 @@ void GS::submitNativeMesh(const GSNativeMesh &mesh)
+         m_backend->SubmitNativeMesh(mesh, currentDrawState());
+ }
+ 
++bool GS::supportsNativeEffects() const
++{
++    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    return m_backend && m_backend->SupportsNativeEffects();
++}
++
++void GS::submitNativeEffect(const GSNativeEffect &effect)
++{
++    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    if (m_backend && effect.opCount != 0u)
++        m_backend->SubmitNativeEffect(effect);
++}
++
+ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
+ {
+     const GSDrawState &state = batch.state;
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index efdf14b..f325fd1 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -68,7 +68,10 @@ struct GSThreadedBackend::Impl
+         GSPresentationRequest request;
+         std::shared_ptr<PresentationResult> result;
+     };
+-    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare, Sync, Native };
++    enum class Op { Submit, Transfer, Upload, Flush, TextureFlush, Write, Prepare, Sync, Native, Effect };
++    // Held by pointer: the variant is as large as its largest member, and a
++    // command a primitive must stay small.
++    using Effect = std::shared_ptr<const GSNativeEffect>;
+     struct Native
+     {
+         GSNativeMesh mesh;
+@@ -79,7 +82,7 @@ struct GSThreadedBackend::Impl
+     {
+         Op op;
+         std::variant<std::monostate, GSPrimitiveBatch, GSTransferCommand,
+-                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason, Native> data;
++                     std::vector<uint8_t>, Pixel, Prepare, GSSyncReason, Native, Effect> data;
+         // The VIF1 thread queues one command per primitive; std::fegetround
+         // goes through the CRT (x87 and SSE control words both) and was 3%
+         // of that thread. The VU math is SSE, so MXCSR alone names the mode.
+@@ -88,7 +91,8 @@ struct GSThreadedBackend::Impl
+         {
+             return sizeof(Command) + (op == Op::Upload ? std::get<std::vector<uint8_t>>(data).size() : 0u) +
+                    (op == Op::Native ? std::get<Native>(data).mesh.vertices.size() * sizeof(GSNativeMesh::Vertex)
+-                                     : 0u);
++                                     : 0u) +
++                   (op == Op::Effect ? sizeof(GSNativeEffect) : 0u);
+         }
+     };
+ 
+@@ -237,6 +241,7 @@ struct GSThreadedBackend::Impl
+             backend->SubmitNativeMesh(native.mesh, native.state);
+             break;
+         }
++        case Op::Effect: backend->SubmitNativeEffect(*std::get<Effect>(command.data)); break;
+         case Op::Transfer: backend->BeginTransfer(std::get<GSTransferCommand>(command.data)); break;
+         case Op::Upload:
+         {
+@@ -436,6 +441,14 @@ void GSThreadedBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawS
+ {
+     m_impl->enqueue({Impl::Op::Native, Impl::Native{mesh, state}});
+ }
++bool GSThreadedBackend::SupportsNativeEffects() const
++{
++    return m_impl->backend->SupportsNativeEffects();
++}
++void GSThreadedBackend::SubmitNativeEffect(const GSNativeEffect &effect)
++{
++    m_impl->enqueue({Impl::Op::Effect, std::make_shared<const GSNativeEffect>(effect)});
++}
+ void GSThreadedBackend::BeginTransfer(const GSTransferCommand &command)
+ {
+     m_impl->enqueue({Impl::Op::Transfer, command});
