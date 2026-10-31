@@ -38,6 +38,18 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    the game thread's 32 strips at the frame's end (the flip's copy into the
    display buffer) are plain sprites, for phase 4's batcher and the
    present ("The rest, probed").
+   **Status (2026-10-31):** on the walk and the forced battle, every
+   offscreen effect the builder can take is native. Of what is left,
+   `TexAnimeTableApply` and `MapDrawGroupRange` draw from T8 and T4 pages
+   with uploads among their sprites, so they wait for phase 4's texture
+   table; the geometry effects are plain primitives into the frame,
+   nothing offscreen; the fades, the focus filter, the lens flare and
+   `ShadowMapRender` draw nothing on this route (probed), so item 3's
+   censuses must find them. With every effect native, pad 3000 at 1x takes
+   35 render passes a frame (37 before CBlur's lay over and the depth of
+   field), no feedback copies; the GPU-time labels put most of the rest on
+   GS-path draws, among them the shadow volumes' 230 or so blends into
+   `02a00` a frame (item 2).
 2. **Native draws for the VU1 programs still on packets:** outlines (about
    17% of the field's vertices), shadow volumes (5%), particles, the
    projected texture, the object set-up. They are computed natively but
@@ -662,7 +674,8 @@ innermost function. On the walk and the forced battle:
 | `SunLightDraw`, `BattleEffectBurstDraw` | primitives other than sprites |
 | `SwordTrailDraw` | a triangle strip of other than axis-aligned quads |
 | `EffectEntryDrawNodes` | transfers among the sprites; some calls draw nothing |
-| `GfxBlitTexRectPixels` (besides in `CBlurDraw`), `ScreenFadeBlockDraw`, `ScreenColorFilterMaybe`, `FocusFilterDrawMaybe`, `LensFlareDraw` | not called on this route |
+| `GfxBlitTexRectPixels` (besides in `CBlurDraw`), `ScreenFadeBlockDraw`, `ScreenFadeBlockDrawWipeStrips`, `ScreenFadeBlockCaptureFrame`, `ScreenFadeCaptureFrame`, `ScreenColorFilterMaybe`, `FocusFilterDrawMaybe`, `LensFlareDraw` | draw nothing on this route (the battle's start included) |
+| `GfxEndFrame`, `GfxFlipBuffersMaybe` | send nothing through the VIF1 lists |
 | `DrawListFrameBegin` (the clear) | 16 untextured black sprites over the frame that also write Z 0 (ZTE with ALWAYS, Z not masked) under a draw environment set before it: a clear of colour and depth |
 
 The game thread's own GIF packet each frame in the field (the census's "32
@@ -840,7 +853,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | groundwork built (jitter, camera registry, [FSR.md](FSR.md)); after phases 3 and 4, a fallback for low-end hardware |
-| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow, the per-object composites (object layers), CBlur's texture blur and the bloom done (2026-10-30), the depth of field (2026-10-31); the rest in "Where it stands" |
+| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow, the per-object composites (object layers), CBlur's texture blur and the bloom done (2026-10-30); the depth of field, CBlur's lay over and the refraction's capture (2026-10-31); the rest in "Where it stands" |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 
