@@ -1053,6 +1053,7 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size);
 struct HeldEffect
 {
     rg::nativefx::Effect effect = rg::nativefx::Effect::None;
+    uint32_t unit = 0u; // a probe's
     GS *gs = nullptr;
     std::vector<std::vector<uint8_t>> packets;
 };
@@ -1089,7 +1090,7 @@ void flushEffect()
     thread_local GSNativeEffect effect;
     thread_local std::vector<std::vector<uint8_t>> withheld;
     std::string why = "the renderer draws no effects";
-    if (supported && rg::nativefx::build(t_held.effect, t_held.packets, effect, withheld, why))
+    if (supported && rg::nativefx::build(t_held.effect, t_held.packets, effect, withheld, why, t_held.unit))
     {
         for (const std::vector<uint8_t> &packet : withheld)
         {
@@ -1119,17 +1120,20 @@ void flushEffect()
         }
         static std::vector<std::string> told;
         why = std::string(rg::nativefx::name(t_held.effect)) + ": " + why;
-        if (told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
+        if (told.size() < (t_held.effect == rg::nativefx::Effect::Probe ? 64u : 8u) &&
+            std::find(told.begin(), told.end(), why) == told.end())
         {
             told.push_back(why);
             std::fprintf(stderr, "[nativefx] an effect stays packets: %s\n", why.c_str());
             static const bool dump = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
-            if (dump)
+            if (dump && t_held.effect != rg::nativefx::Effect::Probe)
                 rg::nativefx::dumpPackets("nativefx refused", t_held.packets);
         }
-        ++g_effectsAsPackets;
+        if (t_held.effect != rg::nativefx::Effect::Probe)
+            ++g_effectsAsPackets;
     }
     t_held.effect = rg::nativefx::Effect::None;
+    t_held.unit = 0u;
     t_held.packets.clear();
 }
 
@@ -1476,9 +1480,10 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
     if (nativeEffects() && t_onVif1Thread)
     {
         const uint32_t address = listAddress(data);
-        const rg::nativefx::Effect effect =
-            address == ~0u ? rg::nativefx::Effect::None : rg::nativefx::effectAt(address);
-        if (effect != t_held.effect)
+        const rg::nativefx::Place place = address == ~0u ? rg::nativefx::Place{} : rg::nativefx::placeAt(address);
+        const rg::nativefx::Effect effect = place.effect;
+        const uint32_t unit = effect == rg::nativefx::Effect::Probe ? place.unit : 0u;
+        if (effect != t_held.effect || unit != t_held.unit)
         {
             flushEffect();
         }
@@ -1489,6 +1494,7 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
         else if (effect != rg::nativefx::Effect::None)
         {
             t_held.effect = effect;
+            t_held.unit = unit;
             t_held.gs = &gs;
             t_held.packets.emplace_back(data, data + size);
             return;

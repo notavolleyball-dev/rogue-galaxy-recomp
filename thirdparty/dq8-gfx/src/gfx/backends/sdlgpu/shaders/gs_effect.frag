@@ -44,6 +44,8 @@ const uint kHighlight = 64u;
 const uint kHighlight2 = 128u;
 const uint kGreenToAlpha = 1024u;
 const uint kKeepAlpha = 2048u;
+// FBMSK 0x00FFFFFF: the alpha alone written (GSNativeEffect's kKeepColor).
+const uint kKeepColor = 32768u;
 const uint kExternal = 256u;
 const uint kTextured = 512u;
 // The alpha pass after a lay over: the alpha the GS stores, As (the backend's).
@@ -208,7 +210,9 @@ void main() {
         rgb = (((a - b) * factor) >> 7) + d;
     }
     rgb = (flags & kColClamp) != 0u ? clamp(rgb, ivec3(0), ivec3(255)) : (rgb & ivec3(255));
-    // Into an external target the pipeline masks the alpha.
+    if ((flags & kKeepColor) != 0u)
+        rgb = ivec3(dst.rgb);
+    // Into an external target the pipeline masks the alpha (or the colour).
     uint outAlpha = writeAlpha && (flags & kKeepAlpha) == 0u ? c.a : dst.a;
     outColor = vec4(vec3(rgb), float(outAlpha)) / 255.0;
 }

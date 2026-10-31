@@ -2727,11 +2727,12 @@ struct SdlGpuBackend::Impl {
                 // allows them: A = Cs and B = 0 adds, A = 0 and B = Cs
                 // subtracts, A = Cs and B = Cd lays the source over.
                 using Blend = SdlGpuDevice::EffectBlend;
-                Blend blend = Blend::Write;
+                Blend blend = (op.flags & GSNativeEffect::kKeepColor) ? Blend::AlphaOnly : Blend::Write;
                 if (op.flags & GSNativeEffect::kBlend) {
                     const uint32_t ab = uint32_t(op.alpha & 0xfu);
                     blend = ab == 0x8u ? Blend::Add : ab == 0x2u ? Blend::Subtract : ab == 0x4u ? Blend::Over : Blend::Write;
-                    if (blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u)
+                    if (blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u ||
+                        (op.flags & GSNativeEffect::kKeepColor))
                         return setError("native effect: a blend into a GS target it cannot draw");
                 }
                 // Depth tested against the scene (ZTE, ZTST GEQUAL or

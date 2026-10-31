@@ -24,7 +24,8 @@ class PS2Runtime;
 // frame). RG_NATIVE_SHADOW (likewise): DrawListEndPlaneShadowPass (stage F: the
 // shadow volumes' mask, blurred, onto the frame). RG_NATIVE_CBLUR (likewise):
 // CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
-// draws). RG_NATIVE_BLOOM (likewise): BloomExtractBlurMaybe, as the
+// draws) and CBlurDrawMaybe (which lays the displayed frame over the new one
+// by 03f80's alpha). RG_NATIVE_BLOOM (likewise): BloomExtractBlurMaybe, as the
 // glare. RG_NATIVE_DOF (likewise): DofFilterDrawMaybe. RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx
@@ -43,6 +44,9 @@ enum class Effect : uint8_t
     Bloom,
     // DofFilterDrawMaybe: the frame to 02a00 and laid back over itself.
     Dof,
+    // CBlurDrawMaybe (with RG_NATIVE_CBLUR): the displayed frame copied to
+    // 02a40, its alpha from 03f80, laid over the frame a pixel or two off.
+    CBlurDraw,
     // DrawListBeginPlaneShadowPass: its packets go on as they are; the
     // registers they set are where the shadow's sprites start from.
     ShadowSetup,
@@ -51,7 +55,12 @@ enum class Effect : uint8_t
     // lays that over the frame (src/vif1_thread.cpp batches the tails).
     CompositeHead,
     CompositeTail,
+    // RG_NATIVE_EFFECTS_PROBE=1: one of the effects not yet drawn by the
+    // renderer (Place::unit: which, probeName), its packets traced and
+    // what the builder makes of them logged, then sent on as they are.
+    Probe,
 };
+const char *probeName(uint32_t unit);
 
 // What an EE address of the frame's packet memory holds: an effect's
 // packets, and for the composites the object's number.
@@ -95,7 +104,8 @@ void boxPages(const Box &box, uint32_t &first, uint32_t &last);
 // When a packet starts a transfer into GS memory: the pages it may write.
 bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &last);
 
+// `unit`: a probe's (Place::unit).
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
-           std::vector<std::vector<uint8_t>> &withheld, std::string &why);
+           std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit = 0u);
 
 } // namespace rg::nativefx
