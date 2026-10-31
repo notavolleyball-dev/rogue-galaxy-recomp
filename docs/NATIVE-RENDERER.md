@@ -31,10 +31,13 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
 1. **The field's remaining post and offscreen work** (phase 3, the census
    table in "Effects: hook the function"; what the effect builder makes of
    each is in "The rest, probed"): `TexAnimeTableApply`'s animated
-   textures (render-to-texture the scene samples), the map pieces `MapDrawGroupRange` draws offscreen, the frame clear, the game
-   thread's 32-strip transfer at the frame's end, the effects drawn as
-   geometry (sword trails, the sun light, battle bursts, effect nodes), the
-   fades, and whether the lens flare's depth probe is right.
+   textures (render-to-texture the scene samples), the map pieces
+   `MapDrawGroupRange` draws offscreen, the effects drawn as geometry
+   (sword trails, the sun light, battle bursts, effect nodes), the fades,
+   and whether the lens flare's depth probe is right. The frame clear and
+   the game thread's 32 strips at the frame's end (the flip's copy into the
+   display buffer) are plain sprites, for phase 4's batcher and the
+   present ("The rest, probed").
 2. **Native draws for the VU1 programs still on packets:** outlines (about
    17% of the field's vertices), shadow volumes (5%), particles, the
    projected texture, the object set-up. They are computed natively but
@@ -660,6 +663,18 @@ innermost function. On the walk and the forced battle:
 | `SwordTrailDraw` | a triangle strip of other than axis-aligned quads |
 | `EffectEntryDrawNodes` | transfers among the sprites; some calls draw nothing |
 | `GfxBlitTexRectPixels` (besides in `CBlurDraw`), `ScreenFadeBlockDraw`, `ScreenColorFilterMaybe`, `FocusFilterDrawMaybe`, `LensFlareDraw` | not called on this route |
+| `DrawListFrameBegin` (the clear) | 16 untextured black sprites over the frame that also write Z 0 (ZTE with ALWAYS, Z not masked) under a draw environment set before it: a clear of colour and depth |
+
+The game thread's own GIF packet each frame in the field (the census's "32
+strips of the frame onto itself") is the flip's copy: 32 sprites of 16
+pixels, DECAL with the texture's alpha, nearest, no blend, from the frame
+(`00000`) through context 1, whose FRAME at that moment is `00e00` as CT24,
+the display buffer (read from the GS's registers when the packet arrives;
+the census took the target for the frame). `CBlurDraw` reads `00e00` the
+next frame. On the title and the load screens it also uploads a 512x448
+image into `02a00` every frame, in 896 tiles of 16x16. Both are plain
+sprites and transfers: phase 4's batcher, and the present ("a present from
+the scene target").
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured

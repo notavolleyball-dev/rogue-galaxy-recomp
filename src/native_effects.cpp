@@ -124,6 +124,8 @@ void dropRanges(uint32_t start, uint32_t end)
 }
 
 PS2Runtime::RecompiledFunction g_frameBeginOriginal = nullptr;
+bool g_probe = false;
+constexpr uint32_t kFrameBeginProbe = 1u; // the probes' unit for DrawListFrameBegin's clear
 
 void afterFrameBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
@@ -133,6 +135,9 @@ void afterFrameBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
     {
         const uint32_t base = read32(stack + 0x28u);
         dropRanges(base, base + read32(stack + 0x34u) * 16u);
+        // RG_NATIVE_EFFECTS_PROBE: the clear it writes from the base on.
+        if (g_probe)
+            addRange(base, stackTop(), Effect::Probe, kFrameBeginProbe);
     }
 }
 
@@ -246,6 +251,7 @@ struct ProbeEntry
     PS2Runtime::RecompiledFunction original;
 };
 ProbeEntry g_probes[] = {
+    {0u, "DrawListFrameBegin", nullptr}, // unit 1, hooked as the frame's start
     {0x00141710u, "GfxBlitTexRectPixels", nullptr},
     {0x001F8250u, "CharaDrawTranslucentPass", nullptr},
     {0x00162F50u, "TexAnimeTableApplyMaybe", nullptr},
@@ -311,7 +317,8 @@ void installProbes(PS2Runtime &runtime, std::integer_sequence<uint32_t, I...>)
 {
     (
         [&] {
-            if (!rg::timing::hookFunction(runtime, g_probes[I].address, &probeHook<I>, g_probes[I].original))
+            if (g_probes[I].address != 0u &&
+                !rg::timing::hookFunction(runtime, g_probes[I].address, &probeHook<I>, g_probes[I].original))
                 std::fprintf(stderr, "[nativefx] probe: %s not hooked\n", g_probes[I].name);
         }(),
         ...);
@@ -442,7 +449,6 @@ bool g_composites = false;
 bool g_cblur = false;
 bool g_bloom = false;
 bool g_dof = false;
-bool g_probe = false;
 bool g_refraction = false;
 
 // --- Packets -----------------------------------------------------------
