@@ -218,21 +218,29 @@ holds, when it is called), so the program names carry "(unverified)" and
 | C | `127ca0b4` | `91f542d0` and four point lights: positions 44, 46, 48, 50 (w: falloff), colors 45, 47, 49, 51, on the normal turned by 64-66 | matches except the first two vertices of a chunk: the interpreter's P/Q timing gives their lanes the next light's 1/\|d\| (the code was written for the hardware's timing; native does the intended) |
 | C | `e3bca52a` | That with each vertex's color c: max(lit * c, -(lit + 128 c)); with 87.y & 0x100 the signs swapped | matches |
 
+| F | `a04c11ce` | Swell: each position pushed out along its normal by (n * q1) * w * s, q1 = 84.x / D, s = clamp((84.y - w) / 84.y, 0.2, 1); only with the one-color C (which overwrites the colors it also writes) | matches the interpreter, clamp included |
+| B | `89123290` | Skinning of **float** positions the EE uploaded (1, 2, 4 bones, as `26a933a5`): positions only, in place; the normals and UVs are floats too (`rawFloats`) | matches (oracle `--synth-floats` floats the sections) |
+| B | `36d686cd` | That, and the normals skinned too | matches |
+| D | `312d076b` | `a786efab`'s guard band and backfaces, but the colors are floats read from the colors section (103.w) and no ST is written (an untextured draw); strips, lists declined. Packets only | matches (`--synth-float-colors`, ST ignored) |
+
 The recorded beam (A, F and D above) is not in this list: it has a
 recording (31 vertices, matched exactly).
 
 Not ported, and why:
 
-- **E** `ab37fe79`, `56d6683a`, `c9e1cecc`, `6e420ef8`, `860dd144`: clipping.
-  `identify` does not read slot E (the GPU clips), so none of them blocks
-  a program; the packet paths decline a chunk with 81.x & 2.
+- **E** `ab37fe79`, `6e420ef8`, `860dd144`: clipping. `identify` does not
+  read slot E (the GPU clips), so none of them blocks a program; the packet
+  paths decline a chunk with 81.x & 2.
+- **E** `56d6683a`, `c9e1cecc` and **A** `8855d9e7`: an indexed
+  per-triangle renderer (A calls B, F, C, sets the guard band and ends with
+  E, which transforms, culls or polygon-clips against the planes and kicks
+  each triangle itself; `56d6683a` has about thirty data-dependent branches).
+  Nothing reaches them, their input layout (index lists, per-face data) is
+  known only from the code, and the GPU clips anyway; a port would be a new
+  mesh kind with a hand-built synthetic recording.
 - **A** `964be3bc`, **B** `857fbbc2`: stubs (`B 0x328` and `JR`): a program
   with one draws nothing.
 - **A** `cf7a85a5` is VU0's (it loads at 0x0c8, outside the VU1 slots), not a strip program.
-- **A** `8855d9e7`, **B** `36d686cd`, `89123290`, **D** `312d076b`, **F**
-  `a04c11ce` (a displacement of the positions and colors along the
-  normals with a look at the neighbours): no scene or tool ran them, and
-  no code path reaching them was found; ported when one is seen.
 
 ## Status (2026-10-28): every recorded program
 
