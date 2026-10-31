@@ -4,7 +4,7 @@ How a VU1 program of the game moves off the VU1: read it from its own code,
 write it as C++ that builds a `GSNativeMesh` (or, for what is not a mesh,
 the packets), check it against the recording and the game, then draw it on
 the GPU. Every program the recordings hold went this way on 2026-10-28
-("Status"); this is the recipe for the pieces still unseen. The plan
+("Status"); this is the recipe for the pieces still unseen ("Pieces written from the code alone" lists what was ported without a recording). The plan
 around it is `docs/NATIVE-RENDERER.md` (phase 1).
 
 ## What a program is
@@ -181,10 +181,58 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | D | 0x1900-0x21e0 | `93cfd2f5a1056991` | Guard band and backfaces with `b8ea8ed5`'s depth and bounds; its triangle lists are declined |
 | D | 0x1900-0x1cb8 | `634107b0f8a88c88` | The guard band (its z before the scale) with `b8ea8ed5`'s depth and bounds |
 | D | 0x1900-0x1b98 | `b8ea8ed53805b0c4` | No culling; z times 87.z, at most 1.y; the vertices' bounds (x, y, z, fog) widen quads 98 and 99, which the `:960` sprite programs read, so `skip` and `gpu` write them too (`applyMemoryEffects`) |
+| F | 0x39d0-0x3b98 | `9df36d6a55fdb496` | Wave: positions turned in x and y about (0, 84.x) by an angle growing with y (`Wave`) |
+| F | 0x39d0-0x3d10 | `ad209cd3feea3c5d` | Reflection map: the view vector reflected in the normal (`Reflection`) |
+| A | 0x0320-0x0530 | `c8143ab4bcadef13` | The transporter beam's driver: B, F, E (a stub, `2aa11602`), C, D; no clipping |
+| F | 0x39d0-0x3c08 | `b1d2924548c74d41` | The beam's UVs: the position through quads 72-75, divided by w, about the point quad 75 projects, scaled by 82.z (`Beam`) |
+| D | 0x1900-0x1be0 | `1bd1b5c0cd88b246` | The beam's D: guard band, depth, **affine ST** (Q written as 1), color (128, 128, 128) and the vertex's alpha. Packets only (`affine`) |
 
 E (clipping) is never ported: the GPU clips the mesh (`gs_native.vert`
 outputs homogeneous positions), so a clipping chunk goes to the GPU like any
 other. The packet paths (`1`, `skip`) leave clipping chunks to the VU1.
+
+### Pieces written from the code alone
+
+No recording holds these (`census.py --recording` shows them as never
+run). They were read from the executable's code and checked with the
+oracle's synthetic mode: the piece is patched into a recorded program, the
+inputs it needs are poked into the data, and native is compared with the
+interpreter's run of the result.
+
+```bash
+tools/vu1/piece.py HASHPREFIX build/spike/piece.bin          # a piece as a 16 KiB image
+build/game/src/rg_vu1_oracle build/harvest/*.vu1r --program HASH:320 \
+    --synth-code build/spike/piece.bin:START:END [--synth-quad N:x,y,z,w ...] \
+    --candidate native --tol-xy 1 --tol-z 16 --tol-rgba 1 --tol-stq 1e-5 --show diff
+```
+
+That proves the arithmetic against the interpreter on real vertices; it
+does not prove the game uses the piece the way assumed (what the data
+holds, when it is called), so the program names carry "(unverified)" and
+`RG_VU1_NATIVE=check` reports a difference the day one runs.
+
+| Piece | Hash | What | Checked |
+|---|---|---|---|
+| F | `0594a063` | Ramp: u = (normal . (100.x, 101.x, 102.x) + 1) / 2, v = 0 (a toon ramp?) | matches on three lit programs |
+| D | `2feaa9a1` | The guard band and scaled depth as `634107b0`, without the bounds, and ST not multiplied by Q (the GS sees Q = 1: no perspective-correct texture). Packets only | matches on three programs |
+| C | `127ca0b4` | `91f542d0` and four point lights: positions 44, 46, 48, 50 (w: falloff), colors 45, 47, 49, 51, on the normal turned by 64-66 | matches except the first two vertices of a chunk: the interpreter's P/Q timing gives their lanes the next light's 1/\|d\| (the code was written for the hardware's timing; native does the intended) |
+| C | `e3bca52a` | That with each vertex's color c: max(lit * c, -(lit + 128 c)); with 87.y & 0x100 the signs swapped | matches |
+
+The recorded beam (A, F and D above) is not in this list: it has a
+recording (31 vertices, matched exactly).
+
+Not ported, and why:
+
+- **E** `ab37fe79`, `56d6683a`, `c9e1cecc`, `6e420ef8`, `860dd144`: clipping.
+  `identify` does not read slot E (the GPU clips), so none of them blocks
+  a program; the packet paths decline a chunk with 81.x & 2.
+- **A** `964be3bc`, **B** `857fbbc2`: stubs (`B 0x328` and `JR`): a program
+  with one draws nothing.
+- **A** `cf7a85a5` is VU0's (it loads at 0x0c8, outside the VU1 slots), not a strip program.
+- **A** `8855d9e7`, **B** `36d686cd`, `89123290`, **D** `312d076b`, **F**
+  `a04c11ce` (a displacement of the positions and colors along the
+  normals with a look at the neighbours): no scene or tool ran them, and
+  no code path reaching them was found; ported when one is seen.
 
 ## Status (2026-10-28): every recorded program
 

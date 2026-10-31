@@ -19,13 +19,18 @@
 //
 // Done: every program the recordings hold (docs/VU1-NATIVE.md, "Status"):
 // the strip programs, composed from a piece per slot (A; B plain or skinned;
-// C vertex colors, one color, lit, lit vertex colors; D: none, guard band,
-// guard band and backfaces, each with or without the scaled depth and
-// bounds; F scroll or sphere map), and the programs whose pieces draw by
-// themselves (Kind): the outlines, the shadow volumes, the overlay sprites,
-// the object setup, the particles and the projected texture. Not done, so
-// left to the VU1 chunk by chunk: clipping (slot E) where the GPU does not
-// clip, the paths no recording took, and the pieces no recording reached.
+// C vertex colors, one color, lit, lit vertex colors, those with four point
+// lights; D: none, guard band, guard band and backfaces, each with or
+// without the scaled depth and bounds, and the beam's; F scroll, sphere map,
+// wave, reflection map, ramp, the beam's), and the programs whose pieces
+// draw by themselves (Kind): the outlines, the shadow volumes, the overlay
+// sprites, the object setup, the particles and the projected texture. The
+// pieces no recording holds (the ramp F, the point-light Cs, the depth-only
+// affine D) are written from the code and checked against the interpreter
+// only (docs/VU1-NATIVE.md, "Pieces written from the code alone"); their
+// program names say "unverified". Not done, so left to the VU1 chunk by
+// chunk: clipping (slot E) where the GPU does not clip, the paths no
+// recording took, and the pieces nothing reached.
 //
 // The arithmetic per vertex is the runtime's (gsNativeMeshPoint in
 // runtime/gs/gs_types.h), whichever way a chunk goes out.
