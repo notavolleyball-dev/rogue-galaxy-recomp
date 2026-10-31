@@ -198,7 +198,7 @@ program at all.
 
 | Kind (`Kind`) | Programs | Field vertices | Pieces | In `gpu` mode |
 |---|---|---|---|---|
-| Strips | 9f727028, cfb58657, 30da21d7, ... (most) | about 78% | A 07151c25; B plain or skinned; C vertex colors, one color, lit, lit vertex colors; D five; F scroll, sphere map or wave (9df36d6a, 2026-10-31: a bend of the positions, not of the UVs) | Mesh, the GPU transforms and clips |
+| Strips | 9f727028, cfb58657, 30da21d7, ... (most) | about 78% | A 07151c25; B plain or skinned; C vertex colors, one color, lit, lit vertex colors; D five; F scroll, sphere map, wave (9df36d6a, 2026-10-31: a bend of the positions, not of the UVs) or reflection map (ad209cd3, 2026-10-31: the view vector reflected in the normal, its x and z as the UV) | Mesh, the GPU transforms and clips |
 | Outlines | 3dd4ba5d and 5 more | 17.1% | A 3f6df595, B 542b235c, C 3689bac9 | Packets |
 | Shadow volumes | 0f44ab11 and 11 more | 5.0% | A 821b638f, B 542b235c or a293001f, C dc8dbfe4 | Packets |
 | Overlay sprites (`:960`) | 4cb64ec1 and 28 more | 0.2% | B 6e42dac6 at its own MSCAL | Packets, VU1 memory |
