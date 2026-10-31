@@ -150,7 +150,8 @@ add_executable(rg_vu1_oracle EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/rg_vu1_oracle.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/gif_events.cpp"
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vu1_native.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/vu1_native.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/native_renderer.cpp")
 target_include_directories(rg_vu1_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/debug" "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(rg_vu1_oracle PRIVATE ps2_runtime)
 # The commit this build is from, for the menu's About window (as of the last
