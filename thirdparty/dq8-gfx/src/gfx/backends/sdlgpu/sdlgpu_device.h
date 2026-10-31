@@ -213,6 +213,7 @@ public:
         float misc[4];
         uint32_t rgba[4];
         uint32_t control[4];
+        float depth[4]; // xy: the Z at the rect's x0 and x1, normalised, when depth tested
     };
     bool supportsEffects() const;
     // An effect's buffer, by slot, kept from one effect to the next.
@@ -231,9 +232,13 @@ public:
     // does not draw. With it, into an external target, by `blend`, its alpha
     // kept when not `writeAlpha`. `source` is the sprite's texture, null when
     // untextured.
+    // With `depth` (an external target's depth surface, as big), the sprite
+    // is depth tested at uniforms.depth (x0 to x1) by `depthCompare` (an
+    // SDL_GPUCompareOp: GREATER_OR_EQUAL or GREATER), depth not written.
     bool effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source, bool linear,
                   SDL_GPUTexture *previous, EffectBlend blend, bool writeAlpha, const SDL_Rect *scissor,
-                  const GsEffectUniforms &uniforms, std::string &error);
+                  const GsEffectUniforms &uniforms, std::string &error, SDL_GPUTexture *depth = nullptr,
+                  uint32_t depthCompare = 0u);
     // Sprites into one external target, one after another in one pass.
     struct EffectDraw {
         SDL_GPUTexture *source = nullptr;
@@ -242,9 +247,12 @@ public:
         bool writeAlpha = true;
         SDL_Rect scissor{};
         GsEffectUniforms uniforms{};
+        // With effectDraws' `depth`: GREATER_OR_EQUAL or GREATER, or 0 for
+        // none, as effectOp's.
+        uint32_t depthCompare = 0u;
     };
     bool effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t height, const EffectDraw *draws, size_t count,
-                     std::string &error);
+                     std::string &error, SDL_GPUTexture *depth = nullptr);
     // Rogue Galaxy's object layers, by slot (at most kMaxLayers), kept from
     // one frame to the next.
     static constexpr uint32_t kMaxLayers = 8u;
@@ -353,7 +361,9 @@ private:
     bool effectPipeline(uint32_t index, std::string &error);
     void releaseEffects();
     // By EffectBlend * 2, plus 1 with the alpha kept.
-    SDL_GPUGraphicsPipeline *m_effectPipelines[12] = {};
+    // By EffectBlend and the alpha written (12), times none, GREATER_OR_EQUAL
+    // and GREATER depth tests.
+    SDL_GPUGraphicsPipeline *m_effectPipelines[36] = {};
     SDL_GPUSampler *m_effectLinearSampler = nullptr;
     // 4 buffers of 2 textures each, then a 1x1 one bound where a sprite
     // samples nothing.

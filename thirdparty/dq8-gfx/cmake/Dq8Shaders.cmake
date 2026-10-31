@@ -72,7 +72,7 @@ endfunction()
 # generated header, which <target> can then #include. Embedding rather than
 # loading at runtime keeps a backend a single self-contained object.
 function(dq8_add_shader TARGET)
-    cmake_parse_arguments(ARG "FRAMEBUFFER_FETCH;DESTINATION_COPY;DUAL_SOURCE;LAYERS;MSL_DECORATION_BINDING" "SOURCE;STAGE;SYMBOL" ""
+    cmake_parse_arguments(ARG "FRAMEBUFFER_FETCH;DESTINATION_COPY;DUAL_SOURCE;LAYERS;EFFECT_DEPTH;MSL_DECORATION_BINDING" "SOURCE;STAGE;SYMBOL" ""
                           ${ARGN})
     if(NOT ARG_SOURCE OR NOT ARG_STAGE OR NOT ARG_SYMBOL)
         message(FATAL_ERROR "dq8_add_shader: SOURCE, STAGE and SYMBOL are required")
@@ -108,6 +108,11 @@ function(dq8_add_shader TARGET)
     if(ARG_DUAL_SOURCE)
         string(APPEND STEM ".dual")
         list(APPEND SHADER_DEFINES -DDQ8_DUAL_SOURCE=1)
+    endif()
+    # The sprite's Z as the fragment's depth (Rogue Galaxy: added).
+    if(ARG_EFFECT_DEPTH)
+        string(APPEND STEM ".depth")
+        list(APPEND SHADER_DEFINES -DDQ8_EFFECT_DEPTH=1)
     endif()
     # The colour to each of the object layers bound (Rogue Galaxy: added).
     if(ARG_LAYERS)

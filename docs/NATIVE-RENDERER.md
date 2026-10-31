@@ -12,13 +12,13 @@ plane shadow, the per-object composites, CBlur's texture blur and the bloom
 renderer" switch. "Where it stands" is the summary for picking the work up;
 the rest is the plan and its record.
 
-## Where it stands (2026-10-30)
+## Where it stands (2026-10-31)
 
 **Done, behind the switch:** every recorded VU1 program native, the strips
 drawn as GPU meshes (phase 1); the glare, the plane shadow, the per-object
 composites (object layers, their lay overs one draw with dual-source
-blending), CBlur's texture blur and the bloom drawn by the renderer
-(phase 3). Each is checked byte for byte at 1x against the GS path or its
+blending), CBlur's texture blur, the bloom and the depth of field drawn by
+the renderer (phase 3). Each is checked byte for byte at 1x against the GS path or its
 replay, and at 1x and 3x in VRAM. Speed: 8x holds 60 fps on the RX 6700 XT;
 "deck mode" (a throttled desktop: 4 cores at 2.9 GHz, the GPU's shader clock
 at 500 MHz, memory at 674 MHz) went from 24.4 fps at 4x (`f53f358`, before
@@ -29,8 +29,7 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
 
 1. **The field's remaining post and offscreen work** (phase 3, the census
    table in "Effects: hook the function"): `TexAnimeTableApply`'s animated
-   textures (render-to-texture the scene samples), the depth of field,
-   `CBlurDraw`, the frame copies (`CharaDrawTranslucentPass` for the
+   textures (render-to-texture the scene samples), `CBlurDraw`, the frame copies (`CharaDrawTranslucentPass` for the
    refraction material, `GfxBlitTexRectPixels`), the map pieces
    `MapDrawGroupRange` draws offscreen, the frame clear, the game thread's
    32-strip transfer at the frame's end, the effects drawn as geometry
@@ -55,13 +54,15 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
 6. **Remove the GS path** (phase 5) once `gs_vram` is not allocated in a
    native run and a playthrough route passes the frame tools.
 
-**The VU1 tail** runs alongside: 17 pieces never recorded, a program with
-one of them left to the VU1 (speed, not correctness, until phase 4).
-[VU1-NATIVE.md](VU1-NATIVE.md) "Status" has which table row each belongs
-to and a checklist of places to play with harvest mode on; a GameFAQs save
-at the end of the game (`build/run/mc0-late`, untracked) gave four of them
-on Zerard. Row 6 (refraction, the transporter's beam) has its samples and
-is ready to port.
+**The VU1 tail** (2026-10-31): every piece is native but the indexed
+per-triangle renderer (A `8855d9e7` with E `56d6683a`, `c9e1cecc`), which
+nothing reaches, the clipping Es (the GPU clips) and two stubs; the pieces
+no recording holds were written from the code and checked against the
+interpreter only, their programs named "unverified" ([VU1-NATIVE.md](VU1-NATIVE.md),
+"Pieces written from the code alone"). Harvest mode (below) still turns
+them into recordings when play reaches them. Programs whose draws go out as
+packets rather than meshes (item 2) now include the affine and float-colour
+Ds and the beam's.
 
 **Capturing the rest** (harvest mode). Build `build/game` (the patches
 apply on configure; after pulling a changed patch, undo them with
@@ -249,7 +250,7 @@ order to port them:
 | `ModelDrawOffscreenCompositeMaybe_16aac0`, with the VU1's depth-and-bounds strips and overlay sprites | E: about 20 objects, each cleared, drawn into `02a00` and blended back | done: object layers, a slot per object and the tails in one pass (`RG_NATIVE_COMPOSITE`, on with the native renderer) |
 | `DrawListBeginPlaneShadowPass_147b80`, `DrawListEndPlaneShadowPass_146cc0`, with the VU1's shadow volumes | F: volumes into `02a00`, 48 feedback sprites of blur in `03800` | stencil volumes, a blur at the buffer's own size. Parity form done as the glare's (`RG_NATIVE_SHADOW`, on with the native renderer) |
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
-| `DofFilterDrawMaybe_17d150` | D: the frame to `02a00` and back (16 sprites in the field) | one or two passes reading native depth |
+| `DofFilterDrawMaybe_17d150` | D: the frame halved into `02a00` (16 sprites), laid back over the far scene by a 32-triangle strip depth tested GEQUAL | done: the strip's quads as sprites depth tested against the scene's depth buffer (`RG_NATIVE_DOF`, on with the native renderer) |
 | `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form of `CBlurTexBlur` done (`RG_NATIVE_CBLUR`, on with the native renderer); `CBlurDraw` stays GS packets |
 | `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
 | `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare. Parity form of the bloom done (`RG_NATIVE_BLOOM`, on with the native renderer) |
@@ -576,6 +577,43 @@ that area 60 copies per 60 frames remain: the depth of field's
 destination alpha test on the frame. The minimap's (on `02ca0`) comes
 before the walk.
 
+**The depth of field (2026-10-31), `RG_NATIVE_DOF`, on with the native
+renderer.** `DofFilterDrawMaybe`'s packets: the frame halved into `02a00`
+(16 sprites of 16 pixels, bilinear, UV 0-512 over 256 pixels), then
+`02a00` laid back over the frame (lerp by As, vertex alpha 0x80, the
+frame's alpha masked) by a triangle strip of 16 quads, 32 pixels each,
+with ZTE and ZTST GEQUAL and Z not written: only the far scene is
+replaced. The strip's Z is a sawtooth, 3907 at each quad's left edge and
+3527 at its right, so the threshold ramps across the screen. The builder
+takes a strip of axis-aligned quads (top and bottom vertices in turn, Z by
+column) as sprites, and a depth test into a GS target;
+`GSNativeEffect::Op` gained the depth buffer and the Z at the sprite's two
+edges (framework patch 0024), and the backend attaches the scene's depth
+surface and draws the sprite with a shader variant writing that Z
+(`gs_effect.frag`, `DQ8_EFFECT_DEPTH`). The 16 quads, and any sprites in
+a row into the same GS target, go in one pass (they were one each).
+
+Bilinear reads in the effects now weigh the four texels with the GS's 4
+fractional bits, as the GS path's `sampleTexture` does for UV draws (they
+used the sampler's, except CT24 and layer sources): the depth of field's
+222 texel rows over 448 land between sixteenths, where the sampler's finer
+weights left it up to 9 levels from the GS path. The glare and the shadow
+move by a few levels with it; against the GS path the shadow is closer (at
+pad 2660 at most 3 levels apart where it was 4), the glare as far (the GS
+path is wrong there, above). CBlur is unchanged and exact.
+
+At 1x, each effect native alone against the GS path for all
+(`tools/bench/fx-run.sh`, `tools/bench/pixdiff.py`): at pad 3000 the depth
+of field differs in 2,422 pixels, by 1 level (29 by 2), all in its far
+region; at pad 3450 and in the battle (pad 4400 with the forced encounter)
+not at all. The other effects as before. At 3x it is within 2 levels with
+`DQ8_GFX_EFFECT_SCALE=0`; at the default 2, its own `02a00` is drawn at 2x
+where the GS path's is at 3x, and 376 pixels differ by more than 8 levels in
+the blurred region, the blur buffers' trade-off. With every effect native,
+the walk's last stretch (pad 3450) makes no feedback copies with or without
+it (the 60 per 60 frames put down to it under "The rest there" no longer
+show on this build), and it saves 2 render passes a frame there.
+
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
 with `gpubusy.sh` falls by an amount recorded in the ledger.
@@ -740,7 +778,7 @@ the long pole and needs phase 0's family count.
 | 0 Attribution and census | S-M | effects done for the field and a battle (2026-10-29); the town, menus, events and movies left |
 | 1 Native meshes | L (about ten families, each a decoder, a shader and harness cases) | done (2026-10-29) |
 | 2 TAA | M | groundwork built (jitter, camera registry, [FSR.md](FSR.md)); after phases 3 and 4, a fallback for low-end hardware |
-| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow, the per-object composites (object layers), CBlur's texture blur and the bloom done (2026-10-30); the rest in "Where it stands" |
+| 3 Post | M-L (about ten effects, each S-M) | the glare, the plane shadow, the per-object composites (object layers), CBlur's texture blur and the bloom done (2026-10-30), the depth of field (2026-10-31); the rest in "Where it stands" |
 | 4 Textures and 2D | M | after 3 |
 | 5 Removal | S | after 4 |
 

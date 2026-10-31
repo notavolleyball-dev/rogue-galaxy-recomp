@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 
+#include "gs_effect.frag.depth.spv.h"
 #include "gs_effect.frag.dual.spv.h"
 #include "gs_effect.frag.spv.h"
 #include "gs_reinterpret.vert.spv.h"
@@ -120,12 +121,22 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     vertexInfo.entrypoint = "main";
     vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    const EffectBlend blend = EffectBlend(index / 2u);
+    // index % 12: the blend and the alpha written; index / 12: no depth
+    // test, GREATER_OR_EQUAL, GREATER.
+    const uint32_t depthMode = index / 12u;
+    const EffectBlend blend = EffectBlend((index % 12u) / 2u);
     const bool dual = blend == EffectBlend::OverExact;
+    if (dual && depthMode != 0u) {
+        error = "effect: a depth-tested lay over by dual-source blending";
+        return false;
+    }
     SDL_GPUShaderCreateInfo fragmentInfo{};
-    fragmentInfo.code = dual ? reinterpret_cast<const uint8_t *>(kGsEffectDualFragSpirv)
-                             : reinterpret_cast<const uint8_t *>(kGsEffectFragSpirv);
-    fragmentInfo.code_size = dual ? sizeof(kGsEffectDualFragSpirv) : sizeof(kGsEffectFragSpirv);
+    fragmentInfo.code = dual             ? reinterpret_cast<const uint8_t *>(kGsEffectDualFragSpirv)
+                        : depthMode != 0u ? reinterpret_cast<const uint8_t *>(kGsEffectDepthFragSpirv)
+                                          : reinterpret_cast<const uint8_t *>(kGsEffectFragSpirv);
+    fragmentInfo.code_size = dual             ? sizeof(kGsEffectDualFragSpirv)
+                             : depthMode != 0u ? sizeof(kGsEffectDepthFragSpirv)
+                                               : sizeof(kGsEffectFragSpirv);
     fragmentInfo.entrypoint = "main";
     fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
@@ -176,6 +187,14 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.target_info.color_target_descriptions = &colorTarget;
     info.target_info.num_color_targets = 1u;
+    if (depthMode != 0u) {
+        info.target_info.has_depth_stencil_target = true;
+        info.target_info.depth_stencil_format = m_depthFormat;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = false;
+        info.depth_stencil_state.compare_op =
+            depthMode == 1u ? SDL_GPU_COMPAREOP_GREATER_OR_EQUAL : SDL_GPU_COMPAREOP_GREATER;
+    }
     pipeline = SDL_CreateGPUGraphicsPipeline(m_device, &info);
     SDL_ReleaseGPUShader(m_device, fragment);
     SDL_ReleaseGPUShader(m_device, vertex);
@@ -186,10 +205,27 @@ bool SdlGpuDevice::effectPipeline(uint32_t index, std::string &error) {
     return true;
 }
 
+namespace {
+// effectPipeline's index: the depth test (none, GREATER_OR_EQUAL, GREATER)
+// times 12, the blend times 2, and the alpha kept.
+uint32_t effectPipelineIndex(SdlGpuDevice::EffectBlend blend, bool writeAlpha, uint32_t depthCompare) {
+    const uint32_t depthMode = depthCompare == SDL_GPU_COMPAREOP_GREATER_OR_EQUAL ? 1u
+                               : depthCompare == SDL_GPU_COMPAREOP_GREATER        ? 2u
+                                                                                  : 0u;
+    return depthMode * 12u + uint32_t(blend) * 2u + (writeAlpha ? 0u : 1u);
+}
+} // namespace
+
 bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source,
                             bool linear, SDL_GPUTexture *previous, EffectBlend blend, bool writeAlpha,
-                            const SDL_Rect *scissor, const GsEffectUniforms &uniforms, std::string &error) {
-    const uint32_t index = uint32_t(blend) * 2u + (writeAlpha ? 0u : 1u);
+                            const SDL_Rect *scissor, const GsEffectUniforms &uniforms, std::string &error,
+                            SDL_GPUTexture *depth, uint32_t depthCompare) {
+    if (depth && (!scissor || (depthCompare != SDL_GPU_COMPAREOP_GREATER_OR_EQUAL &&
+                               depthCompare != SDL_GPU_COMPAREOP_GREATER))) {
+        error = "effectOp: a depth test it cannot draw";
+        return false;
+    }
+    const uint32_t index = effectPipelineIndex(blend, writeAlpha, depth ? depthCompare : 0u);
     if (!effectPipeline(index, error))
         return false;
     SDL_GPUCommandBuffer *commands = pendingCommands(error, effectLabel.c_str());
@@ -200,7 +236,13 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
     // An effect's own buffer is drawn whole from `previous`.
     info.load_op = scissor ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_DONT_CARE;
     info.store_op = SDL_GPU_STOREOP_STORE;
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, nullptr);
+    SDL_GPUDepthStencilTargetInfo depthInfo{};
+    depthInfo.texture = depth;
+    depthInfo.load_op = SDL_GPU_LOADOP_LOAD;
+    depthInfo.store_op = SDL_GPU_STOREOP_STORE;
+    depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, depth ? &depthInfo : nullptr);
     if (!pass) {
         cancelPending();
         error = std::string("SDL_BeginGPURenderPass(effect): ") + SDL_GetError();
@@ -234,12 +276,18 @@ bool SdlGpuDevice::effectOp(SDL_GPUTexture *target, uint32_t width, uint32_t hei
 }
 
 bool SdlGpuDevice::effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t height, const EffectDraw *draws,
-                              size_t count, std::string &error) {
+                              size_t count, std::string &error, SDL_GPUTexture *depth) {
     if (count == 0u)
         return true;
-    for (size_t n = 0; n < count; ++n)
-        if (!effectPipeline(uint32_t(draws[n].blend) * 2u + (draws[n].writeAlpha ? 0u : 1u), error))
+    for (size_t n = 0; n < count; ++n) {
+        if ((draws[n].depthCompare != 0u) != (depth != nullptr)) {
+            error = "effectDraws: draws with and without a depth test in one pass";
             return false;
+        }
+        if (!effectPipeline(effectPipelineIndex(draws[n].blend, draws[n].writeAlpha, depth ? draws[n].depthCompare : 0u),
+                            error))
+            return false;
+    }
     // Something is bound to each slot the shader declares.
     SDL_GPUTexture *dummy = nullptr;
     if (std::any_of(draws, draws + count, [](const EffectDraw &draw) { return !draw.source; })) {
@@ -254,7 +302,15 @@ bool SdlGpuDevice::effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t 
     info.texture = target;
     info.load_op = SDL_GPU_LOADOP_LOAD;
     info.store_op = SDL_GPU_STOREOP_STORE;
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, nullptr);
+    // Every pipeline of a pass names the same attachments: with a depth
+    // buffer, every draw is depth tested (checked above).
+    SDL_GPUDepthStencilTargetInfo depthInfo{};
+    depthInfo.texture = depth;
+    depthInfo.load_op = SDL_GPU_LOADOP_LOAD;
+    depthInfo.store_op = SDL_GPU_STOREOP_STORE;
+    depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, depth ? &depthInfo : nullptr);
     if (!pass) {
         cancelPending();
         error = std::string("SDL_BeginGPURenderPass(effect): ") + SDL_GetError();
@@ -265,7 +321,7 @@ bool SdlGpuDevice::effectDraws(SDL_GPUTexture *target, uint32_t width, uint32_t 
     uint32_t bound = ~0u;
     for (size_t n = 0; n < count; ++n) {
         const EffectDraw &draw = draws[n];
-        const uint32_t index = uint32_t(draw.blend) * 2u + (draw.writeAlpha ? 0u : 1u);
+        const uint32_t index = effectPipelineIndex(draw.blend, draw.writeAlpha, depth ? draw.depthCompare : 0u);
         if (index != bound) {
             SDL_BindGPUGraphicsPipeline(pass, m_effectPipelines[index]);
             bound = index;

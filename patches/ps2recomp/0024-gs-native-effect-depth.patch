@@ -1,0 +1,17 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_types.h b/ps2xRuntime/include/runtime/gs/gs_types.h
+index 62a4001..b87022f 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -361,6 +361,12 @@ struct GSNativeEffect
+         uint64_t test = 0u;  // TEST (its alpha test)
+         uint32_t flags = 0u;
+         uint32_t texa = 0u;  // TEXA's TA0 (bits 0-7) and AEM (bit 15), for kCt24
++        // When TEST tests depth (ZTE, ZTST GEQUAL or GREATER): the depth
++        // buffer (ZBUF, not written) and the Z at x0 and at x1, linear
++        // between (a sprite's one Z; the depth of field's quads ramp), into
++        // a GS target.
++        uint64_t zbuf = 0u;
++        uint32_t z[2] = {};
+     };
+     static constexpr uint32_t kBlend = 1u;     // ABE
+     static constexpr uint32_t kLinear = 2u;    // bilinear (TEX1)

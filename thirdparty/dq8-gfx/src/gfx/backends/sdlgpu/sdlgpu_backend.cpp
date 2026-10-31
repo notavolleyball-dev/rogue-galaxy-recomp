@@ -2573,6 +2573,7 @@ struct SdlGpuBackend::Impl {
     // it draws needs no snapshot; external buffers are the GS's targets. A
     // GS buffer taken over is drawn as an own one at its surface's scale,
     // from the surface, and its last sprite into the surface.
+    std::vector<SdlGpuDevice::EffectDraw> effectBatch;
     bool submitEffect(const GSNativeEffect &effect) {
         if (effect.command != GSNativeEffect::kSprites)
             return device.valid() && layerCommand(effect);
@@ -2650,6 +2651,25 @@ struct SdlGpuBackend::Impl {
             }
         }
         const auto t2 = std::chrono::steady_clock::now();
+        // Sprites one after another into the same GS target, under the same
+        // depth buffer or none, go in one pass (the depth of field's 16
+        // quads were 16), until a sprite reads that target or draws elsewhere
+        // into its surface.
+        effectBatch.clear();
+        Live *batchTarget = nullptr;
+        SDL_GPUTexture *batchDepth = nullptr;
+        const auto flushBatch = [&]() {
+            if (effectBatch.empty())
+                return true;
+            const uint32_t scale = batchTarget->scale;
+            const bool ok = device.effectDraws(batchTarget->surface->texture, batchTarget->width * scale,
+                                               batchTarget->height * scale, effectBatch.data(), effectBatch.size(),
+                                               error, batchDepth);
+            effectBatch.clear();
+            batchTarget = nullptr;
+            batchDepth = nullptr;
+            return ok;
+        };
         for (uint32_t n = 0; n < effect.opCount; ++n) {
             const GSNativeEffect::Op &op = effect.ops[n];
             if (op.target >= effect.bufferCount || op.source >= int32_t(effect.bufferCount))
@@ -2658,6 +2678,12 @@ struct SdlGpuBackend::Impl {
                 device.effectLabel = labelStem + " #" + std::to_string(n);
             Live &target = live[op.target];
             Live *source = op.source >= 0 ? &live[op.source] : nullptr;
+            if (batchTarget && ((source && source->surface == batchTarget->surface) ||
+                                (&target != batchTarget && target.surface == batchTarget->surface) ||
+                                (&target == batchTarget && target.takenOver))) {
+                if (!flushBatch())
+                    return setError(std::move(error));
+            }
             SDL_GPUTexture *sourceTexture = nullptr;
             if (source)
                 sourceTexture = source->current >= 0 ? source->textures[source->current]
@@ -2708,10 +2734,39 @@ struct SdlGpuBackend::Impl {
                     if (blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u)
                         return setError("native effect: a blend into a GS target it cannot draw");
                 }
-                if (!device.effectOp(target.surface->texture, target.width * scale, target.height * scale,
-                                     sourceTexture, linear, nullptr, blend,
-                                     (op.flags & GSNativeEffect::kKeepAlpha) == 0u, &scissor, uniforms, error))
+                // Depth tested against the scene (ZTE, ZTST GEQUAL or
+                // GREATER; the builder allows no other): its depth surface,
+                // as big as the target, and the sprite's Z as a draw's.
+                SDL_GPUTexture *depthTexture = nullptr;
+                uint32_t depthCompare = 0u;
+                if (op.zbuf != 0u && ((op.test >> 16u) & 1u)) {
+                    const uint32_t zbp = uint32_t(op.zbuf & 0x1ffu) << 5u;
+                    const uint32_t zpsm = uint32_t((op.zbuf >> 24u) & 0xfu) | 0x30u;
+                    GsSurface *depth = targets->findDepthSurface(zbp, target.surface->bufferWidth, zpsm,
+                                                                 target.surface->width, target.surface->height);
+                    if (!depth || depth->width != target.surface->width || depth->height != target.surface->height ||
+                        depth->scale != target.surface->scale)
+                        return setError("native effect: a depth-tested sprite without its depth buffer");
+                    depthTexture = depth->texture;
+                    depthCompare = ((op.test >> 17u) & 3u) == 2u ? SDL_GPU_COMPAREOP_GREATER_OR_EQUAL
+                                                                 : SDL_GPU_COMPAREOP_GREATER;
+                    const float depthScale = 1.0f / float(depthMaximumForPsm(zpsm));
+                    uniforms.depth[0] = std::clamp(float(op.z[0]) * depthScale, 0.0f, 1.0f);
+                    uniforms.depth[1] = std::clamp(float(op.z[1]) * depthScale, 0.0f, 1.0f);
+                }
+                if (batchTarget && (batchTarget != &target || batchDepth != depthTexture) && !flushBatch())
                     return setError(std::move(error));
+                SdlGpuDevice::EffectDraw draw{};
+                draw.source = sourceTexture;
+                draw.linear = linear;
+                draw.blend = blend;
+                draw.writeAlpha = (op.flags & GSNativeEffect::kKeepAlpha) == 0u;
+                draw.scissor = scissor;
+                draw.uniforms = uniforms;
+                draw.depthCompare = depthCompare;
+                effectBatch.push_back(draw);
+                batchTarget = &target;
+                batchDepth = depthTexture;
                 targets->markDrawn(*target.surface, GsRegion{x0, y0, x1, y1});
             } else if (target.takenOver && target.current >= 0 && target.lastWrite == n) {
                 // The last into it: into the surface, over the region it holds.
@@ -2740,6 +2795,8 @@ struct SdlGpuBackend::Impl {
             }
             ++stats.nativeEffectOps;
         }
+        if (!flushBatch())
+            return setError(std::move(error));
         // A buffer taken over and drawn once: put back.
         for (uint32_t i = 0; i < effect.bufferCount; ++i) {
             Live &entry = live[i];

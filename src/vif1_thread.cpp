@@ -1123,6 +1123,9 @@ void flushEffect()
         {
             told.push_back(why);
             std::fprintf(stderr, "[nativefx] an effect stays packets: %s\n", why.c_str());
+            static const bool dump = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
+            if (dump)
+                rg::nativefx::dumpPackets("nativefx refused", t_held.packets);
         }
         ++g_effectsAsPackets;
     }

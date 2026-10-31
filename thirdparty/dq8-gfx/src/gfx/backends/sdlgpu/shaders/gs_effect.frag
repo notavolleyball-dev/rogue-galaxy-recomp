@@ -22,6 +22,10 @@ layout(set = 3, binding = 0) uniform EffectParams {
     // a textured sprite); y: ALPHA's A, B, C, D (2 bits each); z: its FIX;
     // w: TEST's ATE, ATST, AREF, AFAIL in their register positions.
     uvec4 control;
+    // xy: the Z at rect's x0 and x1 over the depth format's largest value,
+    // linear between, for a sprite depth tested against the scene
+    // (DQ8_EFFECT_DEPTH; Rogue Galaxy: added).
+    vec4 depth;
 } params;
 layout(location = 0) out vec4 outColor;
 #ifdef DQ8_DUAL_SOURCE
@@ -81,6 +85,15 @@ ivec3 colorTerm(uint select, ivec3 cs, ivec3 cd) {
 }
 
 void main() {
+#ifdef DQ8_EFFECT_DEPTH
+    {
+        // As a triangle's Z at the GS's pixel (its integer coordinate).
+        float x = (gl_FragCoord.x - 0.5) / params.misc.x;
+        float width = params.rect.z - params.rect.x;
+        float t = width > 0.0 ? clamp((x - params.rect.x) / width, 0.0, 1.0) : 0.0;
+        gl_FragDepth = mix(params.depth.x, params.depth.y, t);
+    }
+#endif
 #ifdef DQ8_DUAL_SOURCE
     outFactor = vec4(0.0);
 #endif
@@ -111,11 +124,14 @@ void main() {
         vec2 uv = params.uv.xy + (g - params.rect.xy) * (params.uv.zw - params.uv.xy) / (params.rect.zw - params.rect.xy);
         uvec4 t;
         uint texa = uint(params.misc.w);
-        if ((flags & kLinear) != 0u && (flags & (kCt24 | kLayerSource)) != 0u) {
-            // Each texel's alpha (from TEXA) before the four
-            // are weighed, as the GS (and the GS path's sampleTexture)
-            // filters: under AEM black ones count as transparent, so a
-            // silhouette's alpha falls off.
+        if ((flags & kLinear) != 0u) {
+            // The four texels weighed with the GS's 4 fractional bits, as
+            // the GS path's sampleTexture does for a UV draw: a sprite
+            // scaled by other than a half (the depth of field's 222 rows
+            // over 448) lands between, where the sampler's finer weights
+            // differ by a few levels. And each texel's alpha (from TEXA)
+            // before the four are weighed: under AEM black ones count as
+            // transparent, so a silhouette's alpha falls off.
             int sourceScale = max(int(round(float(textureSize(source, 0).x) / params.misc.y)), 1);
             ivec2 bound = textureSize(source, 0) - 1;
             vec2 base;

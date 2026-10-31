@@ -25,7 +25,7 @@ class PS2Runtime;
 // shadow volumes' mask, blurred, onto the frame). RG_NATIVE_CBLUR (likewise):
 // CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
 // draws). RG_NATIVE_BLOOM (likewise): BloomExtractBlurMaybe, as the
-// glare. RG_NATIVE_EFFECTS_LOG=1
+// glare. RG_NATIVE_DOF (likewise): DofFilterDrawMaybe. RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx
 {
@@ -41,6 +41,8 @@ enum class Effect : uint8_t
     // BloomExtractBlurMaybe: the frame's bright parts blurred in 02a00 and
     // 02c40 and added back, as the glare.
     Bloom,
+    // DofFilterDrawMaybe: the frame to 02a00 and laid back over itself.
+    Dof,
     // DrawListBeginPlaneShadowPass: its packets go on as they are; the
     // registers they set are where the shadow's sprites start from.
     ShadowSetup,

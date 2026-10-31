@@ -29,6 +29,7 @@ constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u; // ModelEmitDrawPacketsM
 constexpr uint32_t kDrawListFrameBegin = 0x001425D0u;
 constexpr uint32_t kCBlurTexBlur = 0x001789E0u; // CBlurTexBlurMaybe
 constexpr uint32_t kBloom = 0x00179360u;        // BloomExtractBlurMaybe
+constexpr uint32_t kDof = 0x0017D150u;          // DofFilterDrawMaybe
 
 // The draw context (GetDrawCtx_15de80 reads it at gp-0x40cc): the frame's
 // buffer index at +0 and its memory stacks at +8, each 8 bytes into the
@@ -197,6 +198,18 @@ void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
 }
 
+PS2Runtime::RecompiledFunction g_dofOriginal = nullptr;
+
+void afterDof(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::Dof);
+}
+
+void dofFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_dofOriginal, rdram, ctx, runtime, &afterDof, stackTop());
+}
+
 // Stage E, an object at a time. The composite draws offscreen when its
 // settings (a0) have +0x50 and +0x5C, a buffer at +0x20 and a strength at
 // +0x24 not negative (docs/NATIVE-RENDERER.md, "Stage E, why offscreen"):
@@ -321,6 +334,7 @@ bool g_shadow = false;
 bool g_composites = false;
 bool g_cblur = false;
 bool g_bloom = false;
+bool g_dof = false;
 
 // --- Packets -----------------------------------------------------------
 
@@ -515,8 +529,10 @@ struct Builder
         return static_cast<int>(i);
     }
 
-    // A sprite from v0 to v1 under `r`.
+    // A sprite from v0 to v1 under `r`; with quadZ, a strip's quad, its Z
+    // v0's at v0's x and v1's at v1's.
     bool trace = false;
+    bool quadZ = false;
     bool sprite(const Registers &r, uint16_t prim, const rg::gif::GifEvent &v0, const rg::gif::GifEvent &v1)
     {
         const uint32_t ctxt = (prim >> 9) & 1u;
@@ -563,14 +579,28 @@ struct Builder
         }
         if ((test >> 14) & 1u)
             return fail("a sprite with the destination alpha test");
-        if (((test >> 16) & 1u) && ((test >> 17) & 3u) != 1u)
-            return fail("a sprite with a depth test");
+        // A depth test against the scene (the depth of field's lay back,
+        // GEQUAL at one Z): drawn into a GS target only (finish).
+        const uint32_t ztst = static_cast<uint32_t>((test >> 17) & 3u);
+        const bool depthTest = ((test >> 16) & 1u) && ztst != 1u;
+        if (depthTest && ztst == 0u)
+            return fail("a sprite with the depth test NEVER");
         if (((zbuf >> 32) & 1u) == 0u)
             return fail("a sprite that writes depth");
         if ((r.value[kDthe] & 1u) || (r.value[kFba + ctxt] & 1u) || (abe && (r.value[kPabe] & 1u)))
             return fail("a sprite with dithering, FBA or PABE");
 
         GSNativeEffect::Op op;
+        if (depthTest)
+        {
+            op.zbuf = zbuf;
+            op.z[0] = v0.x <= v1.x ? v0.z : v1.z;
+            op.z[1] = v0.x <= v1.x ? v1.z : v0.z;
+            // A sprite has v1's Z throughout; a quad's ramps in x (the
+            // caller passes its corners with Z by column).
+            if ((prim & 7u) == 6u && !quadZ)
+                op.z[0] = op.z[1] = v1.z;
+        }
         op.flags |= (frame >> 32) != 0u ? GSNativeEffect::kKeepAlpha : 0u;
         const BufferKey target{static_cast<uint32_t>(frame & 0x1FFu) << 5u, static_cast<uint32_t>((frame >> 16) & 0x3Fu),
                                0u};
@@ -720,7 +750,7 @@ struct Builder
     static bool sameDrawing(const GSNativeEffect::Op &a, const GSNativeEffect::Op &b)
     {
         return a.target == b.target && a.source == b.source && a.flags == b.flags && a.alpha == b.alpha &&
-               a.test == b.test && std::memcmp(a.rgba, b.rgba, sizeof(a.rgba)) == 0 &&
+               a.test == b.test && a.zbuf == b.zbuf && a.z[0] == b.z[0] && a.z[1] == b.z[1] && std::memcmp(a.rgba, b.rgba, sizeof(a.rgba)) == 0 &&
                std::memcmp(a.scissor, b.scissor, sizeof(a.scissor)) == 0;
     }
 
@@ -829,6 +859,8 @@ struct Builder
         {
             const GSNativeEffect::Op &op = out.ops[n];
             const GSNativeEffect::Buffer &buffer = out.buffers[op.target];
+            if (op.zbuf != 0u && buffer.external != 1u)
+                return fail("a depth test into an effect's own buffer");
             if (op.flags & GSNativeEffect::kGreenToAlpha)
             {
                 if (buffer.external == 1u || strips[n] != buffer.fbw * 64u / 16u ||
@@ -878,6 +910,7 @@ const char *name(Effect effect)
     case Effect::Shadow: return "shadow";
     case Effect::CBlur: return "cblur";
     case Effect::Bloom: return "bloom";
+    case Effect::Dof: return "dof";
     case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
@@ -904,7 +937,8 @@ bool enabled()
         g_composites = flag("RG_NATIVE_COMPOSITE", native);
         g_cblur = flag("RG_NATIVE_CBLUR", native);
         g_bloom = flag("RG_NATIVE_BLOOM", native);
-        return g_glare || g_shadow || g_composites || g_cblur || g_bloom;
+        g_dof = flag("RG_NATIVE_DOF", native);
+        return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof;
     }();
     return on;
 }
@@ -937,6 +971,10 @@ void install(PS2Runtime &runtime)
     if (g_bloom && !rg::timing::hookFunction(runtime, kBloom, &bloomExtractBlur, g_bloomOriginal))
     {
         std::fprintf(stderr, "[nativefx] the bloom stays GS packets\n");
+    }
+    if (g_dof && !rg::timing::hookFunction(runtime, kDof, &dofFilterDraw, g_dofOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the depth of field stays GS packets\n");
     }
     if (g_composites &&
         (!rg::timing::hookFunction(runtime, kCompositeAt, &compositeAt, g_compositeOriginal) ||
@@ -1090,7 +1128,7 @@ void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &pack
             if (event.kind == rg::gif::GifEvent::Kind::Register)
                 std::fprintf(stderr, " %02x=%llx", event.reg, static_cast<unsigned long long>(event.value));
             else
-                std::fprintf(stderr, " V(prim %x %d,%d uv %d,%d rgba %02x%02x%02x%02x%s)", event.prim, event.x, event.y,
+                std::fprintf(stderr, " V(prim %x %d,%d z %u uv %d,%d rgba %02x%02x%02x%02x%s)", event.prim, event.x, event.y, event.z,
                              event.u, event.v, event.rgba[0], event.rgba[1], event.rgba[2], event.rgba[3],
                              event.drawing ? " kick" : "");
         }
@@ -1129,7 +1167,7 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     out = GSNativeEffect{};
     withheld.clear();
     if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
-        effect != Effect::CompositeTail)
+        effect != Effect::Dof && effect != Effect::CompositeTail)
     {
         why = "no such effect";
         return false;
@@ -1137,15 +1175,18 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     Builder builder{out, why};
     builder.tail = effect == Effect::CompositeTail;
     static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
-    static int traced[8] = {};
+    static int traced[16] = {};
     builder.trace = traceShadow &&
-                    (effect == Effect::Shadow || effect == Effect::Bloom || effect == Effect::CompositeTail) &&
+                    (effect == Effect::Shadow || effect == Effect::Bloom || effect == Effect::Dof ||
+                     effect == Effect::CompositeTail) &&
                     traced[static_cast<int>(effect)]++ == 0;
     Registers registers = effect == Effect::Shadow ? t_shadowSetup : Registers{};
     rg::gif::GifState state;
     std::vector<rg::gif::GifEvent> events;
     uint32_t queued = 0u;
     rg::gif::GifEvent first;
+    std::array<rg::gif::GifEvent, 4> strip{};
+    bool pendingQuad = false;
     bool ok = true;
     // Each DIRECT on its own, as GS::processGIFPacket takes them: a tag cut
     // at a DIRECT's end loses the rest of its data (the glare's first A+D
@@ -1163,7 +1204,12 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
                     if (event.kind == rg::gif::GifEvent::Kind::Register)
                     {
                         if (event.reg == 0x00u)
+                        {
+                            if (pendingQuad)
+                                ok = builder.fail("a triangle strip ending in half a quad");
                             queued = 0u;
+                            pendingQuad = false;
+                        }
                         else if (event.reg == 0x53u || event.reg == 0x50u)
                             ok = builder.fail("a transfer among the sprites");
                         registers.write(event.reg, event.value);
@@ -1173,6 +1219,42 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
                     const uint16_t prim =
                         attributes ? event.prim
                                    : static_cast<uint16_t>((event.prim & 7u) | (registers.value[kPrmode] & 0x7F8u));
+                    if ((prim & 7u) == 4u)
+                    {
+                        // A triangle strip of axis-aligned quads, two
+                        // triangles each, top and bottom vertices in turn
+                        // (the depth of field's lay back): each quad a sprite.
+                        if (queued < 4u)
+                            strip[queued] = event;
+                        else
+                        {
+                            strip[0] = strip[1];
+                            strip[1] = strip[2];
+                            strip[2] = strip[3];
+                            strip[3] = event;
+                        }
+                        ++queued;
+                        // Odd counts from three on end a quad's first triangle.
+                        pendingQuad = queued >= 3u && queued % 2u == 1u;
+                        if (queued < 4u || pendingQuad)
+                            continue;
+                        const rg::gif::GifEvent &a = strip[0], &b = strip[1], &c = strip[2], &d = strip[3];
+                        // Z by column: a quad's two triangles then
+                        // interpolate it in x alone.
+                        const bool quad = a.x == b.x && c.x == d.x && a.y == c.y && b.y == d.y && a.u == b.u &&
+                                          c.u == d.u && a.v == c.v && b.v == d.v && a.z == b.z && c.z == d.z &&
+                                          std::memcmp(a.rgba, d.rgba, 4) == 0 &&
+                                          std::memcmp(b.rgba, d.rgba, 4) == 0 && std::memcmp(c.rgba, d.rgba, 4) == 0;
+                        if (!quad)
+                        {
+                            ok = builder.fail("a triangle strip other than axis-aligned quads");
+                            return;
+                        }
+                        builder.quadZ = true;
+                        ok = builder.sprite(registers, static_cast<uint16_t>((prim & ~7u) | 6u), a, d);
+                        builder.quadZ = false;
+                        continue;
+                    }
                     if ((prim & 7u) != 6u)
                     {
                         ok = builder.fail("a primitive other than a sprite");
@@ -1194,6 +1276,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
         if (!ok)
             return false;
     }
+    if (pendingQuad)
+        builder.fail("a triangle strip ending in half a quad");
     for (const std::vector<uint8_t> &packet : packets)
     {
         withheld.push_back(packet);
@@ -1203,7 +1287,7 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
         return false;
     if (g_log)
     {
-        static bool shown[8] = {};
+        static bool shown[16] = {};
         if (!shown[static_cast<int>(effect)])
         {
             shown[static_cast<int>(effect)] = true;

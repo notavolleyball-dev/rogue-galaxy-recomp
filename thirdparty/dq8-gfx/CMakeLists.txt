@@ -90,6 +90,11 @@ dq8_add_shader(dq8_gfx_sdlgpu
 dq8_add_shader(dq8_gfx_sdlgpu
     SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/gs_effect.frag"
     STAGE frag SYMBOL kGsEffectDualFragSpirv DUAL_SOURCE)
+# The effect shader writing its sprite's Z, for a sprite depth tested
+# against the scene (the depth of field; Rogue Galaxy: added).
+dq8_add_shader(dq8_gfx_sdlgpu
+    SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/backends/sdlgpu/shaders/gs_effect.frag"
+    STAGE frag SYMBOL kGsEffectDepthFragSpirv EFFECT_DEPTH)
 # The draw shader writing every object layer bound, its pipeline's write
 # masks choosing the one it draws into (Rogue Galaxy: added).
 dq8_add_shader(dq8_gfx_sdlgpu
