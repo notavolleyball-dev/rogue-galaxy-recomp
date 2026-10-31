@@ -17,8 +17,9 @@ the rest is the plan and its record.
 **Done, behind the switch:** every recorded VU1 program native, the strips
 drawn as GPU meshes (phase 1); the glare, the plane shadow, the per-object
 composites (object layers, their lay overs one draw with dual-source
-blending), CBlur (its texture blur and its lay over), the bloom and the
-depth of field drawn by the renderer (phase 3). Each is checked byte for byte at 1x against the GS path or its
+blending), CBlur (its texture blur and its lay over), the bloom, the
+depth of field and the refraction's copy of the frame drawn by the
+renderer (phase 3). Each is checked byte for byte at 1x against the GS path or its
 replay, and at 1x and 3x in VRAM. Speed: 8x holds 60 fps on the RX 6700 XT;
 "deck mode" (a throttled desktop: 4 cores at 2.9 GHz, the GPU's shader clock
 at 500 MHz, memory at 674 MHz) went from 24.4 fps at 4x (`f53f358`, before
@@ -30,9 +31,7 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
 1. **The field's remaining post and offscreen work** (phase 3, the census
    table in "Effects: hook the function"; what the effect builder makes of
    each is in "The rest, probed"): `TexAnimeTableApply`'s animated
-   textures (render-to-texture the scene samples), the frame copy
-   `CharaDrawTranslucentPass` makes for the refraction material, the map
-   pieces `MapDrawGroupRange` draws offscreen, the frame clear, the game
+   textures (render-to-texture the scene samples), the map pieces `MapDrawGroupRange` draws offscreen, the frame clear, the game
    thread's 32-strip transfer at the frame's end, the effects drawn as
    geometry (sword trails, the sun light, battle bursts, effect nodes), the
    fades, and whether the lens flare's depth probe is right.
@@ -253,7 +252,7 @@ order to port them:
 | `TexAnimeTableApplyMaybe_162f50` | 174 sprites into texture pages the scene samples | native render-to-texture into named textures |
 | `DofFilterDrawMaybe_17d150` | D: the frame halved into `02a00` (16 sprites), laid back over the far scene by a 32-triangle strip depth tested GEQUAL | done: the strip's quads as sprites depth tested against the scene's depth buffer (`RG_NATIVE_DOF`, on with the native renderer) |
 | `CBlurDrawMaybe_1784e0`, `CBlurTexBlurMaybe_1789e0`; `GfxBlitTexRectPixels_141710` (the display buffer into `02a40`) | small blur in `03f80`, full-frame blends | copy plus a sampled pass. Parity form done, both (`RG_NATIVE_CBLUR`, on with the native renderer); `CBlurDraw`'s copy into `02a40` is the census's `GfxBlitTexRectPixels` |
-| `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame copied to `03b80` | the scene target sampled directly |
+| `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame halved into `03b80` (one sprite, in `RefractionCaptureFrame`) | parity form done: the copy drawn by the renderer into the GS's `03b80` (`RG_NATIVE_REFRACTION`, on with the native renderer); later the scene target sampled directly |
 | `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare. Parity form of the bloom done (`RG_NATIVE_BLOOM`, on with the native renderer) |
 | `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
 | `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | native depth sampled in a small compute pass, read a frame late |
@@ -630,20 +629,37 @@ the shifted lay over reads past the copy (the GS path's 3x surface holds
 whatever lies below and right, the native buffer clamps, as at 1x). It
 saves 2 render passes a frame (37 to 35 with every effect native).
 
+**The refraction's capture (2026-10-31), `RG_NATIVE_REFRACTION`, on with
+the native renderer.** `CharaDrawTranslucentPass`'s copy of the frame is
+`RefractionCaptureFrame`'s one sprite: the frame, bilinear, halved into
+`03b80` (256x224, CT32), which the refraction material samples later (the
+pass also runs CBlur's texture blur, an effect of its own). Two builder
+rules made it: a buffer an effect draws and never reads is the GS's (its
+result is for later; the builder had kept it as its own and lost it), and a
+sprite may go from one GS buffer into another (not into itself). The
+frame matches the GS path's at pad 3000 at 1x and 3x; `03b80` itself is 1
+level above the GS path's in about a fifth of its pixels, where the 2x2
+average lands on a half: the GS path's float modulate (128/255 then 255/128)
+leaves those just under the half, the effect's integers do not (the GS's
+own truncating arithmetic was tried and is further off). Nothing it
+draws was refused on the walk or the battle.
+
 **The rest, probed (2026-10-31).** `RG_NATIVE_EFFECTS_PROBE=1` hooks the
 census's remaining functions, runs the builder over each one's packets with
 tracing (the first two of each), logs what it would draw or why not, and
-sends the packets on as they are. On the walk and the forced battle:
+sends the packets on as they are. A probe takes only the packets between
+the ranges of the effects and probes it calls, so each is named by the
+innermost function. On the walk and the forced battle:
 
 | Function | The builder's verdict |
 |---|---|
-| `CharaDrawTranslucentPass` | would draw (1 or 2 buffers, 1 to 5 sprites); some calls draw nothing, one reads an own buffer before drawing it whole |
+| `CharaDrawTranslucentPass` (besides its capture and CBlur's blur) | transfers among the sprites; some calls draw nothing |
 | `TexAnimeTableApplyMaybe` | a T8 or T4 texture (CLUT); transfers among the sprites |
 | `MapDrawGroupRange` | transfers among the sprites; some calls draw nothing |
 | `SunLightDraw`, `BattleEffectBurstDraw` | primitives other than sprites |
 | `SwordTrailDraw` | a triangle strip of other than axis-aligned quads |
 | `EffectEntryDrawNodes` | transfers among the sprites; some calls draw nothing |
-| `GfxBlitTexRectPixels` (alone), `RefractionCaptureFrame`, `ScreenFadeBlockDraw`, `ScreenColorFilterMaybe`, `FocusFilterDrawMaybe`, `LensFlareDraw` | not called on this route |
+| `GfxBlitTexRectPixels` (besides in `CBlurDraw`), `ScreenFadeBlockDraw`, `ScreenColorFilterMaybe`, `FocusFilterDrawMaybe`, `LensFlareDraw` | not called on this route |
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured

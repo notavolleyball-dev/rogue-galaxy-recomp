@@ -32,6 +32,7 @@ constexpr uint32_t kCBlurTexBlur = 0x001789E0u; // CBlurTexBlurMaybe
 constexpr uint32_t kBloom = 0x00179360u;        // BloomExtractBlurMaybe
 constexpr uint32_t kDof = 0x0017D150u;          // DofFilterDrawMaybe
 constexpr uint32_t kCBlurDraw = 0x001784E0u;    // CBlurDrawMaybe
+constexpr uint32_t kRefraction = 0x0013FFD0u;   // RefractionCaptureFrame
 
 // The draw context (GetDrawCtx_15de80 reads it at gp-0x40cc): the frame's
 // buffer index at +0 and its memory stacks at +8, each 8 bytes into the
@@ -212,6 +213,18 @@ void cblurDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_cblurDrawOriginal, rdram, ctx, runtime, &afterCBlurDraw, stackTop());
 }
 
+PS2Runtime::RecompiledFunction g_refractionOriginal = nullptr;
+
+void afterRefraction(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::Refraction);
+}
+
+void refractionCaptureFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_refractionOriginal, rdram, ctx, runtime, &afterRefraction, stackTop());
+}
+
 PS2Runtime::RecompiledFunction g_dofOriginal = nullptr;
 
 void afterDof(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
@@ -235,7 +248,6 @@ struct ProbeEntry
 ProbeEntry g_probes[] = {
     {0x00141710u, "GfxBlitTexRectPixels", nullptr},
     {0x001F8250u, "CharaDrawTranslucentPass", nullptr},
-    {0x0013FFD0u, "RefractionCaptureFrame", nullptr},
     {0x00162F50u, "TexAnimeTableApplyMaybe", nullptr},
     {0x001E1710u, "MapDrawGroupRange", nullptr},
     {0x00177540u, "ScreenFadeBlockDraw", nullptr},
@@ -263,7 +275,28 @@ void afterProbe(uint8_t *, R5900Context *, PS2Runtime *, uint32_t index)
         return;
     const ProbeCall call = t_probeCalls.back();
     t_probeCalls.pop_back();
-    addRange(call.top, stackTop(), Effect::Probe, call.unit);
+    // Only the gaps between the ranges inside it (effects, and probes it
+    // called): those keep their own, so the innermost function is named.
+    const uint32_t start = physical(call.top), end = physical(stackTop());
+    if (end <= start || end - start > (256u << 10))
+        return;
+    std::vector<std::pair<uint32_t, uint32_t>> gaps;
+    {
+        std::lock_guard lock(g_mutex);
+        uint32_t at = start;
+        for (const Range &range : g_ranges)
+        {
+            if (range.end <= at || range.start >= end)
+                continue;
+            if (range.start > at)
+                gaps.emplace_back(at, range.start);
+            at = std::max(at, range.end);
+        }
+        if (at < end)
+            gaps.emplace_back(at, end);
+    }
+    for (const auto &gap : gaps)
+        addRange(gap.first, gap.second, Effect::Probe, call.unit);
     (void)index;
 }
 
@@ -410,6 +443,7 @@ bool g_cblur = false;
 bool g_bloom = false;
 bool g_dof = false;
 bool g_probe = false;
+bool g_refraction = false;
 
 // --- Packets -----------------------------------------------------------
 
@@ -895,9 +929,10 @@ struct Builder
         for (uint32_t i = 0; i < out.bufferCount; ++i)
         {
             GSNativeEffect::Buffer &buffer = out.buffers[i];
-            // The GS's: never drawn here, read first, or first drawn over
-            // what it holds.
-            const bool external = firstWrite[i] < 0 || (firstRead[i] >= 0 && firstRead[i] <= firstWrite[i]) ||
+            // The GS's: never drawn here, read first, first drawn over
+            // what it holds, or drawn and never read here (its result is
+            // for later: the refraction's copy of the frame).
+            const bool external = firstWrite[i] < 0 || firstRead[i] < 0 || firstRead[i] <= firstWrite[i] ||
                                   readsDestination(out.ops[firstWrite[i]]);
             buffer.external = external ? 1u : 0u;
             uint32_t width = 0u, height = 0u;
@@ -959,8 +994,8 @@ struct Builder
     {
         if (op.flags & GSNativeEffect::kGreenToAlpha)
             return "a CT16 channel copy of a GS buffer";
-        if (op.source >= 0 && out.buffers[op.source].external && !tail)
-            return "a sprite into a GS target from another";
+        if (op.source >= 0 && static_cast<uint32_t>(op.source) == op.target)
+            return "a sprite into a GS target from itself";
         if ((op.test & 1u) && (!tail || ((op.test >> 12) & 3u) != 0u))
             return "a sprite into a GS target with the alpha test";
         if ((op.flags & GSNativeEffect::kKeepColor) && (op.flags & GSNativeEffect::kBlend))
@@ -992,6 +1027,7 @@ const char *name(Effect effect)
     case Effect::Bloom: return "bloom";
     case Effect::Dof: return "dof";
     case Effect::CBlurDraw: return "cblur draw";
+    case Effect::Refraction: return "refraction";
     case Effect::Probe: return "probe";
     case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeHead: return "composite head";
@@ -1020,8 +1056,9 @@ bool enabled()
         g_cblur = flag("RG_NATIVE_CBLUR", native);
         g_bloom = flag("RG_NATIVE_BLOOM", native);
         g_dof = flag("RG_NATIVE_DOF", native);
+        g_refraction = flag("RG_NATIVE_REFRACTION", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
-        return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_probe;
+        return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_probe;
     }();
     return on;
 }
@@ -1059,6 +1096,10 @@ void install(PS2Runtime &runtime)
     if (g_dof && !rg::timing::hookFunction(runtime, kDof, &dofFilterDraw, g_dofOriginal))
     {
         std::fprintf(stderr, "[nativefx] the depth of field stays GS packets\n");
+    }
+    if (g_refraction && !rg::timing::hookFunction(runtime, kRefraction, &refractionCaptureFrame, g_refractionOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the refraction's capture stays GS packets\n");
     }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
@@ -1259,7 +1300,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     withheld.clear();
     const bool probing = effect == Effect::Probe;
     if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
-        effect != Effect::Dof && effect != Effect::CBlurDraw && effect != Effect::CompositeTail && !probing)
+        effect != Effect::Dof && effect != Effect::CBlurDraw && effect != Effect::Refraction &&
+        effect != Effect::CompositeTail && !probing)
     {
         why = "no such effect";
         return false;
@@ -1269,7 +1311,7 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
     static int traced[16] = {};
     builder.trace = traceShadow &&
-                    (effect == Effect::Shadow || effect == Effect::Bloom || effect == Effect::Dof || effect == Effect::CBlurDraw ||
+                    (effect == Effect::Shadow || effect == Effect::Bloom || effect == Effect::Dof || effect == Effect::CBlurDraw || effect == Effect::Refraction ||
                      effect == Effect::CompositeTail) &&
                     traced[static_cast<int>(effect)]++ == 0;
     static int probed[64] = {};

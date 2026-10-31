@@ -26,7 +26,8 @@ class PS2Runtime;
 // CBlurTexBlurMaybe (03f80, a GS buffer the effect takes over while it
 // draws) and CBlurDrawMaybe (which lays the displayed frame over the new one
 // by 03f80's alpha). RG_NATIVE_BLOOM (likewise): BloomExtractBlurMaybe, as the
-// glare. RG_NATIVE_DOF (likewise): DofFilterDrawMaybe. RG_NATIVE_EFFECTS_LOG=1
+// glare. RG_NATIVE_DOF (likewise): DofFilterDrawMaybe. RG_NATIVE_REFRACTION
+// (likewise): RefractionCaptureFrame. RG_NATIVE_EFFECTS_LOG=1
 // prints the first of each effect built and why any was not.
 namespace rg::nativefx
 {
@@ -47,6 +48,9 @@ enum class Effect : uint8_t
     // CBlurDrawMaybe (with RG_NATIVE_CBLUR): the displayed frame copied to
     // 02a40, its alpha from 03f80, laid over the frame a pixel or two off.
     CBlurDraw,
+    // RefractionCaptureFrame (CharaDrawTranslucentPass's): the frame halved
+    // into 03b80, which the refraction material samples.
+    Refraction,
     // DrawListBeginPlaneShadowPass: its packets go on as they are; the
     // registers they set are where the shadow's sprites start from.
     ShadowSetup,
