@@ -63,6 +63,31 @@ at the end of the game (`build/run/mc0-late`, untracked) gave four of them
 on Zerard. Row 6 (refraction, the transporter's beam) has its samples and
 is ready to port.
 
+**Capturing the rest** (harvest mode). Build `build/game` (the patches
+apply on configure; after pulling a changed patch, undo them with
+`git -C thirdparty/PS2Recomp checkout -- . && rm thirdparty/PS2Recomp/.rg-patches-applied`
+and build again). Then play with your own card:
+
+    tools/vu1/oracle/harvest-play.sh
+
+or, to play the late-game save (a GameFAQs end-of-game save, Jaster Lv99,
+132 hours, so everything is unlocked; the game saves into this copy, not
+the real card):
+
+    RG_MC0_DIR=build/run/mc0-late tools/vu1/oracle/harvest-play.sh
+
+It samples each VU1 program it has no file for yet into `build/harvest`
+(kept between sessions, so it only adds) and checks the native ones against
+the VU1; the log, `build/run/harvest-<time>.log`, has a `[harvest] new
+program` line for each new one, and `?` or `-` in its pieces is an unseen
+piece, so note where you were. Afterwards `tools/vu1/census.py --recording
+build/harvest/*.vu1r` ticks the pieces off. What to play, likeliest first,
+is the "Harvest checklist" in [VU1-NATIVE.md](VU1-NATIVE.md): the Insectron
+arena, battles with every character's skills and the combo finishers, a boss
+or two, water, lava and waterfalls, each planet's first enemy area, save
+points and the other warps, space and the planet select, menus with models,
+story scenes, the first-person view.
+
 ## Why
 
 The GS path works and is fast on a desktop card, but what it can do is capped
