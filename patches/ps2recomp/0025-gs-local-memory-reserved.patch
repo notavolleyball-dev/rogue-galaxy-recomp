@@ -1,0 +1,183 @@
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -8,6 +8,17 @@
+ #include <limits>
+ #include <stdexcept>
+ #include <algorithm>
++#if defined(_WIN32)
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#else
++#include <sys/mman.h>
++#endif
+ 
+ namespace
+ {
+@@ -293,6 +304,24 @@
+     return basePage * 2048 + y * strideBytes + x * 4;
+ }
+ 
++bool (*PS2Memory::s_gsVramReservedOnly)() = nullptr;
++
++void PS2Memory::releaseGsVram()
++{
++    if (m_gsVramReserved)
++    {
++#if defined(_WIN32)
++        VirtualFree(m_gsVRAM, 0, MEM_RELEASE);
++#else
++        munmap(m_gsVRAM, PS2_GS_VRAM_SIZE);
++#endif
++    }
++    else
++        delete[] m_gsVRAM;
++    m_gsVRAM = nullptr;
++    m_gsVramReserved = false;
++}
++
+ PS2Memory::PS2Memory()
+     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
+ {
+@@ -316,8 +345,7 @@
+ 
+     if (m_gsVRAM)
+     {
+-        delete[] m_gsVRAM;
+-        m_gsVRAM = nullptr;
++        releaseGsVram();
+     }
+ 
+     if (m_vu1Code)
+@@ -355,7 +383,7 @@
+         delete[] m_rdram;
+         delete[] m_scratchpad;
+         delete[] iop_ram;
+-        delete[] m_gsVRAM;
++        releaseGsVram();
+         delete[] m_vu0Code;
+         delete[] m_vu0Data;
+         delete[] m_vu1Code;
+@@ -421,9 +449,28 @@
+         gs_regs.dispfb2 = gs_regs.dispfb1;
+         gs_regs.display2 = gs_regs.display1;
+ 
+-        // Allocate GS VRAM (4MB)
+-        m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
+-        std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
++        // Allocate GS VRAM (4MB), or with a native renderer that no longer
++        // keeps local memory, only reserve its address range: nothing is
++        // committed, and a stray access faults instead of reading zeros.
++        if (s_gsVramReservedOnly && s_gsVramReservedOnly())
++        {
++#if defined(_WIN32)
++            void *reserved = VirtualAlloc(nullptr, PS2_GS_VRAM_SIZE, MEM_RESERVE, PAGE_NOACCESS);
++            if (!reserved)
++                throw std::runtime_error("GS VRAM reservation failed");
++#else
++            void *reserved = mmap(nullptr, PS2_GS_VRAM_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++            if (reserved == MAP_FAILED)
++                throw std::runtime_error("GS VRAM reservation failed");
++#endif
++            m_gsVRAM = static_cast<uint8_t *>(reserved);
++            m_gsVramReserved = true;
++        }
++        else
++        {
++            m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
++            std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
++        }
+ 
+         m_vu0Code = new uint8_t[PS2_VU0_CODE_SIZE];
+         m_vu0Data = new uint8_t[PS2_VU0_DATA_SIZE];
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -400,6 +400,10 @@
+     // GS register accessors
+     GSRegisters &gs() { return gs_regs; }
+     const GSRegisters &gs() const { return gs_regs; }
++    // Asked once, as memory is set up: true keeps the GS local memory
++    // reserved (inaccessible) instead of allocated.
++    static void setGsVramReservedOnly(bool (*query)()) { s_gsVramReservedOnly = query; }
++    bool gsVramReserved() const { return m_gsVramReserved; }
+     uint8_t *getGSVRAM() { return m_gsVRAM; }
+     const uint8_t *getGSVRAM() const { return m_gsVRAM; }
+     bool hasSeenGifCopy() const { return m_seenGifCopy; }
+@@ -431,6 +435,9 @@
+     // Registers
+     GSRegisters gs_regs;
+     uint8_t *m_gsVRAM;
++    bool m_gsVramReserved = false;
++    void releaseGsVram();
++    static bool (*s_gsVramReservedOnly)();
+     VIFRegisters vif0_regs;
+     VIFRegisters vif1_regs;
+     DMARegisters dma_regs[10]; // 10 DMA channels
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -123,7 +123,7 @@
+     m_privRegs = privRegs;
+     if (!m_backend)
+         m_backend = std::make_unique<GSCpuBackend>();
+-    m_backend->Initialize(vram, vramSize);
++    m_backend->Initialize(m_localMemoryReserved ? nullptr : vram, vramSize);
+     reset();
+ }
+ 
+@@ -1809,7 +1809,7 @@
+         // The external 4 MiB GS allocation is the backend hand-off format.
+         // This keeps hot backend replacement deterministic even when a future
+         // GPU backend keeps a private/mirrored local-memory representation.
+-        if (m_localMemoryStorage && m_localMemorySize != 0u)
++        if (m_localMemoryStorage && m_localMemorySize != 0u && !m_localMemoryReserved)
+         {
+             std::vector<uint8_t> localMemory;
+             m_backend->SnapshotVram(localMemory);
+@@ -1820,7 +1820,7 @@
+     }
+ 
+     m_backend = std::move(backend);
+-    m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
++    m_backend->Initialize(m_localMemoryReserved ? nullptr : m_localMemoryStorage, m_localMemorySize);
+ }
+ 
+ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -103,6 +103,9 @@
+     ~GS() = default;
+ 
+     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
++    // The local memory is address space only (nothing behind it): backends
++    // are not handed its contents.
++    void setLocalMemoryReserved(bool reserved) { m_localMemoryReserved = reserved; }
+     void reset();
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+ 
+@@ -191,6 +194,7 @@
+     GSContext &activeContext();
+ 
+     uint8_t *m_localMemoryStorage = nullptr;
++    bool m_localMemoryReserved = false;
+     uint32_t m_localMemorySize = 0u;
+     struct GSRegisters *m_privRegs = nullptr;
+     mutable std::recursive_mutex m_stateMutex;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -660,6 +660,7 @@
+         return true;
+     }
+ 
++    m_gs.setLocalMemoryReserved(m_memory.gsVramReserved());
+     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                     { m_gs.processGIFPacket(data, size); });
