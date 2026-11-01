@@ -20,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -121,6 +122,17 @@ public:
     // Marks entries stale; repeated tile writes coalesce until the next acquire.
     void invalidate(const GsPageSet &pages, InvalidationSource source);
 
+    // The upload audit (DQ8_GFX_UPLOAD_AUDIT=1; Rogue Galaxy: added, the first
+    // step of phase 4, docs/NATIVE-RENDERER.md): a record of which host
+    // upload, draw or copy last wrote each page of local memory, and for
+    // every texture and palette built, whether an address table keyed by the
+    // uploads (no local memory) could have supplied it, or why not.
+    // noteUpload: a host write is about to begin (before its invalidation).
+    void noteUpload(const GSTransferCommand &command);
+    bool auditEnabled() const { return m_auditOn; }
+    // The classes so far, one line each, for the stats report.
+    std::string auditReport() const;
+
     const GsTextureCacheStats &stats() const { return m_stats; }
     void resetStats() { m_stats = {}; }
     size_t size() const { return m_entries.size(); }
@@ -205,6 +217,28 @@ private:
         // added).
         uint64_t invalidated = 0u;
     };
+
+    // The upload audit. Writers by page: 0 never written, 1 a draw or a local
+    // copy, 2 a host write that covered only part of a page the page's
+    // earlier writer shared, 3 a host write with no recorded transfer, 16 and
+    // up an upload (index into m_uploads, minus 16).
+    struct UploadRecord {
+        uint32_t dbp = 0u, dbw = 0u, dpsm = 0u, w = 0u, h = 0u;
+        GsPageSet pages, covered;
+    };
+    struct AuditClass {
+        uint64_t count = 0u;
+        uint64_t texels = 0u;
+        std::string example;
+    };
+    bool m_auditOn = false;
+    uint32_t m_auditPending = 0u;
+    std::vector<uint32_t> m_writer;
+    std::vector<UploadRecord> m_uploads;
+    std::map<std::string, AuditClass> m_audit;
+    void auditStamp(const GsPageSet &pages, InvalidationSource source);
+    void auditBuild(const GsTextureKey &key, const Entry &entry);
+    std::string auditPages(const GsPageSet &pages, const GsTextureKey &key, bool clut) const;
 
     std::function<void(SDL_GPUTexture *)> m_beforeRewrite;
     void beforeRewrite(SDL_GPUTexture *texture) {

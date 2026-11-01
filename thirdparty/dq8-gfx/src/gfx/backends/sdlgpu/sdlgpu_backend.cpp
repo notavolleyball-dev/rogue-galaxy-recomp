@@ -4296,6 +4296,8 @@ struct SdlGpuBackend::Impl {
                      d(stats.layerComposites, previousReasons.layerComposites),
                      d(stats.layerOverflows, previousReasons.layerOverflows),
                      d(stats.layerLost, previousReasons.layerLost));
+        if (textures && textures->auditEnabled())
+            std::fputs(textures->auditReport().c_str(), stderr);
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
@@ -5729,6 +5731,8 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
     }
     m_impl->noteRoundTrip(command);
     m_impl->transferCommand = command;
+    if (command.direction == 0u && m_impl->textures)
+        m_impl->textures->noteUpload(command);
     m_impl->transfer->begin(command);
     m_impl->copySourceCurrent.reset();
     if (patchLocalCopy) {

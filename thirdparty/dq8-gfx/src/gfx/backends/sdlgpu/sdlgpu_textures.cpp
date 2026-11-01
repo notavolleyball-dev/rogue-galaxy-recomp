@@ -196,7 +196,10 @@ size_t GsTextureKeyHash::operator()(const GsTextureKey &key) const {
 }
 
 GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache &targets)
-    : m_device(device), m_vram(vram), m_targets(targets) {}
+    : m_device(device), m_vram(vram), m_targets(targets) {
+    const char *audit = std::getenv("DQ8_GFX_UPLOAD_AUDIT");
+    m_auditOn = audit && *audit && *audit != '0';
+}
 
 GsTextureCache::~GsTextureCache() {
     reset();
@@ -230,8 +233,110 @@ void GsTextureCache::reset() {
     releaseUploadPool();
 }
 
+void GsTextureCache::noteUpload(const GSTransferCommand &command) {
+    if (!m_auditOn)
+        return;
+    UploadRecord record;
+    record.dbp = command.bitbltbuf.dbp;
+    record.dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
+    record.dpsm = command.bitbltbuf.dpsm;
+    record.w = command.trxreg.rrw;
+    record.h = command.trxreg.rrh;
+    gsMarkPages(record.pages, record.dbp, record.dbw, record.dpsm, record.w, record.h,
+                command.trxpos.dsax, command.trxpos.dsay);
+    gsMarkCoveredPages(record.covered, record.dbp, record.dbw, record.dpsm, record.w, record.h,
+                       command.trxpos.dsax, command.trxpos.dsay);
+    m_uploads.push_back(record);
+    m_auditPending = static_cast<uint32_t>(m_uploads.size()) + 15u;
+}
+
+void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource source) {
+    if (m_writer.empty())
+        m_writer.assign(kGsPageCount, 0u);
+    const UploadRecord *record =
+        source == InvalidationSource::HostWrite && m_auditPending >= 16u ? &m_uploads[m_auditPending - 16u] : nullptr;
+    gsForEachPage(pages, [&](uint32_t page) {
+        uint32_t &writer = m_writer[page];
+        if (source == InvalidationSource::Draw)
+            writer = 1u;
+        else if (!record || !record->pages.test(page))
+            writer = 3u;
+        else if (record->covered.test(page) || writer == 0u || writer == m_auditPending)
+            writer = m_auditPending;
+        else
+            writer = 2u;
+    });
+}
+
+// One word for what wrote `pages` last, against what the texture wants.
+std::string GsTextureCache::auditPages(const GsPageSet &pages, const GsTextureKey &key, bool clut) const {
+    bool none = false, draw = false, mixed = false, unknown = false;
+    uint32_t upload = 0u;
+    bool several = false;
+    gsForEachPage(pages, [&](uint32_t page) {
+        const uint32_t writer = m_writer.empty() ? 0u : m_writer[page];
+        if (writer == 0u) none = true;
+        else if (writer == 1u) draw = true;
+        else if (writer == 2u) mixed = true;
+        else if (writer == 3u) unknown = true;
+        else if (upload == 0u || upload == writer) upload = writer;
+        else several = true;
+    });
+    if (draw) return "draw-or-copy";
+    if (mixed) return "partial-page";
+    if (unknown) return "unrecorded-write";
+    if (several) return "several-uploads";
+    if (none && upload == 0u) return "never-written";
+    if (none) return "partly-never-written";
+    const UploadRecord &record = m_uploads[upload - 16u];
+    const uint32_t base = clut ? key.cbp : key.tbp0;
+    const uint32_t width = clut ? std::max<uint32_t>(key.texclut & 0xffu, 1u) : key.tbw;
+    const uint32_t psm = (clut ? key.cpsm : key.psm) & 0x3fu;
+    char buffer[96];
+    if ((record.dpsm & 0x3fu) != psm) {
+        std::snprintf(buffer, sizeof buffer, "reinterpreted upload %02x as %02x", record.dpsm & 0x3fu, psm);
+        return buffer;
+    }
+    if (record.dbp == base && record.dbw == width)
+        return "exact";
+    if (record.dbw == width)
+        return "same-width-other-base";
+    return "other-geometry";
+}
+
+void GsTextureCache::auditBuild(const GsTextureKey &key, const Entry &entry) {
+    for (const bool clut : {false, true}) {
+        const GsPageSet &pages = clut ? entry.clutPages : entry.texelPages;
+        if (pages.none())
+            continue;
+        const std::string cls = std::string(clut ? "clut " : "texture ") + auditPages(pages, key, clut);
+        AuditClass &entryClass = m_audit[cls];
+        ++entryClass.count;
+        entryClass.texels += clut ? 256u : uint64_t(key.width) * key.height;
+        if (entryClass.example.empty()) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof buffer, "tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x", key.tbp0, key.tbw,
+                          key.psm, key.width, key.height, key.cbp, key.cpsm);
+            entryClass.example = buffer;
+        }
+    }
+}
+
+std::string GsTextureCache::auditReport() const {
+    std::string out;
+    for (const auto &[name, entryClass] : m_audit) {
+        char buffer[256];
+        std::snprintf(buffer, sizeof buffer, "[upload-audit] %-44s %7llu builds %9llu Ktexels  e.g. %s\n", name.c_str(),
+                      static_cast<unsigned long long>(entryClass.count),
+                      static_cast<unsigned long long>(entryClass.texels / 1000u), entryClass.example.c_str());
+        out += buffer;
+    }
+    return out;
+}
+
 void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource source) {
-    (void)source;
+    if (m_auditOn)
+        auditStamp(pages, source);
     // Draws mostly land in pages no texture reads; the walk below, over up
     // to 2048 entries, ran for every flush and every host write.
     const GsPageSet hit = m_sourcePagesAll & pages;
@@ -465,6 +570,8 @@ SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &e
     markSourcePages(key, entry.pages);
     markTexelPages(key, entry.texelPages);
     markClutPages(key, entry.clutPages);
+    if (m_auditOn)
+        auditBuild(key, entry);
     SDL_GPUTexture *texture = entry.texture;
     m_sourcePagesAll |= entry.pages;
     Entry &stored = m_entries.emplace(key, std::move(entry)).first->second;

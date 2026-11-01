@@ -711,6 +711,26 @@ with `gpubusy.sh` falls by an amount recorded in the ledger.
 - Depth switches to reversed float once phase 0's census confirms that no
   GS-path draw tests against model depth any more.
 
+**Step 1, the upload audit (2026-11-01, `DQ8_GFX_UPLOAD_AUDIT=1`):** the
+texture cache keeps which upload, draw or copy last wrote each 8 KiB page and,
+for each texture and palette it builds, says whether an address table keyed
+by the uploads could supply it (`[upload-audit]` lines on the stats report,
+cumulative). The walk (pad 3000) and the forced battle (pad 3450) gave, in
+builds: texture `exact` (same base, width and format as one upload) 14 and
+18; `reinterpreted upload 00 as 13` (a CT32 upload read as T8, the game's
+way of sending 8-bit art) 54 and 62, the largest class by texels; `partial-
+page` (an upload that shares a page with another writer) 25 and 33, among
+them a T4 read of the object buffer at `02a00` (an effect, not an upload);
+`draw-or-copy` 7 and 8; `several-uploads` 0 and 1. Palettes: `partial-
+page` 87 and 108 (a CLUT is under a page, so page granularity cannot judge
+it), `draw-or-copy` 12 and 13. What it means for step 2: a table of
+rectangles is not enough, because the common case reads an upload through
+another format; an upload has to be kept as the words the GS would hold (the
+GS's own layout for the format it was sent in), and a read in any format maps
+onto those words. That is a sparse local memory by upload, and it can be
+the first step of dropping the dense one. Block-level (256 byte) coverage
+would settle the `partial-page` classes; the audit does not have it yet.
+
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save
 and a load, a movie) passes with the frame tools.
