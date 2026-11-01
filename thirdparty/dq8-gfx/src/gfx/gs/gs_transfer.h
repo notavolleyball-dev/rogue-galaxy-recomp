@@ -15,6 +15,7 @@
 #include "runtime/gs/gs_types.h"
 
 #include <array>
+#include <unordered_map>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -42,6 +43,19 @@ public:
     uint32_t consumeLocalToHost(uint8_t *dst, uint32_t maxBytes);
 
     GSTransferSnapshot snapshot() const { return m_state; }
+
+    // DQ8_GFX_UPLOAD_REPEATS=1 (Rogue Galaxy: added): how many host->local
+    // transfers wrote what their destination already held, from another
+    // transfer of the same rectangle with the same bytes, nothing else
+    // having been transferred onto those pages since (draws are not seen
+    // here). What skipping them could save; cumulative.
+    struct RepeatStats {
+        uint64_t transfers = 0u, bytes = 0u;
+        uint64_t repeats = 0u, repeatBytes = 0u;
+        uint64_t samePayloadPagesTouched = 0u;
+    };
+    bool repeatsEnabled() const { return m_repeatsOn; }
+    const RepeatStats &repeatStats() const { return m_repeats; }
     size_t pendingLocalToHostBytes() const {
         return m_localToHost.size() - m_localToHostReadPos;
     }
@@ -66,6 +80,17 @@ private:
 
     std::vector<uint8_t> m_localToHost;
     size_t m_localToHostReadPos = 0u;
+
+    void finishRepeatCheck();
+    bool m_repeatsOn = false;
+    RepeatStats m_repeats{};
+    uint64_t m_payloadHash = 0u, m_payloadBytes = 0u;
+    uint64_t m_nextStamp = 1u;
+    std::array<uint64_t, 512> m_pageStamp{};
+    struct LastWrite {
+        uint64_t hash = 0u, stamp = 0u;
+    };
+    std::unordered_map<uint64_t, LastWrite> m_lastWrite;
 };
 
 } // namespace dq8::gfx

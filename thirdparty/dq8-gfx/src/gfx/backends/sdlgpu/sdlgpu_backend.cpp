@@ -4369,6 +4369,21 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(textures->stats().uploadStoreReads),
                          static_cast<unsigned long long>(textures->stats().localMemoryReads),
                          static_cast<unsigned long long>(textures->stats().targetReadsSkipped));
+        if (transfer && transfer->repeatsEnabled()) {
+            static GsTransferEngine::RepeatStats before{};
+            const GsTransferEngine::RepeatStats &now = transfer->repeatStats();
+            const uint64_t bytes = now.bytes - before.bytes, repeatBytes = now.repeatBytes - before.repeatBytes;
+            std::fprintf(stderr,
+                         "[upload-repeats] %llu of %llu transfers wrote what was there (%llu of %llu KiB, %.0f%%); "
+                         "same bytes onto pages written since %llu\n",
+                         static_cast<unsigned long long>(now.repeats - before.repeats),
+                         static_cast<unsigned long long>(now.transfers - before.transfers),
+                         static_cast<unsigned long long>(repeatBytes / 1024u),
+                         static_cast<unsigned long long>(bytes / 1024u),
+                         bytes ? 100.0 * static_cast<double>(repeatBytes) / static_cast<double>(bytes) : 0.0,
+                         static_cast<unsigned long long>(now.samePayloadPagesTouched - before.samePayloadPagesTouched));
+            before = now;
+        }
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;

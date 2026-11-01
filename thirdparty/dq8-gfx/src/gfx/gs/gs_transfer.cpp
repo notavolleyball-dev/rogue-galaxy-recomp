@@ -3,6 +3,7 @@
 #include "runtime/gs/ps2_gs_memory.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 namespace dq8::gfx {
@@ -20,6 +21,8 @@ constexpr uint32_t kTransferIdle = 3u;
 GsTransferEngine::GsTransferEngine(GsVram &vram)
     : m_vram(vram) {
     m_state.direction = kTransferIdle;
+    const char *repeats = std::getenv("DQ8_GFX_UPLOAD_REPEATS");
+    m_repeatsOn = repeats && *repeats && *repeats != '0';
 }
 
 void GsTransferEngine::reset() {
@@ -32,6 +35,35 @@ void GsTransferEngine::reset() {
 }
 
 // Movie tiles must invalidate their own pages, not the rectangle back to (0,0).
+void GsTransferEngine::finishRepeatCheck() {
+    const GSTransferCommand &c = m_command;
+    uint64_t key = 0xCBF29CE484222325ull;
+    for (const uint64_t field : {uint64_t(c.bitbltbuf.dbp), uint64_t(c.bitbltbuf.dbw), uint64_t(c.bitbltbuf.dpsm),
+                                 uint64_t(c.trxpos.dsax), uint64_t(c.trxpos.dsay), uint64_t(c.trxreg.rrw),
+                                 uint64_t(c.trxreg.rrh)})
+        key = (key ^ field) * 0x100000001B3ull;
+    const GsPageSet pages = destinationPages();
+    ++m_repeats.transfers;
+    m_repeats.bytes += m_payloadBytes;
+    LastWrite &last = m_lastWrite[key];
+    bool untouched = last.stamp != 0u;
+    for (size_t page = 0; untouched && page < pages.size(); ++page)
+        untouched = !pages.test(page) || m_pageStamp[page] == last.stamp;
+    if (last.stamp != 0u && last.hash == m_payloadHash) {
+        if (untouched) {
+            ++m_repeats.repeats;
+            m_repeats.repeatBytes += m_payloadBytes;
+            return; // the pages hold what they held
+        }
+        ++m_repeats.samePayloadPagesTouched;
+    }
+    last.hash = m_payloadHash;
+    last.stamp = m_nextStamp++;
+    for (size_t page = 0; page < pages.size(); ++page)
+        if (pages.test(page))
+            m_pageStamp[page] = last.stamp;
+}
+
 GsPageSet GsTransferEngine::destinationPages() const {
     GsPageSet pages;
     gsMarkPages(pages, m_command.bitbltbuf.dbp,
@@ -62,9 +94,20 @@ void GsTransferEngine::begin(const GSTransferCommand &command) {
     m_state.copiedPixels = 0u;
     m_state.direction = command.direction;
     m_state.localToHostPendingBytes = 0u;
+    m_payloadHash = 0xCBF29CE484222325ull;
+    m_payloadBytes = 0u;
 
-    if (command.direction == kLocalToLocal)
+    if (command.direction == kLocalToLocal) {
         performLocalToLocal();
+        if (m_repeatsOn) {
+            // A copy onto pages a repeat would otherwise find untouched.
+            const GsPageSet pages = destinationPages();
+            const uint64_t stamp = m_nextStamp++;
+            for (size_t page = 0; page < pages.size(); ++page)
+                if (pages.test(page))
+                    m_pageStamp[page] = stamp;
+        }
+    }
     else if (command.direction == kLocalToHost)
         performLocalToHost();
 }
@@ -182,6 +225,18 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
     if (m_command.trxreg.rrw == 0u || m_command.trxreg.rrh == 0u ||
         m_state.totalPixels == 0u)
         return;
+    if (m_repeatsOn) {
+        uint32_t i = 0u;
+        for (; i + 8u <= sizeBytes; i += 8u) {
+            uint64_t word;
+            std::memcpy(&word, data + i, sizeof(word));
+            m_payloadHash = (m_payloadHash ^ word) * 0x100000001B3ull;
+            m_payloadHash ^= m_payloadHash >> 29;
+        }
+        for (; i < sizeBytes; ++i)
+            m_payloadHash = (m_payloadHash ^ data[i]) * 0x100000001B3ull;
+        m_payloadBytes += sizeBytes;
+    }
 
     const uint32_t dbp = m_command.bitbltbuf.dbp;
     const uint32_t dbw = std::max<uint32_t>(m_command.bitbltbuf.dbw, 1u);
@@ -335,6 +390,8 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
 
     if (wrote && m_invalidate)
         m_invalidate(destinationPages());
+    if (m_repeatsOn && m_state.direction != kHostToLocal)
+        finishRepeatCheck();
 
     // DQ8_GS_UPLOAD_TRACE=N reports how upload() is actually being fed: the
     // per-call payload decides whether the cost is the pixel writes or the
