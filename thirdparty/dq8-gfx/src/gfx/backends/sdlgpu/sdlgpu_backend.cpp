@@ -2828,11 +2828,58 @@ struct SdlGpuBackend::Impl {
                 }
                 if (batchTarget && (batchTarget != &target || batchDepth != depthTexture) && !flushBatch())
                     return setError(std::move(error));
+                const bool writeAlpha = (op.flags & GSNativeEffect::kKeepAlpha) == 0u;
+                // A sprite laid over the whole frame (the glare's, the glow's:
+                // a fifth of the boss's GPU time at 4x, 2026-11-01) runs this
+                // shader's filtering and colour arithmetic for every pixel of
+                // the upscaled frame. Its term is worked out at the effect
+                // scale instead, one GS pixel at a time as the GS does, and
+                // read once into the blend (DQ8_GFX_FX_FULL_LAYOVER=1: as
+                // before).
+                static const bool fullLayover = [] {
+                    const char *value = std::getenv("DQ8_GFX_FX_FULL_LAYOVER");
+                    return value && *value && std::strcmp(value, "0") != 0;
+                }();
+                if (!fullLayover && source && !depthTexture && (op.test & 1u) == 0u && scale > ownScale &&
+                    x0 == 0u && y0 == 0u && x1 == target.width && y1 == target.height &&
+                    (blend == Blend::Add || (blend == Blend::Over && !writeAlpha))) {
+                    if (!flushBatch())
+                        return setError(std::move(error));
+                    SDL_GPUTexture *term = device.effectTexture(SdlGpuDevice::kEffectTermSlot, target.width * ownScale,
+                                                                target.height * ownScale, error);
+                    if (!term)
+                        return setError(std::move(error));
+                    SdlGpuDevice::GsEffectUniforms termUniforms = uniforms;
+                    termUniforms.misc[0] = float(ownScale);
+                    // Every texel written: the sprite covers it all, no test discards.
+                    if (!device.effectOp(term, target.width * ownScale, target.height * ownScale, sourceTexture, linear,
+                                         sourceTexture, Blend::Write, true, nullptr, termUniforms, error))
+                        return setError(std::move(error));
+                    SdlGpuDevice::EffectDraw apply{};
+                    apply.source = term;
+                    apply.linear = true;
+                    apply.blend = blend;
+                    apply.writeAlpha = writeAlpha;
+                    apply.scissor = scissor;
+                    apply.uniforms = uniforms;
+                    apply.uniforms.misc[1] = float(target.width);
+                    apply.uniforms.misc[2] = float(target.height);
+                    apply.uniforms.control[0] |= 512u | 131072u; // textured, kApplyTerm
+                    effectBatch.push_back(apply);
+                    batchTarget = &target;
+                    batchDepth = nullptr;
+                    // The term's slot is the next one's too.
+                    if (!flushBatch())
+                        return setError(std::move(error));
+                    targets->markDrawn(*target.surface, GsRegion{x0, y0, x1, y1});
+                    ++stats.nativeEffectOps;
+                    continue;
+                }
                 SdlGpuDevice::EffectDraw draw{};
                 draw.source = sourceTexture;
                 draw.linear = linear;
                 draw.blend = blend;
-                draw.writeAlpha = (op.flags & GSNativeEffect::kKeepAlpha) == 0u;
+                draw.writeAlpha = writeAlpha;
                 draw.scissor = scissor;
                 draw.uniforms = uniforms;
                 draw.depthCompare = depthCompare;

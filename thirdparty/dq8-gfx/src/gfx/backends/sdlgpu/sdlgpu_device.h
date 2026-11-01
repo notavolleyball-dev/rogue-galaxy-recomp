@@ -238,6 +238,9 @@ public:
                     const EffectTaps &taps, std::string &error);
     bool supportsEffects() const;
     // An effect's buffer, by slot, kept from one effect to the next.
+    // The slot of a frame lay over's term, computed at the effect scale
+    // before it is laid over (the backend's submitEffect).
+    static constexpr uint32_t kEffectTermSlot = 8u;
     SDL_GPUTexture *effectTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error);
     // How a sprite into an external target meets what is there: the
     // shader's colour written, added, subtracted from it (Cd - Cs), or laid
@@ -389,7 +392,9 @@ private:
     SDL_GPUSampler *m_effectLinearSampler = nullptr;
     // 4 buffers of 2 textures each, then a 1x1 one bound where a sprite
     // samples nothing.
-    std::array<EffectTexture, 9> m_effectTextures{};
+    // 0-7 an effect's buffers (two each), 8 a lay over's term
+    // (kEffectTermSlot), the last a 1x1 stand-in.
+    std::array<EffectTexture, 10> m_effectTextures{};
     std::array<EffectTexture, kMaxLayers> m_layerTextures{};
 
     SDL_GPUGraphicsPipeline *m_reinterpretPipeline = nullptr;

@@ -52,6 +52,11 @@ const uint kTextured = 512u;
 const uint kAlphaOnly = 8192u;
 // The source is an object layer (the backend's).
 const uint kLayerSource = 16384u;
+// A frame lay over from its term (the backend's): the source holds, at a
+// smaller scale, what the sprite gives the blend, rgb its Cs C and alpha its
+// C/128 (a lay over) or As (an add), as this shader gives them into an
+// external target; read once, between its texels, and given to the blend.
+const uint kApplyTerm = 131072u;
 
 uvec4 bytes(vec4 color) {
     return uvec4(round(clamp(color, 0.0, 1.0) * 255.0));
@@ -105,6 +110,18 @@ void main() {
     // A GS pixel samples at its top-left corner; each of the scale x scale
     // pixels of an upscaled target at its own.
     vec2 g = (gl_FragCoord.xy - 0.5) / scale;
+    if ((flags & kApplyTerm) != 0u) {
+        // The term's texel j holds the GS position j / its scale.
+        vec2 size = params.misc.yz;
+        float termScale = float(textureSize(source, 0).x) / size.x;
+        vec4 term = texture(source, (g * termScale + 0.5) / (size * termScale));
+        vec3 rgb = vec3(bytes(term).rgb) / 255.0;
+#ifdef DQ8_DUAL_SOURCE
+        outFactor = vec4(term.a);
+#endif
+        outColor = vec4(rgb, term.a);
+        return;
+    }
     uvec4 dst = toFrame ? uvec4(0u) : bytes(texelFetch(previous, ivec2(gl_FragCoord.xy), 0));
     bool inside = all(greaterThanEqual(g, params.rect.xy)) && all(lessThan(g, params.rect.zw)) &&
                   all(greaterThanEqual(g, params.scissor.xy)) && all(lessThan(g, params.scissor.zw + 1.0));
