@@ -157,6 +157,10 @@ public:
     void setScale(uint32_t scale);
     // Off, a resolve reads the GPU's pixels back and drops them: the local
     // memory is the host writes' alone (nothing draws into it).
+    template <typename Visit> void forEachSurface(Visit &&visit) const {
+        for (const auto &surface : m_surfaces)
+            visit(*surface);
+    }
     void setWritesResolved(bool on) { m_writesResolved = on; }
     // Told of every region a draw (or a GPU copy) wrote into a color surface.
     void setDrawObserver(std::function<void(const GsSurface &, const GsRegion &)> observer) {
@@ -188,6 +192,10 @@ public:
 
     // Makes local memory current for every surface overlapping `pages`.
     bool resolve(const GsPageSet &pages, std::string &error);
+    // Copies the part of each owning target that covers `pages` into local
+    // memory and leaves the target the owner (a palette inside the frame is
+    // a few texels: resolve() reads back everything the GPU holds of it).
+    bool copyOut(const GsPageSet &pages, std::string &error);
     // Before a host write to `pages`: brings back what the GPU owns there
     // and the write will not replace. `covered` are pages it writes whole.
     bool resolveForHostWrite(const GsPageSet &pages, std::string &error,

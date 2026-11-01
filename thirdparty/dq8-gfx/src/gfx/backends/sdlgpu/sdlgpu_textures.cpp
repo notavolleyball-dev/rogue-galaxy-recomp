@@ -514,14 +514,27 @@ GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
     if (warn) {
         // Draws wrote blocks this read covers: with no local memory kept
         // for them, whatever is read here is stale. Once per first block.
-        static std::set<uint32_t> seen;
+        static std::set<std::string> seen;
         const GsBlockSet drawn = blocks & m_drawnBlocks;
-        uint32_t first = 0u;
-        while (first < kGsBlockCount && !drawn.test(first))
-            ++first;
-        if (seen.insert(first).second)
-            std::fprintf(stderr, "[local-read] texture/palette read covers drawn blocks from block %u (%zu of %zu blocks)\n",
-                         first, drawn.count(), blocks.count());
+        char head[160];
+        std::snprintf(head, sizeof head, "tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x", key.tbp0, key.tbw, key.psm,
+                      key.width, key.height, key.cbp, key.cpsm);
+        std::string line = head;
+        m_targets.forEachSurface([&](const GsSurface &surface) {
+            if (surface.depth || surface.undefined)
+                return;
+            GsBlockSet own;
+            gsMarkBlocks(own, surface.base, surface.bufferWidth, surface.psm, surface.width, surface.height);
+            if ((own & drawn).none())
+                return;
+            char buffer[96];
+            std::snprintf(buffer, sizeof buffer, " | target %05x fbw %u psm %02x %ux%u (%zu blocks)", surface.base,
+                          surface.bufferWidth, surface.psm, surface.width, surface.height, (own & drawn).count());
+            line += buffer;
+        });
+        if (seen.insert(line).second)
+            std::fprintf(stderr, "[local-read] %zu of %zu blocks drawn: %s\n", drawn.count(), blocks.count(),
+                         line.c_str());
     }
     return &m_vram;
 }
@@ -1068,8 +1081,10 @@ bool GsTextureCache::resolveSource(const GsTextureKey &key, const GsRegion &regi
     GsPageSet pages = staleTexelPages(key, region);
     if (exclude)
         pages &= ~*exclude;
-    markClutReads(key, pages);
-    return m_targets.resolve(pages, error);
+    GsPageSet clutPages;
+    markClutReads(key, clutPages);
+    // The palette is a few texels of whatever target holds it.
+    return m_targets.resolve(pages, error) && m_targets.copyOut(clutPages, error);
 }
 
 void GsTextureCache::markClutReads(const GsTextureKey &key, GsPageSet &pages) const {
@@ -1124,7 +1139,7 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     GsPageSet clutPages;
     if (indexed)
         markClutReads(key, clutPages);
-    if (!m_targets.resolve(clutPages, error) ||
+    if (!m_targets.copyOut(clutPages, error) ||
         !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error))
         return false;
     if (indexed)

@@ -967,6 +967,26 @@ bool GsTargetCache::resolve(const GsPageSet &pages, std::string &error) {
     return resolveSurfaces(surfaces, error);
 }
 
+bool GsTargetCache::copyOut(const GsPageSet &pages, std::string &error) {
+    if (pages.none())
+        return true;
+    for (auto &candidate : m_surfaces) {
+        GsSurface &surface = *candidate;
+        if (surface.depth || surface.gpuDirty.empty() || (surface.ownedPages & pages).none())
+            continue;
+        GsRegion wanted = regionForPages(surface, pages & surface.ownedPages);
+        wanted.x0 = std::max(wanted.x0, surface.gpuDirty.x0);
+        wanted.y0 = std::max(wanted.y0, surface.gpuDirty.y0);
+        wanted.x1 = std::min(wanted.x1, surface.gpuDirty.x1);
+        wanted.y1 = std::min(wanted.y1, surface.gpuDirty.y1);
+        if (wanted.empty())
+            continue;
+        if (!resolveRegion(surface, wanted, error))
+            return false;
+    }
+    return true;
+}
+
 bool GsTargetCache::resolveAll(std::string &error) {
     std::vector<GsSurface *> surfaces;
     for (auto &candidate : m_surfaces) {
