@@ -106,9 +106,9 @@ them** (each gated by byte-identical VRAM on the walk and the forced battle,
 4. *Item 1's rest and item 3's censuses* (town, item messages, dissolves,
    other movies), now also with `DQ8_GFX_UPLOAD_AUDIT=1` on, which says
    whether the store holds for each.
-5. *Stop allocating `gs_vram`* in a native run (`GsVram` unattached is a
-   no-op for `read`/`write`, but the transfer engine and `GSMem` row readers
-   take the raw pointer), then a playthrough route, then phase 5.
+5. *Stop allocating `gs_vram`*: done 2026-11-01 (Phase 4, step 4); what is
+   left is a playthrough route (title, Salgin, battles, a boss, menus, a save
+   and a load, a movie), then phase 5.
 
 **Verifying.** Walk: `tools/vu1/oracle/native-run.sh NAME gpu 110 3000`, then
 `python3 tools/bench/cmpvram.py NAME vg1`; battle: `RG_FORCE_ENCOUNTER=1`
@@ -838,9 +838,34 @@ dropping either changes the picture (100,512 bytes of VRAM differ on the
 walk). Those patches are the aliasing itself: something draws or samples
 the uploaded words through the target. Finding what is the next step.
 
-**Done when** `gs_vram` is no longer allocated
-
-**Done when** `gs_vram` is no longer allocated
+**Step 4, no game-side local memory (2026-11-01):** with the native renderer
+and the GPU backend, the game's 4 MiB of GS local memory is no longer
+allocated: `PS2Memory` reserves the address range `PROT_NONE` (nothing
+committed; a stray read or write faults, which is how the readers were
+found), `GS` hands its backends a null pointer, and the sdlgpu backend keeps
+a 4 MiB memory of its own (`GsTextureCache`'s host writes plus whatever a
+readback asks for). `RG_GS_VRAM_RESERVE=0` allocates it as before; with the
+native renderer off nothing changed. Checked on the walk, the forced
+battle (shadow volumes, effects, HUD), the title screen and the opening
+movie, the file-load screen: the same pictures as the allocated run, and no
+fault. Two parts of the backend changed for it. The drawn-page rule became a
+drawn-*block* rule (`gsMarkBlocks`, `GsTextureCache::noteDrawnBlocks`,
+fed by `GsTargetCache::setDrawObserver`): uploaded textures share pages with
+render targets (the transporter glow, the HUD) without sharing blocks, and
+under the page rule they were read from the stale memory; the audit
+(`DQ8_GFX_UPLOAD_AUDIT=1`, memory allocated) shows no uploads-only
+DIFFERENT on the battle. The few builds that still read drawn blocks
+(`DQ8_GFX_WARN_LOCAL_READS=1` lists them: the frame at `00000` as T8 with
+its CLUT, `03800`, a 512-wide `00e00`, palettes at `03f80`, `02d20`) are
+served by resolves into the backend's memory (`resolves=0` per 60 frames on
+the walk, a few hundred `texture` resolves in a battle). So the honest
+state: the game keeps no GS memory, but the backend's own still takes those
+readbacks. `DQ8_GFX_DROP_RESOLVES=1` drops them and `DQ8_GFX_POISON_DRAWN=1`
+makes a read of drawn blocks return garbage, so each one that matters shows
+in the picture (it does: the glow and the HUD under the page rule, now only
+those rare builds); getting them off the CPU is the target-sampling work of
+loose end 2. The movies' frames and every other pad-timed screenshot differ
+between runs by timing, so compare runs of one session, or use the audit.
 
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save
