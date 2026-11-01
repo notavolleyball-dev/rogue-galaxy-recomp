@@ -2709,9 +2709,11 @@ struct SdlGpuBackend::Impl {
             }
             // A run of additive taps of an own buffer on itself (the glare's
             // zoom streak: twenty passes) goes in passes of four
-            // (gs_effect_taps.frag); DQ8_GFX_FX_TAPS=0 keeps one pass a tap.
-            static const bool groupTaps = std::getenv("DQ8_GFX_FX_TAPS") == nullptr ||
-                                          std::strcmp(std::getenv("DQ8_GFX_FX_TAPS"), "0") != 0;
+            // (gs_effect_taps.frag); DQ8_GFX_FX_TAPS=1 groups them.
+            // Off unless DQ8_GFX_FX_TAPS=1: measured no faster (the glare's GPU
+            // time 127.9 ms/s grouped, 120.0 not, deck mode, 4x).
+            static const bool groupTaps = std::getenv("DQ8_GFX_FX_TAPS") != nullptr &&
+                                          std::strcmp(std::getenv("DQ8_GFX_FX_TAPS"), "1") == 0;
             if (groupTaps && source == &target && !target.surface && !target.takenOver && target.current >= 0 &&
                 op.flags == 0x1bu && op.alpha == 0x8000000068ull && (op.test & 1u) == 0u && op.zbuf == 0u) {
                 uint32_t run = 1u;
