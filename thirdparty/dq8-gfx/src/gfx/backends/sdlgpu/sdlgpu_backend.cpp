@@ -3026,6 +3026,91 @@ struct SdlGpuBackend::Impl {
         submitOne(copy);
     }
 
+    // A sprite that only moves texels from one target to another (Rogue
+    // Galaxy's flip copies the frame into the display buffer as 32 of them,
+    // 0.5 ms of the GPU a frame at 4x through the draw shader, 2026-11-01):
+    // a texture copy. DECAL, nearest, one texel to a pixel, nothing blended,
+    // tested, fogged or masked, both targets at one scale; anything else
+    // draws. DQ8_GFX_NO_SPRITE_COPY=1 draws them all.
+    bool copySprite(const GSPrimitiveBatch &batch, GsSurface &color, const GsTestState &test) {
+        static const bool off = [] {
+            const char *value = std::getenv("DQ8_GFX_NO_SPRITE_COPY");
+            return value && *value && std::strcmp(value, "0") != 0;
+        }();
+        const GSDrawState &state = batch.state;
+        const GSContext &context = state.context;
+        if (off || state.prim.type != GS_PRIM_SPRITE || batch.vertexCount != 2u || !state.prim.tme ||
+            !state.prim.fst || state.prim.abe || state.prim.fge || context.tex0.tfx != 1u ||
+            (context.tex1 & 0x1e0u) != 0u || context.frame.fbmsk != 0u)
+            return false;
+        if ((test.alphaTestEnabled && test.alphaTest != kAlphaAlways) || test.destinationAlphaTestEnabled ||
+            (test.depthTestEnabled && !(context.zbuf.zmask && test.depthTest == kDepthAlways)))
+            return false;
+        const uint8_t target = context.frame.psm;
+        const uint8_t texture = context.tex0.psm;
+        // The alpha must come through as it is, or not be kept: a CT24 target
+        // keeps none; into CT32, a CT32 texture's own (TCC) and no FBA.
+        if (!(target == GS_PSM_CT24 || (target == GS_PSM_CT32 && texture == GS_PSM_CT32 && context.tex0.tcc &&
+                                        (context.fba & 1u) == 0u)))
+            return false;
+        if (texture != GS_PSM_CT32 && texture != GS_PSM_CT24)
+            return false;
+        const GSVertex &a = batch.vertices[0], &b = batch.vertices[1];
+        const float ofx = float(context.xyoffset.ofx) / 16.0f, ofy = float(context.xyoffset.ofy) / 16.0f;
+        const float x0 = std::min(a.x, b.x) - ofx, x1 = std::max(a.x, b.x) - ofx;
+        const float y0 = std::min(a.y, b.y) - ofy, y1 = std::max(a.y, b.y) - ofy;
+        const float u0 = float(std::min(a.u, b.u)) / 16.0f, u1 = float(std::max(a.u, b.u)) / 16.0f;
+        const float v0 = float(std::min(a.v, b.v)) / 16.0f, v1 = float(std::max(a.v, b.v)) / 16.0f;
+        // Whole pixels and texels, one to one, in the same direction.
+        const auto whole = [](float value) { return value == std::floor(value) && value >= 0.0f; };
+        if (!whole(x0) || !whole(y0) || !whole(x1) || !whole(y1) || !whole(u0) || !whole(v0) ||
+            x1 - x0 != u1 - u0 || y1 - y0 != v1 - v0 || x1 <= x0 || y1 <= y0 || (a.x < b.x) != (a.u < b.u) ||
+            (a.y < b.y) != (a.v < b.v))
+            return false;
+        const GsRegion scissor{uint32_t(context.scissor.x0), uint32_t(context.scissor.y0),
+                               uint32_t(context.scissor.x1) + 1u, uint32_t(context.scissor.y1) + 1u};
+        const GsRegion to{uint32_t(x0), uint32_t(y0), uint32_t(x1), uint32_t(y1)};
+        if (!scissor.contains(to) || to.x1 > color.width || to.y1 > color.height)
+            return false;
+        GsSurface *source = targets->findColorSurface(context.tex0.tbp0, GS_PSM_CT32);
+        if (!source || source == &color || source->depth || source->scale != color.scale ||
+            source->bufferWidth != context.tex0.tbw || uint32_t(u1) > source->width || uint32_t(v1) > source->height)
+            return false;
+        std::string error;
+        if (!flushDraws())
+            return true;
+        {
+            ResolveReasonScope scope(*targets, GsResolveReason::View);
+            if (!targets->prepareColorView(*source, error)) {
+                setError(std::move(error));
+                return true;
+            }
+        }
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "sprite copy");
+        if (!commands) {
+            setError(std::move(error));
+            return true;
+        }
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        if (!copy) {
+            device.cancelPending();
+            setError(std::string("SDL_BeginGPUCopyPass(sprite): ") + SDL_GetError());
+            return true;
+        }
+        const uint32_t scale = color.scale;
+        SDL_GPUTextureLocation from{}, into{};
+        from.texture = source->texture;
+        from.x = uint32_t(u0) * scale;
+        from.y = uint32_t(v0) * scale;
+        into.texture = color.texture;
+        into.x = to.x0 * scale;
+        into.y = to.y0 * scale;
+        SDL_CopyGPUTextureToTexture(copy, &from, &into, to.width() * scale, to.height() * scale, 1u, false);
+        SDL_EndGPUCopyPass(copy);
+        targets->markDrawn(color, to);
+        return true;
+    }
+
     void submitOne(const GSPrimitiveBatch &batch) {
         ++stats.primitivesSubmitted;
         // Numbered as a frame log numbers them (from the frame's start), so
@@ -3117,6 +3202,8 @@ struct SdlGpuBackend::Impl {
         written.x1 = std::min(written.x1, color->width);
         written.y1 = std::min(written.y1, color->height);
         if (written.empty())
+            return;
+        if (!routed && copySprite(batch, *color, test))
             return;
 
         // Inactive depth must not grow/discard a live surface during colour-only passes.
