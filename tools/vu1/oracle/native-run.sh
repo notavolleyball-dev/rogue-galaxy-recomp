@@ -21,6 +21,10 @@ export RG_MC0_DIR=build/run/mc0-bench RG_SETTINGS_FILE=build/run/bench-settings.
 export RG_GS_FRAMELOG="build/run/$NAME.txt@$FRAME" RG_VU1_NATIVE=$MODE DQ8_GFX_SCREENSHOT_DIR=build/run/shots/$NAME DQ8_GFX_SCREENSHOT_EVERY=600
 # The F1 menu's native renderer is off unless set: the effects on, as before it (RG_VU1_NATIVE above still sets the VU1's mode).
 export RG_NATIVE_RENDERER=${RG_NATIVE_RENDERER:-1}
+# The frame log's VRAM dump (what cmpvram.py compares) needs the game-side
+# local memory, which a native run otherwise only reserves: RG_GS_VRAM_RESERVE=1
+# for a run of the reserved mode.
+export RG_GS_VRAM_RESERVE=${RG_GS_VRAM_RESERVE:-0}
 mkdir -p build/run/shots/$NAME
 unset RG_VU1_REPLAY
 cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1

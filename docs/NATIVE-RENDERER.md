@@ -110,7 +110,10 @@ them** (each gated by byte-identical VRAM on the walk and the forced battle,
    left is a playthrough route (title, Salgin, battles, a boss, menus, a save
    and a load, a movie), then phase 5.
 
-**Verifying.** Walk: `tools/vu1/oracle/native-run.sh NAME gpu 110 3000`, then
+**Verifying.** (`native-run.sh` keeps the game's local memory allocated,
+`RG_GS_VRAM_RESERVE=0`, because the VRAM dump needs it; set
+`RG_GS_VRAM_RESERVE=1` to run the reserved mode and compare screenshots
+within a session instead.) Walk: `tools/vu1/oracle/native-run.sh NAME gpu 110 3000`, then
 `python3 tools/bench/cmpvram.py NAME vg1`; battle: `RG_FORCE_ENCOUNTER=1`
 `... NAME gpu 130 3450` against `vb1` (the reference logs are in `build/run`;
 regenerate them from a commit before the change when they are missing). A
