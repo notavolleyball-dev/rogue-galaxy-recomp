@@ -755,11 +755,14 @@ builds, updates, palette refreshes, and the region identities and
 replacements the draws ask for). The walk (pad 3000) and the forced battle
 (pad 3450) end with all of VRAM and the display buffer byte-identical to the
 runs without it; 173,560 reads came from the host writes' memory and 27,884
-from local memory on the walk (246,475 and 36,011 in the battle). Off by
-default: a host write that does not pass the transfer's invalidation (a
-movie's frames, the round trips) would leave it stale, and the censuses of
-item 3 have to look at those before it is on with the native renderer. It
-still keeps `gs_vram` for the reads that need the targets and for the
+from local memory on the walk (246,475 and 36,011 in the battle). **Censuses (2026-11-01):** the audit also checks every update of a cached
+texture (the movie writes its frames this way). The title screen and the
+opening movie (150 s: about 6,000 updates, 1 M texels) and the walk with a
+menu opened and closed (about 140,000 updates, 3.7 M texels) found no read
+the rule served that differed from local memory (the 2,552 that differed were
+all `needs-targets`: textures of the frame buffer). So the store is on
+(`DQ8_GFX_UPLOAD_STORE=0` turns it off), and the walk is byte-identical with
+it. It still keeps `gs_vram` for the reads that need the targets and for the
 writes draws make.
 
 **Done when** `gs_vram` is no longer allocated in a native run, and a

@@ -201,7 +201,7 @@ GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache
     const char *audit = std::getenv("DQ8_GFX_UPLOAD_AUDIT");
     m_auditOn = audit && *audit && *audit != '0';
     const char *store = std::getenv("DQ8_GFX_UPLOAD_STORE");
-    m_storeOn = store && *store && *store != '0';
+    m_storeOn = !store || (*store && *store != '0'); // on unless DQ8_GFX_UPLOAD_STORE=0
     m_tracking = m_auditOn || m_storeOn;
     if (m_tracking) {
         // The sparse store's stand-in: a local memory that only host writes
@@ -1167,6 +1167,26 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
         return false;
     }
 
+    if (m_auditOn) {
+        // The same test as a build's, for the texels this update re-reads.
+        GsVram *const saved = m_src;
+        m_src = &m_vram;
+        const uint64_t real = expand(key, region, true);
+        m_src = &m_shadow;
+        const uint64_t shadow = expand(key, region, true);
+        m_src = saved;
+        const bool served = (entry.pages & m_drawn).none();
+        AuditClass &entryClass = m_audit[std::string("update ") + (served ? "uploads-only " : "needs-targets ") +
+                                         (real == shadow ? "SAME" : "DIFFERENT")];
+        ++entryClass.count;
+        entryClass.texels += uint64_t(region.width()) * region.height();
+        if (entryClass.example.empty()) {
+            char buffer[96];
+            std::snprintf(buffer, sizeof buffer, "tbp %05x tbw %u psm %02x %ux%u", key.tbp0, key.tbw, key.psm,
+                          key.width, key.height);
+            entryClass.example = buffer;
+        }
+    }
     const bool wholeTexture = region.x0 == 0u && region.y0 == 0u &&
                               region.x1 >= key.width && region.y1 >= key.height;
     // A whole texture dirty again with no palette change waiting is most
