@@ -785,6 +785,21 @@ What still goes through local memory: the imports into targets (`refreshes`:
 225 Kpx a frame in the battle), the textures over several targets' pages,
 and the palettes draws wrote.
 
+**Step 3b, imports nothing reads (2026-11-01):** the per-object offscreen
+buffers (`02a20` up to `02c40`; the game clears an object's box before it is
+drawn into them) no longer import what local memory holds under them when
+the native renderer is on (`DQ8_GFX_KEEP_OBJECT_IMPORTS=1` imports):
+walk and battle byte-identical, the walk's `refreshes` from 2,979 Kpx to 579
+per 60 frames, the battle's from 13,499 to 10,063. Two things this did not
+get: the buffer at `02a00` (512x448) and the host writes patched into the
+small buffers (`cpu-patch`, the textures uploaded to pages the buffers share:
+2.5 M pixels in 140 s of the battle at `02ac0` alone) are read, since
+dropping either changes the picture (100,512 bytes of VRAM differ on the
+walk). Those patches are the aliasing itself: something draws or samples
+the uploaded words through the target. Finding what is the next step.
+
+**Done when** `gs_vram` is no longer allocated
+
 **Done when** `gs_vram` is no longer allocated
 
 **Done when** `gs_vram` is no longer allocated in a native run, and a

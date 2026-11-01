@@ -46,6 +46,7 @@
 #include <SDL3/SDL.h>
 
 #include "gfx/backends/sdlgpu/sdlgpu_backend.h"
+#include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_native_iop.h"
 #include "runtime/ps2_pad_host.h"
@@ -806,6 +807,7 @@ Setup::Setup(PS2Runtime &runtime)
         // worker's: an F9 mark then says which thread was saturated.
         dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport() + mainStallReport(); });
         dq8::gfx::setPresentObserver(&debug::noteFrameTime);
+        dq8::gfx::setDiscardImportQuery([] { return rg::nativerenderer::enabled(); });
         // Aspect ratio Auto follows the Widescreen option.
         sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
         sdl->setSideImageLoader(&loadBorderImage);

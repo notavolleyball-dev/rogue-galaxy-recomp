@@ -125,6 +125,9 @@ const char *gsResolveReasonName(GsResolveReason reason);
 // transfer and slows the game to a crawl (Rogue Galaxy: added).
 bool gsTargetTraceEnabled();
 void gsSetTargetTrace(bool enabled);
+// Whether the per-object offscreen buffers skip importing local memory
+// (Rogue Galaxy: added; the game answers with its native renderer's switch).
+void setDiscardImportQuery(bool (*query)());
 
 struct GsTargetCacheStats {
     uint64_t surfacesCreated = 0u;

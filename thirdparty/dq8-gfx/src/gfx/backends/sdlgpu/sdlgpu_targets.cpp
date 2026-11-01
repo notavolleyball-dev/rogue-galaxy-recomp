@@ -31,6 +31,18 @@ std::atomic<bool> &traceFlag() {
 }
 } // namespace
 
+static bool (*g_discardImportQuery)() = nullptr;
+
+void setDiscardImportQuery(bool (*query)()) {
+    g_discardImportQuery = query;
+}
+
+static bool discardsImports(const GsSurface &surface) {
+    static const bool keep = std::getenv("DQ8_GFX_KEEP_OBJECT_IMPORTS") != nullptr;
+    return !keep && surface.psm == GS_PSM_CT32 && surface.base >= 0x2A20u && surface.base < 0x2C40u &&
+           g_discardImportQuery != nullptr && g_discardImportQuery();
+}
+
 bool gsTargetTraceEnabled() {
     return traceFlag().load(std::memory_order_relaxed);
 }
@@ -1207,6 +1219,18 @@ bool GsTargetCache::refresh(GsSurface &surface, std::string &error) {
         return true;
     }
 
+    // Rogue Galaxy's per-object offscreen buffers (0x2A20 up to the glare's
+    // 0x2C40) are cleared by the game before each object is drawn into them,
+    // and local memory under them holds only the textures uploaded to the
+    // same pages: importing it is a read of memory nothing wants. With the
+    // native renderer (its query says so) they keep what they hold. The walk
+    // and the forced battle end byte-identical, and the walk's refreshes
+    // fall from 2,979 Kpx to 579 (DQ8_GFX_KEEP_OBJECT_IMPORTS=1 imports).
+    if (discardsImports(surface)) {
+        surface.needsUpload.clear();
+        surface.undefined = false;
+        return true;
+    }
     if (surface.psm == GS_PSM_CT32 &&
         (surface.base & 31u) == 0u && surface.width == surface.bufferWidth * 64u &&
         surface.ownedPages.any()) {
