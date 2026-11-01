@@ -2829,7 +2829,7 @@ struct SdlGpuBackend::Impl {
                 if (batchTarget && (batchTarget != &target || batchDepth != depthTexture) && !flushBatch())
                     return setError(std::move(error));
                 const bool writeAlpha = (op.flags & GSNativeEffect::kKeepAlpha) == 0u;
-                // A sprite laid over the whole frame (the glare's, the glow's:
+                // A sprite laid over (most of) the frame (the glare's, the glow's:
                 // a fifth of the boss's GPU time at 4x, 2026-11-01) runs this
                 // shader's filtering and colour arithmetic for every pixel of
                 // the upscaled frame. Its term is worked out at the effect
@@ -2840,8 +2840,9 @@ struct SdlGpuBackend::Impl {
                     const char *value = std::getenv("DQ8_GFX_FX_FULL_LAYOVER");
                     return value && *value && std::strcmp(value, "0") != 0;
                 }();
-                if (!fullLayover && source && !depthTexture && (op.test & 1u) == 0u && scale > ownScale &&
-                    x0 == 0u && y0 == 0u && x1 == target.width && y1 == target.height &&
+                // Most of the frame (the 64x64 effect's covers 446 of 448 rows).
+                const bool most = uint64_t(x1 - x0) * (y1 - y0) * 2u >= uint64_t(target.width) * target.height;
+                if (!fullLayover && source && !depthTexture && (op.test & 1u) == 0u && scale > ownScale && most &&
                     (blend == Blend::Add || (blend == Blend::Over && !writeAlpha))) {
                     if (!flushBatch())
                         return setError(std::move(error));
@@ -2851,9 +2852,11 @@ struct SdlGpuBackend::Impl {
                         return setError(std::move(error));
                     SdlGpuDevice::GsEffectUniforms termUniforms = uniforms;
                     termUniforms.misc[0] = float(ownScale);
-                    // Every texel written: the sprite covers it all, no test discards.
+                    // The sprite's pixels; the apply reads no others.
+                    const SDL_Rect region{int(x0 * ownScale), int(y0 * ownScale), int((x1 - x0) * ownScale),
+                                          int((y1 - y0) * ownScale)};
                     if (!device.effectOp(term, target.width * ownScale, target.height * ownScale, sourceTexture, linear,
-                                         sourceTexture, Blend::Write, true, nullptr, termUniforms, error))
+                                         sourceTexture, Blend::Write, true, &region, termUniforms, error))
                         return setError(std::move(error));
                     SdlGpuDevice::EffectDraw apply{};
                     apply.source = term;

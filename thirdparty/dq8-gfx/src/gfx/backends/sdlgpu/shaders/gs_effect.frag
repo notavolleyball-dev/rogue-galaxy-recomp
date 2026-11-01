@@ -114,7 +114,12 @@ void main() {
         // The term's texel j holds the GS position j / its scale.
         vec2 size = params.misc.yz;
         float termScale = float(textureSize(source, 0).x) / size.x;
-        vec4 term = texture(source, (g * termScale + 0.5) / (size * termScale));
+        // Only the sprite's own texels hold its term: read between them,
+        // not past its edge.
+        vec2 low = max(params.rect.xy, params.scissor.xy);
+        vec2 high = min(params.rect.zw, params.scissor.zw + 1.0) - 1.0 / termScale;
+        vec2 at = clamp(g, low, max(low, high));
+        vec4 term = texture(source, (at * termScale + 0.5) / (size * termScale));
         vec3 rgb = vec3(bytes(term).rgb) / 255.0;
 #ifdef DQ8_DUAL_SOURCE
         outFactor = vec4(term.a);
