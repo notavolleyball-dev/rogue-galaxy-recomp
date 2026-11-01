@@ -23,7 +23,7 @@ export RG_NATIVE_RENDERER=${RG_NATIVE_RENDERER:-1}
 unset RG_VU1_REPLAY RG_GS_FRAMELOG DQ8_GFX_SCREENSHOT_DIR
 card=$(dirname "$(ls /sys/class/drm/card*/device/gpu_busy_percent | head -1)")
 cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1
-build/game/src/roguegalaxy disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
+${EXE:-build/game/src/roguegalaxy} disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
 pid=$!
 sleep $((SECS - 25))
 : > "build/run/$NAME.gpu"
