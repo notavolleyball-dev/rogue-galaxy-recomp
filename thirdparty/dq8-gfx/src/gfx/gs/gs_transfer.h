@@ -53,8 +53,18 @@ public:
         uint64_t transfers = 0u, bytes = 0u;
         uint64_t repeats = 0u, repeatBytes = 0u;
         uint64_t samePayloadPagesTouched = 0u;
+        uint64_t skipped = 0u; // of the repeats, not written (setSkipRepeats)
     };
-    bool repeatsEnabled() const { return m_repeatsOn; }
+    bool repeatsEnabled() const { return m_repeatsOn || m_skipRepeats; }
+    // Skip the uploads that would write what is already there (the backend
+    // owns the memory): the same rectangle, the same bytes, no transfer and
+    // no draw onto those pages since. `drawn` sums the draw generations of a
+    // page set (they only grow, so any draw changes the sum).
+    using DrawnSum = std::function<uint64_t(const GsPageSet &)>;
+    void setSkipRepeats(bool on, DrawnSum drawn) {
+        m_skipRepeats = on;
+        m_drawnSum = std::move(drawn);
+    }
     const RepeatStats &repeatStats() const { return m_repeats; }
     size_t pendingLocalToHostBytes() const {
         return m_localToHost.size() - m_localToHostReadPos;
@@ -82,13 +92,19 @@ private:
     size_t m_localToHostReadPos = 0u;
 
     void finishRepeatCheck();
+    uint64_t repeatKey() const;
+    bool isRepeat(uint64_t key, const GsPageSet &pages) const;
+    bool tracking() const { return m_repeatsOn || m_skipRepeats; }
     bool m_repeatsOn = false;
+    bool m_skipRepeats = false;
+    bool m_hashedWhole = false;
+    DrawnSum m_drawnSum;
     RepeatStats m_repeats{};
     uint64_t m_payloadHash = 0u, m_payloadBytes = 0u;
     uint64_t m_nextStamp = 1u;
     std::array<uint64_t, 512> m_pageStamp{};
     struct LastWrite {
-        uint64_t hash = 0u, stamp = 0u;
+        uint64_t hash = 0u, stamp = 0u, drawn = 0u;
     };
     std::unordered_map<uint64_t, LastWrite> m_lastWrite;
 };

@@ -163,6 +163,8 @@ public:
     }
     void setWritesResolved(bool on) { m_writesResolved = on; }
     // Told of every region a draw (or a GPU copy) wrote into a color surface.
+    // How many draws have written the page (any surface, depth included).
+    uint64_t pageGeneration(uint32_t page) const { return m_pageGeneration[page]; }
     void setDrawObserver(std::function<void(const GsSurface &, const GsRegion &)> observer) {
         m_drawObserver = std::move(observer);
     }
