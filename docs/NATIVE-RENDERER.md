@@ -12,7 +12,7 @@ plane shadow, the per-object composites, CBlur's texture blur and the bloom
 renderer" switch. "Where it stands" is the summary for picking the work up;
 the rest is the plan and its record.
 
-## Where it stands (2026-10-31)
+## Where it stands (2026-10-31, with 2026-11-01 below)
 
 **Done, behind the switch:** every recorded VU1 program native, the strips
 drawn as GPU meshes (phase 1); the glare, the plane shadow, the per-object
@@ -77,6 +77,46 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    reversed float depth.
 6. **Remove the GS path** (phase 5) once `gs_vram` is not allocated in a
    native run and a playthrough route passes the frame tools.
+
+**Since 2026-10-31, toward dropping the GS (2026-11-01; the record is in
+"Phase 4", steps 1 to 3b):** item 2's shadow volumes are grouped by blend
+(`RG_NATIVE_VOLUME_GROUP`), and the outlines turned out not to cost draws
+(452 lines in 2 runs); item 4 is under way: the texture cache reads texels and
+palettes from a memory only host writes reach when no draw or copy touched the
+pages (`DQ8_GFX_UPLOAD_STORE`, on; checked on the walk, the battle, the title
+screen, the opening movie and a menu), the frame no longer round-trips local
+memory (the flip's CT24 view imports by GPU page copy), and the per-object
+buffers skip importing what is under them. **Loose ends, in the order to take
+them** (each gated by byte-identical VRAM on the walk and the forced battle,
+`cmpvram.py` against `vg1`/`vb1`, see "Verifying" below):
+
+1. *What reads the host writes patched into the object buffers* (`cpu-patch`
+   at `02ac0`, `02b00`, `02b20`, `02b60`, `02a00`; dropping them changes the
+   picture). Trace the draw that samples a patched region
+   (`DQ8_GFX_TRACE_TARGETS=1`), then give it the upload from the store or an
+   object layer instead of a patch.
+2. *The textures that still need targets:* the frame (`00000`) read as T8
+   128x128 with its CLUT at `00000` (about 2,500 updates and 7 builds a run,
+   not identified), the object buffers `02a40`-`02a80` read as T8 or T4, `03800`
+   written outside a recorded upload, the palettes draws wrote (12 a run),
+   and `02a00` read 512 wide (several targets' pages): sample the targets on
+   the GPU (`copyFromTarget` is the CT32 start of it).
+3. *The 2D batcher* (item 5 above): about 4,800 `GsPkt*` sites; the largest
+   piece, independent of 1 and 2.
+4. *Item 1's rest and item 3's censuses* (town, item messages, dissolves,
+   other movies), now also with `DQ8_GFX_UPLOAD_AUDIT=1` on, which says
+   whether the store holds for each.
+5. *Stop allocating `gs_vram`* in a native run (`GsVram` unattached is a
+   no-op for `read`/`write`, but the transfer engine and `GSMem` row readers
+   take the raw pointer), then a playthrough route, then phase 5.
+
+**Verifying.** Walk: `tools/vu1/oracle/native-run.sh NAME gpu 110 3000`, then
+`python3 tools/bench/cmpvram.py NAME vg1`; battle: `RG_FORCE_ENCOUNTER=1`
+`... NAME gpu 130 3450` against `vb1` (the reference logs are in `build/run`;
+regenerate them from a commit before the change when they are missing). A
+movie's frames follow the wall clock, so compare it by `DQ8_GFX_UPLOAD_AUDIT=1`
+(its per-update SAME/DIFFERENT lines), not by screenshots. A title run is the
+game started with no `RG_INPUT` for 150 s.
 
 **The VU1 tail** (2026-10-31): every piece is native but the indexed
 per-triangle renderer (A `8855d9e7` with E `56d6683a`, `c9e1cecc`), which
