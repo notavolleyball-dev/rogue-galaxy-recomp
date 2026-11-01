@@ -86,6 +86,7 @@ struct GsTextureCacheStats {
     // Reads served from the host writes' memory, and from local memory
     // (DQ8_GFX_UPLOAD_STORE; Rogue Galaxy: added).
     uint64_t uploadStoreReads = 0u;
+    uint64_t targetReadsSkipped = 0u;
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
     // Textures sourced from a region a render target owns. Correct, but the

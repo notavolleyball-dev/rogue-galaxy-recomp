@@ -1077,6 +1077,11 @@ bool GsTextureCache::resolveSource(const GsTextureKey &key, const GsRegion &regi
     GsPageSet conservative;
     markSourcePages(key, conservative);
     if (!m_targets.ownsAny(conservative)) return true;
+    static const bool blockwiseResolve = std::getenv("DQ8_GFX_NO_BLOCKWISE_TARGETS") == nullptr;
+    if (m_storeOn && blockwiseResolve && !blocksDrawn(key)) {
+        ++m_stats.targetReadsSkipped;
+        return true;
+    }
 
     GsPageSet pages = staleTexelPages(key, region);
     if (exclude)
@@ -1126,6 +1131,14 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     else
         gsMarkPages(texelPages, key.tbp0, key.tbw, key.psm, region.width(), region.height(), region.x0, region.y0);
     GsSurface *target = m_targets.nativeOwner(texelPages, true);
+    // A texture whose blocks no draw wrote is what the host wrote there, which
+    // the host writes' memory has (the target only holds it as a patch, in
+    // pages it shares with the texture): not a read of the target.
+    static const bool blockwise = std::getenv("DQ8_GFX_NO_BLOCKWISE_TARGETS") == nullptr;
+    if (target && m_storeOn && blockwise && !blocksDrawn(key)) {
+        ++m_stats.targetReadsSkipped;
+        target = nullptr;
+    }
     if (!indexed && std::getenv("DQ8_GFX_DEBUG_DIRECT"))
         std::fprintf(stderr, "[direct] tbp %05x tbw %u %ux%u region %u,%u-%u,%u target %s\n", key.tbp0, key.tbw,
                      key.width, key.height, region.x0, region.y0, region.x1, region.y1, target ? "yes" : "no");

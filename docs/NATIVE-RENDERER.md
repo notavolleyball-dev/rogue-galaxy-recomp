@@ -90,19 +90,24 @@ buffers skip importing what is under them. **Loose ends, in the order to take
 them** (each gated by byte-identical VRAM on the walk and the forced battle,
 `cmpvram.py` against `vg1`/`vb1`, see "Verifying" below):
 
-1. *What reads the host writes patched into the object buffers* (`cpu-patch`
-   at `02ac0`, `02b00`, `02b20`, `02b60`, `02a00`; dropping them changes the
-   picture). Trace the draw that samples a patched region
-   (`DQ8_GFX_TRACE_TARGETS=1`), then give it the upload from the store or an
-   object layer instead of a patch.
-2. *The textures that still need targets:* the frame (`00000`) read as T8
-   128x128 with its CLUT at `00000` (about 2,500 updates and 7 builds a run,
-   not identified), the object buffers `02a40`-`02a80` read as T8 or T4, `03800`
-   written outside a recorded upload, the palettes draws wrote (12 a run),
-   and `02a00` read 512 wide (several targets' pages): sample the targets on
-   the GPU (`copyFromTarget` is the CT32 start of it).
-3. *The 2D batcher* (item 5 above): about 4,800 `GsPkt*` sites; the largest
-   piece, independent of 1 and 2.
+1. ~~*What reads the host writes patched into the object buffers*~~ Done
+   2026-11-01 (step 5 below): the texture builds that read through the
+   target for textures uploaded into its pages.
+2. *The textures that still need targets* (the list `DQ8_GFX_WARN_LOCAL_READS=1`
+   prints, with the owning targets): the frame (`00000`) read as T8/T4 views
+   (64x64 to 128x256) with the CLUT in the frame too (palettes now copied
+   out region-wise; the texels come from the target), the palettes at `03f80`
+   (a 64x64 target), `03800` with no target left that owns its drawn blocks,
+   and `02ba0` read 512 wide over four targets. In a title run only the 512x512
+   `00000` read over the flip surface's tail rows remains (rows past 448). They
+   are served by resolves into the backend's memory; sampling the targets on
+   the GPU would remove the readbacks (`copyFromTarget` is the CT32 start).
+3. *The 2D batcher* (item 5 above): kept as the translator the end-state
+   section calls enough for phase 5 ("Shrinks": the packets keep arriving, a
+   thin translator feeds the sprite batcher; the sdlgpu backend already draws
+   them on the GPU from native textures). What it still carried of local memory
+   is items 1 and 2; rewriting the 4,800 call sites for direct native calls
+   stays the later option the "Open" list names, not done.
 4. *Item 1's rest and item 3's censuses* (town, item messages, dissolves,
    other movies), now also with `DQ8_GFX_UPLOAD_AUDIT=1` on, which says
    whether the store holds for each.
@@ -869,6 +874,18 @@ in the picture (it does: the glow and the HUD under the page rule, now only
 those rare builds); getting them off the CPU is the target-sampling work of
 loose end 2. The movies' frames and every other pad-timed screenshot differ
 between runs by timing, so compare runs of one session, or use the audit.
+
+**Step 5, textures uploaded into a target's pages (2026-11-01):** a texture
+build or update whose blocks no draw wrote is read from the host writes'
+memory and no longer through the target that shares its pages
+(`expandFromTarget`, `resolveSource`; `DQ8_GFX_NO_BLOCKWISE_TARGETS=1` off),
+and the host writes patched into the object buffers (`02a20` to `02c40`) are
+not recorded any more (`DQ8_GFX_KEEP_OBJECT_PATCHES=1` records them): they
+were the way those textures reached the target. Walk and battle byte-identical
+to `vg1`/`vb1`; 254,352 target reads skipped in the battle, its `refreshes`
+from 10 Mpx to 3 Kpx per 60 frames. Palettes inside a target (the frame at
+`00000`, `03f80`) are copied out region-wise (`GsTargetCache::copyOut`, the
+target stays the owner) instead of resolving everything the GPU holds of it.
 
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save

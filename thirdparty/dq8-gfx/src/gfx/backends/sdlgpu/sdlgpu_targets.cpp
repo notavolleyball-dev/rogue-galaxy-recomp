@@ -185,6 +185,10 @@ void forEachBlock(uint32_t psm, uint32_t base, uint32_t bw, const GsRegion &rect
 
 void addCpuPatch(GsSurface &surface, GsRegion region) {
     if (region.empty()) return;
+    // The textures uploaded into an object buffer's pages are read from the
+    // host writes' memory (undrawn blocks), not through the target.
+    static const bool keepPatches = std::getenv("DQ8_GFX_KEEP_OBJECT_PATCHES") != nullptr;
+    if (!keepPatches && discardsImports(surface)) return;
     // Join rectangles only along a complete edge; bounding disjoint writes
     // would upload stale CPU pixels over their GPU-owned neighbours.
     for (auto it = surface.cpuPatches.rbegin(); it != surface.cpuPatches.rend(); ++it) {
