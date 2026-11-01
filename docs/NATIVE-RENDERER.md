@@ -731,6 +731,22 @@ onto those words. That is a sparse local memory by upload, and it can be
 the first step of dropping the dense one. Block-level (256 byte) coverage
 would settle the `partial-page` classes; the audit does not have it yet.
 
+**Step 2a, the host writes' memory (2026-11-01, same switch):** the audit
+also feeds every host upload to a second local memory that nothing else
+writes, and at each build compares the texels' indices and the palette window
+read from it with those read from `gs_vram`. The rule to serve a build from
+it: no page it reads was touched by a draw, a copy or a write outside the
+last upload since an upload covered the whole page. On the walk and the
+battle every build the rule serves (about 70 textures and 90 to 110 palettes
+a run, among them the `reinterpreted 00 as 13` and `partial-page` classes the
+first audit could not judge) read the same texels from it, 0 differences; the
+rest (7 to 8 textures of the frame buffer at `00000`, 11 of the object buffer
+at `02a40`, one of `03800` written outside a recorded upload, 12 palettes) is
+what a draw or a copy wrote and needs the targets. So the sparse store is
+the uploads' own words in the GS's layout, and it already serves the
+uploaded art; what is left for step 3 is naming the targets those 20 or so
+builds come from.
+
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save
 and a load, a movie) passes with the frame tools.

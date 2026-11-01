@@ -197,8 +197,16 @@ size_t GsTextureKeyHash::operator()(const GsTextureKey &key) const {
 
 GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache &targets)
     : m_device(device), m_vram(vram), m_targets(targets) {
+    m_src = &m_vram;
     const char *audit = std::getenv("DQ8_GFX_UPLOAD_AUDIT");
     m_auditOn = audit && *audit && *audit != '0';
+    if (m_auditOn) {
+        // The sparse store's stand-in: a local memory that only host writes
+        // reach, which a texture or palette must read the same texels from.
+        m_shadowStorage.assign(kGsVramBytes, 0u);
+        m_shadow.attach(m_shadowStorage.data(), static_cast<uint32_t>(m_shadowStorage.size()));
+        m_shadowTransfer = std::make_unique<GsTransferEngine>(m_shadow);
+    }
 }
 
 GsTextureCache::~GsTextureCache() {
@@ -247,7 +255,13 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
     gsMarkCoveredPages(record.covered, record.dbp, record.dbw, record.dpsm, record.w, record.h,
                        command.trxpos.dsax, command.trxpos.dsay);
     m_uploads.push_back(record);
+    m_shadowTransfer->begin(command);
     m_auditPending = static_cast<uint32_t>(m_uploads.size()) + 15u;
+}
+
+void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
+    if (m_auditOn && m_shadowTransfer)
+        m_shadowTransfer->upload(data, sizeBytes);
 }
 
 void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource source) {
@@ -255,6 +269,14 @@ void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource sourc
         m_writer.assign(kGsPageCount, 0u);
     const UploadRecord *record =
         source == InvalidationSource::HostWrite && m_auditPending >= 16u ? &m_uploads[m_auditPending - 16u] : nullptr;
+    // A page a draw, a copy or an unrecorded write touched is not the host
+    // writes' alone until an upload covers all of it.
+    if (source == InvalidationSource::Draw || !record)
+        m_drawn |= pages;
+    else {
+        m_drawn |= pages & ~record->pages;
+        m_drawn &= ~(pages & record->covered);
+    }
     gsForEachPage(pages, [&](uint32_t page) {
         uint32_t &writer = m_writer[page];
         if (source == InvalidationSource::Draw)
@@ -309,7 +331,28 @@ void GsTextureCache::auditBuild(const GsTextureKey &key, const Entry &entry) {
         const GsPageSet &pages = clut ? entry.clutPages : entry.texelPages;
         if (pages.none())
             continue;
-        const std::string cls = std::string(clut ? "clut " : "texture ") + auditPages(pages, key, clut);
+        // The texels (their indices) and the palette window, from local
+        // memory and from the host writes alone.
+        const GsRegion whole{0u, 0u, key.width, key.height};
+        bool same = true;
+        if (!clut) {
+            const uint64_t real = expand(key, whole, true);
+            m_src = &m_shadow;
+            const uint64_t shadow = expand(key, whole, true);
+            m_src = &m_vram;
+            same = real == shadow;
+        } else {
+            const uint64_t real = hashClutWindow(key);
+            m_src = &m_shadow;
+            const uint64_t shadow = hashClutWindow(key);
+            m_src = &m_vram;
+            same = real == shadow;
+        }
+        // The rule step 2 would use: the host writes' memory serves a build
+        // when no page of it was touched by anything else.
+        const bool served = (pages & m_drawn).none();
+        const std::string cls = std::string(clut ? "clut " : "texture ") + (served ? "uploads-only " : "needs-targets ") +
+                                (same ? "SAME: " : "DIFFERENT: ") + auditPages(pages, key, clut);
         AuditClass &entryClass = m_audit[cls];
         ++entryClass.count;
         entryClass.texels += clut ? 256u : uint64_t(key.width) * key.height;
@@ -600,7 +643,7 @@ void GsTextureCache::buildPalette(const GsTextureKey &key) {
         const uint32_t clutIndex = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
         const uint32_t clutX = clutOriginU + (clutIndex & 0x0fu);
         const uint32_t clutY = clutOriginV + (clutIndex >> 4u);
-        const uint32_t entryValue = m_vram.read(key.cpsm, key.cbp, clutWidth, clutX, clutY);
+        const uint32_t entryValue = m_src->read(key.cpsm, key.cbp, clutWidth, clutX, clutY);
         uint32_t color = 0u;
         switch (key.cpsm & 0x3fu) {
         case GS_PSM_CT16:
@@ -652,13 +695,13 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region,
             // The raw word is the RGBA byte sequence; TEXA does not apply.
             const auto readRow = psm == GS_PSM_Z32 ? GSMem::ReadRowZ32 : GSMem::ReadRowCT32;
             uint8_t *out = hashOnly ? m_rawRow.data() : row;
-            readRow(m_vram.data(), key.tbp0, key.tbw, region.x0, y, regionWidth, out);
+            readRow(m_src->data(), key.tbp0, key.tbw, region.x0, y, regionWidth, out);
             texelHash = hashBytes(texelHash, out, static_cast<size_t>(regionWidth) * 4u);
             continue;
         }
         case GS_PSM_T8: {
             uint8_t *raw = m_rawRow.data();
-            GSMem::ReadRowP8(m_vram.data(), key.tbp0, key.tbw, region.x0, y,
+            GSMem::ReadRowP8(m_src->data(), key.tbp0, key.tbw, region.x0, y,
                              regionWidth, raw);
             texelHash = hashBytes(texelHash, raw, regionWidth);
             if (hashOnly)
@@ -672,7 +715,7 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region,
             // general loop below re-read every texel's palette entry from
             // local memory although buildPalette has already resolved them.
             uint8_t *raw = m_idxRow.data();
-            m_vram.readRowT4(key.tbp0, key.tbw, region.x0, y, regionWidth, raw);
+            m_src->readRowT4(key.tbp0, key.tbw, region.x0, y, regionWidth, raw);
             if (!hashOnly)
                 for (uint32_t x = 0u; x < regionWidth; ++x)
                     std::memcpy(row + static_cast<size_t>(x) * 4u, &m_clutRgba[raw[x] & 0x0fu], 4u);
@@ -693,7 +736,7 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region,
             // not needed here.
             uint32_t *words = reinterpret_cast<uint32_t *>(m_rawRow.data());
             uint8_t *raw = m_idxRow.data();
-            GSMem::ReadRowCT32(m_vram.data(), key.tbp0, key.tbw, region.x0, y,
+            GSMem::ReadRowCT32(m_src->data(), key.tbp0, key.tbw, region.x0, y,
                                regionWidth, reinterpret_cast<uint8_t *>(words));
             const uint32_t shift = psm == GS_PSM_T4HH ? 28u : 24u;
             const uint32_t mask = psm == GS_PSM_T8H ? 0xffu : 0x0fu;
@@ -728,7 +771,7 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region,
         // Formats with no fast path: one swizzled read and one hash word per
         // pixel, exactly as before.
         for (uint32_t x = region.x0; x < region.x1; ++x) {
-            const uint32_t raw = m_vram.read(key.psm, key.tbp0, key.tbw, x, y);
+            const uint32_t raw = m_src->read(key.psm, key.tbp0, key.tbw, x, y);
             texelHash = hashStep(texelHash, raw);
             if (hashOnly)
                 continue;
@@ -740,7 +783,7 @@ uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region,
                 const uint32_t clutX = clutOriginU + (clutIndex & 0x0fu);
                 const uint32_t clutY = clutOriginV + (clutIndex >> 4u);
                 const uint32_t entryValue =
-                    m_vram.read(key.cpsm, key.cbp, clutWidth, clutX, clutY);
+                    m_src->read(key.cpsm, key.cbp, clutWidth, clutX, clutY);
                 switch (key.cpsm & 0x3fu) {
                 case GS_PSM_CT16:
                 case GS_PSM_CT16S:
@@ -888,7 +931,7 @@ uint64_t GsTextureCache::hashClutWindow(const GsTextureKey &key) const {
             resolveClutIndex(index, key.cpsm, key.csm, key.csa, key.psm);
         const uint32_t clutX = clutOriginU + (resolved & 0x0fu);
         const uint32_t clutY = clutOriginV + (resolved >> 4u);
-        clutHash = hashStep(clutHash, m_vram.read(key.cpsm, key.cbp, clutWidth, clutX, clutY));
+        clutHash = hashStep(clutHash, m_src->read(key.cpsm, key.cbp, clutWidth, clutX, clutY));
     }
     return clutHash;
 }

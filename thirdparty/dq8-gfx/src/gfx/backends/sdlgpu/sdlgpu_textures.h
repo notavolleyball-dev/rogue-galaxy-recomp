@@ -11,6 +11,7 @@
 
 #include "gfx/backends/sdlgpu/sdlgpu_regions.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
+#include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
 
 #include "runtime/gs/gs_types.h"
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -129,6 +131,7 @@ public:
     // uploads (no local memory) could have supplied it, or why not.
     // noteUpload: a host write is about to begin (before its invalidation).
     void noteUpload(const GSTransferCommand &command);
+    void noteUploadData(const uint8_t *data, uint32_t sizeBytes);
     bool auditEnabled() const { return m_auditOn; }
     // The classes so far, one line each, for the stats report.
     std::string auditReport() const;
@@ -234,6 +237,7 @@ private:
     bool m_auditOn = false;
     uint32_t m_auditPending = 0u;
     std::vector<uint32_t> m_writer;
+    GsPageSet m_drawn;
     std::vector<UploadRecord> m_uploads;
     std::map<std::string, AuditClass> m_audit;
     void auditStamp(const GsPageSet &pages, InvalidationSource source);
@@ -299,6 +303,11 @@ private:
 
     SdlGpuDevice &m_device;
     GsVram &m_vram;
+    // Where expand and the palette reads look: m_vram, or the audit's shadow.
+    GsVram *m_src = nullptr;
+    GsVram m_shadow;
+    std::vector<uint8_t> m_shadowStorage;
+    std::unique_ptr<GsTransferEngine> m_shadowTransfer;
     GsTargetCache &m_targets;
     std::unordered_map<GsTextureKey, Entry, GsTextureKeyHash> m_entries;
     // sourcePagesFor's last answer: consecutive draws nearly always share a
