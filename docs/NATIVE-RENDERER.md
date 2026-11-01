@@ -133,7 +133,10 @@ game started with no `RG_INPUT` for 150 s.
 
 **The VU1 tail** (2026-10-31): every piece is native but the indexed
 per-triangle renderer (A `8855d9e7` with E `56d6683a`, `c9e1cecc`), which
-nothing reaches, the clipping Es (the GPU clips) and two stubs; the pieces
+nothing reaches, the clipping Es (the GPU clips: with the native renderer the clipping chunks
+go to it with E's near and far planes as clip distances, 2026-11-01; until
+then they ran on the VU1, about half of what the VIF1 thread still
+interpreted in a fight) and two stubs; the pieces
 no recording holds were written from the code and checked against the
 interpreter only, their programs named "unverified" ([VU1-NATIVE.md](VU1-NATIVE.md),
 "Pieces written from the code alone"). Harvest mode (below) still turns

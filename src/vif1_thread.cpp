@@ -24,6 +24,7 @@
 #include "debug/draw_origins.h"
 #include "debug/vu1_replay.h"
 #include "native_effects.h"
+#include "native_renderer.h"
 #include "vu1_native.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
@@ -67,6 +68,20 @@ const uint32_t g_checkEvery = [] {
     return static_cast<uint32_t>(every == 0ul ? 1ul : every);
 }();
 const bool g_drawOrigins = rg::debug::drawOriginsEnabled();
+// Whether the GPU path takes the chunks slot E clips: with the native
+// renderer, unless RG_VU1_CLIP_ON_VU1=1 (the VU1 clips them, as before).
+// Read at first use, after the menu's setting.
+struct GpuClips
+{
+    operator bool() const
+    {
+        static const bool on = [] {
+            const char *vu1 = std::getenv("RG_VU1_CLIP_ON_VU1");
+            return rg::nativerenderer::enabled() && !(vu1 && *vu1 && std::strcmp(vu1, "0") != 0);
+        }();
+        return on;
+    }
+} g_gpuClips;
 // The native renderer's effects (src/native_effects.h), drawn by the
 // renderer itself; read at first use, after the menu's setting.
 bool nativeEffects()
@@ -761,10 +776,13 @@ public:
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
-                // The chunks that clip go to the VU1 in every mode: the GPU's
-                // clipping of triangles across the eye plane does not match
-                // the VU1's on every driver.
-                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, false);
+                // The chunks that clip (slot E) go to the GPU with the native
+                // renderer: the mesh carries E's near and far planes and the
+                // shader clips there (gl_ClipDistance), so no driver is left
+                // to cut at the eye on its own. Otherwise, and in the packet
+                // modes, they go to the VU1.
+                const char *reason =
+                    rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, gpu && g_gpuClips);
                 if (reason)
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
