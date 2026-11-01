@@ -200,7 +200,10 @@ GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache
     m_src = &m_vram;
     const char *audit = std::getenv("DQ8_GFX_UPLOAD_AUDIT");
     m_auditOn = audit && *audit && *audit != '0';
-    if (m_auditOn) {
+    const char *store = std::getenv("DQ8_GFX_UPLOAD_STORE");
+    m_storeOn = store && *store && *store != '0';
+    m_tracking = m_auditOn || m_storeOn;
+    if (m_tracking) {
         // The sparse store's stand-in: a local memory that only host writes
         // reach, which a texture or palette must read the same texels from.
         m_shadowStorage.assign(kGsVramBytes, 0u);
@@ -242,7 +245,7 @@ void GsTextureCache::reset() {
 }
 
 void GsTextureCache::noteUpload(const GSTransferCommand &command) {
-    if (!m_auditOn)
+    if (!m_tracking)
         return;
     UploadRecord record;
     record.dbp = command.bitbltbuf.dbp;
@@ -260,7 +263,7 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
 }
 
 void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
-    if (m_auditOn && m_shadowTransfer)
+    if (m_tracking && m_shadowTransfer)
         m_shadowTransfer->upload(data, sizeBytes);
 }
 
@@ -335,17 +338,20 @@ void GsTextureCache::auditBuild(const GsTextureKey &key, const Entry &entry) {
         // memory and from the host writes alone.
         const GsRegion whole{0u, 0u, key.width, key.height};
         bool same = true;
+        GsVram *const saved = m_src;
         if (!clut) {
+            m_src = &m_vram;
             const uint64_t real = expand(key, whole, true);
             m_src = &m_shadow;
             const uint64_t shadow = expand(key, whole, true);
-            m_src = &m_vram;
+            m_src = saved;
             same = real == shadow;
         } else {
+            m_src = &m_vram;
             const uint64_t real = hashClutWindow(key);
             m_src = &m_shadow;
             const uint64_t shadow = hashClutWindow(key);
-            m_src = &m_vram;
+            m_src = saved;
             same = real == shadow;
         }
         // The rule step 2 would use: the host writes' memory serves a build
@@ -378,7 +384,7 @@ std::string GsTextureCache::auditReport() const {
 }
 
 void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource source) {
-    if (m_auditOn)
+    if (m_tracking)
         auditStamp(pages, source);
     // Draws mostly land in pages no texture reads; the walk below, over up
     // to 2048 entries, ran for every flush and every host write.
@@ -441,8 +447,20 @@ GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
     return m_lastSourcePages;
 }
 
+GsVram *GsTextureCache::sourceFor(const GsPageSet &pages) {
+    if (!m_storeOn)
+        return &m_vram;
+    if ((pages & m_drawn).none()) {
+        ++m_stats.uploadStoreReads;
+        return &m_shadow;
+    }
+    ++m_stats.localMemoryReads;
+    return &m_vram;
+}
+
 GsTextureIdentity GsTextureCache::regionIdentity(const GSDrawState &state, const GsRegion &region) {
     const GsTextureKey key = keyFor(state);
+    SourceScope scope(*this, m_storeOn ? sourcePagesFor(state) : GsPageSet{});
     GsTextureIdentity identity;
     identity.texels = expand(key, region, true);
     if (gsIsIndexedPsm(key.psm))
@@ -458,6 +476,7 @@ SDL_GPUTexture *GsTextureCache::replacement(const GSDrawState &state, const GsRe
     const GsTextureKey key = keyFor(state);
     if (!gsIsIndexedPsm(key.psm))
         return nullptr;
+    SourceScope scope(*this, m_storeOn ? sourcePagesFor(state) : GsPageSet{});
     // The palette first: most regions drawn are art the host leaves alone,
     // and their texels need no hash.
     const uint64_t clut = hashClutWindow(key);
@@ -941,6 +960,7 @@ uint64_t GsTextureCache::hashClutWindow(const GsTextureKey &key) const {
 // write. When it moved, every expanded colour is stale, so the whole texture
 // re-expands on next use.
 void GsTextureCache::refreshClut(const GsTextureKey &key, Entry &entry) {
+    SourceScope scope(*this, entry.pages);
     entry.clutDirty = false;
     if (!gsIsIndexedPsm(key.psm))
         return;
@@ -1121,6 +1141,7 @@ void GsTextureCache::restrictToSampled(const GsTextureKey &key, const GsRegion &
 }
 
 bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
+    SourceScope scope(*this, entry.pages);
     const GsRegion region = entry.dirty;
     if (region.empty() || !entry.texture)
         return true;
@@ -1191,6 +1212,9 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
 }
 
 bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
+    GsPageSet sourcePages;
+    markSourcePages(key, sourcePages);
+    SourceScope scope(*this, sourcePages);
     if (!m_device.valid()) {
         error = "SDL GPU device is not available";
         return false;
@@ -1200,8 +1224,6 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     // render-to-texture, which DQ8 uses. Resolving costs the extra detail a
     // scaled target holds; sampling the target directly is the fix, and is not
     // done yet.
-    GsPageSet sourcePages;
-    markSourcePages(key, sourcePages);
     const bool owned = m_targets.ownsAny(sourcePages);
     if (owned)
         ++m_stats.renderTargetSources;

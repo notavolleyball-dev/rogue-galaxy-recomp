@@ -83,6 +83,10 @@ struct GsTextureCacheStats {
     // added).
     uint64_t unchangedUpdates = 0u;
     uint64_t evictions = 0u;
+    // Reads served from the host writes' memory, and from local memory
+    // (DQ8_GFX_UPLOAD_STORE; Rogue Galaxy: added).
+    uint64_t uploadStoreReads = 0u;
+    uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
     // Textures sourced from a region a render target owns. Correct, but the
     // resolve costs the extra detail a scaled target holds.
@@ -235,6 +239,21 @@ private:
         std::string example;
     };
     bool m_auditOn = false;
+    // DQ8_GFX_UPLOAD_STORE=1 (Rogue Galaxy: added): texels and palettes
+    // are read from the host writes' memory (m_shadow) when no page they
+    // read was touched by anything else, from local memory otherwise.
+    bool m_storeOn = false;
+    bool m_tracking = false;
+    GsVram *sourceFor(const GsPageSet &pages);
+    struct SourceScope {
+        GsTextureCache &cache;
+        GsVram *saved;
+        SourceScope(GsTextureCache &c, const GsPageSet &pages) : cache(c), saved(c.m_src) {
+            if (c.m_storeOn)
+                c.m_src = c.sourceFor(pages);
+        }
+        ~SourceScope() { cache.m_src = saved; }
+    };
     uint32_t m_auditPending = 0u;
     std::vector<uint32_t> m_writer;
     GsPageSet m_drawn;

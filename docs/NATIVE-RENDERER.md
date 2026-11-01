@@ -747,6 +747,21 @@ the uploads' own words in the GS's layout, and it already serves the
 uploaded art; what is left for step 3 is naming the targets those 20 or so
 builds come from.
 
+**Step 2b, serving from it (2026-11-01, `DQ8_GFX_UPLOAD_STORE=1`):** the
+texture cache reads texels and palettes from the host writes' memory when no
+page they read was touched by anything else (the rule above), and from
+`gs_vram` otherwise (`SourceScope` in `sdlgpu_textures.cpp`; the cache
+builds, updates, palette refreshes, and the region identities and
+replacements the draws ask for). The walk (pad 3000) and the forced battle
+(pad 3450) end with all of VRAM and the display buffer byte-identical to the
+runs without it; 173,560 reads came from the host writes' memory and 27,884
+from local memory on the walk (246,475 and 36,011 in the battle). Off by
+default: a host write that does not pass the transfer's invalidation (a
+movie's frames, the round trips) would leave it stale, and the censuses of
+item 3 have to look at those before it is on with the native renderer. It
+still keeps `gs_vram` for the reads that need the targets and for the
+writes draws make.
+
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save
 and a load, a movie) passes with the frame tools.

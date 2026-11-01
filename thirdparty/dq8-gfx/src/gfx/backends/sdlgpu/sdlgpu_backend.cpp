@@ -4298,6 +4298,10 @@ struct SdlGpuBackend::Impl {
                      d(stats.layerLost, previousReasons.layerLost));
         if (textures && textures->auditEnabled())
             std::fputs(textures->auditReport().c_str(), stderr);
+        if (textures && (textures->stats().uploadStoreReads | textures->stats().localMemoryReads) != 0u)
+            std::fprintf(stderr, "[upload-store] reads from host writes %llu, from local memory %llu\n",
+                         static_cast<unsigned long long>(textures->stats().uploadStoreReads),
+                         static_cast<unsigned long long>(textures->stats().localMemoryReads));
         previousReasons = stats;
         previousSameState = stats.sameStatePrimitives;
         previousSubmitted = stats.primitivesSubmitted;
