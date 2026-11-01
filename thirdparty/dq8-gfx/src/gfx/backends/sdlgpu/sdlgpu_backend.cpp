@@ -4374,14 +4374,13 @@ struct SdlGpuBackend::Impl {
             const GsTransferEngine::RepeatStats &now = transfer->repeatStats();
             const uint64_t bytes = now.bytes - before.bytes, repeatBytes = now.repeatBytes - before.repeatBytes;
             std::fprintf(stderr,
-                         "[upload-repeats] %llu of %llu transfers wrote what was there (%llu of %llu KiB, %.0f%%), %llu skipped; "
+                         "[upload-repeats] %llu of %llu transfers wrote what was there (%llu of %llu KiB, %.0f%%); "
                          "same bytes onto pages written since %llu\n",
                          static_cast<unsigned long long>(now.repeats - before.repeats),
                          static_cast<unsigned long long>(now.transfers - before.transfers),
                          static_cast<unsigned long long>(repeatBytes / 1024u),
                          static_cast<unsigned long long>(bytes / 1024u),
                          bytes ? 100.0 * static_cast<double>(repeatBytes) / static_cast<double>(bytes) : 0.0,
-                         static_cast<unsigned long long>(now.skipped - before.skipped),
                          static_cast<unsigned long long>(now.samePayloadPagesTouched - before.samePayloadPagesTouched));
             before = now;
         }
@@ -5687,19 +5686,6 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     // read of drawn pixels asks for (a palette a draw wrote, a frame read
     // back for display); the game has none. DQ8_GFX_DROP_RESOLVES=1 drops
     // them instead, so what depends on them shows.
-    // An upload of what the backend's memory already holds is skipped
-    // (DQ8_GFX_SKIP_SAME_UPLOADS=0 writes it anyway): a quarter of the boss
-    // fight's upload bytes, 2026-11-01.
-    {
-        const char *skip = std::getenv("DQ8_GFX_SKIP_SAME_UPLOADS");
-        const bool on = storeOnly && !(skip && std::strcmp(skip, "0") == 0);
-        m_impl->transfer->setSkipRepeats(on, [impl = m_impl.get()](const GsPageSet &pages) {
-            uint64_t sum = 0u;
-            if (impl->targets)
-                gsForEachPage(pages, [&](uint32_t page) { sum += impl->targets->pageGeneration(page); });
-            return sum;
-        });
-    }
     m_impl->targets->setWritesResolved(!(storeOnly && std::getenv("DQ8_GFX_DROP_RESOLVES") != nullptr));
     // DQ8_GFX_EFFECT_SCALE=N (Rogue Galaxy: added): Rogue Galaxy's two blur
     // buffers, 192x192 at 0x2C40 (a zoom streak, twenty passes of it added

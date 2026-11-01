@@ -32,60 +32,36 @@ void GsTransferEngine::reset() {
     m_partialPixelBytes = 0u;
     m_localToHost.clear();
     m_localToHostReadPos = 0u;
-    // The draw generations restart with the targets: no old upload counts.
-    m_lastWrite.clear();
-    m_pageStamp.fill(0u);
 }
 
 // Movie tiles must invalidate their own pages, not the rectangle back to (0,0).
-uint64_t GsTransferEngine::repeatKey() const {
+void GsTransferEngine::finishRepeatCheck() {
     const GSTransferCommand &c = m_command;
     uint64_t key = 0xCBF29CE484222325ull;
     for (const uint64_t field : {uint64_t(c.bitbltbuf.dbp), uint64_t(c.bitbltbuf.dbw), uint64_t(c.bitbltbuf.dpsm),
                                  uint64_t(c.trxpos.dsax), uint64_t(c.trxpos.dsay), uint64_t(c.trxreg.rrw),
                                  uint64_t(c.trxreg.rrh)})
         key = (key ^ field) * 0x100000001B3ull;
-    return key;
-}
-
-// Whether the transfer now hashed (m_payloadHash) writes what its pages hold:
-// the last transfer of this rectangle had these bytes and nothing was
-// transferred or drawn onto its pages since.
-bool GsTransferEngine::isRepeat(uint64_t key, const GsPageSet &pages) const {
-    const auto found = m_lastWrite.find(key);
-    if (found == m_lastWrite.end() || found->second.hash != m_payloadHash)
-        return false;
-    const LastWrite &last = found->second;
-    for (size_t page = 0; page < pages.size(); ++page)
-        if (pages.test(page) && m_pageStamp[page] != last.stamp)
-            return false;
-    return !m_drawnSum || m_drawnSum(pages) == last.drawn;
-}
-
-void GsTransferEngine::finishRepeatCheck() {
-    const uint64_t key = repeatKey();
     const GsPageSet pages = destinationPages();
     ++m_repeats.transfers;
     m_repeats.bytes += m_payloadBytes;
-    if (isRepeat(key, pages)) {
-        ++m_repeats.repeats;
-        m_repeats.repeatBytes += m_payloadBytes;
-        return; // the pages hold what they held
-    }
     LastWrite &last = m_lastWrite[key];
-    if (last.stamp != 0u && last.hash == m_payloadHash)
+    bool untouched = last.stamp != 0u;
+    for (size_t page = 0; untouched && page < pages.size(); ++page)
+        untouched = !pages.test(page) || m_pageStamp[page] == last.stamp;
+    if (last.stamp != 0u && last.hash == m_payloadHash) {
+        if (untouched) {
+            ++m_repeats.repeats;
+            m_repeats.repeatBytes += m_payloadBytes;
+            return; // the pages hold what they held
+        }
         ++m_repeats.samePayloadPagesTouched;
-    if (m_lastWrite.size() > 65536u) {
-        m_lastWrite.clear();
-        m_lastWrite[key] = {};
     }
-    LastWrite &record = m_lastWrite[key];
-    record.hash = m_payloadHash;
-    record.stamp = m_nextStamp++;
-    record.drawn = m_drawnSum ? m_drawnSum(pages) : 0u;
+    last.hash = m_payloadHash;
+    last.stamp = m_nextStamp++;
     for (size_t page = 0; page < pages.size(); ++page)
         if (pages.test(page))
-            m_pageStamp[page] = record.stamp;
+            m_pageStamp[page] = last.stamp;
 }
 
 GsPageSet GsTransferEngine::destinationPages() const {
@@ -120,11 +96,10 @@ void GsTransferEngine::begin(const GSTransferCommand &command) {
     m_state.localToHostPendingBytes = 0u;
     m_payloadHash = 0xCBF29CE484222325ull;
     m_payloadBytes = 0u;
-    m_hashedWhole = false;
 
     if (command.direction == kLocalToLocal) {
         performLocalToLocal();
-        if (tracking()) {
+        if (m_repeatsOn) {
             // A copy onto pages a repeat would otherwise find untouched.
             const GsPageSet pages = destinationPages();
             const uint64_t stamp = m_nextStamp++;
@@ -250,41 +225,17 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
     if (m_command.trxreg.rrw == 0u || m_command.trxreg.rrh == 0u ||
         m_state.totalPixels == 0u)
         return;
-    if (tracking()) {
-        auto hashBytes = [this](const uint8_t *bytes, uint32_t count) {
-            uint32_t i = 0u;
-            for (; i + 8u <= count; i += 8u) {
-                uint64_t word;
-                std::memcpy(&word, bytes + i, sizeof(word));
-                m_payloadHash = (m_payloadHash ^ word) * 0x100000001B3ull;
-                m_payloadHash ^= m_payloadHash >> 29;
-            }
-            for (; i < count; ++i)
-                m_payloadHash = (m_payloadHash ^ bytes[i]) * 0x100000001B3ull;
-            m_payloadBytes += count;
-        };
-        const uint64_t need =
-            (static_cast<uint64_t>(m_state.totalPixels) * gsBitsPerPixel(m_command.bitbltbuf.dpsm) + 7u) / 8u;
-        if (m_state.copiedPixels == 0u && m_partialPixelBytes == 0u && need != 0u && sizeBytes >= need) {
-            // The whole transfer in this payload: known before writing it.
-            hashBytes(data, static_cast<uint32_t>(need));
-            m_hashedWhole = true;
-            const uint64_t key = repeatKey();
-            const GsPageSet pages = destinationPages();
-            if (m_skipRepeats && isRepeat(key, pages)) {
-                ++m_repeats.transfers;
-                m_repeats.bytes += m_payloadBytes;
-                ++m_repeats.repeats;
-                m_repeats.repeatBytes += m_payloadBytes;
-                ++m_repeats.skipped;
-                m_state.copiedPixels = m_state.totalPixels;
-                m_state.direction = kTransferIdle;
-                m_state.totalPixels = 0u;
-                return;
-            }
-        } else if (!m_hashedWhole) {
-            hashBytes(data, sizeBytes);
+    if (m_repeatsOn) {
+        uint32_t i = 0u;
+        for (; i + 8u <= sizeBytes; i += 8u) {
+            uint64_t word;
+            std::memcpy(&word, data + i, sizeof(word));
+            m_payloadHash = (m_payloadHash ^ word) * 0x100000001B3ull;
+            m_payloadHash ^= m_payloadHash >> 29;
         }
+        for (; i < sizeBytes; ++i)
+            m_payloadHash = (m_payloadHash ^ data[i]) * 0x100000001B3ull;
+        m_payloadBytes += sizeBytes;
     }
 
     const uint32_t dbp = m_command.bitbltbuf.dbp;
@@ -439,7 +390,7 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
 
     if (wrote && m_invalidate)
         m_invalidate(destinationPages());
-    if (tracking() && m_state.direction != kHostToLocal)
+    if (m_repeatsOn && m_state.direction != kHostToLocal)
         finishRepeatCheck();
 
     // DQ8_GS_UPLOAD_TRACE=N reports how upload() is actually being fed: the
