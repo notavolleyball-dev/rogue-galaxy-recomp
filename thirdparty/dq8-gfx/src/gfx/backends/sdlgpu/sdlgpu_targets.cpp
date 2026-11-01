@@ -1333,8 +1333,13 @@ bool GsTargetCache::prepareColorView(GsSurface &surface, std::string &error) {
     // target's detail, where a resolve would bring it down to native and
     // stall for the readback. Between surfaces of different scales the pages
     // go as nearest blits (Rogue Galaxy: changed).
+    // A CT24 source is a CT32 one for this: the same pages, and the alpha it
+    // carries is the draws' (Rogue Galaxy: added; the flip draws the frame
+    // into the display buffer as CT24, and CBlur reads that as CT32 the next
+    // frame, which was a readback of the whole frame).
+    static const bool ct24Sources = std::getenv("DQ8_GFX_NO_CT24_IMPORT") == nullptr;
     auto nativePages = [](const GsSurface &s) {
-        return s.psm == GS_PSM_CT32 && (s.base & 31u) == 0u &&
+        return (s.psm == GS_PSM_CT32 || (ct24Sources && s.psm == GS_PSM_CT24)) && (s.base & 31u) == 0u &&
                s.width == s.bufferWidth * 64u && s.height % 32u == 0u &&
                s.pages.count() == s.bufferWidth * (s.height / 32u);
     };

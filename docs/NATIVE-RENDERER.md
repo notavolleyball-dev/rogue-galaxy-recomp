@@ -765,6 +765,28 @@ all `needs-targets`: textures of the frame buffer). So the store is on
 it. It still keeps `gs_vram` for the reads that need the targets and for the
 writes draws make.
 
+**Step 3a, the frame no longer round-trips (2026-11-01):** the walk's
+`resolves=60 (13440 Kpx)` per 60 frames, a readback of the whole 512x448
+frame a frame, was one cause: the flip draws the frame into the display
+buffer `00e00` as CT24, and CBlur's read of it as CT32 made a CT32 view of
+the same pages, which imported the CT24 surface through local memory (a
+`view-resolve`, `DQ8_GFX_TRACE_TARGETS=1`) because only CT32 sources went by
+GPU page copies. A CT24 surface now counts as one for that import
+(`DQ8_GFX_NO_CT24_IMPORT=1` undoes it); the alpha it carries is the draws'.
+Also in: a CT32 texture's texels from the CT32 target that drew its pages,
+texel for texel on the GPU (`gs_target_copy.frag`, `copyFromTarget`; the
+way `expandIndexed8` does 8-bit ones; `DQ8_GFX_NO_DIRECT_TARGET_TEXTURES=1`
+undoes it; `DQ8_GFX_CHECK_GPU_TEXTURES=1` compares it with the CPU's
+expansion), which the walk reaches only for small ones: the frame's
+texture (`tbp 00000`, 512x512) is dirtied by the flip's writes to rows 448 on,
+and the object buffer `02a00` read as 512 wide is not one target's. Walk
+and battle: `resolves=0`, VRAM and display buffer byte-identical to before.
+What still goes through local memory: the imports into targets (`refreshes`:
+225 Kpx a frame in the battle), the textures over several targets' pages,
+and the palettes draws wrote.
+
+**Done when** `gs_vram` is no longer allocated
+
 **Done when** `gs_vram` is no longer allocated in a native run, and a
 playthrough route (title, Salgin, the first battles, a boss, menus, a save
 and a load, a movie) passes with the frame tools.

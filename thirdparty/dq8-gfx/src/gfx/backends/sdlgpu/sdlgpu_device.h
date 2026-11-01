@@ -196,6 +196,13 @@ public:
                         uint32_t width, uint32_t height, const SDL_Rect &region,
                         const std::array<uint32_t, 4> &pages, std::string &error);
 
+    // A CT32 texture's texels from the CT32 target holding them, texel for
+    // texel (gs_target_copy.frag; `pages` as expandIndexed8's, the texture's
+    // pages per row being its TBW).
+    bool copyFromTarget(SDL_GPUTexture *target, SDL_GPUTexture *destination, uint32_t width, uint32_t height,
+                        const SDL_Rect &region, const std::array<uint32_t, 4> &pages, SDL_GPUTexture *preserve,
+                        std::string &error);
+
     // A GS local-to-local transfer between CT32 targets at the same scale.
     // `mapping` holds four codes per pixel of `box` in the destination (see
     // gs_local_copy.frag). `source` may be `destination`; both are read from
@@ -349,6 +356,7 @@ private:
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     bool m_framebufferFetch = false;
     bool createIndex8(std::string &error);
+    bool createTargetCopy(std::string &error);
     void releaseIndex8();
 
     // GSNativeEffect's: written and added pipelines, a bilinear sampler and
@@ -378,6 +386,7 @@ private:
     SDL_GPUTextureFormat m_sidesFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
     SDL_GPUSampler *m_linearSampler = nullptr;
     SDL_GPUGraphicsPipeline *m_index8Pipeline = nullptr;
+    SDL_GPUGraphicsPipeline *m_targetCopyPipeline = nullptr;
     SDL_GPUTexture *m_index8Palette = nullptr;
     SDL_GPUTexture *m_index8Placement = nullptr;
     SDL_GPUTransferBuffer *m_index8Upload = nullptr;

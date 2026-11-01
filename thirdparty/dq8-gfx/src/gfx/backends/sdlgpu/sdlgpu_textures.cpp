@@ -1026,11 +1026,26 @@ void GsTextureCache::markClutReads(const GsTextureKey &key, GsPageSet &pages) co
 bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsRegion region,
                                       bool &handled, std::string &error) {
     handled = false;
-    if ((key.psm & 0x3fu) != GS_PSM_T8 || (key.tbp0 & 31u) != 0u)
+    // An 8-bit indexed texture through its palette, or (Rogue Galaxy: added)
+    // a CT32 one texel for texel, from the target that drew its pages. The
+    // flip's copy of the frame into the display buffer reads the frame so,
+    // every frame; through local memory that was a readback of the whole
+    // frame, an expansion and an upload.
+    const bool indexed = (key.psm & 0x3fu) == GS_PSM_T8;
+    static const bool direct = std::getenv("DQ8_GFX_NO_DIRECT_TARGET_TEXTURES") == nullptr;
+    if ((!indexed && !((key.psm & 0x3fu) == GS_PSM_CT32 && direct)) || (key.tbp0 & 31u) != 0u)
         return true;
     GsPageSet texelPages;
-    markTexelPages(key, texelPages);
+    if (indexed)
+        markTexelPages(key, texelPages);
+    else if (region.empty())
+        return true;
+    else
+        gsMarkPages(texelPages, key.tbp0, key.tbw, key.psm, region.width(), region.height(), region.x0, region.y0);
     GsSurface *target = m_targets.nativeOwner(texelPages, true);
+    if (!indexed && std::getenv("DQ8_GFX_DEBUG_DIRECT"))
+        std::fprintf(stderr, "[direct] tbp %05x tbw %u %ux%u region %u,%u-%u,%u target %s\n", key.tbp0, key.tbw,
+                     key.width, key.height, region.x0, region.y0, region.x1, region.y1, target ? "yes" : "no");
     if (!target)
         return true;
 
@@ -1039,12 +1054,15 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     // patches, the textures uploaded into its other pages, can wait: Rogue
     // Galaxy, refreshRegion).
     GsPageSet clutPages;
-    markClutReads(key, clutPages);
+    if (indexed)
+        markClutReads(key, clutPages);
     if (!m_targets.resolve(clutPages, error) ||
         !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error))
         return false;
-    buildPalette(key);
+    if (indexed)
+        buildPalette(key);
 
+    SDL_GPUTexture *preserve = nullptr;
     if (!entry.renderable) {
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -1062,21 +1080,32 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
         }
         if (entry.texture) {
             beforeRewrite(entry.texture);
-            SDL_ReleaseGPUTexture(m_device.handle(), entry.texture);
+            if (indexed)
+                SDL_ReleaseGPUTexture(m_device.handle(), entry.texture);
+            else
+                preserve = entry.texture; // released once copied from
         }
+        if (indexed)
+            region = {0u, 0u, key.width, key.height};
         entry.texture = texture;
         entry.renderable = true;
-        region = {0u, 0u, key.width, key.height};
     } else {
         beforeRewrite(entry.texture);
     }
 
     const SDL_Rect rect{int(region.x0), int(region.y0), int(region.width()), int(region.height())};
-    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u, std::max<uint32_t>(key.tbw >> 1u, 1u),
+    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u, indexed ? std::max<uint32_t>(key.tbw >> 1u, 1u) : key.tbw,
                                         target->base >> 5u,
                                         target->bufferWidth | (std::max(target->scale, 1u) << 16u)};
-    if (!m_device.expandIndexed8(target->texture, m_clutRgba.data(), entry.texture, key.width,
-                                 key.height, rect, pages, error))
+    const bool done = indexed ? m_device.expandIndexed8(target->texture, m_clutRgba.data(), entry.texture, key.width,
+                                                        key.height, rect, pages, error)
+                              : m_device.copyFromTarget(target->texture, entry.texture, key.width, key.height, rect,
+                                                        pages, preserve, error);
+    if (preserve) {
+        // The copy was recorded; the old texture goes when it has run.
+        SDL_ReleaseGPUTexture(m_device.handle(), preserve);
+    }
+    if (!done)
         return false;
     ++m_stats.expandedFromTargets;
     handled = true;
