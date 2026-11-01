@@ -2296,7 +2296,16 @@ struct SdlGpuBackend::Impl {
     // The slots for a buffer `fbw` wide, at the scene's scale: 512 GS rows,
     // the tallest frame the game draws.
     bool prepareLayers(uint32_t base, uint32_t fbw) {
-        const uint32_t scale = std::max(targets->scale(), 1u);
+        // DQ8_GFX_LAYER_SCALE=N: the objects' layers at most N times the GS
+        // size (they are laid over the frame with a bilinear tap, so a
+        // smaller layer is a softer object, for a fraction of the fill).
+        static const uint32_t layerCap = [] {
+            const char *value = std::getenv("DQ8_GFX_LAYER_SCALE");
+            return value ? uint32_t(std::strtoul(value, nullptr, 10)) : 0u;
+        }();
+        uint32_t scale = std::max(targets->scale(), 1u);
+        if (layerCap != 0u)
+            scale = std::min(scale, layerCap);
         const uint32_t width = std::max(fbw, 1u) * 64u, height = 512u;
         if (layers.count != 0u && layers.surface.width == width && layers.surface.height == height &&
             layers.surface.scale == scale) {
@@ -2685,11 +2694,11 @@ struct SdlGpuBackend::Impl {
             if (skipFrame && effect.buffers[op.target].base == 0u && effect.buffers[op.target].external)
                 continue;
             if (traceFx)
-                std::fprintf(stderr, "[fx] %s #%u target %05x %ux%u source %d %05x rect %.0f,%.0f-%.0f,%.0f flags %x\n",
+                std::fprintf(stderr, "[fx] %s #%u target %05x %ux%u source %d %05x rect %.0f,%.0f-%.0f,%.0f flags %x alpha %llx rgba %u,%u,%u,%u\n",
                              labelStem.empty() ? "" : labelStem.c_str(), n, effect.buffers[op.target].base,
                              effect.buffers[op.target].width, effect.buffers[op.target].height, op.source,
                              op.source >= 0 ? effect.buffers[op.source].base : 0u, op.rect[0], op.rect[1], op.rect[2],
-                             op.rect[3], op.flags);
+                             op.rect[3], op.flags, (unsigned long long)op.alpha, op.rgba[0], op.rgba[1], op.rgba[2], op.rgba[3]);
             Live &target = live[op.target];
             Live *source = op.source >= 0 ? &live[op.source] : nullptr;
             if (batchTarget && ((source && source->surface == batchTarget->surface) ||
@@ -2697,6 +2706,45 @@ struct SdlGpuBackend::Impl {
                                 (&target == batchTarget && target.takenOver))) {
                 if (!flushBatch())
                     return setError(std::move(error));
+            }
+            // A run of additive taps of an own buffer on itself (the glare's
+            // zoom streak: twenty passes) goes in passes of four
+            // (gs_effect_taps.frag); DQ8_GFX_FX_TAPS=0 keeps one pass a tap.
+            static const bool groupTaps = std::getenv("DQ8_GFX_FX_TAPS") == nullptr ||
+                                          std::strcmp(std::getenv("DQ8_GFX_FX_TAPS"), "0") != 0;
+            if (groupTaps && source == &target && !target.surface && !target.takenOver && target.current >= 0 &&
+                op.flags == 0x1bu && op.alpha == 0x8000000068ull && (op.test & 1u) == 0u && op.zbuf == 0u) {
+                uint32_t run = 1u;
+                while (run < 4u && n + run < effect.opCount) {
+                    const GSNativeEffect::Op &other = effect.ops[n + run];
+                    if (other.target != op.target || other.source != op.source || other.flags != op.flags ||
+                        other.alpha != op.alpha || (other.test & 1u) != 0u || other.zbuf != 0u)
+                        break;
+                    ++run;
+                }
+                if (run >= 2u) {
+                    SdlGpuDevice::EffectTaps taps;
+                    taps.count = run;
+                    for (uint32_t j = 0; j < run; ++j) {
+                        const GSNativeEffect::Op &tap = effect.ops[n + j];
+                        for (int k = 0; k < 4; ++k) {
+                            taps.rect[j][k] = tap.rect[k];
+                            taps.uv[j][k] = tap.uv[k];
+                            taps.scissor[j][k] = float(tap.scissor[k]);
+                            taps.rgba[j][k] = tap.rgba[k];
+                        }
+                    }
+                    const int next = 1 - target.current;
+                    SDL_GPUTexture *previous = target.textures[target.current];
+                    if (!device.effectTaps(target.textures[next], target.width * target.scale,
+                                           target.height * target.scale, previous, float(target.width),
+                                           float(target.height), float(target.scale), previous, taps, error))
+                        return setError(std::move(error));
+                    target.current = next;
+                    stats.nativeEffectOps += run;
+                    n += run - 1u;
+                    continue;
+                }
             }
             SDL_GPUTexture *sourceTexture = nullptr;
             if (source)

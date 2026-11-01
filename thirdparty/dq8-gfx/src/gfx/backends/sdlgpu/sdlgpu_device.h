@@ -222,6 +222,17 @@ public:
         uint32_t control[4];
         float depth[4]; // xy: the Z at the rect's x0 and x1, normalised, when depth tested
     };
+    // Up to four additive taps of one buffer in a pass (gs_effect_taps.frag).
+    struct EffectTaps {
+        uint32_t count = 0u;
+        float rect[4][4] = {};
+        float uv[4][4] = {};
+        float scissor[4][4] = {};
+        uint32_t rgba[4][4] = {};
+    };
+    bool effectTaps(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source,
+                    float sourceWidth, float sourceHeight, float scale, SDL_GPUTexture *previous,
+                    const EffectTaps &taps, std::string &error);
     bool supportsEffects() const;
     // An effect's buffer, by slot, kept from one effect to the next.
     SDL_GPUTexture *effectTexture(uint32_t slot, uint32_t width, uint32_t height, std::string &error);
@@ -387,6 +398,8 @@ private:
     SDL_GPUSampler *m_linearSampler = nullptr;
     SDL_GPUGraphicsPipeline *m_index8Pipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_targetCopyPipeline = nullptr;
+    SDL_GPUGraphicsPipeline *m_effectTapsPipeline = nullptr;
+    bool createEffectTaps(std::string &error);
     SDL_GPUTexture *m_index8Palette = nullptr;
     SDL_GPUTexture *m_index8Placement = nullptr;
     SDL_GPUTransferBuffer *m_index8Upload = nullptr;

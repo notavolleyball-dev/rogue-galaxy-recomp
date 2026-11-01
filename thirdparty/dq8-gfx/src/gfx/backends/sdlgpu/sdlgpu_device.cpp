@@ -8,6 +8,7 @@
 #include "gs_native.vert.spv.h"
 #include "gs_index8.frag.spv.h"
 #include "gs_target_copy.frag.spv.h"
+#include "gs_effect_taps.frag.spv.h"
 #include "gs_local_copy.frag.spv.h"
 #include "gs_reinterpret.frag.spv.h"
 #include "gs_reinterpret.vert.spv.h"
@@ -18,6 +19,7 @@
 #include "gs_native.vert.msl.h"
 #include "gs_index8.frag.msl.h"
 #include "gs_target_copy.frag.msl.h"
+#include "gs_effect_taps.frag.msl.h"
 #include "gs_local_copy.frag.msl.h"
 #include "gs_reinterpret.frag.msl.h"
 #include "gs_reinterpret.vert.msl.h"
@@ -377,6 +379,9 @@ void SdlGpuDevice::destroy() {
     if (m_targetCopyPipeline)
         SDL_ReleaseGPUGraphicsPipeline(m_device, m_targetCopyPipeline);
     m_targetCopyPipeline = nullptr;
+    if (m_effectTapsPipeline)
+        SDL_ReleaseGPUGraphicsPipeline(m_device, m_effectTapsPipeline);
+    m_effectTapsPipeline = nullptr;
     releaseLocalCopy();
     releaseEffects();
     if (m_sampler)
@@ -966,6 +971,116 @@ bool SdlGpuDevice::createTargetCopy(std::string &error) {
         error = std::string("SDL_CreateGPUGraphicsPipeline(target copy): ") + SDL_GetError();
         return false;
     }
+    return true;
+}
+
+bool SdlGpuDevice::createEffectTaps(std::string &error) {
+    SDL_GPUShaderCreateInfo vertexInfo{};
+    vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsReinterpretVertSpirv);
+    vertexInfo.code_size = sizeof(kGsReinterpretVertSpirv);
+    vertexInfo.entrypoint = "main";
+    vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    SDL_GPUShaderCreateInfo fragmentInfo{};
+    fragmentInfo.code = reinterpret_cast<const uint8_t *>(kGsEffectTapsFragSpirv);
+    fragmentInfo.code_size = sizeof(kGsEffectTapsFragSpirv);
+    fragmentInfo.entrypoint = "main";
+    fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fragmentInfo.num_samplers = 2u;
+    fragmentInfo.num_uniform_buffers = 1u;
+#ifdef DQ8_GFX_HAS_MSL
+    if ((SDL_GetGPUShaderFormats(m_device) & SDL_GPU_SHADERFORMAT_MSL) != 0) {
+        vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsReinterpretVertSpirvMsl);
+        vertexInfo.code_size = sizeof(kGsReinterpretVertSpirvMsl);
+        vertexInfo.entrypoint = "main0";
+        vertexInfo.format = SDL_GPU_SHADERFORMAT_MSL;
+        fragmentInfo.code = reinterpret_cast<const uint8_t *>(kGsEffectTapsFragSpirvMsl);
+        fragmentInfo.code_size = sizeof(kGsEffectTapsFragSpirvMsl);
+        fragmentInfo.entrypoint = "main0";
+        fragmentInfo.format = SDL_GPU_SHADERFORMAT_MSL;
+    }
+#endif
+    SDL_GPUShader *vertex = SDL_CreateGPUShader(m_device, &vertexInfo);
+    if (!vertex) {
+        error = std::string("SDL_CreateGPUShader(effect taps vertex): ") + SDL_GetError();
+        return false;
+    }
+    SDL_GPUShader *fragment = SDL_CreateGPUShader(m_device, &fragmentInfo);
+    if (!fragment) {
+        error = std::string("SDL_CreateGPUShader(effect taps fragment): ") + SDL_GetError();
+        SDL_ReleaseGPUShader(m_device, vertex);
+        return false;
+    }
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.target_info.color_target_descriptions = &colorTarget;
+    info.target_info.num_color_targets = 1u;
+    m_effectTapsPipeline = SDL_CreateGPUGraphicsPipeline(m_device, &info);
+    SDL_ReleaseGPUShader(m_device, fragment);
+    SDL_ReleaseGPUShader(m_device, vertex);
+    if (!m_effectTapsPipeline) {
+        error = std::string("SDL_CreateGPUGraphicsPipeline(effect taps): ") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+bool SdlGpuDevice::effectTaps(SDL_GPUTexture *target, uint32_t width, uint32_t height, SDL_GPUTexture *source,
+                              float sourceWidth, float sourceHeight, float scale, SDL_GPUTexture *previous,
+                              const EffectTaps &taps, std::string &error) {
+    if (!m_effectTapsPipeline && !createEffectTaps(error))
+        return false;
+    if (!m_effectLinearSampler) {
+        // effectPipeline makes the sampler; any index will do.
+        if (!effectPipeline(0u, error))
+            return false;
+    }
+    SDL_GPUCommandBuffer *commands = pendingCommands(error, effectLabel.c_str());
+    if (!commands)
+        return false;
+    SDL_GPUColorTargetInfo info{};
+    info.texture = target;
+    info.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    info.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &info, 1u, nullptr);
+    if (!pass) {
+        cancelPending();
+        error = std::string("SDL_BeginGPURenderPass(effect taps): ") + SDL_GetError();
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, m_effectTapsPipeline);
+    const SDL_GPUViewport viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
+    SDL_SetGPUViewport(pass, &viewport);
+    const SDL_Rect whole{0, 0, int(width), int(height)};
+    SDL_SetGPUScissor(pass, &whole);
+    const SDL_GPUTextureSamplerBinding bindings[2] = {{source, m_effectLinearSampler}, {previous, m_sampler}};
+    SDL_BindGPUFragmentSamplers(pass, 0u, bindings, 2u);
+    struct Block {
+        float misc[4];
+        float rect[4][4];
+        float uv[4][4];
+        float scissor[4][4];
+        uint32_t rgba[4][4];
+    } block{};
+    block.misc[0] = scale;
+    block.misc[1] = sourceWidth;
+    block.misc[2] = sourceHeight;
+    block.misc[3] = float(taps.count);
+    std::memcpy(block.rect, taps.rect, sizeof block.rect);
+    std::memcpy(block.uv, taps.uv, sizeof block.uv);
+    std::memcpy(block.scissor, taps.scissor, sizeof block.scissor);
+    std::memcpy(block.rgba, taps.rgba, sizeof block.rgba);
+    SDL_PushGPUFragmentUniformData(commands, 0u, &block, sizeof block);
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
     return true;
 }
 
