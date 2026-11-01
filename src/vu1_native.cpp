@@ -2039,12 +2039,64 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     }
 }
 
+// A chunk's shadow volume fans come as (state, fan) pairs, the state an add
+// or a subtract blend by the fan's facing, alternating in the program's
+// triangle order; the GPU draws each change of state as a draw of its own
+// (about 1,000 a frame). Here the pairs are grouped by state, the group of
+// the first fan first, one state packet each, so the fans draw as two. The
+// mask is 8 bits a channel clamped after every blend, so this changes the
+// result wherever a pixel clamps between a subtract and an add that the
+// program's order would have kept apart: RG_NATIVE_VOLUME_GROUP=0 keeps the
+// program's order (docs/NATIVE-RENDERER.md, phase 3 item 2).
+void groupShadowFans(std::vector<std::vector<uint8_t>> &packets)
+{
+    static const bool off = [] {
+        const char *value = std::getenv("RG_NATIVE_VOLUME_GROUP");
+        return value && std::strcmp(value, "0") == 0;
+    }();
+    if (off || packets.size() < 4u || (packets.size() & 1u) != 0u)
+    {
+        return;
+    }
+    const std::vector<uint8_t> first = packets[0];
+    std::vector<uint8_t> other;
+    for (size_t i = 2; i < packets.size() && other.empty(); i += 2)
+    {
+        if (packets[i] != first)
+        {
+            other = packets[i];
+        }
+    }
+    if (other.empty())
+    {
+        return;
+    }
+    std::vector<std::vector<uint8_t>> grouped;
+    grouped.reserve(packets.size() / 2u + 2u);
+    for (const std::vector<uint8_t> *state : {&first, static_cast<const std::vector<uint8_t> *>(&other)})
+    {
+        grouped.push_back(*state);
+        for (size_t i = 0; i < packets.size(); i += 2)
+        {
+            if (packets[i] == *state)
+            {
+                grouped.push_back(std::move(packets[i + 1]));
+            }
+        }
+    }
+    packets = std::move(grouped);
+}
+
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
                std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
 {
     if (!hasMesh(program))
     {
         buildChunk(program, data, top, packets);
+        if (program.kind == Kind::Shadow)
+        {
+            groupShadowFans(packets);
+        }
         mesh.vertices.clear();
         mesh.header.vertexCount = 0u;
         return;

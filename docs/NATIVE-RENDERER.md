@@ -54,6 +54,15 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    17% of the field's vertices), shadow volumes (5%), particles, the
    projected texture, the object set-up. They are computed natively but
    still kick GS packets.
+   **Shadow volumes, first cut (2026-11-01):** a chunk's fans are grouped
+   by blend (add, subtract) before they go out, so the GPU draws them as
+   two runs a chunk where the program's order alternated: 277 runs a frame
+   on the walk (pad 3000) became 43, 242 in the forced battle (pad 3450)
+   became 47, and all of VRAM is byte-identical at 1x with
+   `RG_NATIVE_VOLUME_GROUP=0` (the program's order). The mask clamps at 8
+   bits after every blend, so this can differ where a pixel clamps between
+   a subtract and an add; none did on these two frames, so the town and the
+   censuses of item 3 should recheck it. The fans are still GS packets.
 3. **Censuses not run yet:** the town, menus, events with item messages,
    battle dissolves, movies (`tools/bench/origins-run.sh`). Each may add
    effects to item 1.
