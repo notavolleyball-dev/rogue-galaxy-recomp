@@ -113,6 +113,9 @@ struct Program
     bool skinNormals = true;
     // D reads the colors as floats from the colors section and writes no ST (312d076b).
     bool rawColor = false;
+    // Its number, from 1 in the order first met (logged as it is), which
+    // the renderer's GPU time labels show as pN (GSNativeMesh's source).
+    uint32_t index = 0;
 };
 
 // Whether buildMesh can make the program's chunks a GSNativeMesh; if not,

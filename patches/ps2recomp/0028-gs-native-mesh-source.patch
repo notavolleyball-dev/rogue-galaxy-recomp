@@ -1,0 +1,12 @@
+--- a/ps2xRuntime/include/runtime/gs/gs_types.h
++++ b/ps2xRuntime/include/runtime/gs/gs_types.h
+@@ -468,6 +468,9 @@
+         // A renderer that only draws whole triangles drops one crossing them.
+         uint32_t clips = 0u;
+         float clipPlanes[2][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
++        // What built the mesh (the game's own numbering, 0 for none), for a
++        // renderer's per-draw accounting only.
++        uint32_t source = 0u;
+     };
+     Header header{};
+     std::vector<Vertex> vertices;

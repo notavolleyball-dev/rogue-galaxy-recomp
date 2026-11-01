@@ -193,6 +193,7 @@ struct DrawBatch {
     // from firstIndex, each vertex naming its mesh's record (Rogue Galaxy:
     // added). Consecutive meshes of one state share the draw.
     bool native = false;
+    uint32_t nativeSource = 0u; // the program of its meshes (GSNativeMesh source), ~0 for several
     uint32_t firstIndex = 0u;
     uint32_t indexCount = 0u;
 
@@ -1666,6 +1667,10 @@ struct SdlGpuBackend::Impl {
                     triangle(k + 1u, k, k + 2u);
             }
         }
+        // The program that built it, for the GPU time label; ~0 when the
+        // draw holds more than one's.
+        const uint32_t source = mesh.header.source;
+        draw.nativeSource = !draw.native ? source : draw.nativeSource == source ? source : ~0u;
         draw.native = true;
         draw.pipeline.nativeMesh = 1u;
         if (mesh.header.backface)
@@ -3686,18 +3691,21 @@ struct SdlGpuBackend::Impl {
         const bool textured = (batch.fragmentUniforms.control[0] & kFragFlagTme) != 0u;
         const bool big = uint64_t(batch.written.width()) * batch.written.height() * 2u >=
                          uint64_t(batch.color->width) * batch.color->height;
-        char label[48];
+        char label[64];
+        char program[12] = "";
+        if (batch.native)
+            std::snprintf(program, sizeof(program), batch.nativeSource == ~0u ? " p*" : " p%u", batch.nativeSource);
         const uint32_t c0 = batch.fragmentUniforms.control[0], c3 = batch.fragmentUniforms.control[3];
         if (textured) {
-            std::snprintf(label, sizeof(label), "%05x %s%s%s%s s%.0f w%u%u f%.0f %s%s%s t%u", batch.color->base, batch.depth ? "3D" : "2D",
-                          batch.native ? " mesh" : "", batch.feedback ? " fb" : "", batch.pipeline.blendEnabled ? " bl" : "",
+            std::snprintf(label, sizeof(label), "%05x %s%s%s%s%s s%.0f w%u%u f%.0f %s%s%s t%u", batch.color->base, batch.depth ? "3D" : "2D",
+                          batch.native ? " mesh" : "", program, batch.feedback ? " fb" : "", batch.pipeline.blendEnabled ? " bl" : "",
                           batch.fragmentUniforms.misc[1], c3 & 3u, (c3 >> 2u) & 3u, batch.fragmentUniforms.misc[2],
                           (c0 & kFragFlagLinear) ? "L" : "P", (c0 & kFragFlagFst) ? " uv" : " stq", (c0 & kFragFlagNativeGrid) ? " g" : "",
                           batch.fragmentUniforms.control[2]);
             return label;
         }
-        std::snprintf(label, sizeof(label), "%05x %ux%u %s%s%s%s%s%s", batch.color->base, batch.color->width,
-                      batch.color->height, batch.depth ? "3D" : "2D", batch.native ? " mesh" : "",
+        std::snprintf(label, sizeof(label), "%05x %ux%u %s%s%s%s%s%s%s", batch.color->base, batch.color->width,
+                      batch.color->height, batch.depth ? "3D" : "2D", batch.native ? " mesh" : "", program,
                       batch.feedback ? " feedback" : batch.destination ? " destination" : "",
                       textured ? " tex" : "", batch.pipeline.blendEnabled ? " blend" : "",
                       !batch.native && big ? " big" : "");

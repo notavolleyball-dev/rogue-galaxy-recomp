@@ -281,6 +281,8 @@ const Program *intern(const Program &shape)
     name += shape.rawFloats ? " floats (unverified)" : "";
     Program &program = programs.emplace_back(shape);
     program.name = name.c_str();
+    program.index = static_cast<uint32_t>(programs.size());
+    std::fprintf(stderr, "[vu1native] program %u = %s\n", program.index, program.name);
     return &program;
 }
 
@@ -2170,6 +2172,7 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
     {
         projectorMesh(program, VuData(data), top, chunk.mesh);
     }
+    chunk.mesh.header.source = program.index;
     packets.clear();
     packets.push_back(std::move(chunk.fog));
     // PRIM and PRMODE behind the program's GIF tag, made the packet's end.
