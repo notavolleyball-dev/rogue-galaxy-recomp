@@ -889,6 +889,19 @@ from 10 Mpx to 3 Kpx per 60 frames. Palettes inside a target (the frame at
 `00000`, `03f80`) are copied out region-wise (`GsTargetCache::copyOut`, the
 target stays the owner) instead of resolving everything the GPU holds of it.
 
+**What the effects cost (2026-11-01, measured, not guessed).** Per frame the
+effects run in this order, each reading and writing the frame after the one
+before: the plane shadow, CBlur, the frame captured into `03b80`, a small
+palette blur, the 16-strip resample through `02a00`, the glare. Skipping every
+op that writes the frame (`DQ8_GFX_SKIP_FX_FRAME=1`) at 4x and 60 fps, not
+throttled: power 41.2 to 36.4 W (12%), the GS backend's share of the wall 46%
+to 39%. The 20 or so small blur passes on the 192x192 buffers cost 3-5 ms/s
+each under `DQ8_GFX_GPU_TIMES=1` (deck mode); the scene's own draws are
+about 40% of the GPU time and the effects' frame lay-overs about a fifth. So
+fusing the lay-overs into one pass would save perhaps 8%, not a doubling; the
+larger lever is the scene's offscreen work (the object buffers at the
+internal scale, `02a00 512x448 3D blend` at 1,600 draws a second).
+
 **Done when** `gs_vram` is no longer allocated in a native run (met) and the
 spot checks above pass; a full playthrough is not required, since the flag
 keeps the GS path for anything the checks miss.

@@ -2679,6 +2679,17 @@ struct SdlGpuBackend::Impl {
                 return setError("native effect: no such buffer");
             if (device.gpuTimes())
                 device.effectLabel = labelStem + " #" + std::to_string(n);
+            static const bool traceFx = std::getenv("DQ8_GFX_TRACE_EFFECTS") != nullptr;
+            // DQ8_GFX_SKIP_FX_FRAME=1 (a measurement): the ops that write the frame are not drawn.
+            static const bool skipFrame = std::getenv("DQ8_GFX_SKIP_FX_FRAME") != nullptr;
+            if (skipFrame && effect.buffers[op.target].base == 0u && effect.buffers[op.target].external)
+                continue;
+            if (traceFx)
+                std::fprintf(stderr, "[fx] %s #%u target %05x %ux%u source %d %05x rect %.0f,%.0f-%.0f,%.0f flags %x\n",
+                             labelStem.empty() ? "" : labelStem.c_str(), n, effect.buffers[op.target].base,
+                             effect.buffers[op.target].width, effect.buffers[op.target].height, op.source,
+                             op.source >= 0 ? effect.buffers[op.source].base : 0u, op.rect[0], op.rect[1], op.rect[2],
+                             op.rect[3], op.flags);
             Live &target = live[op.target];
             Live *source = op.source >= 0 ? &live[op.source] : nullptr;
             if (batchTarget && ((source && source->surface == batchTarget->surface) ||
