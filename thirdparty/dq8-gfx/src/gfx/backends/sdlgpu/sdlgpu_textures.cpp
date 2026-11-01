@@ -5,6 +5,7 @@
 #include "runtime/gs/ps2_gs_memory.h"
 
 #include <algorithm>
+#include <set>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -239,6 +240,9 @@ void GsTextureCache::reset() {
     }
     m_entries.clear();
     m_sourcePagesAll.reset();
+    m_drawnBlocks.reset();
+    m_drawMemo.clear();
+    ++m_drawnGeneration;
     for (auto &entries : m_entriesByPage)
         entries.clear();
     releaseUploadPool();
@@ -253,6 +257,8 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
     record.dpsm = command.bitbltbuf.dpsm;
     record.w = command.trxreg.rrw;
     record.h = command.trxreg.rrh;
+    record.x = command.trxpos.dsax;
+    record.y = command.trxpos.dsay;
     gsMarkPages(record.pages, record.dbp, record.dbw, record.dpsm, record.w, record.h,
                 command.trxpos.dsax, command.trxpos.dsay);
     gsMarkCoveredPages(record.covered, record.dbp, record.dbw, record.dpsm, record.w, record.h,
@@ -272,13 +278,23 @@ void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource sourc
         m_writer.assign(kGsPageCount, 0u);
     const UploadRecord *record =
         source == InvalidationSource::HostWrite && m_auditPending >= 16u ? &m_uploads[m_auditPending - 16u] : nullptr;
-    // A page a draw, a copy or an unrecorded write touched is not the host
-    // writes' alone until an upload covers all of it.
-    if (source == InvalidationSource::Draw || !record)
-        m_drawn |= pages;
-    else {
-        m_drawn |= pages & ~record->pages;
-        m_drawn &= ~(pages & record->covered);
+    // Blocks a copy or an unrecorded write touched are not the host writes'
+    // alone until an upload covers them whole; a draw's are marked as it
+    // draws (noteDrawnBlocks), at its own extent.
+    if (source != InvalidationSource::Draw) {
+        if (!record) {
+            gsBlocksOfPages(m_drawnBlocks, pages);
+            ++m_drawnGeneration;
+        } else {
+            gsBlocksOfPages(m_drawnBlocks, pages & ~record->pages);
+            GsBlockSet covered;
+            gsMarkCoveredBlocks(covered, record->dbp, record->dbw, record->dpsm, record->w, record->h, record->x,
+                                record->y);
+            if ((m_drawnBlocks & covered).any()) {
+                m_drawnBlocks &= ~covered;
+                ++m_drawnGeneration;
+            }
+        }
     }
     gsForEachPage(pages, [&](uint32_t page) {
         uint32_t &writer = m_writer[page];
@@ -356,7 +372,7 @@ void GsTextureCache::auditBuild(const GsTextureKey &key, const Entry &entry) {
         }
         // The rule step 2 would use: the host writes' memory serves a build
         // when no page of it was touched by anything else.
-        const bool served = (pages & m_drawn).none();
+        const bool served = !blocksDrawn(key);
         const std::string cls = std::string(clut ? "clut " : "texture ") + (served ? "uploads-only " : "needs-targets ") +
                                 (same ? "SAME: " : "DIFFERENT: ") + auditPages(pages, key, clut);
         AuditClass &entryClass = m_audit[cls];
@@ -447,20 +463,72 @@ GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
     return m_lastSourcePages;
 }
 
-GsVram *GsTextureCache::sourceFor(const GsPageSet &pages) {
+void GsTextureCache::noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32_t psm, const GsRegion &region) {
+    if (!m_tracking || region.empty())
+        return;
+    DrawMemo &memo = m_drawMemo[base];
+    if (memo.generation == m_drawnGeneration && memo.bw == bufferWidth && memo.psm == psm &&
+        memo.region.contains(region))
+        return;
+    gsMarkBlocks(m_drawnBlocks, base, bufferWidth, psm, region.width(), region.height(), region.x0, region.y0);
+    memo.region = region;
+    memo.bw = bufferWidth;
+    memo.psm = psm;
+    memo.generation = m_drawnGeneration;
+}
+
+GsBlockSet GsTextureCache::blocksFor(const GsTextureKey &key) const {
+    GsBlockSet blocks;
+    gsMarkBlocks(blocks, key.tbp0, key.tbw, key.psm, key.width, key.height);
+    if (gsIsIndexedPsm(key.psm)) {
+        const bool sixteenBitClut = key.cpsm == GS_PSM_CT16 || key.cpsm == GS_PSM_CT16S;
+        const uint32_t entries = (key.csm == 0u && sixteenBitClut) ? 512u : 256u;
+        const uint32_t clutWidth = (key.texclut & 0xffu) + 16u;
+        const uint32_t clutHeight = ((key.texclut >> 16u) & 0xffffu) + (entries + 15u) / 16u;
+        gsMarkBlocks(blocks, key.cbp, std::max<uint32_t>(key.texclut & 0xffu, 1u), key.cpsm, clutWidth, clutHeight);
+    }
+    return blocks;
+}
+
+GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
     if (!m_storeOn)
         return &m_vram;
-    if ((pages & m_drawn).none()) {
+    const GsBlockSet blocks = blocksFor(key);
+    if ((blocks & m_drawnBlocks).none()) {
         ++m_stats.uploadStoreReads;
         return &m_shadow;
     }
     ++m_stats.localMemoryReads;
+    // DQ8_GFX_POISON_DRAWN=1: a read of drawn pages that is not served from
+    // a target sees garbage (a loud colour), so the picture says whether
+    // anything depends on local memory the draws would have written.
+    static const bool poison = std::getenv("DQ8_GFX_POISON_DRAWN") != nullptr;
+    if (poison) {
+        if (m_poisonStorage.empty()) {
+            m_poisonStorage.assign(kGsVramBytes, 0xA5u);
+            m_poison.attach(m_poisonStorage.data(), static_cast<uint32_t>(m_poisonStorage.size()));
+        }
+        return &m_poison;
+    }
+    static const bool warn = std::getenv("DQ8_GFX_WARN_LOCAL_READS") != nullptr;
+    if (warn) {
+        // Draws wrote blocks this read covers: with no local memory kept
+        // for them, whatever is read here is stale. Once per first block.
+        static std::set<uint32_t> seen;
+        const GsBlockSet drawn = blocks & m_drawnBlocks;
+        uint32_t first = 0u;
+        while (first < kGsBlockCount && !drawn.test(first))
+            ++first;
+        if (seen.insert(first).second)
+            std::fprintf(stderr, "[local-read] texture/palette read covers drawn blocks from block %u (%zu of %zu blocks)\n",
+                         first, drawn.count(), blocks.count());
+    }
     return &m_vram;
 }
 
 GsTextureIdentity GsTextureCache::regionIdentity(const GSDrawState &state, const GsRegion &region) {
     const GsTextureKey key = keyFor(state);
-    SourceScope scope(*this, m_storeOn ? sourcePagesFor(state) : GsPageSet{});
+    SourceScope scope(*this, key);
     GsTextureIdentity identity;
     identity.texels = expand(key, region, true);
     if (gsIsIndexedPsm(key.psm))
@@ -476,7 +544,7 @@ SDL_GPUTexture *GsTextureCache::replacement(const GSDrawState &state, const GsRe
     const GsTextureKey key = keyFor(state);
     if (!gsIsIndexedPsm(key.psm))
         return nullptr;
-    SourceScope scope(*this, m_storeOn ? sourcePagesFor(state) : GsPageSet{});
+    SourceScope scope(*this, keyFor(state));
     // The palette first: most regions drawn are art the host leaves alone,
     // and their texels need no hash.
     const uint64_t clut = hashClutWindow(key);
@@ -960,7 +1028,7 @@ uint64_t GsTextureCache::hashClutWindow(const GsTextureKey &key) const {
 // write. When it moved, every expanded colour is stale, so the whole texture
 // re-expands on next use.
 void GsTextureCache::refreshClut(const GsTextureKey &key, Entry &entry) {
-    SourceScope scope(*this, entry.pages);
+    SourceScope scope(*this, key);
     entry.clutDirty = false;
     if (!gsIsIndexedPsm(key.psm))
         return;
@@ -1170,7 +1238,7 @@ void GsTextureCache::restrictToSampled(const GsTextureKey &key, const GsRegion &
 }
 
 bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
-    SourceScope scope(*this, entry.pages);
+    SourceScope scope(*this, key);
     const GsRegion region = entry.dirty;
     if (region.empty() || !entry.texture)
         return true;
@@ -1204,7 +1272,7 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
         m_src = &m_shadow;
         const uint64_t shadow = expand(key, region, true);
         m_src = saved;
-        const bool served = (entry.pages & m_drawn).none();
+        const bool served = !blocksDrawn(key);
         AuditClass &entryClass = m_audit[std::string("update ") + (served ? "uploads-only " : "needs-targets ") +
                                          (real == shadow ? "SAME" : "DIFFERENT")];
         ++entryClass.count;
@@ -1263,7 +1331,7 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
 bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &error, const GsRegion *sampled) {
     GsPageSet sourcePages;
     markSourcePages(key, sourcePages);
-    SourceScope scope(*this, sourcePages);
+    SourceScope scope(*this, key);
     if (!m_device.valid()) {
         error = "SDL GPU device is not available";
         return false;

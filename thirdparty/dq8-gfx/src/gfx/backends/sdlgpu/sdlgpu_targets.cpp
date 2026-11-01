@@ -575,6 +575,8 @@ void GsTargetCache::markDrawn(GsSurface &surface, const GsRegion &region) {
     clipped.y1 = std::min(clipped.y1, surface.height);
     surface.gpuDirty.merge(clipped);
     surface.undefined = false;
+    if (m_drawObserver && !surface.depth)
+        m_drawObserver(surface, clipped);
     GsPageSet writtenPages;
     gsMarkPages(writtenPages, surface.base, surface.bufferWidth, surface.psm,
                 clipped.width(), clipped.height(), clipped.x0, clipped.y0);

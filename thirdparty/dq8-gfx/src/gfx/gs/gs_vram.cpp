@@ -907,6 +907,69 @@ void gsMarkCoveredPages(GsPageSet &pages,
             pages.set(((baseBlock >> 5u) + row * pagesPerRow + column) % kGsPageCount);
 }
 
+void gsBlocksOfPages(GsBlockSet &blocks, const GsPageSet &pages) {
+    gsForEachPage(pages, [&](uint32_t page) {
+        for (uint32_t block = 0u; block < 32u; ++block)
+            blocks.set(page * 32u + block);
+    });
+}
+
+namespace {
+
+// The blocks of a rectangle's block cells in [firstRow, endRow) x
+// [firstColumn, endColumn), by the format's block table.
+template <typename Visit>
+void forEachBlockCell(uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, uint32_t firstColumn,
+                      uint32_t endColumn, uint32_t firstRow, uint32_t endRow, Visit &&visit) {
+    const GsPageExtent extent = gsPageExtent(psm);
+    const GsBlockExtent block = gsBlockExtent(psm);
+    const uint32_t pagesPerRow = std::max<uint32_t>(std::max<uint32_t>(bufferWidth, 1u) * 64u / extent.width, 1u);
+    const uint32_t blocksPerPageRow = extent.width / block.width;
+    const uint32_t blocksPerPageColumn = extent.height / block.height;
+    const uint32_t basePage = baseBlock >> 5u;
+    const uint32_t baseOffset = baseBlock & 31u;
+    for (uint32_t row = firstRow; row < endRow; ++row) {
+        for (uint32_t column = firstColumn; column < endColumn; ++column) {
+            const uint32_t page = basePage + (row / blocksPerPageColumn) * pagesPerRow + column / blocksPerPageRow;
+            const uint32_t id = baseOffset + gsBlockInPage(psm, column % blocksPerPageRow, row % blocksPerPageColumn);
+            visit((page * 32u + id) % kGsBlockCount);
+        }
+    }
+}
+
+} // namespace
+
+void gsMarkBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, uint32_t width,
+                  uint32_t height, uint32_t x, uint32_t y) {
+    if (width == 0u || height == 0u)
+        return;
+    const GsPageExtent extent = gsPageExtent(psm);
+    const GsBlockExtent block = gsBlockExtent(psm);
+    if (!extent.valid() || !block.valid()) {
+        GsPageSet pages;
+        gsMarkPages(pages, baseBlock, bufferWidth, psm, width, height, x, y);
+        gsBlocksOfPages(blocks, pages);
+        return;
+    }
+    forEachBlockCell(baseBlock, bufferWidth, psm, x / block.width, (x + width - 1u) / block.width + 1u,
+                     y / block.height, (y + height - 1u) / block.height + 1u,
+                     [&](uint32_t id) { blocks.set(id); });
+}
+
+void gsMarkCoveredBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm,
+                         uint32_t width, uint32_t height, uint32_t x, uint32_t y) {
+    const GsPageExtent extent = gsPageExtent(psm);
+    const GsBlockExtent block = gsBlockExtent(psm);
+    if (!extent.valid() || !block.valid() || width == 0u || height == 0u)
+        return;
+    const uint32_t firstColumn = (x + block.width - 1u) / block.width;
+    const uint32_t endColumn = (x + width) / block.width;
+    const uint32_t firstRow = (y + block.height - 1u) / block.height;
+    const uint32_t endRow = (y + height) / block.height;
+    forEachBlockCell(baseBlock, bufferWidth, psm, firstColumn, endColumn, firstRow, endRow,
+                     [&](uint32_t id) { blocks.set(id); });
+}
+
 GsVram::GsVram() {
     ensureLookupTables();
 }

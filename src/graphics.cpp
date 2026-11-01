@@ -740,14 +740,15 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
 
 } // namespace
 
+static std::atomic<bool> g_reserveLocalMemory{false};
+
 Setup::Setup(PS2Runtime &runtime)
 {
-    // Phase 5 of docs/NATIVE-RENDERER.md: RG_GS_VRAM_RESERVE=1 keeps the GS
-    // local memory reserved but inaccessible, so what still reads it faults.
-    PS2Memory::setGsVramReservedOnly([] {
-        const char *value = std::getenv("RG_GS_VRAM_RESERVE");
-        return value && value[0] == '1' && rg::nativerenderer::enabled();
-    });
+    // Phase 5 of docs/NATIVE-RENDERER.md: with the native renderer and the
+    // GPU backend, the GS local memory is address space only (inaccessible,
+    // so what still read it would fault) and the backend keeps the host
+    // writes' memory itself. RG_GS_VRAM_RESERVE=0 allocates it as before.
+    PS2Memory::setGsVramReservedOnly([] { return g_reserveLocalMemory.load(); });
 #if defined(RG_HAS_SDLGPU)
     if (env("RG_GS", "sdlgpu") == "sdlgpu")
     {
@@ -856,6 +857,7 @@ Setup::Setup(PS2Runtime &runtime)
                     sdl->resolutionScale(), m_menu ? ", menu on F1" : "");
         m_backend = std::move(sdl);
         m_name = "sdlgpu";
+        g_reserveLocalMemory = rg::nativerenderer::enabled() && env("RG_GS_VRAM_RESERVE", "1") != "0";
     }
 #else
     (void)runtime;

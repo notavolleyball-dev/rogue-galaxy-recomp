@@ -23,6 +23,12 @@ inline constexpr uint32_t kGsPageCount = kGsVramBytes / kGsPageBytes;
 
 using GsPageSet = std::bitset<kGsPageCount>;
 
+// A block is 256 bytes, 32 to a page: the unit two formats' layouts of the
+// same memory can be told apart at.
+inline constexpr uint32_t kGsBlockBytes = 256u;
+inline constexpr uint32_t kGsBlockCount = kGsVramBytes / kGsBlockBytes;
+using GsBlockSet = std::bitset<kGsBlockCount>;
+
 // The set as 64-bit words, page p at bit p % 64 of word p / 64. Every
 // standard library lays a 512-bit bitset out so (libc++, MSVC and libstdc++
 // alike); the bitset's own shift and mask go through bit iterators and cost
@@ -102,6 +108,28 @@ void gsMarkCoveredPages(GsPageSet &pages,
                         uint32_t height,
                         uint32_t x = 0u,
                         uint32_t y = 0u);
+
+// The same at block granularity: every block a rectangle touches, and the
+// blocks it writes whole. An unknown block table marks every block of the
+// pages it touches (covered: none).
+void gsMarkBlocks(GsBlockSet &blocks,
+                  uint32_t baseBlock,
+                  uint32_t bufferWidth,
+                  uint32_t psm,
+                  uint32_t width,
+                  uint32_t height,
+                  uint32_t x = 0u,
+                  uint32_t y = 0u);
+void gsMarkCoveredBlocks(GsBlockSet &blocks,
+                         uint32_t baseBlock,
+                         uint32_t bufferWidth,
+                         uint32_t psm,
+                         uint32_t width,
+                         uint32_t height,
+                         uint32_t x = 0u,
+                         uint32_t y = 0u);
+// Every block of the pages given.
+void gsBlocksOfPages(GsBlockSet &blocks, const GsPageSet &pages);
 
 // A view over externally owned GS local memory. GS::init() hands the backend
 // the frontend's allocation and other code may read it, so backends write

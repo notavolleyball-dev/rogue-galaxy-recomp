@@ -5603,7 +5603,11 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
         });
     }
     m_impl->targets->setScale(m_impl->scale);
-    m_impl->targets->setWritesResolved(!storeOnly);
+    // The memory the backend keeps for itself still takes the readbacks a
+    // read of drawn pixels asks for (a palette a draw wrote, a frame read
+    // back for display); the game has none. DQ8_GFX_DROP_RESOLVES=1 drops
+    // them instead, so what depends on them shows.
+    m_impl->targets->setWritesResolved(!(storeOnly && std::getenv("DQ8_GFX_DROP_RESOLVES") != nullptr));
     // DQ8_GFX_EFFECT_SCALE=N (Rogue Galaxy: added): Rogue Galaxy's two blur
     // buffers, 192x192 at 0x2C40 (a zoom streak, twenty passes of it added
     // to itself a frame) and 0x3800 (a glow, six), at scale N, 2 unless set;
@@ -5624,6 +5628,10 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
         m_impl->targets->setEffectBuffers(std::move(bases), effectScale);
     }
     m_impl->targets->reset();
+    m_impl->targets->setDrawObserver([impl = m_impl.get()](const GsSurface &surface, const GsRegion &region) {
+        if (impl->textures)
+            impl->textures->noteDrawnBlocks(surface.base, surface.bufferWidth, surface.psm, region);
+    });
     m_impl->textures->reset();
 }
 

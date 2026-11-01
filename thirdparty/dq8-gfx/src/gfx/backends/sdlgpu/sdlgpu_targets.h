@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -157,6 +158,10 @@ public:
     // Off, a resolve reads the GPU's pixels back and drops them: the local
     // memory is the host writes' alone (nothing draws into it).
     void setWritesResolved(bool on) { m_writesResolved = on; }
+    // Told of every region a draw (or a GPU copy) wrote into a color surface.
+    void setDrawObserver(std::function<void(const GsSurface &, const GsRegion &)> observer) {
+        m_drawObserver = std::move(observer);
+    }
     uint32_t scale() const { return m_scale; }
     // Effect buffers (Rogue Galaxy: added): colour surfaces at these bases,
     // at most 256 pixels wide, are made at no more than `scale` (0: the
@@ -337,6 +342,7 @@ private:
     std::array<uint64_t, kGsPageCount> m_pageGeneration{};
     std::array<CpuWords, kGsVramBytes / 256u> m_cpuWords{};
     bool m_writesResolved = true;
+    std::function<void(const GsSurface &, const GsRegion &)> m_drawObserver;
     // Patch and refresh uploads, recorded into the device's pending command
     // buffer (Rogue Galaxy: added).
     SdlGpuUploadPool m_uploadPool;

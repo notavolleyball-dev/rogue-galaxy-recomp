@@ -127,6 +127,8 @@ public:
 
     // Marks entries stale; repeated tile writes coalesce until the next acquire.
     void invalidate(const GsPageSet &pages, InvalidationSource source);
+    // A draw wrote `region` of the color surface at `base`.
+    void noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32_t psm, const GsRegion &region);
 
     // The upload audit (DQ8_GFX_UPLOAD_AUDIT=1; Rogue Galaxy: added, the first
     // step of phase 4, docs/NATIVE-RENDERER.md): a record of which host
@@ -230,7 +232,7 @@ private:
     // earlier writer shared, 3 a host write with no recorded transfer, 16 and
     // up an upload (index into m_uploads, minus 16).
     struct UploadRecord {
-        uint32_t dbp = 0u, dbw = 0u, dpsm = 0u, w = 0u, h = 0u;
+        uint32_t dbp = 0u, dbw = 0u, dpsm = 0u, w = 0u, h = 0u, x = 0u, y = 0u;
         GsPageSet pages, covered;
     };
     struct AuditClass {
@@ -244,19 +246,32 @@ private:
     // read was touched by anything else, from local memory otherwise.
     bool m_storeOn = false;
     bool m_tracking = false;
-    GsVram *sourceFor(const GsPageSet &pages);
+    GsVram *sourceFor(const GsTextureKey &key);
+    GsBlockSet blocksFor(const GsTextureKey &key) const;
+    bool blocksDrawn(const GsTextureKey &key) const { return (blocksFor(key) & m_drawnBlocks).any(); }
     struct SourceScope {
         GsTextureCache &cache;
         GsVram *saved;
-        SourceScope(GsTextureCache &c, const GsPageSet &pages) : cache(c), saved(c.m_src) {
+        SourceScope(GsTextureCache &c, const GsTextureKey &key) : cache(c), saved(c.m_src) {
             if (c.m_storeOn)
-                c.m_src = c.sourceFor(pages);
+                c.m_src = c.sourceFor(key);
         }
         ~SourceScope() { cache.m_src = saved; }
     };
     uint32_t m_auditPending = 0u;
     std::vector<uint32_t> m_writer;
-    GsPageSet m_drawn;
+    // The blocks something other than a host write touched since an upload
+    // last covered them: what the host writes' memory cannot be trusted for.
+    // Block granularity, because a draw and a texture of uploaded data
+    // share pages (the glows, the HUD) without sharing blocks.
+    GsBlockSet m_drawnBlocks;
+    struct DrawMemo {
+        uint32_t bw = 0u, psm = 0u;
+        GsRegion region;
+        uint64_t generation = ~0ull;
+    };
+    std::unordered_map<uint32_t, DrawMemo> m_drawMemo;
+    uint64_t m_drawnGeneration = 0u;
     std::vector<UploadRecord> m_uploads;
     std::map<std::string, AuditClass> m_audit;
     void auditStamp(const GsPageSet &pages, InvalidationSource source);
@@ -325,6 +340,8 @@ private:
     // Where expand and the palette reads look: m_vram, or the audit's shadow.
     GsVram *m_src = nullptr;
     GsVram m_shadow;
+    GsVram m_poison;
+    std::vector<uint8_t> m_poisonStorage;
     std::vector<uint8_t> m_shadowStorage;
     std::unique_ptr<GsTransferEngine> m_shadowTransfer;
     GsTargetCache &m_targets;
