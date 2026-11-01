@@ -12,6 +12,9 @@ plane shadow, the per-object composites, CBlur's texture blur and the bloom
 renderer" switch. "Where it stands" is the summary for picking the work up;
 the rest is the plan and its record.
 
+See [GS-DECOUPLING.md](GS-DECOUPLING.md) for why the renderer is still shaped
+like the GS and the plan that ends it.
+
 ## Where it stands (2026-10-31, with 2026-11-01 below)
 
 **Done, behind the switch:** every recorded VU1 program native, the strips
