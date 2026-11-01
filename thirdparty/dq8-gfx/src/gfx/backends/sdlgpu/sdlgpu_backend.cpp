@@ -644,6 +644,9 @@ struct SdlGpuBackend::Impl {
     mutable std::mutex mutex;
     SdlGpuDevice device;
     GsVram vram;
+    // Without a game-side local memory (Initialize given none), the host
+    // writes' own: draws never resolve into it.
+    std::vector<uint8_t> ownedMemory;
     std::unique_ptr<GsTransferEngine> transfer;
     GSTransferCommand transferCommand{};
     bool patchingHostWrite = false;
@@ -5569,6 +5572,11 @@ SdlGpuBackend::~SdlGpuBackend() {
 void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     std::lock_guard lock(m_impl->mutex);
     m_impl->last.valid = false;
+    const bool storeOnly = vram == nullptr;
+    if (storeOnly) {
+        m_impl->ownedMemory.assign(vramSize, 0u);
+        vram = m_impl->ownedMemory.data();
+    }
     m_impl->vram.attach(vram, vramSize);
     m_impl->transferCommand = {};
     m_impl->patchingHostWrite = false;
@@ -5595,6 +5603,7 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
         });
     }
     m_impl->targets->setScale(m_impl->scale);
+    m_impl->targets->setWritesResolved(!storeOnly);
     // DQ8_GFX_EFFECT_SCALE=N (Rogue Galaxy: added): Rogue Galaxy's two blur
     // buffers, 192x192 at 0x2C40 (a zoom streak, twenty passes of it added
     // to itself a frame) and 0x3800 (a glow, six), at scale N, 2 unless set;

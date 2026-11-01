@@ -154,6 +154,9 @@ public:
     GsTargetCache &operator=(const GsTargetCache &) = delete;
 
     void setScale(uint32_t scale);
+    // Off, a resolve reads the GPU's pixels back and drops them: the local
+    // memory is the host writes' alone (nothing draws into it).
+    void setWritesResolved(bool on) { m_writesResolved = on; }
     uint32_t scale() const { return m_scale; }
     // Effect buffers (Rogue Galaxy: added): colour surfaces at these bases,
     // at most 256 pixels wide, are made at no more than `scale` (0: the
@@ -333,6 +336,7 @@ private:
     };
     std::array<uint64_t, kGsPageCount> m_pageGeneration{};
     std::array<CpuWords, kGsVramBytes / 256u> m_cpuWords{};
+    bool m_writesResolved = true;
     // Patch and refresh uploads, recorded into the device's pending command
     // buffer (Rogue Galaxy: added).
     SdlGpuUploadPool m_uploadPool;

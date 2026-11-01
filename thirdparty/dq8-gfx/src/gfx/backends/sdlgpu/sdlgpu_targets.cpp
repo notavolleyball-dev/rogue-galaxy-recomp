@@ -1142,7 +1142,9 @@ void GsTargetCache::writeResolved(GsSurface &surface, GsRegion region,
     GsPageSet resolvedPages;
     gsMarkPages(resolvedPages, surface.base, surface.bufferWidth, surface.psm,
                 region.width(), region.height(), region.x0, region.y0);
-    if (surface.psm == GS_PSM_CT32 && (resolvedPages & ~surface.ownedPages).none()) {
+    if (!m_writesResolved) {
+        // Nothing to store it in.
+    } else if (surface.psm == GS_PSM_CT32 && (resolvedPages & ~surface.ownedPages).none()) {
         GSMem::WriteRunCT32(m_vram.data(), surface.base, surface.bufferWidth,
                             region.x0, region.x1, region.x0, region.y0,
                             pixels, regionWidth * region.height());

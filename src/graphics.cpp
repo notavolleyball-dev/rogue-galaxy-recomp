@@ -742,6 +742,12 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
 
 Setup::Setup(PS2Runtime &runtime)
 {
+    // Phase 5 of docs/NATIVE-RENDERER.md: RG_GS_VRAM_RESERVE=1 keeps the GS
+    // local memory reserved but inaccessible, so what still reads it faults.
+    PS2Memory::setGsVramReservedOnly([] {
+        const char *value = std::getenv("RG_GS_VRAM_RESERVE");
+        return value && value[0] == '1' && rg::nativerenderer::enabled();
+    });
 #if defined(RG_HAS_SDLGPU)
     if (env("RG_GS", "sdlgpu") == "sdlgpu")
     {
