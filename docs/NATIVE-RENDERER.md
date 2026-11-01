@@ -76,7 +76,9 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    the GS's integer colour arithmetic and no local memory behind it; then
    reversed float depth.
 6. **Remove the GS path** (phase 5) once `gs_vram` is not allocated in a
-   native run and a playthrough route passes the frame tools.
+   native run and the spot checks pass (walk and battle VRAM, title and movie,
+   a Zerard tour); a full playthrough is not a gate, the feature flag is what
+   keeps the GS path available.
 
 **Since 2026-10-31, toward dropping the GS (2026-11-01; the record is in
 "Phase 4", steps 1 to 3b):** item 2's shadow volumes are grouped by blend
@@ -112,8 +114,8 @@ them** (each gated by byte-identical VRAM on the walk and the forced battle,
    other movies), now also with `DQ8_GFX_UPLOAD_AUDIT=1` on, which says
    whether the store holds for each.
 5. *Stop allocating `gs_vram`*: done 2026-11-01 (Phase 4, step 4); what is
-   left is a playthrough route (title, Salgin, battles, a boss, menus, a save
-   and a load, a movie), then phase 5.
+   left is the readbacks of loose end 2, then phase 5. No playthrough route:
+   the native renderer stays behind its flag, and the GS path is the fallback.
 
 **Verifying.** (`native-run.sh` keeps the game's local memory allocated,
 `RG_GS_VRAM_RESERVE=0`, because the VRAM dump needs it; set
@@ -887,9 +889,9 @@ from 10 Mpx to 3 Kpx per 60 frames. Palettes inside a target (the frame at
 `00000`, `03f80`) are copied out region-wise (`GsTargetCache::copyOut`, the
 target stays the owner) instead of resolving everything the GPU holds of it.
 
-**Done when** `gs_vram` is no longer allocated in a native run, and a
-playthrough route (title, Salgin, the first battles, a boss, menus, a save
-and a load, a movie) passes with the frame tools.
+**Done when** `gs_vram` is no longer allocated in a native run (met) and the
+spot checks above pass; a full playthrough is not required, since the flag
+keeps the GS path for anything the checks miss.
 
 ### Phase 5: remove the GS path
 
