@@ -280,6 +280,9 @@ public:
     // added).
     GsSurface *findDepthSurface(uint32_t base, uint32_t bufferWidth, uint32_t psm, uint32_t minWidth,
                                 uint32_t minHeight) const;
+    // The depth surface at `base` with this buffer width, of any Z format,
+    // for a read of its values (the depth probe; Rogue Galaxy: added).
+    GsSurface *findDepthAt(uint32_t base, uint32_t bufferWidth) const;
 
     // A colour surface that can stand in for a texture read of this region --
     // same base, format and buffer width, and already holding drawn content.

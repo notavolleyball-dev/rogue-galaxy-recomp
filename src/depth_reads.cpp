@@ -8,6 +8,10 @@
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/ps2_gs_memory.h"
 
+#if defined(RG_HAS_SDLGPU)
+#include "gfx/gs/gs_depth_probe.h"
+#endif
+
 namespace rg::graphics
 {
 namespace
@@ -41,6 +45,10 @@ public:
     {
         const uint8_t psm = command.bitbltbuf.spsm & 0x3Fu;
         const bool depth = psm == kPsmZ32 || psm == kPsmZ24 || psm == kPsmZ16 || psm == kPsmZ16S;
+        if (command.direction == kLocalToHost && depth && probe(command))
+        {
+            return;
+        }
         if (command.direction == kLocalToHost && depth && m_vram)
         {
             read(command, psm);
@@ -116,6 +124,42 @@ public:
     void CancelPreparedPresentations() noexcept override { m_inner->CancelPreparedPresentations(); }
 
 private:
+    // With the SDL GPU backend, depth is drawn on the GPU only: the block
+    // comes from what it last copied out of its depth target, a frame or two
+    // old (dq8-gfx's gfx/gs/gs_depth_probe.h). False when that backend does
+    // not serve the read.
+    bool probe(const GSTransferCommand &command)
+    {
+#if defined(RG_HAS_SDLGPU)
+        namespace probe = dq8::gfx::depthprobe;
+        if (!probe::served())
+        {
+            return false;
+        }
+        probe::Request request;
+        request.base = command.bitbltbuf.sbp;
+        request.bufferWidth = std::max<uint32_t>(command.bitbltbuf.sbw, 1u);
+        request.psm = command.bitbltbuf.spsm & 0x3Fu;
+        request.x = command.trxpos.ssax;
+        request.y = command.trxpos.ssay;
+        request.width = command.trxreg.rrw;
+        request.height = command.trxreg.rrh;
+        if (!probe::read(request, m_bytes))
+        {
+            return false;
+        }
+        m_readPos = 0u;
+        m_snapshot = {};
+        m_snapshot.totalPixels = request.width * request.height;
+        m_snapshot.copiedPixels = m_snapshot.totalPixels;
+        m_snapshot.direction = kLocalToHost;
+        return true;
+#else
+        (void)command;
+        return false;
+#endif
+    }
+
     // GsTransferEngine::performLocalToHost for the depth formats: pixels in
     // row order, little-endian, 32, 24 or 16 bits each.
     void read(const GSTransferCommand &command, uint8_t psm)

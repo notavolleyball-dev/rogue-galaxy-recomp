@@ -40,6 +40,7 @@ add_library(dq8_gfx_gs STATIC
     src/gfx/gs/gs_vram.cpp
     src/gfx/gs/gs_transfer.cpp
     src/gfx/gs/gs_state.cpp
+    src/gfx/gs/gs_depth_probe.cpp
 )
 target_include_directories(dq8_gfx_gs PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(dq8_gfx_gs PUBLIC dq8_host_simd ps2_runtime)
@@ -65,6 +66,7 @@ foreach(shader IN ITEMS
         "gs_display.frag;frag;kGsDisplayFragSpirv"
         "gs_index8.frag;frag;kGsIndex8FragSpirv"
         "gs_target_copy.frag;frag;kGsTargetCopyFragSpirv"
+        "gs_depth_probe.frag;frag;kGsDepthProbeFragSpirv"
         "gs_local_copy.frag;frag;kGsLocalCopyFragSpirv"
         "gs_effect.frag;frag;kGsEffectFragSpirv"
         "gs_effect_taps.frag;frag;kGsEffectTapsFragSpirv"

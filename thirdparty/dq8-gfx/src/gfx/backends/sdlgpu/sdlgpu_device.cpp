@@ -8,6 +8,7 @@
 #include "gs_native.vert.spv.h"
 #include "gs_index8.frag.spv.h"
 #include "gs_target_copy.frag.spv.h"
+#include "gs_depth_probe.frag.spv.h"
 #include "gs_effect_taps.frag.spv.h"
 #include "gs_local_copy.frag.spv.h"
 #include "gs_reinterpret.frag.spv.h"
@@ -19,6 +20,7 @@
 #include "gs_native.vert.msl.h"
 #include "gs_index8.frag.msl.h"
 #include "gs_target_copy.frag.msl.h"
+#include "gs_depth_probe.frag.msl.h"
 #include "gs_effect_taps.frag.msl.h"
 #include "gs_local_copy.frag.msl.h"
 #include "gs_reinterpret.frag.msl.h"
@@ -203,6 +205,19 @@ bool SdlGpuDevice::create(std::string &error) {
             break;
         }
     }
+    // Depth read back as the GS's Z values (drawDepthProbe): the depth
+    // targets sampled, the block drawn into an R32_UINT target.
+    {
+        const char *value = std::getenv("DQ8_GFX_DEPTH_PROBE");
+        const bool off = value && std::strcmp(value, "0") == 0;
+        m_depthProbeSupported =
+            !off &&
+            SDL_GPUTextureSupportsFormat(m_device, m_depthFormat, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(m_device, SDL_GPU_TEXTUREFORMAT_R32_UINT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+    }
 
     SDL_GPUShaderCreateInfo vertexInfo{};
     vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsDrawVertSpirv);
@@ -379,6 +394,9 @@ void SdlGpuDevice::destroy() {
     if (m_targetCopyPipeline)
         SDL_ReleaseGPUGraphicsPipeline(m_device, m_targetCopyPipeline);
     m_targetCopyPipeline = nullptr;
+    if (m_depthProbePipeline)
+        SDL_ReleaseGPUGraphicsPipeline(m_device, m_depthProbePipeline);
+    m_depthProbePipeline = nullptr;
     if (m_effectTapsPipeline)
         SDL_ReleaseGPUGraphicsPipeline(m_device, m_effectTapsPipeline);
     m_effectTapsPipeline = nullptr;
@@ -1126,6 +1144,96 @@ bool SdlGpuDevice::copyFromTarget(SDL_GPUTexture *target, SDL_GPUTexture *destin
     const SDL_GPUTextureSamplerBinding binding{target, m_sampler};
     SDL_BindGPUFragmentSamplers(pass, 0u, &binding, 1u);
     SDL_PushGPUFragmentUniformData(commands, 0u, pages.data(), sizeof(uint32_t) * pages.size());
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+bool SdlGpuDevice::createDepthProbe(std::string &error) {
+    SDL_GPUShaderCreateInfo vertexInfo{};
+    vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsReinterpretVertSpirv);
+    vertexInfo.code_size = sizeof(kGsReinterpretVertSpirv);
+    vertexInfo.entrypoint = "main";
+    vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    SDL_GPUShaderCreateInfo fragmentInfo{};
+    fragmentInfo.code = reinterpret_cast<const uint8_t *>(kGsDepthProbeFragSpirv);
+    fragmentInfo.code_size = sizeof(kGsDepthProbeFragSpirv);
+    fragmentInfo.entrypoint = "main";
+    fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fragmentInfo.num_samplers = 1u;
+    fragmentInfo.num_uniform_buffers = 1u;
+#ifdef DQ8_GFX_HAS_MSL
+    if ((SDL_GetGPUShaderFormats(m_device) & SDL_GPU_SHADERFORMAT_MSL) != 0) {
+        vertexInfo.code = reinterpret_cast<const uint8_t *>(kGsReinterpretVertSpirvMsl);
+        vertexInfo.code_size = sizeof(kGsReinterpretVertSpirvMsl);
+        vertexInfo.entrypoint = "main0";
+        vertexInfo.format = SDL_GPU_SHADERFORMAT_MSL;
+        fragmentInfo.code = reinterpret_cast<const uint8_t *>(kGsDepthProbeFragSpirvMsl);
+        fragmentInfo.code_size = sizeof(kGsDepthProbeFragSpirvMsl);
+        fragmentInfo.entrypoint = "main0";
+        fragmentInfo.format = SDL_GPU_SHADERFORMAT_MSL;
+    }
+#endif
+    SDL_GPUShader *vertex = SDL_CreateGPUShader(m_device, &vertexInfo);
+    if (!vertex) {
+        error = std::string("SDL_CreateGPUShader(depth probe vertex): ") + SDL_GetError();
+        return false;
+    }
+    SDL_GPUShader *fragment = SDL_CreateGPUShader(m_device, &fragmentInfo);
+    if (!fragment) {
+        error = std::string("SDL_CreateGPUShader(depth probe fragment): ") + SDL_GetError();
+        SDL_ReleaseGPUShader(m_device, vertex);
+        return false;
+    }
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = SDL_GPU_TEXTUREFORMAT_R32_UINT;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.target_info.color_target_descriptions = &colorTarget;
+    info.target_info.num_color_targets = 1u;
+    m_depthProbePipeline = SDL_CreateGPUGraphicsPipeline(m_device, &info);
+    SDL_ReleaseGPUShader(m_device, fragment);
+    SDL_ReleaseGPUShader(m_device, vertex);
+    if (!m_depthProbePipeline) {
+        error = std::string("SDL_CreateGPUGraphicsPipeline(depth probe): ") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+bool SdlGpuDevice::drawDepthProbe(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *depth,
+                                  SDL_GPUTexture *destination, uint32_t width, uint32_t height,
+                                  const std::array<uint32_t, 8> &params, std::string &error) {
+    if (!m_depthProbeSupported) {
+        error = "depth probe not supported by this device";
+        return false;
+    }
+    if (!m_depthProbePipeline && !createDepthProbe(error))
+        return false;
+    SDL_GPUColorTargetInfo colorTarget{};
+    colorTarget.texture = destination;
+    colorTarget.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1u, nullptr);
+    if (!pass) {
+        error = std::string("SDL_BeginGPURenderPass(depth probe): ") + SDL_GetError();
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, m_depthProbePipeline);
+    const SDL_GPUViewport viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
+    SDL_SetGPUViewport(pass, &viewport);
+    const SDL_Rect scissor{0, 0, int(width), int(height)};
+    SDL_SetGPUScissor(pass, &scissor);
+    const SDL_GPUTextureSamplerBinding binding{depth, m_sampler};
+    SDL_BindGPUFragmentSamplers(pass, 0u, &binding, 1u);
+    SDL_PushGPUFragmentUniformData(commands, 0u, params.data(), sizeof(uint32_t) * params.size());
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);
     return true;

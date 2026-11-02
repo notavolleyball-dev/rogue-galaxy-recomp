@@ -409,6 +409,9 @@ bool GsTargetCache::createTexture(GsSurface &surface, std::string &error) {
     if (surface.depth) {
         info.format = m_device.depthFormat();
         info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+        // Sampled by the depth probe (findDepthAt, drawDepthProbe).
+        if (m_device.depthProbeSupported())
+            info.usage |= SDL_GPU_TEXTUREUSAGE_SAMPLER;
     } else {
         info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
         // SAMPLER so a target can later be sampled as a texture, which is how
@@ -1209,6 +1212,20 @@ GsSurface *GsTargetCache::findDepthSurface(uint32_t base, uint32_t bufferWidth, 
             return &surface;
     }
     return nullptr;
+}
+
+GsSurface *GsTargetCache::findDepthAt(uint32_t base, uint32_t bufferWidth) const {
+    bufferWidth = std::max<uint32_t>(bufferWidth, 1u);
+    GsSurface *found = nullptr;
+    for (const auto &candidate : m_surfaces) {
+        GsSurface &surface = *candidate;
+        if (!surface.depth || surface.base != base || surface.bufferWidth != bufferWidth || !surface.texture)
+            continue;
+        // One drawn into over one that holds nothing yet.
+        if (!found || (found->undefined && !surface.undefined))
+            found = &surface;
+    }
+    return found;
 }
 
 void GsTargetCache::claimWhole(GsSurface &surface) {

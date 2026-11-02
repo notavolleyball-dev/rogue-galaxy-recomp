@@ -173,6 +173,17 @@ public:
 
     // Depth format chosen at creation from what the device actually supports.
     SDL_GPUTextureFormat depthFormat() const { return m_depthFormat; }
+    // Whether depth targets are made sampleable, so a block of one can be
+    // copied out as the GS's Z values (drawDepthProbe; Rogue Galaxy: added).
+    // Chosen at creation; DQ8_GFX_DEPTH_PROBE=0 turns it off.
+    bool depthProbeSupported() const { return m_depthProbeSupported; }
+    // Into `destination` (R32_UINT, `width` x `height`), in `commands`: the
+    // block of `depth` at params[0], params[1] in GS pixels, params[2] the
+    // resolution scale, params[3] the depth format's largest value,
+    // params[4], params[5] the target's size in GS pixels
+    // (gs_depth_probe.frag).
+    bool drawDepthProbe(SDL_GPUCommandBuffer *commands, SDL_GPUTexture *depth, SDL_GPUTexture *destination,
+                        uint32_t width, uint32_t height, const std::array<uint32_t, 8> &params, std::string &error);
 
     // Pipelines are created on demand and live for the device's lifetime;
     // the set of distinct GS states a game uses is small and bounded.
@@ -406,6 +417,9 @@ private:
     SDL_GPUSampler *m_linearSampler = nullptr;
     SDL_GPUGraphicsPipeline *m_index8Pipeline = nullptr;
     SDL_GPUGraphicsPipeline *m_targetCopyPipeline = nullptr;
+    bool m_depthProbeSupported = false;
+    SDL_GPUGraphicsPipeline *m_depthProbePipeline = nullptr;
+    bool createDepthProbe(std::string &error);
     SDL_GPUGraphicsPipeline *m_effectTapsPipeline = nullptr;
     bool createEffectTaps(std::string &error);
     SDL_GPUTexture *m_index8Palette = nullptr;

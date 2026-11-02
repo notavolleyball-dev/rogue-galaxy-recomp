@@ -92,8 +92,9 @@ pages (`DQ8_GFX_UPLOAD_STORE`, on; checked on the walk, the battle, the title
 screen, the opening movie and a menu), the frame no longer round-trips local
 memory (the flip's CT24 view imports by GPU page copy), and the per-object
 buffers skip importing what is under them. **Loose ends, in the order to take
-them** (each gated by byte-identical VRAM on the walk and the forced battle,
-`cmpvram.py` against `vg1`/`vb1`, see "Verifying" below):
+them** (each was gated by byte-identical VRAM on the walk and the forced
+battle; since 2026-11-02 that is a diagnostic, not a gate, see "Verifying"
+below):
 
 1. ~~*What reads the host writes patched into the object buffers*~~ Done
    2026-11-01 (step 5 below): the texture builds that read through the
@@ -120,7 +121,18 @@ them** (each gated by byte-identical VRAM on the walk and the forced battle,
    left is the readbacks of loose end 2, then phase 5. No playthrough route:
    the native renderer stays behind its flag, and the GS path is the fallback.
 
-**Verifying.** (`native-run.sh` keeps the game's local memory allocated,
+**Verifying (since 2026-11-02).** The goal is off the GS: native pieces
+replace the game's GS work at the function (RGDecomp's C says what each
+function means to draw) rather than reproduce its packets and local memory,
+so byte-identical VRAM is no longer the gate. A piece is checked by eye on
+the routes that reach it, by the frame rate and the GPU times, and by the
+readbacks (`resolves=` on the stats line) it adds or removes. `cmpvram.py`
+stays a diagnostic: where a piece is meant to draw what the GS path drew
+(the flip's copy), a diff still points at a bug; elsewhere a diff is
+expected. The old `vg1`/`vb1` references predate later changes, so compare
+a run with the piece's switch off from the same build instead.
+
+The tools (`native-run.sh` keeps the game's local memory allocated,
 `RG_GS_VRAM_RESERVE=0`, because the VRAM dump needs it; set
 `RG_GS_VRAM_RESERVE=1` to run the reserved mode and compare screenshots
 within a session instead.) Walk: `tools/vu1/oracle/native-run.sh NAME gpu 110 3000`, then
@@ -335,7 +347,7 @@ order to port them:
 | `CharaDrawTranslucentPass_1f8250`, `RefractionCaptureFrame_13ffd0` | the frame halved into `03b80` (one sprite, in `RefractionCaptureFrame`) | parity form done: the copy drawn by the renderer into the GS's `03b80` (`RG_NATIVE_REFRACTION`, on with the native renderer); later the scene target sampled directly |
 | `BloomExtractBlurMaybe_179360`, `FocusFilterDrawMaybe_17c000` | C, D: the battle now and then; the bloom also in the field (14 sprites a frame where the walk ends) | as the glare. Parity form of the bloom done (`RG_NATIVE_BLOOM`, on with the native renderer) |
 | `ShadowMapRender_146680`, `ShadowMapBlur_145b60` | not seen in the field or the battle | a shadow pass at a chosen size; blur or PCF |
-| `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | native depth sampled in a small compute pass, read a frame late |
+| `LensFlareDraw_2ed830`, `DepthProbeGetSlot_13fc80` (8x8 Z reads in `GfxEndFrame_141c20`) | not seen | **depth served from the GPU (2026-11-02):** the read (PSMZ32 at the sun, the minimum of 64 against the sun's depth) found nothing in local memory with the GPU backend, so the flare was never occluded; now the backend copies the block out of its depth target at each frame's end (`gs_depth_probe.frag`) and the read takes the last one, a frame or two late (`gfx/gs/gs_depth_probe.h`, `DQ8_GFX_DEPTH_PROBE=0`). Not yet seen on screen. Later: the flare itself native, its occlusion decided on the GPU |
 | `ScreenColorFilterMaybe_179c60`, `ScreenFade*`, `ScreenFadeBlockCaptureFrame_177ed0` | fades (the battle's start) | full-screen tint or fade; capture kept on the GPU |
 | `GfxFlipBuffersMaybe_143650`, and the game thread's 32-strip transfer at the frame's end | | a present from the scene target, no copy |
 

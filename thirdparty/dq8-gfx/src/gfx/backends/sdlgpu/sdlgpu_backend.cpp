@@ -4,6 +4,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_input.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "gfx/backends/sdlgpu/sdlgpu_textures.h"
+#include "gfx/gs/gs_depth_probe.h"
 #include "gfx/gs/gs_state.h"
 #include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
@@ -658,6 +659,22 @@ struct SdlGpuBackend::Impl {
     bool patchingHostWrite = false;
     // A host write that skipped resolving the pages it covers is still arriving.
     bool coveredTransferOpen = false;
+    // The depth probe (gfx/gs/gs_depth_probe.h; Rogue Galaxy: added): the
+    // blocks the game's Z reads wanted, copied out of the depth targets at a
+    // frame's end, a batch a frame, a few batches in flight.
+    struct DepthProbeBatch {
+        SDL_GPUFence *fence = nullptr;
+        // kMaxRequests blocks of kMaxPixels values, the n-th at n * kMaxPixels.
+        SDL_GPUTransferBuffer *download = nullptr;
+        // R32_UINT, kMaxSide square, one per block.
+        std::array<SDL_GPUTexture *, depthprobe::kMaxRequests> textures{};
+        // The read's place in its frame and what it asked for.
+        std::vector<std::pair<uint32_t, depthprobe::Request>> entries;
+        uint64_t sequence = 0u;
+    };
+    std::array<DepthProbeBatch, 3> depthProbeBatches{};
+    uint64_t depthProbeSequence = 0u;
+    bool depthProbeFailed = false;
     // Pages of the open host write already released to local memory, so a
     // page goes once, when the rows that fill it have arrived (Rogue Galaxy:
     // added; see UploadImage).
@@ -1405,6 +1422,217 @@ struct SdlGpuBackend::Impl {
             roundTripUpload.seen = 0u;
             roundTripUpload.expected = roundTrip.expected;
         }
+    }
+
+    // The depth probe stops at its first error: the reads then get zeros, as
+    // before it.
+    void failDepthProbe(const std::string &why) {
+        if (!depthProbeFailed)
+            std::fprintf(stderr, "[depth probe] off: %s\n", why.c_str());
+        depthProbeFailed = true;
+        depthprobe::setServed(false);
+    }
+
+    static bool depthProbeTraced() {
+        static const bool on = [] {
+            const char *value = std::getenv("DQ8_GFX_TRACE_DEPTH_PROBE");
+            return value && *value && std::strcmp(value, "0") != 0;
+        }();
+        return on;
+    }
+
+    // Publishes the batches the GPU has finished, oldest first; with `wait`,
+    // waits for them all.
+    void retireDepthProbes(bool wait) {
+        SDL_GPUDevice *gpu = device.handle();
+        if (!gpu)
+            return;
+        std::array<DepthProbeBatch *, std::tuple_size_v<decltype(depthProbeBatches)>> done{};
+        size_t count = 0u;
+        for (auto &batch : depthProbeBatches) {
+            if (!batch.fence)
+                continue;
+            if (wait)
+                SDL_WaitForGPUFences(gpu, true, &batch.fence, 1u);
+            else if (!SDL_QueryGPUFence(gpu, batch.fence))
+                continue;
+            done[count++] = &batch;
+        }
+        std::sort(done.begin(), done.begin() + count,
+                  [](const DepthProbeBatch *a, const DepthProbeBatch *b) { return a->sequence < b->sequence; });
+        for (size_t i = 0u; i < count; ++i) {
+            DepthProbeBatch &batch = *done[i];
+            SDL_ReleaseGPUFence(gpu, batch.fence);
+            batch.fence = nullptr;
+            const auto *mapped = static_cast<const uint32_t *>(SDL_MapGPUTransferBuffer(gpu, batch.download, false));
+            if (!mapped) {
+                failDepthProbe(std::string("SDL_MapGPUTransferBuffer(depth probe): ") + SDL_GetError());
+                batch.entries.clear();
+                continue;
+            }
+            for (size_t n = 0u; n < batch.entries.size(); ++n) {
+                const auto &[index, request] = batch.entries[n];
+                const uint32_t *values = mapped + n * depthprobe::kMaxPixels;
+                depthprobe::publish(index, request, values);
+                if (depthProbeTraced()) {
+                    uint32_t lowest = values[0];
+                    for (uint32_t p = 1u; p < request.width * request.height; ++p)
+                        lowest = std::min(lowest, values[p]);
+                    std::fprintf(stderr, "[depth probe] #%u zbp=%05x %ux%u@%u,%u min=%08x\n", index, request.base,
+                                 request.width, request.height, request.x, request.y, lowest);
+                }
+            }
+            SDL_UnmapGPUTransferBuffer(gpu, batch.download);
+            batch.entries.clear();
+        }
+    }
+
+    bool ensureDepthProbeBatch(DepthProbeBatch &batch) {
+        SDL_GPUDevice *gpu = device.handle();
+        if (!batch.download) {
+            SDL_GPUTransferBufferCreateInfo info{};
+            info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+            info.size = uint32_t(depthprobe::kMaxRequests * depthprobe::kMaxPixels * sizeof(uint32_t));
+            batch.download = SDL_CreateGPUTransferBuffer(gpu, &info);
+            if (!batch.download) {
+                failDepthProbe(std::string("SDL_CreateGPUTransferBuffer(depth probe): ") + SDL_GetError());
+                return false;
+            }
+        }
+        for (auto &texture : batch.textures) {
+            if (texture)
+                continue;
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = SDL_GPU_TEXTUREFORMAT_R32_UINT;
+            info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+            info.width = depthprobe::kMaxSide;
+            info.height = depthprobe::kMaxSide;
+            info.layer_count_or_depth = 1u;
+            info.num_levels = 1u;
+            info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+            texture = SDL_CreateGPUTexture(gpu, &info);
+            if (!texture) {
+                failDepthProbe(std::string("SDL_CreateGPUTexture(depth probe): ") + SDL_GetError());
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void releaseDepthProbes() {
+        SDL_GPUDevice *gpu = device.handle();
+        if (!gpu)
+            return;
+        for (auto &batch : depthProbeBatches) {
+            if (batch.fence) {
+                SDL_WaitForGPUFences(gpu, true, &batch.fence, 1u);
+                SDL_ReleaseGPUFence(gpu, batch.fence);
+            }
+            if (batch.download)
+                SDL_ReleaseGPUTransferBuffer(gpu, batch.download);
+            for (auto *texture : batch.textures)
+                if (texture)
+                    SDL_ReleaseGPUTexture(gpu, texture);
+            batch = {};
+        }
+    }
+
+    // At a frame's end, after its draws: the blocks the game's Z reads
+    // wanted since the last time, copied out of the depth targets for the
+    // reads of a later frame (gfx/gs/gs_depth_probe.h). A block of a target
+    // nothing drew into is the clear's 0, published at once. With every
+    // batch still in flight the requests wait for the next frame's.
+    void captureDepthProbes() {
+        if (depthProbeFailed || !device.depthProbeSupported() || !targets)
+            return;
+        retireDepthProbes(false);
+        DepthProbeBatch *batch = nullptr;
+        for (auto &candidate : depthProbeBatches)
+            if (!candidate.fence) {
+                batch = &candidate;
+                break;
+            }
+        if (!batch)
+            return;
+        const std::vector<depthprobe::Request> wanted = depthprobe::takeRequests();
+        if (wanted.empty())
+            return;
+        SDL_GPUCommandBuffer *commands = nullptr;
+        std::string error;
+        for (uint32_t index = 0u; index < wanted.size(); ++index) {
+            const depthprobe::Request &request = wanted[index];
+            GsSurface *surface = targets->findDepthAt(request.base, request.bufferWidth);
+            if (!surface || surface->undefined) {
+                const std::vector<uint32_t> zeros(size_t(request.width) * request.height, 0u);
+                depthprobe::publish(index, request, zeros.data());
+                continue;
+            }
+            if (!commands) {
+                if (!ensureDepthProbeBatch(*batch))
+                    return;
+                // The frame's draws go to the GPU ahead of the copy.
+                if (!flushDraws())
+                    return;
+                if (!device.submitPending(error)) {
+                    failDepthProbe(error);
+                    return;
+                }
+                commands = SDL_AcquireGPUCommandBuffer(device.handle());
+                if (!commands) {
+                    failDepthProbe(std::string("SDL_AcquireGPUCommandBuffer(depth probe): ") + SDL_GetError());
+                    return;
+                }
+            }
+            const uint32_t slot = uint32_t(batch->entries.size());
+            const std::array<uint32_t, 8> params{request.x,
+                                                 request.y,
+                                                 std::max<uint32_t>(surface->scale, 1u),
+                                                 depthMaximumForPsm(surface->psm),
+                                                 surface->width,
+                                                 surface->height,
+                                                 0u,
+                                                 0u};
+            if (!device.drawDepthProbe(commands, surface->texture, batch->textures[slot], request.width,
+                                       request.height, params, error)) {
+                SDL_CancelGPUCommandBuffer(commands);
+                batch->entries.clear();
+                failDepthProbe(error);
+                return;
+            }
+            batch->entries.emplace_back(index, request);
+        }
+        if (!commands)
+            return;
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        if (!copy) {
+            SDL_CancelGPUCommandBuffer(commands);
+            batch->entries.clear();
+            failDepthProbe(std::string("SDL_BeginGPUCopyPass(depth probe): ") + SDL_GetError());
+            return;
+        }
+        for (size_t n = 0u; n < batch->entries.size(); ++n) {
+            const depthprobe::Request &request = batch->entries[n].second;
+            SDL_GPUTextureRegion region{};
+            region.texture = batch->textures[n];
+            region.w = request.width;
+            region.h = request.height;
+            region.d = 1u;
+            SDL_GPUTextureTransferInfo destination{};
+            destination.transfer_buffer = batch->download;
+            destination.offset = uint32_t(n * depthprobe::kMaxPixels * sizeof(uint32_t));
+            destination.pixels_per_row = request.width;
+            destination.rows_per_layer = request.height;
+            SDL_DownloadFromGPUTexture(copy, &region, &destination);
+        }
+        SDL_EndGPUCopyPass(copy);
+        batch->fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+        if (!batch->fence) {
+            batch->entries.clear();
+            failDepthProbe(std::string("SDL_SubmitGPUCommandBufferAndAcquireFence(depth probe): ") + SDL_GetError());
+            return;
+        }
+        batch->sequence = ++depthProbeSequence;
     }
 
     void noteRoundTripRead(const uint8_t *data, uint32_t size) {
@@ -5691,6 +5919,8 @@ SdlGpuBackend::~SdlGpuBackend() {
         }
         std::string ignored;
         m_impl->device.submitPendingAndWait(ignored);
+        depthprobe::setServed(false);
+        m_impl->releaseDepthProbes();
         m_impl->textures.reset();
         m_impl->targets.reset();
         for (auto *stream : {&m_impl->vertexStream, &m_impl->indexStream, &m_impl->recordStream})
@@ -5802,6 +6032,7 @@ void SdlGpuBackend::Reset() {
         m_impl->textures->reset();
     if (m_impl->targets)
         m_impl->targets->reset();
+    depthprobe::reset();
 }
 
 void SdlGpuBackend::Submit(const GSPrimitiveBatch &batch) {
@@ -6064,6 +6295,8 @@ GSPresentationTicket SdlGpuBackend::PreparePresentation(const GSPresentationRequ
         m_impl->reportStats();
         m_impl->lastError.clear();
         m_impl->applyRequestedScale();
+        // The frame's depth, for the game's Z reads of a later frame.
+        m_impl->captureDepthProbes();
         m_impl->acquirePresentation(request, stage);
         m_impl->finishPresentation(stage);
         if (!m_impl->lastError.empty())
@@ -6447,6 +6680,9 @@ std::unique_ptr<SdlGpuBackend> createSdlGpuBackend(std::string &error) {
         if (!impl->batches.empty() && (!texture || impl->batchesUse(texture)))
             impl->flushDraws();
     });
+    // The game's Z reads come from the GPU's depth (gfx/gs/gs_depth_probe.h).
+    depthprobe::reset();
+    depthprobe::setServed(backend->m_impl->device.depthProbeSupported());
     return backend;
 }
 
