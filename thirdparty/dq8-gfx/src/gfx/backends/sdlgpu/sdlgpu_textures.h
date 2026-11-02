@@ -110,6 +110,8 @@ struct GsTextureCacheStats {
     uint64_t expandedFromTargets = 0u;
     // Of those, built a page at a time from several targets (Rogue Galaxy: added).
     uint64_t expandedFromSeveralTargets = 0u;
+    // Named texels expanded on the GPU with a palette a target drew.
+    uint64_t namedWithTargetPalettes = 0u;
 
     double hitRate() const {
         return lookups == 0u ? 0.0
@@ -381,6 +383,10 @@ private:
         // address from the image's base; built on first use.
         mutable std::vector<uint32_t> wordToPixel;
     };
+    // Named texels with a palette a target drew: the indices uploaded, the
+    // colours fetched from the target on the GPU (Rogue Galaxy: added).
+    bool expandNamedWithTargetPalette(const GsTextureKey &key, Entry &entry, bool &handled, std::string &error);
+    bool m_wantIndices = false;
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();

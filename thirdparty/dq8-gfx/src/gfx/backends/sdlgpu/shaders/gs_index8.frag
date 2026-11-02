@@ -16,7 +16,7 @@ layout(set = 2, binding = 2) uniform sampler2D placement;
 layout(set = 2, binding = 3) uniform sampler2D paletteTarget;
 layout(set = 3, binding = 0) uniform Index8Params {
     // x: texture base page, y: texture pages per row | mode << 16 (0 T8,
-    // 1 T4, 2 T8H, 3 T4HL, 4 T4HH),
+    // 1 T4, 2 T8H, 3 T4HL, 4 T4HH, 5 indices given in `target`'s R),
     // z: target base page, w: target pages per row | resolution scale << 16
     uvec4 pages;
 } params;
@@ -44,7 +44,10 @@ void main() {
     uint scale = max(params.pages.w >> 16u, 1u);
     uvec2 origin = uvec2((relative % pagesPerRow) * 64u, (relative / pagesPerRow) * 32u);
     uint index;
-    if (mode >= 2u) {
+    if (mode == 5u) {
+        // Rogue Galaxy: the indices uploaded as they are, one a texel in R.
+        index = bytesAt(target, ivec2(p)).r;
+    } else if (mode >= 2u) {
         uvec4 pixel = bytesAt(target, ivec2((origin + (p & uvec2(63u, 31u))) * scale));
         index = mode == 2u ? pixel.a : (mode == 3u ? (pixel.a & 15u) : (pixel.a >> 4u));
     } else if (mode == 1u) {

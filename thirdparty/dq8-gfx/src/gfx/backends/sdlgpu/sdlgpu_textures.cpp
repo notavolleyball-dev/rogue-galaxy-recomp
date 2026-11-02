@@ -1488,6 +1488,8 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     bool expanded = false;
     if (!expandFromTarget(key, entry, region, expanded, error))
         return false;
+    if (!expanded && !expandNamedWithTargetPalette(key, entry, expanded, error))
+        return false;
     if (expanded) {
         entry.identity.texels = 0u;
         entry.blockHash = 0u;
@@ -1612,6 +1614,12 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     bool expanded = false;
     if (!expandFromTarget(key, entry, {0u, 0u, key.width, key.height}, expanded, error))
         return false;
+    if (!expanded && !expandNamedWithTargetPalette(key, entry, expanded, error))
+        return false;
+    if (expanded && entry.paletteFromTarget && entry.identity.texels != 0u) {
+        ++m_stats.builds;
+        return true;
+    }
     if (expanded) {
         entry.identity = {};
         entry.identity.clut = entry.paletteFromTarget ? 0u : hashClutWindow(key);
@@ -1961,7 +1969,12 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const TexaState texa = unpackTexa(key.texa);
     std::array<uint32_t, 256> palette{};
     const NamedImage *clut = nullptr;
-    if (indexed) {
+    if (m_wantIndices) {
+        if (!indexed)
+            return false;
+        for (uint32_t i = 0u; i < 256u; ++i)
+            palette[i] = i | 0xff000000u; // the index itself, in R
+    } else if (indexed) {
         if (key.csm != 0u)
             return miss(m_stats.namedMissPalette);
         const auto clutFound = m_named.find(key.cbp);
@@ -2056,6 +2069,86 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         texelHash = hashStep(texelHash, clut->upload.node);
     ++m_stats.namedExpands;
     hash = texelHash;
+    return true;
+}
+
+
+bool GsTextureCache::expandNamedWithTargetPalette(const GsTextureKey &key, Entry &entry, bool &handled,
+                                                  std::string &error) {
+    handled = false;
+    static const bool on = std::getenv("DQ8_GFX_NO_TARGET_PALETTES") == nullptr;
+    if (!on || !gsIsIndexedPsm(key.psm) || !namedtextures::active() || (key.cpsm & 0x3fu) != GS_PSM_CT32 ||
+        key.csm != 0u || !m_storeOn || !clutBlocksDrawn(key))
+        return true;
+    GsPageSet clutPages;
+    markClutReads(key, clutPages);
+    GsSurface *paletteTarget = clutPages.any() ? m_targets.nativeOwner(clutPages, true) : nullptr;
+    if (!paletteTarget || (clutPages & ~paletteTarget->pages).any())
+        return true;
+    // The indices from the named texels, into m_staging (index in R).
+    const GsRegion whole{0u, 0u, key.width, key.height};
+    uint64_t hash = 0u;
+    m_wantIndices = true;
+    const bool named = expandNamed(key, whole, false, hash);
+    m_wantIndices = false;
+    if (!named)
+        return true;
+    if (!m_targets.refreshRegion(*paletteTarget, m_targets.regionForPages(*paletteTarget, clutPages), error))
+        return false;
+
+    SDL_GPUDevice *device = m_device.handle();
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.width = key.width;
+    info.height = key.height;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture *indices = SDL_CreateGPUTexture(device, &info);
+    if (!indices) {
+        error = std::string("SDL_CreateGPUTexture(indices): ") + SDL_GetError();
+        return false;
+    }
+    if (!uploadRegion(indices, whole, error)) {
+        SDL_ReleaseGPUTexture(device, indices);
+        return false;
+    }
+    if (!entry.renderable) {
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &info);
+        if (!texture) {
+            SDL_ReleaseGPUTexture(device, indices);
+            error = std::string("SDL_CreateGPUTexture(target palette): ") + SDL_GetError();
+            return false;
+        }
+        if (entry.texture) {
+            beforeRewrite(entry.texture);
+            SDL_ReleaseGPUTexture(device, entry.texture);
+        }
+        entry.texture = texture;
+        entry.renderable = true;
+    } else {
+        beforeRewrite(entry.texture);
+    }
+    std::array<uint32_t, 256> palette{};
+    targetPaletteCoordinates(key, *paletteTarget, palette);
+    const std::array<uint32_t, 4> pages{0u,
+                                        1u | (5u << 16u) | (1u << 24u) |
+                                            (std::min(std::max(paletteTarget->scale, 1u), 15u) << 25u),
+                                        0u, 1u | (1u << 16u)};
+    const SDL_Rect rect{0, 0, int(key.width), int(key.height)};
+    const bool done = m_device.expandIndexed8(indices, palette.data(), entry.texture, key.width, key.height, rect,
+                                              pages, error, paletteTarget->texture);
+    SDL_ReleaseGPUTexture(device, indices); // released once the expansion has run
+    if (!done)
+        return false;
+    entry.paletteFromTarget = true;
+    entry.identity = {};
+    entry.identity.texels = hash;
+    ++m_stats.namedWithTargetPalettes;
+    handled = true;
     return true;
 }
 

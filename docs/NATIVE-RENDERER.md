@@ -119,8 +119,9 @@ below):
    (`DQ8_GFX_NO_TARGET_PALETTES=1` off), and so is one in another CT32
    target (bound beside the texels' target). Reads spanning several targets (`02ba0` at 512 wide) are built a page at
    a time from each page's target (`DQ8_GFX_NO_MULTI_TARGET_TEXTURES=1` off).
-   Left: a drawn palette for uploaded texels (the texels are expanded on the
-   CPU, so the palette is copied out). Builds; unverified
+   A drawn palette for named (uploaded) texels: the indices are uploaded as
+   they are and expanded on the GPU with the palette fetched from its target
+   (`gs_index8.frag` mode 5), no copy-out. Builds; unverified
    on screen.
 3. *The 2D batcher* (item 5 above): kept as the translator the end-state
    section calls enough for phase 5 ("Shrinks": the packets keep arriving, a
