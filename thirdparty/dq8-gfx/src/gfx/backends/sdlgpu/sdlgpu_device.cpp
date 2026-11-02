@@ -755,7 +755,7 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
     fragmentInfo.entrypoint = "main";
     fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fragmentInfo.num_samplers = 3u;
+    fragmentInfo.num_samplers = 4u;
     fragmentInfo.num_uniform_buffers = 1u;
 #ifdef DQ8_GFX_HAS_MSL
     if ((SDL_GetGPUShaderFormats(m_device) & SDL_GPU_SHADERFORMAT_MSL) != 0) {
@@ -892,7 +892,7 @@ void SdlGpuDevice::releaseIndex8() {
 bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palette,
                                   SDL_GPUTexture *destination, uint32_t width, uint32_t height,
                                   const SDL_Rect &region, const std::array<uint32_t, 4> &pages,
-                                  std::string &error) {
+                                  std::string &error, SDL_GPUTexture *paletteTarget) {
     if (!m_index8Pipeline && !createIndex8(error))
         return false;
 
@@ -938,9 +938,11 @@ bool SdlGpuDevice::expandIndexed8(SDL_GPUTexture *target, const uint32_t *palett
     const SDL_GPUViewport viewport{0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
     SDL_SetGPUViewport(pass, &viewport);
     SDL_SetGPUScissor(pass, &region);
-    const SDL_GPUTextureSamplerBinding bindings[3] = {
-        {target, m_sampler}, {m_index8Palette, m_sampler}, {m_index8Placement, m_sampler}};
-    SDL_BindGPUFragmentSamplers(pass, 0u, bindings, 3u);
+    const SDL_GPUTextureSamplerBinding bindings[4] = {{target, m_sampler},
+                                                      {m_index8Palette, m_sampler},
+                                                      {m_index8Placement, m_sampler},
+                                                      {paletteTarget ? paletteTarget : target, m_sampler}};
+    SDL_BindGPUFragmentSamplers(pass, 0u, bindings, 4u);
     SDL_PushGPUFragmentUniformData(commands, 0u, pages.data(), sizeof(uint32_t) * pages.size());
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);

@@ -1238,11 +1238,21 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     if (indexed)
         markClutReads(key, clutPages);
     static const bool targetPalettes = std::getenv("DQ8_GFX_NO_TARGET_PALETTES") == nullptr;
-    const bool paletteInTarget = indexed && targetPalettes && (key.cpsm & 0x3fu) == GS_PSM_CT32 &&
-                                 key.csm == 0u && clutPages.any() && (clutPages & ~target->pages).none() &&
-                                 m_targets.nativeOwner(clutPages, true) == target;
+    // Also a palette in another CT32 target (Rogue Galaxy: the palettes at
+    // 03f80), bound beside the texels' target.
+    GsSurface *paletteTarget = nullptr;
+    if (indexed && targetPalettes && (key.cpsm & 0x3fu) == GS_PSM_CT32 && key.csm == 0u && clutPages.any()) {
+        paletteTarget = m_targets.nativeOwner(clutPages, true);
+        if (paletteTarget && (clutPages & ~paletteTarget->pages).any())
+            paletteTarget = nullptr;
+        // Its blocks no draw wrote are the host's (the upload store has them).
+        if (paletteTarget && m_storeOn && !clutBlocksDrawn(key))
+            paletteTarget = nullptr;
+    }
+    const bool paletteInTarget = paletteTarget != nullptr;
     if (paletteInTarget) {
-        if (!m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages | clutPages), error))
+        if (!m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error) ||
+            !m_targets.refreshRegion(*paletteTarget, m_targets.regionForPages(*paletteTarget, clutPages), error))
             return false;
     } else if (!m_targets.copyOut(clutPages, error) ||
                !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error)) {
@@ -1290,17 +1300,20 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
                                                     : std::max<uint32_t>(key.tbw, 1u);
     const std::array<uint32_t, 4> pages{key.tbp0 >> 5u,
                                         texturePagesPerRow | (indexed ? mode << 16u : 0u) |
-                                            (paletteInTarget ? 1u << 24u : 0u),
+                                            (paletteInTarget ? (1u << 24u) |
+                                                                   (std::min(std::max(paletteTarget->scale, 1u), 15u) << 25u)
+                                                             : 0u),
                                         target->base >> 5u,
                                         target->bufferWidth | (std::max(target->scale, 1u) << 16u)};
     std::array<uint32_t, 256> palette{};
     if (paletteInTarget)
-        targetPaletteCoordinates(key, *target, palette);
+        targetPaletteCoordinates(key, *paletteTarget, palette);
     else if (indexed)
         std::copy_n(m_clutRgba.begin(), std::min<size_t>(m_clutRgba.size(), palette.size()), palette.begin());
     entry.paletteFromTarget = paletteInTarget;
     const bool done = indexed ? m_device.expandIndexed8(target->texture, palette.data(), entry.texture, key.width,
-                                                        key.height, rect, pages, error)
+                                                        key.height, rect, pages, error,
+                                                        paletteInTarget ? paletteTarget->texture : nullptr)
                               : m_device.copyFromTarget(target->texture, entry.texture, key.width, key.height, rect,
                                                         pages, preserve, error);
     if (preserve) {

@@ -208,7 +208,8 @@ public:
     // per row, then the target's; the target must cover every page read.
     bool expandIndexed8(SDL_GPUTexture *target, const uint32_t *palette, SDL_GPUTexture *destination,
                         uint32_t width, uint32_t height, const SDL_Rect &region,
-                        const std::array<uint32_t, 4> &pages, std::string &error);
+                        const std::array<uint32_t, 4> &pages, std::string &error,
+                        SDL_GPUTexture *paletteTarget = nullptr);
 
     // A CT32 texture's texels from the CT32 target holding them, texel for
     // texel (gs_target_copy.frag; `pages` as expandIndexed8's, the texture's

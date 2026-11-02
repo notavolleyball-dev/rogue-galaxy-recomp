@@ -113,9 +113,10 @@ below):
    table gained T4's 128x128 page; `DQ8_GFX_NO_INDEXED4_TARGETS=1` off).
    A CT32 CSM1 palette inside the same target as the texels (the frame's
    case) is fetched from the target by the shader too, with no copy-out
-   (`DQ8_GFX_NO_TARGET_PALETTES=1` off). Left: palettes in another target
-   than the texels (`03f80`), and reads spanning several targets (`02ba0`
-   at 512 wide). Builds; unverified
+   (`DQ8_GFX_NO_TARGET_PALETTES=1` off), and so is one in another CT32
+   target (bound beside the texels' target). Left: a drawn palette for
+   uploaded texels (the texels are expanded on the CPU, so the palette is
+   copied out), and reads spanning several targets (`02ba0` at 512 wide). Builds; unverified
    on screen.
 3. *The 2D batcher* (item 5 above): kept as the translator the end-state
    section calls enough for phase 5 ("Shrinks": the packets keep arriving, a

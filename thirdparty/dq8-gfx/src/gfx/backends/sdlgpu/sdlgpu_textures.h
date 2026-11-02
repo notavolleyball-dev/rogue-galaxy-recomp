@@ -267,6 +267,14 @@ private:
     GsVram *sourceFor(const GsTextureKey &key);
     GsBlockSet blocksFor(const GsTextureKey &key) const;
     bool blocksDrawn(const GsTextureKey &key) const { return (blocksFor(key) & m_drawnBlocks).any(); }
+    // The palette's blocks only (Rogue Galaxy: added).
+    bool clutBlocksDrawn(const GsTextureKey &key) const {
+        GsBlockSet blocks;
+        const uint32_t clutWidth = (key.texclut & 0xffu) + 16u;
+        const uint32_t clutHeight = ((key.texclut >> 16u) & 0xffffu) + 16u;
+        gsMarkBlocks(blocks, key.cbp, std::max<uint32_t>(key.texclut & 0xffu, 1u), key.cpsm, clutWidth, clutHeight);
+        return (blocks & m_drawnBlocks).any();
+    }
     struct SourceScope {
         GsTextureCache &cache;
         GsVram *saved;

@@ -11,6 +11,9 @@ layout(set = 2, binding = 1) uniform sampler2D palette;
 // and G (y), which of that pixel's bytes in B, and for PSMT4 which nibble
 // in A.
 layout(set = 2, binding = 2) uniform sampler2D placement;
+// The target holding the palette when the palette is in a target (bit 24
+// below); the texels' target when it is the same one.
+layout(set = 2, binding = 3) uniform sampler2D paletteTarget;
 layout(set = 3, binding = 0) uniform Index8Params {
     // x: texture base page, y: texture pages per row | mode << 16 (0 T8,
     // 1 T4, 2 T8H, 3 T4HL, 4 T4HH),
@@ -30,7 +33,6 @@ void main() {
     // bits, y high), not its colour (a CT32 CLUT inside the same target).
     bool paletteInTarget = (params.pages.y & (1u << 24u)) != 0u;
     uint texturePagesPerRow = params.pages.y & 65535u;
-    uint scaleOf = max(params.pages.w >> 16u, 1u);
     // T8 pages are 128x64 texels, T4 128x128; the alpha formats are CT32
     // pages, 64x32, a texel to a pixel.
     uvec2 pageShift = mode == 0u ? uvec2(7u, 6u) : (mode == 1u ? uvec2(7u, 7u) : uvec2(6u, 5u));
@@ -57,7 +59,9 @@ void main() {
     if (paletteInTarget) {
         uvec4 at = bytesAt(palette, ivec2(index, 0));
         uvec2 place = uvec2(at.x | (at.y << 8u), at.z | (at.w << 8u));
-        outColor = texelFetch(target, ivec2(place * scaleOf), 0);
+        // Bits 25-28: the palette target's resolution scale.
+        uint paletteScale = max((params.pages.y >> 25u) & 15u, 1u);
+        outColor = texelFetch(paletteTarget, ivec2(place * paletteScale), 0);
     } else {
         outColor = texelFetch(palette, ivec2(index, 0), 0);
     }
