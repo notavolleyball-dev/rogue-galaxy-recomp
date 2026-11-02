@@ -3,6 +3,8 @@
 #include <string>
 
 class PS2Runtime;
+class GS;
+struct GSNativeEffect;
 
 // Runs the game's VIF1 DMA lists -- the VU1 microprograms and the GS packets
 // they kick -- on a thread of their own, beside the game, as the PS2 runs VU1
@@ -50,5 +52,8 @@ std::string busyReport();
 
 // Lists handed over and not yet finished (the stall watch).
 bool busy();
+// From the game thread: `effect` to the GS behind everything the VIF1 lists
+// and the GIF stage still hold (as the flip's effect goes).
+void submitEffectFromGame(GS &gs, const GSNativeEffect &effect);
 
 } // namespace rg::vif1

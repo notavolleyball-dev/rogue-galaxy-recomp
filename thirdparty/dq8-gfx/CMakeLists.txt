@@ -43,6 +43,7 @@ add_library(dq8_gfx_gs STATIC
     src/gfx/gs/gs_depth_probe.cpp
     src/gfx/gs/gs_named_targets.cpp
     src/gfx/gs/gs_named_textures.cpp
+    src/gfx/gs/gs_host_reads.cpp
 )
 target_include_directories(dq8_gfx_gs PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(dq8_gfx_gs PUBLIC dq8_host_simd ps2_runtime)

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,8 @@
 #include "gfx/gs/gs_named_targets.h"
 #include "gfx/gs/gs_named_textures.h"
 #include "gfx/gs/gs_depth_probe.h"
+#include "gfx/gs/gs_host_reads.h"
+#include "vif1_thread.h"
 #include "gif_events.h"
 #include "native_renderer.h"
 #include "ps2_runtime.h"
@@ -1529,6 +1532,36 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         setReturnS32(ctx, 0);
         ctx->pc = getRegU32(ctx, 31);
         return;
+    }
+    // A colour read (ScreenFadeBlockCaptureFrame's and MenuCaptureScreenTex's
+    // frame captures): the GPU target's region straight into buf, in GS
+    // order, through the GS queue as a command (gfx/gs/gs_host_reads.h).
+    const bool colour = psm == 0x00u || psm == 0x01u || psm == 0x02u || psm == 0x0Au;
+    namespace reads = dq8::gfx::hostreads;
+    if (g_rdram && runtime && si == t_storeImage.si && colour && reads::served())
+    {
+        const dq8::gfx::depthprobe::Request &q = t_storeImage.request;
+        reads::Request request;
+        request.base = q.base;
+        request.bufferWidth = q.bufferWidth;
+        request.psm = psm;
+        request.x = q.x;
+        request.y = q.y;
+        request.width = q.width;
+        request.height = q.height;
+        const uint32_t id = reads::begin(request);
+        GSNativeEffect effect{};
+        effect.command = reads::kCommand | id;
+        rg::vif1::submitEffectFromGame(runtime->gs(), effect);
+        if (reads::wait(id, bytes, std::chrono::milliseconds(2000)) && !bytes.empty())
+        {
+            std::memcpy(g_rdram + physical(buffer), bytes.data(), bytes.size());
+            t_storeImage.si = 0u;
+            t_skipSync = true;
+            setReturnS32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
     }
     t_storeImage.si = 0u;
     g_execStoreImageOriginal(rdram, ctx, runtime);

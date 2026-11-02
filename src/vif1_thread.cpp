@@ -2032,6 +2032,13 @@ void shutdown()
     }
 }
 
+void submitEffectFromGame(GS &gs, const GSNativeEffect &effect)
+{
+    if (g_stage)
+        g_thread->drain();
+    gs.submitNativeEffect(effect);
+}
+
 std::string busyReport()
 {
     static auto lastTime = std::chrono::steady_clock::now();

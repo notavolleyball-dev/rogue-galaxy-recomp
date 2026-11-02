@@ -6,6 +6,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_textures.h"
 #include "gfx/gs/gs_depth_probe.h"
 #include "gfx/gs/gs_named_textures.h"
+#include "gfx/gs/gs_host_reads.h"
 #include "gfx/gs/gs_state.h"
 #include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
@@ -3212,7 +3213,68 @@ struct SdlGpuBackend::Impl {
         return true;
     }
 
+    // A frame capture the game asked for (gfx/gs/gs_host_reads.h): the
+    // target's region read back and packed in the read's format, in GS order.
+    bool serveHostRead(uint32_t id) {
+        namespace reads = dq8::gfx::hostreads;
+        reads::Request r;
+        if (!reads::pending(id, r))
+            return true;
+        std::vector<uint8_t> bytes;
+        const auto fail = [&] {
+            reads::complete(id, {}, false);
+            return true;
+        };
+        if (!flushDraws())
+            return fail();
+        if (displayFrame.pending && inDisplay(r.base))
+            materializeDisplay();
+        const uint32_t psm = r.psm & 0x3fu;
+        GsSurface *surface = targets->findColorSurface(r.base, psm);
+        if (!surface && psm == GS_PSM_CT24)
+            surface = targets->findColorSurface(r.base, GS_PSM_CT32);
+        if (!surface || surface->depth || r.width == 0u || r.height == 0u || r.x + r.width > surface->width ||
+            r.y + r.height > surface->height)
+            return fail();
+        std::vector<uint8_t> rgba;
+        std::string error;
+        if (!targets->readRegion(*surface, GsRegion{r.x, r.y, r.x + r.width, r.y + r.height}, rgba, error))
+            return fail();
+        const size_t pixels = static_cast<size_t>(r.width) * r.height;
+        if (rgba.size() < pixels * 4u)
+            return fail();
+        switch (psm) {
+        case GS_PSM_CT32:
+            bytes = std::move(rgba);
+            bytes.resize(pixels * 4u);
+            break;
+        case GS_PSM_CT24:
+            bytes.resize(pixels * 3u);
+            for (size_t i = 0; i < pixels; ++i)
+                std::memcpy(bytes.data() + i * 3u, rgba.data() + i * 4u, 3u);
+            break;
+        case GS_PSM_CT16:
+        case GS_PSM_CT16S:
+            bytes.resize(pixels * 2u);
+            for (size_t i = 0; i < pixels; ++i) {
+                const uint8_t *c = rgba.data() + i * 4u;
+                const uint16_t v = static_cast<uint16_t>((c[0] >> 3) | ((c[1] >> 3) << 5) | ((c[2] >> 3) << 10) |
+                                                         (c[3] >= 0x80u ? 0x8000u : 0u));
+                bytes[i * 2u] = static_cast<uint8_t>(v);
+                bytes[i * 2u + 1u] = static_cast<uint8_t>(v >> 8);
+            }
+            break;
+        default:
+            return fail();
+        }
+        ++stats.hostReadsNative;
+        reads::complete(id, std::move(bytes), true);
+        return true;
+    }
+
     bool submitEffect(const GSNativeEffect &effect) {
+        if ((effect.command & dq8::gfx::hostreads::kCommandMask) == dq8::gfx::hostreads::kCommand)
+            return serveHostRead(effect.command & 0xFFFFu);
         if (effect.command != GSNativeEffect::kSprites) {
             resolveDeferredFlip(false);
             return device.valid() && layerCommand(effect);
@@ -5106,7 +5168,7 @@ struct SdlGpuBackend::Impl {
             std::fprintf(stderr,
                          "[native-memory] expands named %llu, not named: no name %llu, shape %llu, palette %llu | "
                          "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
-                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu\n",
+                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets)\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedMissNoName),
                          static_cast<unsigned long long>(t.namedMissShape),
@@ -5122,7 +5184,8 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(t.localMemoryReads),
                          static_cast<unsigned long long>(stats.localCopies),
                          static_cast<unsigned long long>(t.namedCopies),
-                         static_cast<unsigned long long>(stats.hostReads));
+                         static_cast<unsigned long long>(stats.hostReads),
+                         static_cast<unsigned long long>(stats.hostReadsNative));
         }
         if (transfer && transfer->repeatsEnabled()) {
             static GsTransferEngine::RepeatStats before{};
@@ -6399,6 +6462,7 @@ SdlGpuBackend::~SdlGpuBackend() {
         std::string ignored;
         m_impl->device.submitPendingAndWait(ignored);
         depthprobe::setServed(false);
+        dq8::gfx::hostreads::setServed(false);
         m_impl->releaseDepthProbes();
         if (m_impl->displayFrame.texture)
             SDL_ReleaseGPUTexture(m_impl->device.handle(), m_impl->displayFrame.texture);
@@ -7185,6 +7249,7 @@ std::unique_ptr<SdlGpuBackend> createSdlGpuBackend(std::string &error) {
     // The game's Z reads come from the GPU's depth (gfx/gs/gs_depth_probe.h).
     depthprobe::reset();
     depthprobe::setServed(backend->m_impl->device.depthProbeSupported());
+    dq8::gfx::hostreads::setServed(std::getenv("DQ8_GFX_NO_HOST_READS") == nullptr);
     return backend;
 }
 

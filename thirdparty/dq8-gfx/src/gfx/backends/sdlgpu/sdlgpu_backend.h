@@ -85,6 +85,7 @@ struct SdlGpuStats {
     // (Rogue Galaxy: added; the native path's remaining uses of local memory).
     uint64_t localCopies = 0;
     uint64_t hostReads = 0;
+    uint64_t hostReadsNative = 0; // frame captures served from a target (gs_host_reads.h)
     uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
     // Objects drawn into object layers (GSNativeEffect::kRouteLayer), the
     // passes that laid them over the frame, those started because every

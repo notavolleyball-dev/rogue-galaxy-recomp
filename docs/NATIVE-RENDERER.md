@@ -973,9 +973,10 @@ takes their primitives. The lens flare's occlusion read no longer goes to
 the GS at all (`RG_NATIVE_DEPTH_READS`: `sceGsExecStoreImage` and the
 `sceGsSyncPath` after it answered from the depth probe). `TexAnimeTableApply`'s `DrawListAddVramCopyFixed` copies between named
 images are made between their bytes (`DQ8_GFX_NO_NAMED_COPIES=1` off).
-Still GS-shaped: the fade's frame capture (`ScreenFadeBlockCaptureFrame`:
-a `GsDownloadImage` of the frame, a readback), and the menu's screen capture
-(`MenuCaptureScreenTex`). Builds; unverified on screen.
+Still GS-shaped: nothing of the frame captures: the fade's (`ScreenFadeBlockCaptureFrame`)
+and the menu's (`MenuCaptureScreenTex`) `sceGsExecStoreImage` of colour is
+served from the GPU target in GS order straight into the game's buffer
+(`gfx/gs/gs_host_reads.h`, `DQ8_GFX_NO_HOST_READS=1` off). Builds; unverified on screen.
 
 **Where the GS still is (2026-11-02, after the run above):** the presenter
 shows the display frame the flip made (its own texture) and reads DISPFB only

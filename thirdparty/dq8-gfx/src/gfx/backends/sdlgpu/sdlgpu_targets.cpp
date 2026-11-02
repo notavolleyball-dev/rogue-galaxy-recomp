@@ -1579,6 +1579,13 @@ bool GsTargetCache::download(GsSurface &surface,
                                     surface.height * surface.scale, out, error);
 }
 
+bool GsTargetCache::readRegion(GsSurface &surface, const GsRegion &region, std::vector<uint8_t> &out,
+                               std::string &error) {
+    if (!applyCpuPatches(surface, error))
+        return false;
+    return downloadScaled(surface, region, out, error);
+}
+
 // Reads one region of a surface back at GS resolution, as tightly packed RGBA8
 // rows of region.width() pixels.
 //

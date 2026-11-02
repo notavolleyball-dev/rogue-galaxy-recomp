@@ -302,6 +302,9 @@ public:
     // of width*scale pixels. Used by presentation, which wants the scaled
     // image rather than the native-resolution one resolve() produces.
     bool download(GsSurface &surface, std::vector<uint8_t> &out, std::string &error);
+    // One region of a surface at GS resolution as RGBA8 rows, its CPU
+    // patches applied first (Rogue Galaxy: added; the game's frame captures).
+    bool readRegion(GsSurface &surface, const GsRegion &region, std::vector<uint8_t> &out, std::string &error);
 
     const GsTargetCacheStats &stats() const { return m_stats; }
     void resetStats() { m_stats = {}; }
