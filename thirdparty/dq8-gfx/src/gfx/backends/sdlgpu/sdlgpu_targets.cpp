@@ -43,7 +43,17 @@ void setDiscardImportQuery(bool (*query)()) {
 // (gfx/gs/gs_named_targets.h: every target the game sets from a texture
 // descriptor smaller than the screen), those are the ones; otherwise
 // Rogue Galaxy's per-object buffers, 0x2A20 up to the glare's 0x2C40.
+bool gsNativeBypass() {
+    static const bool requested = [] {
+        const char *value = std::getenv("DQ8_GFX_NATIVE_BYPASS");
+        return value != nullptr && std::strcmp(value, "0") != 0;
+    }();
+    return requested && g_discardImportQuery != nullptr && g_discardImportQuery();
+}
+
 static bool discardsImports(const GsSurface &surface) {
+    if (!surface.depth && gsNativeBypass())
+        return true;
     static const bool keep = std::getenv("DQ8_GFX_KEEP_OBJECT_IMPORTS") != nullptr;
     if (keep || surface.psm != GS_PSM_CT32 || g_discardImportQuery == nullptr || !g_discardImportQuery())
         return false;

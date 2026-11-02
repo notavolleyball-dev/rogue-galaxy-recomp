@@ -3213,6 +3213,37 @@ struct SdlGpuBackend::Impl {
         return true;
     }
 
+    // DQ8_GFX_NATIVE_BYPASS (gsNativeBypass): a host upload goes to the
+    // texture cache alone (its name, the upload store) and invalidates the
+    // textures over its pages; no transfer into local memory, no flush of
+    // queued draws, no settle or patch of targets. An unrecorded upload onto
+    // a live target's pages may be a write into the target: that one takes
+    // the full path.
+    bool bypassingUpload = false;
+    GsPageSet bypassPages;
+    bool bypassUpload(const GSTransferCommand &command) {
+        if (command.direction != 0u || !textures || !gsNativeBypass())
+            return false;
+        const uint32_t dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
+        GsPageSet pages;
+        gsMarkPages(pages, command.bitbltbuf.dbp, dbw, command.bitbltbuf.dpsm, command.trxreg.rrw,
+                    command.trxreg.rrh, command.trxpos.dsax, command.trxpos.dsay);
+        const bool recorded = namedtextures::peek(command.bitbltbuf.dbp, dbw, command.bitbltbuf.dpsm,
+                                                  command.trxreg.rrw, command.trxreg.rrh);
+        if (!recorded && targets->ownsAny(pages)) {
+            ++stats.uploadsIntoTargets;
+            return false;
+        }
+        ++stats.uploadsBypassed;
+        textures->noteUpload(command);
+        textures->invalidate(pages, GsTextureCache::InvalidationSource::HostWrite);
+        transferCommand = command;
+        transferPagesValid = false;
+        bypassPages = pages;
+        bypassingUpload = true;
+        return true;
+    }
+
     // A frame capture the game asked for (gfx/gs/gs_host_reads.h): the
     // target's region read back and packed in the read's format, in GS order.
     bool serveHostRead(uint32_t id) {
@@ -5168,7 +5199,7 @@ struct SdlGpuBackend::Impl {
             std::fprintf(stderr,
                          "[native-memory] expands named %llu, not named: no name %llu, shape %llu, palette %llu | "
                          "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
-                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets)\n",
+                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets) | bypass: uploads %llu, onto targets %llu, resolves skipped %llu\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedMissNoName),
                          static_cast<unsigned long long>(t.namedMissShape),
@@ -5185,7 +5216,10 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(stats.localCopies),
                          static_cast<unsigned long long>(t.namedCopies),
                          static_cast<unsigned long long>(stats.hostReads),
-                         static_cast<unsigned long long>(stats.hostReadsNative));
+                         static_cast<unsigned long long>(stats.hostReadsNative),
+                         static_cast<unsigned long long>(stats.uploadsBypassed),
+                         static_cast<unsigned long long>(stats.uploadsIntoTargets),
+                         static_cast<unsigned long long>(t.resolvesBypassed));
         }
         if (transfer && transfer->repeatsEnabled()) {
             static GsTransferEngine::RepeatStats before{};
@@ -6629,8 +6663,11 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
         ((command.direction != 1u && m_impl->inDisplay(command.bitbltbuf.dbp)) ||
          (command.direction != 0u && m_impl->inDisplay(command.bitbltbuf.sbp))))
         m_impl->materializeDisplay();
+    m_impl->bypassingUpload = false;
     if (m_impl->textures)
         m_impl->textures->noteTransferStart(command);
+    if (m_impl->bypassUpload(command))
+        return;
     if (command.direction == 2u)
         ++m_impl->stats.localCopies;
     else if (command.direction == 1u)
@@ -6719,6 +6756,12 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     m_impl->last.valid = false;
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->stats.transferBytes += sizeBytes;
+    if (m_impl->bypassingUpload) {
+        // The native bypass: the bytes go to the texture cache alone.
+        m_impl->textures->noteUploadData(data, sizeBytes);
+        m_impl->textures->invalidate(m_impl->bypassPages, GsTextureCache::InvalidationSource::HostWrite);
+        return;
+    }
     if (!m_impl->transfer) return;
     const bool roundTripReturned = m_impl->noteRoundTripUpload(data, sizeBytes);
     const auto before = m_impl->transfer->snapshot();

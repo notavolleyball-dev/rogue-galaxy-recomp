@@ -44,6 +44,9 @@ void push(const Upload &upload);
 // matches it (records before the match were never sent and are dropped).
 bool take(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, Upload &out);
 
+// Whether one of the next few queued records matches, without taking it.
+bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height);
+
 bool active();
 void reset();
 

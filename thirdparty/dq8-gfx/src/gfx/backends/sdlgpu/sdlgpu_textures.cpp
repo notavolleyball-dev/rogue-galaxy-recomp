@@ -277,7 +277,7 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
     ++m_uploadSerial;
     const uint32_t psm = record.dpsm & 0x3fu;
     static const bool decodeStore = std::getenv("DQ8_GFX_DECODE_STORE") != nullptr;
-    m_uploadCopied = !decodeStore && m_vram.attached() &&
+    m_uploadCopied = !decodeStore && !gsNativeBypass() && m_vram.attached() &&
                      (psm == GS_PSM_CT32 || psm == GS_PSM_T8 || psm == GS_PSM_T4);
     m_shadowTransfer->begin(command);
     m_auditPending = static_cast<uint32_t>(m_uploads.size()) + 15u;
@@ -1138,6 +1138,12 @@ GsPageSet GsTextureCache::staleTexelPages(const GsTextureKey &key, const GsRegio
 
 bool GsTextureCache::resolveSource(const GsTextureKey &key, const GsRegion &region,
                                   std::string &error, const GsPageSet *exclude) {
+    // The native bypass reads no target back into local memory: textures
+    // come from names, the upload store or the targets on the GPU.
+    if (gsNativeBypass()) {
+        ++m_stats.resolvesBypassed;
+        return true;
+    }
     GsPageSet conservative;
     markSourcePages(key, conservative);
     if (!m_targets.ownsAny(conservative)) return true;

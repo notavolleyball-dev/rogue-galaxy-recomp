@@ -1022,6 +1022,17 @@ keeps the GS path for anything the checks miss.
 
 ### Phase 5: remove the GS path
 
+**Redefined (2026-11-02): bypass, not removal.** Upstream keeps the GS path
+as the fallback, so its code stays; phase 5 is the native path never
+entering it. First cut, `DQ8_GFX_NATIVE_BYPASS=1` (off by default): host
+uploads go to the texture cache only (names and the upload store), with no
+local-memory write, conflict flush, settle, patch or release of targets
+(an unrecorded upload onto a live target keeps the full path); no target
+imports local memory; no texture read resolves a target into it. What it
+still leaves: page ownership on draws (it is how a target is found by
+address), local-to-local copies the named images do not cover, and the
+GS frontend's register file. Builds; unverified on screen.
+
 Delete local memory, page ownership, imports and patches, snapshots,
 destination copies, round trips and readbacks from the backend, plus the
 `DQ8_GFX_*` switches that exist only for them. Keep `RG_RENDER=gs` for one

@@ -129,6 +129,10 @@ void gsSetTargetTrace(bool enabled);
 // Whether the per-object offscreen buffers skip importing local memory
 // (Rogue Galaxy: added; the game answers with its native renderer's switch).
 void setDiscardImportQuery(bool (*query)());
+// DQ8_GFX_NATIVE_BYPASS=1 with the native renderer (Rogue Galaxy: added):
+// the native path skips the GS bookkeeping (imports, resolves into local
+// memory, uploads into targets' pages); the GS path is untouched.
+bool gsNativeBypass();
 
 struct GsTargetCacheStats {
     uint64_t surfacesCreated = 0u;

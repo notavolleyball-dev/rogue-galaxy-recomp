@@ -60,6 +60,21 @@ bool take(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t he
     return false;
 }
 
+bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height) {
+    Queue &q = queue();
+    if (!q.active.load(std::memory_order_acquire))
+        return false;
+    std::lock_guard<std::mutex> lock(q.mutex);
+    const size_t limit = std::min(q.records.size(), kLookahead);
+    for (size_t i = 0; i < limit; ++i) {
+        const Upload &r = q.records[i];
+        if (r.dbp == dbp && r.dbw == dbw && (r.dpsm & 0x3fu) == (dpsm & 0x3fu) && r.width == width &&
+            r.height == height)
+            return true;
+    }
+    return false;
+}
+
 bool active() {
     return queue().active.load(std::memory_order_acquire);
 }

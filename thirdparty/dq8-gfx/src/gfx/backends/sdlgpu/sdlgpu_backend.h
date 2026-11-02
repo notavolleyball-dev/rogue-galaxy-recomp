@@ -86,6 +86,10 @@ struct SdlGpuStats {
     uint64_t localCopies = 0;
     uint64_t hostReads = 0;
     uint64_t hostReadsNative = 0; // frame captures served from a target (gs_host_reads.h)
+    // DQ8_GFX_NATIVE_BYPASS: uploads that skipped the GS bookkeeping, and
+    // the unrecorded ones onto a live target that took the full path.
+    uint64_t uploadsBypassed = 0;
+    uint64_t uploadsIntoTargets = 0;
     uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
     // Objects drawn into object layers (GSNativeEffect::kRouteLayer), the
     // passes that laid them over the frame, those started because every

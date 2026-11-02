@@ -101,6 +101,7 @@ struct GsTextureCacheStats {
     uint64_t uploadsSelfNamed = 0u; // no record: named by their own format and size
     uint64_t uploadsPatched = 0u;   // into part of a named image
     uint64_t namedCopies = 0u;      // local copies made between named images
+    uint64_t resolvesBypassed = 0u; // texture reads of targets the bypass did not resolve
     uint64_t unnamedUploadBytes = 0u;
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
