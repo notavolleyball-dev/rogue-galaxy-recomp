@@ -443,7 +443,7 @@ void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource sourc
     if (!m_named.empty() && source != InvalidationSource::HostWrite && source != InvalidationSource::Draw) {
         GsBlockSet blocks;
         gsBlocksOfPages(blocks, pages);
-        dropNamed(blocks);
+        dropNamed(blocks, m_namedCopyKeep);
     }
     if (m_tracking)
         auditStamp(pages, source);
@@ -2150,6 +2150,72 @@ bool GsTextureCache::expandNamedWithTargetPalette(const GsTextureKey &key, Entry
     ++m_stats.namedWithTargetPalettes;
     handled = true;
     return true;
+}
+
+
+void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
+    m_namedCopyKeep = ~0u;
+    if (command.direction != 2u || m_named.empty())
+        return;
+    static const bool off = std::getenv("DQ8_GFX_NO_NAMED_COPIES") != nullptr;
+    const GSBitBltBuf &b = command.bitbltbuf;
+    const auto from = m_named.find(b.sbp);
+    const auto to = m_named.find(b.dbp);
+    const uint32_t spsm = b.spsm & 0x3fu, dpsm = b.dpsm & 0x3fu;
+    const auto usable = [](const NamedImage &image, uint32_t psm, uint32_t bw) {
+        return !image.upload.preSwizzled && (image.upload.psm & 0x3fu) == psm &&
+               (image.upload.dpsm & 0x3fu) == psm && std::max<uint32_t>(image.upload.dbw, 1u) == std::max<uint32_t>(bw, 1u);
+    };
+    const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
+    const uint32_t sx = command.trxpos.ssax, sy = command.trxpos.ssay;
+    const uint32_t dx = command.trxpos.dsax, dy = command.trxpos.dsay;
+    if (off || from == m_named.end() || to == m_named.end() || spsm != dpsm || !usable(from->second, spsm, b.sbw) ||
+        !usable(to->second, dpsm, b.dbw) || sx + w > from->second.upload.textureWidth ||
+        sy + h > from->second.upload.textureHeight || dx + w > to->second.upload.textureWidth ||
+        dy + h > to->second.upload.textureHeight)
+        return;
+    const uint32_t bits = namedBits(spsm);
+    if (bits == 0u)
+        return;
+    // Through a copy of the source rows, so an overlapping copy within one
+    // image reads what was there before.
+    const std::vector<uint8_t> source = from->second.bytes;
+    std::vector<uint8_t> &dest = to->second.bytes;
+    const uint32_t sw = from->second.upload.textureWidth, dw = to->second.upload.textureWidth;
+    const auto get = [&](uint32_t x, uint32_t y) -> uint32_t {
+        const size_t i = static_cast<size_t>(y) * sw + x;
+        switch (bits) {
+        case 4u: return (source[i >> 1u] >> ((i & 1u) * 4u)) & 0x0fu;
+        case 8u: return source[i];
+        case 16u: return source[i * 2u] | (source[i * 2u + 1u] << 8u);
+        case 24u: return source[i * 3u] | (source[i * 3u + 1u] << 8u) | (source[i * 3u + 2u] << 16u);
+        default: { uint32_t v; std::memcpy(&v, source.data() + i * 4u, 4u); return v; }
+        }
+    };
+    const auto put = [&](uint32_t x, uint32_t y, uint32_t v) {
+        const size_t i = static_cast<size_t>(y) * dw + x;
+        switch (bits) {
+        case 4u: {
+            const uint32_t shift = (i & 1u) * 4u;
+            dest[i >> 1u] = static_cast<uint8_t>((dest[i >> 1u] & ~(0x0fu << shift)) | ((v & 0x0fu) << shift));
+            break;
+        }
+        case 8u: dest[i] = static_cast<uint8_t>(v); break;
+        case 16u: dest[i * 2u] = uint8_t(v); dest[i * 2u + 1u] = uint8_t(v >> 8u); break;
+        case 24u: dest[i * 3u] = uint8_t(v); dest[i * 3u + 1u] = uint8_t(v >> 8u); dest[i * 3u + 2u] = uint8_t(v >> 16u); break;
+        default: std::memcpy(dest.data() + i * 4u, &v, 4u); break;
+        }
+    };
+    for (uint32_t y = 0u; y < h; ++y)
+        for (uint32_t x = 0u; x < w; ++x)
+            put(dx + x, dy + y, get(sx + x, sy + y));
+    to->second.wordToPixel.clear();
+    // Other named images under the written rectangle are something else now.
+    GsBlockSet written;
+    gsMarkBlocks(written, b.dbp, std::max<uint32_t>(b.dbw, 1u), dpsm, dx + w, dy + h);
+    dropNamed(written, b.dbp);
+    m_namedCopyKeep = b.dbp;
+    ++m_stats.namedCopies;
 }
 
 } // namespace dq8::gfx

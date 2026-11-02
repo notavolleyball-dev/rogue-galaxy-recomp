@@ -100,6 +100,7 @@ struct GsTextureCacheStats {
     uint64_t uploadsUnnamed = 0u;
     uint64_t uploadsSelfNamed = 0u; // no record: named by their own format and size
     uint64_t uploadsPatched = 0u;   // into part of a named image
+    uint64_t namedCopies = 0u;      // local copies made between named images
     uint64_t unnamedUploadBytes = 0u;
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
@@ -156,6 +157,10 @@ public:
     // uploads (no local memory) could have supplied it, or why not.
     // noteUpload: a host write is about to begin (before its invalidation).
     void noteUpload(const GSTransferCommand &command);
+    // Every transfer, before anything else sees it (Rogue Galaxy: added): a
+    // local-to-local copy between named images (the texture animations'
+    // frames) is made between their bytes, and its destination stays named.
+    void noteTransferStart(const GSTransferCommand &command);
     void noteUploadData(const uint8_t *data, uint32_t sizeBytes);
     // After a payload of `command` landed in local memory, pixels
     // [copiedBefore, copiedAfter) of its rectangle: the host writes' memory
@@ -387,6 +392,7 @@ private:
     // colours fetched from the target on the GPU (Rogue Galaxy: added).
     bool expandNamedWithTargetPalette(const GsTextureKey &key, Entry &entry, bool &handled, std::string &error);
     bool m_wantIndices = false;
+    uint32_t m_namedCopyKeep = ~0u; // the named image the current copy wrote
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();

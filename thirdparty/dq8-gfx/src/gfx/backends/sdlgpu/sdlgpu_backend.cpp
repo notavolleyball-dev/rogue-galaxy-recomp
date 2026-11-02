@@ -5106,7 +5106,7 @@ struct SdlGpuBackend::Impl {
             std::fprintf(stderr,
                          "[native-memory] expands named %llu, not named: no name %llu, shape %llu, palette %llu | "
                          "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
-                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu, host reads %llu\n",
+                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedMissNoName),
                          static_cast<unsigned long long>(t.namedMissShape),
@@ -5121,6 +5121,7 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(t.expandedFromTargets),
                          static_cast<unsigned long long>(t.localMemoryReads),
                          static_cast<unsigned long long>(stats.localCopies),
+                         static_cast<unsigned long long>(t.namedCopies),
                          static_cast<unsigned long long>(stats.hostReads));
         }
         if (transfer && transfer->repeatsEnabled()) {
@@ -6564,6 +6565,8 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
         ((command.direction != 1u && m_impl->inDisplay(command.bitbltbuf.dbp)) ||
          (command.direction != 0u && m_impl->inDisplay(command.bitbltbuf.sbp))))
         m_impl->materializeDisplay();
+    if (m_impl->textures)
+        m_impl->textures->noteTransferStart(command);
     if (command.direction == 2u)
         ++m_impl->stats.localCopies;
     else if (command.direction == 1u)

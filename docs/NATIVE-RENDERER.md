@@ -971,9 +971,9 @@ flare, the animated textures and the movie's frame all draw between
 `DrawListBeginPrim` and `DrawListEndPrim` (RGDecomp), so `RG_NATIVE_2D`
 takes their primitives. The lens flare's occlusion read no longer goes to
 the GS at all (`RG_NATIVE_DEPTH_READS`: `sceGsExecStoreImage` and the
-`sceGsSyncPath` after it answered from the depth probe). Still GS-shaped:
-`TexAnimeTableApply`'s `DrawListAddVramCopyFixed` (a local-to-local copy,
-done on the GPU), the fade's frame capture (`ScreenFadeBlockCaptureFrame`:
+`sceGsSyncPath` after it answered from the depth probe). `TexAnimeTableApply`'s `DrawListAddVramCopyFixed` copies between named
+images are made between their bytes (`DQ8_GFX_NO_NAMED_COPIES=1` off).
+Still GS-shaped: the fade's frame capture (`ScreenFadeBlockCaptureFrame`:
 a `GsDownloadImage` of the frame, a readback), and the menu's screen capture
 (`MenuCaptureScreenTex`). Builds; unverified on screen.
 
