@@ -3230,8 +3230,15 @@ struct SdlGpuBackend::Impl {
                     command.trxreg.rrh, command.trxpos.dsax, command.trxpos.dsay);
         const bool recorded = namedtextures::peek(command.bitbltbuf.dbp, dbw, command.bitbltbuf.dpsm,
                                                   command.trxreg.rrw, command.trxreg.rrh);
-        if (!recorded && targets->ownsAny(pages)) {
+        if (targets->ownsAny(pages)) {
             ++stats.uploadsIntoTargets;
+            // A named upload over pages a target drew replaces them: the
+            // target gives them up, or every texture read there would be
+            // rebuilt from the target's stale pixels (~400 a frame on the
+            // walk). It goes on through local memory, as an upload no target
+            // holds, so a later use of the target finds its bytes there.
+            if (recorded)
+                targets->invalidate(pages);
             return false;
         }
         ++stats.uploadsBypassed;
