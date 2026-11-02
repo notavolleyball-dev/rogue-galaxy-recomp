@@ -955,8 +955,8 @@ triangle meshes in window coordinates (`build2D`: sprites as two triangles
 with the second vertex's Z and colour, flat shading from the provoking
 vertex, texel UVs normalised by the block's TEX0). The GS no longer
 assembles or kicks those vertices; it still keeps the register state, which
-is the backend's draw-state vocabulary. Refused (sent as packets): lines,
-points, fog, PRMODE attributes. Next: the state from the API too (the
+is the backend's draw-state vocabulary. Lines and points become thin quads. Refused (sent as packets):
+fog, PRMODE attributes. Next: the state from the API too (the
 `GsPkt` setters write into the builder at `+0x70`), so the block needs no
 GIF parsing at all. Builds; unverified on screen.
 

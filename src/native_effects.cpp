@@ -2245,9 +2245,9 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             }
             const uint16_t prim = e.prim;
             const uint32_t type = prim & 7u;
-            if (type <= 2u || type == 7u)
+            if (type == 7u)
             {
-                why = "points or lines";
+                why = "a reserved primitive type";
                 return false;
             }
             if ((prim & 0x20u) && e.f != 0xFFu)
@@ -2262,6 +2262,48 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             }
             switch (type)
             {
+            case 0u: // point: a pixel's square
+                if (e.drawing)
+                {
+                    rg::gif::GifEvent a = e, b = e;
+                    a.x = static_cast<uint16_t>(e.x & ~15u);
+                    a.y = static_cast<uint16_t>(e.y & ~15u);
+                    b.x = static_cast<uint16_t>(a.x + 16u);
+                    b.y = static_cast<uint16_t>(a.y + 16u);
+                    sprite(a, b, static_cast<uint16_t>(prim & ~0x08u), ok);
+                }
+                break;
+            case 1u: // line
+            case 2u: // line strip
+                queue.push_back(e);
+                if (queue.size() > 2u)
+                    queue.erase(queue.begin());
+                if (queue.size() == 2u && e.drawing)
+                {
+                    // Half a pixel either side of the centre line, as the
+                    // backend widens the GS's lines.
+                    const rg::gif::GifEvent &p0 = queue[0], &p1 = queue[1];
+                    const float dx = (static_cast<float>(p1.x) - p0.x) / 16.0f;
+                    const float dy = (static_cast<float>(p1.y) - p0.y) / 16.0f;
+                    const float length = std::sqrt(dx * dx + dy * dy);
+                    const float nx = length > 1e-6f ? -dy / length * 0.5f : 0.5f;
+                    const float ny = length > 1e-6f ? dx / length * 0.5f : 0.0f;
+                    openMesh(prim);
+                    GSNativeMesh::Vertex v[4] = {vertexOf(p0, p1, prim, ok), vertexOf(p0, p1, prim, ok),
+                                                 vertexOf(p1, p1, prim, ok), vertexOf(p1, p1, prim, ok)};
+                    v[0].x += nx; v[0].y += ny;
+                    v[1].x -= nx; v[1].y -= ny;
+                    v[2].x -= nx; v[2].y -= ny;
+                    v[3].x += nx; v[3].y += ny;
+                    mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v[0], v[1], v[2], v[0], v[2], v[3]});
+                    if (type == 1u)
+                        queue.clear();
+                }
+                else if (type == 1u && queue.size() == 2u)
+                {
+                    queue.clear();
+                }
+                break;
             case 6u: // sprite
                 queue.push_back(e);
                 if (queue.size() == 2u)
