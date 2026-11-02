@@ -7,6 +7,7 @@
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 
+#include <map>
 #include <algorithm>
 #include <set>
 #include <array>
@@ -1736,12 +1737,17 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
 void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
     if (m_named.empty() || (m_namedBlocks & blocks).none())
         return;
+    bool erased = false;
     for (auto it = m_named.begin(); it != m_named.end();) {
-        if (it->first != keep && (it->second.blocks & blocks).any())
+        if (it->first != keep && (it->second.blocks & blocks).any()) {
             it = m_named.erase(it);
-        else
+            erased = true;
+        } else {
             ++it;
+        }
     }
+    if (!erased)
+        return;
     m_namedBlocks.reset();
     for (const auto &[base, image] : m_named) {
         (void)base;
@@ -1901,23 +1907,48 @@ void GsTextureCache::finishNamedUpload() {
         // 8-bit art sent as CT32 at half the size: its bytes are the T8
         // page layout's, read as CT32 words. Each T8 texel's byte is found
         // through the two layouts, once, so the image is kept linear.
+        // The game sends the same few shapes every frame: each shape's map
+        // (per T8 texel, its byte in the upload) is made once and kept.
         const uint32_t w32 = u.width, h32 = u.height, w8 = u.textureWidth, h8 = u.textureHeight;
         const uint32_t tbw32 = std::max<uint32_t>(u.dbw, 1u), tbw8 = std::max<uint32_t>(u.textureBufferWidth, 1u);
-        std::unordered_map<uint32_t, uint32_t> pixelOfWord;
-        pixelOfWord.reserve(static_cast<size_t>(w32) * h32);
-        for (uint32_t y = 0u; y < h32; ++y)
-            for (uint32_t x = 0u; x < w32; ++x)
-                pixelOfWord.emplace(GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u, y * w32 + x);
-        std::vector<uint8_t> linear(static_cast<size_t>(w8) * h8, 0u);
-        for (uint32_t y = 0u; y < h8; ++y) {
-            for (uint32_t x = 0u; x < w8; ++x) {
-                const uint32_t address = GSPSMT8::addrPSMT8(0u, tbw8, x, y);
-                const auto found = pixelOfWord.find(address >> 2u);
-                if (found == pixelOfWord.end())
-                    return; // not this layout after all: leave it unnamed
-                linear[static_cast<size_t>(y) * w8 + x] = image.bytes[static_cast<size_t>(found->second) * 4u + (address & 3u)];
+        const std::array<uint32_t, 6> shape = {w32, h32, tbw32, w8, h8, tbw8};
+        static thread_local std::map<std::array<uint32_t, 6>, std::vector<uint32_t>> maps;
+        auto known = maps.find(shape);
+        if (known == maps.end()) {
+            if (maps.size() >= 256u)
+                maps.clear();
+            // Word address to upload pixel, as a flat table over the
+            // upload's own words; then each T8 texel's byte through it. An
+            // empty map: not this layout after all.
+            uint32_t maxWord = 0u;
+            for (uint32_t y = 0u; y < h32; ++y)
+                for (uint32_t x = 0u; x < w32; ++x)
+                    maxWord = std::max(maxWord, GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u);
+            std::vector<uint32_t> pixelOfWord(static_cast<size_t>(maxWord) + 1u, ~0u);
+            for (uint32_t y = 0u; y < h32; ++y)
+                for (uint32_t x = 0u; x < w32; ++x)
+                    pixelOfWord[GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u] = y * w32 + x;
+            std::vector<uint32_t> byteOf(static_cast<size_t>(w8) * h8);
+            for (uint32_t y = 0u; y < h8 && !byteOf.empty(); ++y) {
+                for (uint32_t x = 0u; x < w8; ++x) {
+                    const uint32_t address = GSPSMT8::addrPSMT8(0u, tbw8, x, y);
+                    const uint32_t word = address >> 2u;
+                    if (word >= pixelOfWord.size() || pixelOfWord[word] == ~0u) {
+                        byteOf.clear();
+                        break;
+                    }
+                    byteOf[static_cast<size_t>(y) * w8 + x] = pixelOfWord[word] * 4u + (address & 3u);
+                }
             }
+            known = maps.emplace(shape, std::move(byteOf)).first;
         }
+        const std::vector<uint32_t> &byteOf = known->second;
+        if (byteOf.empty())
+            return; // not this layout after all: leave it unnamed
+        std::vector<uint8_t> linear(byteOf.size());
+        const uint8_t *from = image.bytes.data();
+        for (size_t i = 0; i < byteOf.size(); ++i)
+            linear[i] = from[byteOf[i]];
         image.bytes = std::move(linear);
     }
     m_namedBlocks |= image.blocks;
