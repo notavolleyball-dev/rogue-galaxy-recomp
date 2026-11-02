@@ -877,9 +877,34 @@ public:
             }
             else
             {
-                for (const auto &packet : m_nativePackets)
+                // RG_NATIVE_VU1_MESHES: the programs with no mesh of their own
+                // (outlines, shadow volumes, particles, the overlay, the
+                // object set-up) have their native packets' primitives drawn
+                // as meshes too, as the GsPkt blocks are (build2D): only the
+                // register state goes on to the GS.
+                static const bool asMeshes = [] {
+                    const char *value = std::getenv("RG_NATIVE_VU1_MESHES");
+                    return value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
+                }();
+                thread_local std::vector<rg::nativefx::Piece2D> pieces;
+                std::string refused;
+                if (asMeshes && nativeMode() == rg::vu1native::Mode::Gpu && !rg::vu1native::hasMesh(*native) &&
+                    rg::nativefx::build2D(m_nativePackets, pieces, refused))
                 {
-                    deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                    for (const rg::nativefx::Piece2D &piece : pieces)
+                    {
+                        if (!piece.packet.empty())
+                            deliverPacket(m_runtime.gs(), piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                        else
+                            deliverMesh(m_runtime.gs(), piece.mesh);
+                    }
+                }
+                else
+                {
+                    for (const auto &packet : m_nativePackets)
+                    {
+                        deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                    }
                 }
                 if (nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
                 {

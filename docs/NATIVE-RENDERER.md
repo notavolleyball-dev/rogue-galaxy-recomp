@@ -53,7 +53,10 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    field), no feedback copies; the GPU-time labels put most of the rest on
    GS-path draws, among them the shadow volumes' 230 or so blends into
    `02a00` a frame (item 2).
-2. **Native draws for the VU1 programs still on packets:** outlines (about
+2. **Native draws for the VU1 programs still on packets** (2026-11-02:
+   their native packets now go through `build2D`, `RG_NATIVE_VU1_MESHES`:
+   the primitives as meshes, the register state as packets; fogged chunks
+   stay packets; builds, unverified on screen): outlines (about
    17% of the field's vertices), shadow volumes (5%), particles, the
    projected texture, the object set-up. They are computed natively but
    still kick GS packets.

@@ -2137,6 +2137,7 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         v.x = static_cast<float>(e.x) / 16.0f;
         v.y = static_cast<float>(e.y) / 16.0f;
         v.z = static_cast<float>(e.z);
+        v.depth = v.z; // the Z as the packet has it
         const rg::gif::GifEvent &c = (prim & 0x08u) ? e : provoking; // IIP
         v.r = c.rgba[0];
         v.g = c.rgba[1];
