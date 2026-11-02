@@ -963,6 +963,18 @@ fog, PRMODE attributes. Next: the state from the API too (the
 `GsPkt` setters write into the builder at `+0x70`), so the block needs no
 GIF parsing at all. Builds; unverified on screen.
 
+**The effects through the GsPkt blocks (2026-11-02):** the sword trails,
+the sun light, the battle bursts, the effect nodes, the fades, the lens
+flare, the animated textures and the movie's frame all draw between
+`DrawListBeginPrim` and `DrawListEndPrim` (RGDecomp), so `RG_NATIVE_2D`
+takes their primitives. The lens flare's occlusion read no longer goes to
+the GS at all (`RG_NATIVE_DEPTH_READS`: `sceGsExecStoreImage` and the
+`sceGsSyncPath` after it answered from the depth probe). Still GS-shaped:
+`TexAnimeTableApply`'s `DrawListAddVramCopyFixed` (a local-to-local copy,
+done on the GPU), the fade's frame capture (`ScreenFadeBlockCaptureFrame`:
+a `GsDownloadImage` of the frame, a readback), and the menu's screen capture
+(`MenuCaptureScreenTex`). Builds; unverified on screen.
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small

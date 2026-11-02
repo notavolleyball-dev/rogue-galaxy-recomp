@@ -11,6 +11,7 @@
 
 #include "gfx/gs/gs_named_targets.h"
 #include "gfx/gs/gs_named_textures.h"
+#include "gfx/gs/gs_depth_probe.h"
 #include "gif_events.h"
 #include "native_renderer.h"
 #include "ps2_runtime.h"
@@ -569,6 +570,17 @@ bool g_shadowMap = false;
 bool g_descTargets = false;
 bool g_namedTextures = false;
 bool g_prim2D = false;
+bool g_depthReads = false;
+// libgraph's store-image pair and path sync (RGDecomp config/main.symbols.txt).
+constexpr uint32_t kSceGsSetDefStoreImage = 0x00109348u;
+constexpr uint32_t kSceGsExecStoreImage = 0x00109488u;
+constexpr uint32_t kSceGsSyncPath = 0x00109030u;
+PS2Runtime::RecompiledFunction g_setDefStoreImageOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_execStoreImageOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_syncPathOriginal = nullptr;
+void setDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+void syncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 // DrawListBeginPrim_141b00 / DrawListEndPrim_141a20: the GsPkt API's blocks.
 constexpr uint32_t kDrawListBeginPrim = 0x00141B00u;
 constexpr uint32_t kDrawListEndPrim = 0x00141A20u;
@@ -1223,9 +1235,10 @@ bool enabled()
         g_descTargets = flag("RG_NATIVE_DESC_TARGETS", native);
         g_namedTextures = flag("RG_NATIVE_NAMED_TEXTURES", native);
         g_prim2D = flag("RG_NATIVE_2D", native);
+        g_depthReads = flag("RG_NATIVE_DEPTH_READS", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_namedTextures || g_prim2D || g_probe;
+               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_namedTextures || g_prim2D || g_depthReads || g_probe;
     }();
     return on;
 }
@@ -1306,6 +1319,14 @@ void install(PS2Runtime &runtime)
     {
         g_prim2D = false;
         std::fprintf(stderr, "[nativefx] 2D stays GS packets\n");
+    }
+    if (g_depthReads &&
+        (!rg::timing::hookFunction(runtime, kSceGsSetDefStoreImage, &setDefStoreImage, g_setDefStoreImageOriginal) ||
+         !rg::timing::hookFunction(runtime, kSceGsExecStoreImage, &execStoreImage, g_execStoreImageOriginal) ||
+         !rg::timing::hookFunction(runtime, kSceGsSyncPath, &syncPath, g_syncPathOriginal)))
+    {
+        g_depthReads = false;
+        std::fprintf(stderr, "[nativefx] depth reads stay GS transfers\n");
     }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
@@ -1450,6 +1471,70 @@ void afterEndPrim(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 void drawListEndPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     rg::hooks::callThen(g_endPrimOriginal, rdram, ctx, runtime, &afterEndPrim, 0u);
+}
+
+// The lens flare's occlusion test (GfxEndFrame_141c20) reads an 8x8 block
+// of Z around each of its four slots: sceGsSetDefStoreImage(si, sbp, sbw,
+// PSMZ32, x - 4, y - 4, 8, 8), sceGsExecStoreImage(si, buf), then
+// sceGsSyncPath(0, 0), and keeps the block's least Z. With
+// RG_NATIVE_DEPTH_READS the read is served from the GPU's depth (the depth
+// probe, a frame or two old) straight into buf: no GS transfer and no path
+// sync. A read the probe does not serve goes to the GS as before.
+struct StoreImageCall
+{
+    uint32_t si = 0u;
+    dq8::gfx::depthprobe::Request request;
+};
+StoreImageCall t_storeImage; // game thread
+bool t_skipSync = false;
+
+void setDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    t_storeImage.si = getRegU32(ctx, 4);
+    dq8::gfx::depthprobe::Request &r = t_storeImage.request;
+    r.base = getRegU32(ctx, 5) & 0x3FFFu;
+    r.bufferWidth = std::max<uint32_t>(getRegU32(ctx, 6) & 0x3Fu, 1u);
+    r.psm = getRegU32(ctx, 7) & 0x3Fu;
+    r.x = getRegU32(ctx, 8) & 0x7FFu;
+    r.y = getRegU32(ctx, 9) & 0x7FFu;
+    r.width = getRegU32(ctx, 10) & 0xFFFFu;
+    r.height = getRegU32(ctx, 11) & 0xFFFFu;
+    g_setDefStoreImageOriginal(rdram, ctx, runtime);
+}
+
+void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    namespace probe = dq8::gfx::depthprobe;
+    const uint32_t si = getRegU32(ctx, 4);
+    const uint32_t buffer = getRegU32(ctx, 5);
+    const uint32_t psm = t_storeImage.request.psm;
+    const bool depth = psm == 0x30u || psm == 0x31u || psm == 0x32u || psm == 0x3Au;
+    thread_local std::vector<uint8_t> bytes;
+    if (g_rdram && si == t_storeImage.si && depth && probe::served() &&
+        probe::read(t_storeImage.request, bytes) && !bytes.empty())
+    {
+        std::memcpy(g_rdram + physical(buffer), bytes.data(), bytes.size());
+        t_storeImage.si = 0u;
+        t_skipSync = true;
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    t_storeImage.si = 0u;
+    g_execStoreImageOriginal(rdram, ctx, runtime);
+}
+
+void syncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (t_skipSync)
+    {
+        // The read it waits for never went to the GS.
+        t_skipSync = false;
+        setReturnS32(ctx, 0);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    g_syncPathOriginal(rdram, ctx, runtime);
 }
 
 template <typename T> T readAt(uint32_t address)
