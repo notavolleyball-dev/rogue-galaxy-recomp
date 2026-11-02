@@ -4,6 +4,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt8.h"
 
 #include <algorithm>
 #include <set>
@@ -250,6 +251,7 @@ void GsTextureCache::reset() {
 }
 
 void GsTextureCache::noteUpload(const GSTransferCommand &command) {
+    beginNamedUpload(command);
     if (!m_tracking)
         return;
     UploadRecord record;
@@ -281,6 +283,12 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
 }
 
 void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
+    if (m_namedOpen && data && sizeBytes) {
+        const size_t room = m_namedExpected - m_namedPending.bytes.size();
+        m_namedPending.bytes.insert(m_namedPending.bytes.end(), data, data + std::min<size_t>(room, sizeBytes));
+        if (m_namedPending.bytes.size() >= m_namedExpected)
+            finishNamedUpload();
+    }
     if (m_tracking && m_shadowTransfer && !m_uploadCopied)
         m_shadowTransfer->upload(data, sizeBytes);
 }
@@ -429,6 +437,13 @@ std::string GsTextureCache::auditReport() const {
 }
 
 void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource source) {
+    // A copy into a named image's blocks makes it something else (uploads
+    // and draws drop names at their own extent).
+    if (!m_named.empty() && source != InvalidationSource::HostWrite && source != InvalidationSource::Draw) {
+        GsBlockSet blocks;
+        gsBlocksOfPages(blocks, pages);
+        dropNamed(blocks);
+    }
     if (m_tracking)
         auditStamp(pages, source);
     // Draws mostly land in pages no texture reads; the walk below, over up
@@ -493,6 +508,11 @@ GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
 }
 
 void GsTextureCache::noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32_t psm, const GsRegion &region) {
+    if (!m_named.empty() && !region.empty()) {
+        GsBlockSet drawn;
+        gsMarkBlocks(drawn, base, std::max<uint32_t>(bufferWidth, 1u), psm, region.x1, region.y1);
+        dropNamed(drawn);
+    }
     if (!m_tracking || region.empty())
         return;
     DrawMemo &memo = m_drawMemo[base];
@@ -570,6 +590,9 @@ GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
 
 GsTextureIdentity GsTextureCache::regionIdentity(const GSDrawState &state, const GsRegion &region) {
     const GsTextureKey key = keyFor(state);
+    const bool identityRead = m_identityRead;
+    m_identityRead = true;
+    struct Restore { bool &flag; bool value; ~Restore() { flag = value; } } restore{m_identityRead, identityRead};
     SourceScope scope(*this, key);
     GsTextureIdentity identity;
     identity.texels = expand(key, region, true);
@@ -597,7 +620,10 @@ SDL_GPUTexture *GsTextureCache::replacement(const GSDrawState &state, const GsRe
     }
     if (!m_lastPaletteWanted)
         return nullptr;
+    const bool identityRead = m_identityRead;
+    m_identityRead = true;
     const uint64_t texels = expand(key, region, true);
+    m_identityRead = identityRead;
     uint64_t id = kHashSeed;
     for (const uint64_t value : {texels, clut, uint64_t(region.width()) << 32u | region.height(),
                                  uint64_t(wantedScale) << 3u | (shadow ? 4u : 0u) | (border ? 2u : 0u) |
@@ -791,6 +817,11 @@ void GsTextureCache::buildPalette(const GsTextureKey &key) {
 }
 
 uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly) {
+    if (!m_identityRead && !m_named.empty()) {
+        uint64_t namedHash = 0u;
+        if (expandNamed(key, region, hashOnly, namedHash))
+            return namedHash;
+    }
     const TexaState texa = unpackTexa(key.texa);
     const uint32_t clutWidth = std::max<uint32_t>(key.texclut & 0xffu, 1u);
     const uint32_t clutOriginU = (key.texclut >> 8u) & 0xffu;
@@ -1618,6 +1649,199 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
 
     ++m_stats.builds;
     m_stats.texelsExpanded += static_cast<uint64_t>(width) * height;
+    return true;
+}
+
+
+// --- Textures by name (Rogue Galaxy: added) --------------------------------
+
+void GsTextureCache::dropNamed(const GsBlockSet &blocks) {
+    if (m_named.empty() || (m_namedBlocks & blocks).none())
+        return;
+    for (auto it = m_named.begin(); it != m_named.end();) {
+        if ((it->second.blocks & blocks).any())
+            it = m_named.erase(it);
+        else
+            ++it;
+    }
+    m_namedBlocks.reset();
+    for (const auto &[base, image] : m_named) {
+        (void)base;
+        m_namedBlocks |= image.blocks;
+    }
+}
+
+void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
+    if (m_namedOpen)
+        finishNamedUpload(); // a short one: dropped there
+    const uint32_t dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
+    const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
+    // Whatever this transfer writes is no longer the image named there.
+    if (!m_named.empty()) {
+        GsBlockSet written;
+        gsMarkBlocks(written, command.bitbltbuf.dbp, dbw, dpsm, command.trxpos.dsax + command.trxreg.rrw,
+                     command.trxpos.dsay + command.trxreg.rrh);
+        dropNamed(written);
+    }
+    static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
+    if (off || command.direction != 0u || command.trxpos.dsax != 0u || command.trxpos.dsay != 0u ||
+        !namedtextures::active())
+        return;
+    namedtextures::Upload upload;
+    if (!namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, command.trxreg.rrw, command.trxreg.rrh, upload))
+        return;
+    uint32_t bits = 0u;
+    switch (dpsm) {
+    case GS_PSM_CT32: bits = 32u; break;
+    case GS_PSM_CT24: bits = 24u; break;
+    case GS_PSM_CT16: case GS_PSM_CT16S: bits = 16u; break;
+    case GS_PSM_T8: case GS_PSM_T8H: bits = 8u; break;
+    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH: bits = 4u; break;
+    default: return;
+    }
+    m_namedPending = {};
+    m_namedPending.upload = upload;
+    m_namedExpected = (static_cast<size_t>(upload.width) * upload.height * bits + 7u) / 8u;
+    if (m_namedExpected == 0u)
+        return;
+    m_namedPending.bytes.reserve(m_namedExpected);
+    gsMarkBlocks(m_namedPending.blocks, upload.dbp, dbw, dpsm, upload.width, upload.height);
+    m_namedOpen = true;
+}
+
+void GsTextureCache::finishNamedUpload() {
+    m_namedOpen = false;
+    NamedImage image = std::move(m_namedPending);
+    m_namedPending = {};
+    if (image.bytes.size() < m_namedExpected)
+        return;
+    const namedtextures::Upload &u = image.upload;
+    if (u.preSwizzled) {
+        // 8-bit art sent as CT32 at half the size: its bytes are the T8
+        // page layout's, read as CT32 words. Each T8 texel's byte is found
+        // through the two layouts, once, so the image is kept linear.
+        const uint32_t w32 = u.width, h32 = u.height, w8 = u.textureWidth, h8 = u.textureHeight;
+        const uint32_t tbw32 = std::max<uint32_t>(u.dbw, 1u), tbw8 = std::max<uint32_t>(u.textureBufferWidth, 1u);
+        std::unordered_map<uint32_t, uint32_t> pixelOfWord;
+        pixelOfWord.reserve(static_cast<size_t>(w32) * h32);
+        for (uint32_t y = 0u; y < h32; ++y)
+            for (uint32_t x = 0u; x < w32; ++x)
+                pixelOfWord.emplace(GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u, y * w32 + x);
+        std::vector<uint8_t> linear(static_cast<size_t>(w8) * h8, 0u);
+        for (uint32_t y = 0u; y < h8; ++y) {
+            for (uint32_t x = 0u; x < w8; ++x) {
+                const uint32_t address = GSPSMT8::addrPSMT8(0u, tbw8, x, y);
+                const auto found = pixelOfWord.find(address >> 2u);
+                if (found == pixelOfWord.end())
+                    return; // not this layout after all: leave it unnamed
+                linear[static_cast<size_t>(y) * w8 + x] = image.bytes[static_cast<size_t>(found->second) * 4u + (address & 3u)];
+            }
+        }
+        image.bytes = std::move(linear);
+    }
+    m_namedBlocks |= image.blocks;
+    m_named[u.dbp] = std::move(image);
+}
+
+bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
+    const auto found = m_named.find(key.tbp0);
+    if (found == m_named.end())
+        return false;
+    const NamedImage &image = found->second;
+    const namedtextures::Upload &u = image.upload;
+    const uint32_t psm = key.psm & 0x3fu;
+    if (u.palette || (u.psm & 0x3fu) != psm || std::max<uint32_t>(key.tbw, 1u) != std::max<uint32_t>(u.textureBufferWidth, 1u))
+        return false;
+    const uint32_t w = u.textureWidth, h = u.textureHeight;
+    const auto pow2 = [](uint32_t v) { uint32_t p = 1u; while (p < v) p <<= 1u; return p; };
+    if (key.width > pow2(w) || key.height > pow2(h))
+        return false;
+
+    const bool indexed = gsIsIndexedPsm(key.psm);
+    const bool fourBit = psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+    const TexaState texa = unpackTexa(key.texa);
+    std::array<uint32_t, 256> palette{};
+    const NamedImage *clut = nullptr;
+    if (indexed) {
+        if (key.csm != 0u)
+            return false;
+        const auto clutFound = m_named.find(key.cbp);
+        if (clutFound == m_named.end() || !clutFound->second.upload.palette ||
+            (clutFound->second.upload.dpsm & 0x3fu) != (key.cpsm & 0x3fu))
+            return false;
+        clut = &clutFound->second;
+        const uint32_t cpsm = key.cpsm & 0x3fu;
+        const bool sixteen = cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S;
+        if (!sixteen && cpsm != GS_PSM_CT32)
+            return false;
+        const uint32_t cw = clut->upload.width, ch = clut->upload.height;
+        for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u); ++raw) {
+            const uint32_t index = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
+            const uint32_t cx = index & 0x0fu, cy = index >> 4u;
+            if (cx >= cw || cy >= ch)
+                return false;
+            const size_t at = static_cast<size_t>(cy) * cw + cx;
+            uint32_t value = 0u;
+            if (sixteen) {
+                value = static_cast<uint32_t>(clut->bytes[at * 2u]) | (static_cast<uint32_t>(clut->bytes[at * 2u + 1u]) << 8u);
+                palette[raw] = applyTexa(texa, key.cpsm, rgba5551To8888(value));
+            } else {
+                std::memcpy(&value, clut->bytes.data() + at * 4u, 4u);
+                palette[raw] = applyTexa(texa, key.cpsm, value);
+            }
+        }
+    }
+
+    const uint32_t regionWidth = region.width();
+    if (!hashOnly)
+        m_staging.assign(static_cast<size_t>(regionWidth) * region.height() * 4u, 0u);
+    uint64_t texelHash = hashStep(hashStep(hashStep(kHashSeed ^ 0x6e616d6564ull, key.width), key.height), key.psm);
+    texelHash = hashStep(texelHash, u.node);
+    for (uint32_t y = region.y0; y < region.y1; ++y) {
+        uint8_t *row = hashOnly ? nullptr : m_staging.data() + static_cast<size_t>(y - region.y0) * regionWidth * 4u;
+        for (uint32_t x = region.x0; x < region.x1; ++x) {
+            uint32_t color = 0u;
+            uint32_t raw = 0u;
+            if (x < w && y < h) {
+                const size_t i = static_cast<size_t>(y) * w + x;
+                switch (psm) {
+                case GS_PSM_CT32:
+                    std::memcpy(&raw, image.bytes.data() + i * 4u, 4u);
+                    color = raw;
+                    break;
+                case GS_PSM_CT24:
+                    raw = image.bytes[i * 3u] | (image.bytes[i * 3u + 1u] << 8u) | (image.bytes[i * 3u + 2u] << 16u);
+                    color = applyTexa(texa, key.psm, raw);
+                    break;
+                case GS_PSM_CT16:
+                case GS_PSM_CT16S:
+                    raw = image.bytes[i * 2u] | (image.bytes[i * 2u + 1u] << 8u);
+                    color = applyTexa(texa, key.psm, rgba5551To8888(raw));
+                    break;
+                case GS_PSM_T8:
+                case GS_PSM_T8H:
+                    raw = image.bytes[i];
+                    color = palette[raw];
+                    break;
+                case GS_PSM_T4:
+                case GS_PSM_T4HL:
+                case GS_PSM_T4HH:
+                    raw = (image.bytes[i >> 1u] >> ((i & 1u) * 4u)) & 0x0fu;
+                    color = palette[raw];
+                    break;
+                default:
+                    return false;
+                }
+            }
+            texelHash = hashStep(texelHash, raw);
+            if (row)
+                std::memcpy(row + (x - region.x0) * 4u, &color, 4u);
+        }
+    }
+    if (clut)
+        texelHash = hashStep(texelHash, clut->upload.node);
+    ++m_stats.namedExpands;
+    hash = texelHash;
     return true;
 }
 

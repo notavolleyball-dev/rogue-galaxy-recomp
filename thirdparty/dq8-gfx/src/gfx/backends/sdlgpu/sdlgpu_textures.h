@@ -11,6 +11,7 @@
 
 #include "gfx/backends/sdlgpu/sdlgpu_regions.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
+#include "gfx/gs/gs_named_textures.h"
 #include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
 
@@ -89,6 +90,7 @@ struct GsTextureCacheStats {
     // (DQ8_GFX_UPLOAD_STORE; Rogue Galaxy: added).
     uint64_t uploadStoreReads = 0u;
     uint64_t targetReadsSkipped = 0u;
+    uint64_t namedExpands = 0u; // textures expanded from a named upload (Rogue Galaxy: added)
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
     // Textures sourced from a region a render target owns. Correct, but the
@@ -355,6 +357,28 @@ private:
     // the region is the whole texture. `hashOnly` reads and hashes them the
     // same way and expands nothing (Rogue Galaxy: added).
     uint64_t expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly = false);
+    // Textures by name (Rogue Galaxy: added; gfx/gs/gs_named_textures.h):
+    // the bytes of each named upload, by its base, while no other write
+    // touched its blocks.
+    struct NamedImage {
+        namedtextures::Upload upload;
+        std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
+        GsBlockSet blocks;
+    };
+    void beginNamedUpload(const GSTransferCommand &command);
+    void finishNamedUpload();
+    void dropNamed(const GsBlockSet &blocks);
+    // Expands the region from a named image when one serves this key (and
+    // its palette, for an indexed one); false leaves m_staging untouched.
+    bool expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash);
+    std::unordered_map<uint32_t, NamedImage> m_named;
+    GsBlockSet m_namedBlocks;
+    bool m_namedOpen = false;
+    NamedImage m_namedPending;
+    size_t m_namedExpected = 0;
+    // Replacement packs are keyed by the GS path's hashes: their reads stay
+    // on it.
+    bool m_identityRead = false;
     bool uploadRegion(SDL_GPUTexture *texture, const GsRegion &region, std::string &error);
     // Transfer buffers come from a pool guarded by the device's submission
     // serials: the movie path uploads dozens of regions a frame, and creating

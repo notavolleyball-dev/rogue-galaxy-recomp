@@ -5,6 +5,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "gfx/backends/sdlgpu/sdlgpu_textures.h"
 #include "gfx/gs/gs_depth_probe.h"
+#include "gfx/gs/gs_named_textures.h"
 #include "gfx/gs/gs_state.h"
 #include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
@@ -5077,6 +5078,13 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(textures->stats().uploadStoreReads),
                          static_cast<unsigned long long>(textures->stats().localMemoryReads),
                          static_cast<unsigned long long>(textures->stats().targetReadsSkipped));
+        if (textures && textures->stats().namedExpands != 0u) {
+            const auto named = namedtextures::stats();
+            std::fprintf(stderr, "[named-textures] expands %llu, uploads named %llu of %llu queued (%llu dropped)\n",
+                         static_cast<unsigned long long>(textures->stats().namedExpands),
+                         static_cast<unsigned long long>(named.matched), static_cast<unsigned long long>(named.pushed),
+                         static_cast<unsigned long long>(named.dropped));
+        }
         if (transfer && transfer->repeatsEnabled()) {
             static GsTransferEngine::RepeatStats before{};
             const GsTransferEngine::RepeatStats &now = transfer->repeatStats();

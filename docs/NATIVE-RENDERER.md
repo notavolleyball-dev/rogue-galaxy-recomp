@@ -931,6 +931,20 @@ Push and pop (`DrawEnvPush_144830`/`Pop_144800`) are copies of the 0x190-byte
 environment on an 8-deep stack and need no hook: the target is always one a
 descriptor or the video mode set. Builds; unverified on screen.
 
+**Textures by name (2026-11-02, `RG_NATIVE_NAMED_TEXTURES`):** every
+upload of a name-table image is built by `TexBuildUploadPkt_158610`, which
+knows the node's real format and size, its palettes, and that 8-bit art with
+the node's flag set goes as CT32 at half size, pre-swizzled (the audit's
+`reinterpreted upload 00 as 13`). The hook queues one record per transfer in
+packet order; the texture cache takes the record matching each host-to-GS
+transfer (`gfx/gs/gs_named_textures.h`), keeps the bytes linear in the
+texture's own format, and expands textures and palettes (CSM1, CT32 or CT16)
+from them. A draw, copy or other upload over the blocks drops the name and
+the GS-layout path serves as before. Not yet: content-keyed sharing between
+names (the same art uploaded to two places decodes twice), the identity
+hashes replacement packs use, and the uploads the manager's own callback
+makes. Builds; unverified on screen.
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small

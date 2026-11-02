@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "gfx/gs/gs_named_targets.h"
+#include "gfx/gs/gs_named_textures.h"
 #include "gif_events.h"
 #include "native_renderer.h"
 #include "ps2_runtime.h"
@@ -566,6 +567,11 @@ bool g_colorFilter = false;
 bool g_focus = false;
 bool g_shadowMap = false;
 bool g_descTargets = false;
+bool g_namedTextures = false;
+// TexBuildUploadPkt_158610: every upload of a name table image.
+constexpr uint32_t kTexBuildUploadPkt = 0x00158610u;
+PS2Runtime::RecompiledFunction g_texBuildUploadOriginal = nullptr;
+void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 // DrawEnvSetFrameFromDesc_144fe0: the game's offscreen targets, by descriptor.
 constexpr uint32_t kSetFrameFromDesc = 0x00144FE0u;
 PS2Runtime::RecompiledFunction g_setFrameFromDescOriginal = nullptr;
@@ -1206,9 +1212,10 @@ bool enabled()
         g_focus = flag("RG_NATIVE_FOCUS", native);
         g_shadowMap = flag("RG_NATIVE_SHADOW_MAP", native);
         g_descTargets = flag("RG_NATIVE_DESC_TARGETS", native);
+        g_namedTextures = flag("RG_NATIVE_NAMED_TEXTURES", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_probe;
+               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_namedTextures || g_probe;
     }();
     return on;
 }
@@ -1276,6 +1283,12 @@ void install(PS2Runtime &runtime)
     {
         g_descTargets = false;
         std::fprintf(stderr, "[nativefx] render targets stay unnamed\n");
+    }
+    if (g_namedTextures &&
+        !rg::timing::hookFunction(runtime, kTexBuildUploadPkt, &texBuildUpload, g_texBuildUploadOriginal))
+    {
+        g_namedTextures = false;
+        std::fprintf(stderr, "[nativefx] textures stay unnamed\n");
     }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
@@ -1392,6 +1405,116 @@ void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         dq8::gfx::namedtargets::declare(target);
     }
     g_setFrameFromDescOriginal(rdram, ctx, runtime);
+}
+
+template <typename T> T readAt(uint32_t address)
+{
+    T value{};
+    std::memcpy(&value, g_rdram + physical(address), sizeof(T));
+    return value;
+}
+
+// TexBuildUploadPkt_158610(obj, dst, tex, mode) writes, at dst, the uploads
+// of one image node: its palettes (count of them, `stride` apart, to
+// `base + i*n` blocks; 16x16 for 8-bit, 8x2 for 4-bit), then each mip
+// level. 8-bit art with the node's flag (+0x36) set goes as CT32 at half
+// the width and height, pre-swizzled. Each transfer is queued, in the
+// order the packets hold them, for the backend to know it by name
+// (gfx/gs/gs_named_textures.h). The arithmetic is the function's own.
+void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    namespace named = dq8::gfx::namedtextures;
+    const uint32_t obj = getRegU32(ctx, 4);
+    const uint32_t dst = getRegU32(ctx, 5);
+    const uint32_t tex = getRegU32(ctx, 6);
+    const uint32_t mode = getRegU32(ctx, 7);
+    if (dst != 0u && tex != 0u && g_rdram)
+    {
+        const int32_t nodeBpp = readAt<int16_t>(tex + 6u);
+        int32_t w = readAt<int16_t>(tex + 2u);
+        int32_t h = readAt<int16_t>(tex + 4u);
+        const int16_t flag = readAt<int16_t>(tex + 0x36u);
+        const uint64_t tex0 = readAt<uint64_t>(tex + 0x38u);
+        const uint32_t count = readAt<uint8_t>(tex + 0x32u);
+        const uint32_t base = static_cast<uint16_t>(readAt<int16_t>(tex + 0x34u));
+        const uint32_t clut = readAt<uint32_t>(tex + 0x60u);
+        const uint32_t fn = readAt<uint32_t>(obj + 0x1F4u);
+        uint32_t tbp = static_cast<uint32_t>(tex0 & 0x3FFFu);
+        uint32_t tbw = static_cast<uint32_t>((tex0 >> 14) & 0x3Fu);
+        uint32_t psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
+        const uint32_t cpsm = static_cast<uint32_t>((tex0 >> 51) & 0xFu);
+        const uint32_t texturePsm = psm;
+        uint32_t textureTbw = tbw;
+        int32_t bpp = nodeBpp;
+        bool preSwizzled = false;
+        uint32_t n = 0u;
+        if (nodeBpp == 8)
+        {
+            if (flag != 0)
+            {
+                w >>= 1;
+                h >>= 1;
+                psm = 0u;
+                bpp = 32;
+                tbw >>= 1;
+                preSwizzled = true;
+            }
+            n = 4u;
+        }
+        else if (nodeBpp == 4)
+        {
+            n = 1u;
+        }
+        // The palettes, unless the node's manager uploads them through its
+        // own callback (a transfer of a shape not known here).
+        if (n > 0u && clut != 0u && !(fn != 0u && mode == 0u) && (nodeBpp == 8 || nodeBpp == 4))
+        {
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                named::Upload upload;
+                upload.dbp = (base + i * n) & 0x3FFFu;
+                upload.dbw = 1u;
+                upload.dpsm = cpsm;
+                upload.width = nodeBpp == 8 ? 16u : 8u;
+                upload.height = nodeBpp == 8 ? 16u : 2u;
+                upload.psm = cpsm;
+                upload.textureBufferWidth = 1u;
+                upload.textureWidth = upload.width;
+                upload.textureHeight = upload.height;
+                upload.palette = true;
+                upload.node = tex;
+                named::push(upload);
+            }
+        }
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            const uint32_t mip = readAt<uint32_t>(tex + 0x50u + i * 4u);
+            if (mip == 0u || w <= 0 || h <= 0)
+                break;
+            if (tbw == 0u)
+                tbw = 1u;
+            named::Upload upload;
+            upload.dbp = tbp & 0x3FFFu;
+            upload.dbw = tbw;
+            upload.dpsm = psm;
+            upload.width = static_cast<uint32_t>(w);
+            upload.height = static_cast<uint32_t>(h);
+            upload.psm = texturePsm;
+            upload.textureBufferWidth = preSwizzled ? std::max<uint32_t>(textureTbw, 1u) : tbw;
+            upload.textureWidth = preSwizzled ? upload.width * 2u : upload.width;
+            upload.textureHeight = preSwizzled ? upload.height * 2u : upload.height;
+            upload.preSwizzled = preSwizzled;
+            upload.node = tex + i;
+            named::push(upload);
+            const int32_t k = bpp * (w * h) / 256 / 8;
+            w >>= 1;
+            h >>= 1;
+            tbp += static_cast<uint16_t>(k);
+            tbw >>= 1;
+            textureTbw >>= 1;
+        }
+    }
+    g_texBuildUploadOriginal(rdram, ctx, runtime);
 }
 } // namespace
 
