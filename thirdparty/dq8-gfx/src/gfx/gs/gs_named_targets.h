@@ -14,12 +14,19 @@
 // Bases are in GS blocks (FBP * 32), the unit GsSurface::base uses.
 namespace dq8::gfx::namedtargets {
 
+enum class Kind : uint8_t {
+    Auto,    // by size: smaller than the screen is offscreen work
+    Frame,   // DrawEnvGetFrameTexDesc's: the frame the game draws
+    Display, // DrawEnvGetDispFbTexDesc's: the displayed buffer
+};
+
 struct Target {
     uint32_t base = 0;
     uint32_t bufferWidth = 0; // in 64-pixel units
     uint32_t width = 0;       // pixels
     uint32_t height = 0;      // pixels
     uint32_t psm = 0;
+    Kind kind = Kind::Auto;
 };
 
 // Any thread. Re-declaring the same target is cheap.
@@ -29,9 +36,10 @@ void declare(const Target &target);
 // fixed GS address ranges to what was declared.
 bool active();
 
-// A declared target at this base and format that is smaller than the screen
-// (the frame, the display buffer and the full-screen work buffers are
-// excluded: they keep what earlier passes left in them).
+// A declared target at this base and format that is the game's offscreen
+// work: any declared one but the frame and the display buffer, once those
+// are named (Kind::Frame, Kind::Display); until then, one smaller than the
+// screen. DQ8_GFX_KEEP_SCREEN_IMPORTS=1 keeps the size rule.
 bool offscreen(uint32_t base, uint32_t psm);
 
 // The declared target at this base, if any.

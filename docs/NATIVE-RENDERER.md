@@ -930,7 +930,7 @@ declares each to the backend (`gfx/gs/gs_named_targets.h`). Targets smaller
 than the screen are the game's cleared-before-use buffers and skip imports;
 the frame, the display buffer and the full-screen work buffer (`02a00`) are
 screen-sized and keep them. This replaces the fixed `0x2A20`-`0x2C40` range
-and covers the shadow map, the minimap and the mob preview the range missed.
+and covers the shadow map, the minimap and the mob preview the range missed. Since the same day the frame and the displayed buffer are named from the game's getters (`DrawEnvGetFrameTexDesc_144cc0`, `DrawEnvGetDispFbTexDesc_144a00`), and every other declared target skips imports, `02a00` too: on the native path the memory under it holds only host uploads, never what was drawn there (`DQ8_GFX_KEEP_SCREEN_IMPORTS=1` keeps the size rule).
 Push and pop (`DrawEnvPush_144830`/`Pop_144800`) are copies of the 0x190-byte
 environment on an 8-deep stack and need no hook: the target is always one a
 descriptor or the video mode set. Builds; unverified on screen.

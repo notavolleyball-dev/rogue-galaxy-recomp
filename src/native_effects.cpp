@@ -596,6 +596,14 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 constexpr uint32_t kSetFrameFromDesc = 0x00144FE0u;
 PS2Runtime::RecompiledFunction g_setFrameFromDescOriginal = nullptr;
 void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+// DrawEnvGetFrameTexDesc_144cc0 / DrawEnvGetDispFbTexDesc_144a00: the frame
+// and the displayed buffer, as texture descriptors.
+constexpr uint32_t kGetFrameTexDesc = 0x00144CC0u;
+constexpr uint32_t kGetDispFbTexDesc = 0x00144A00u;
+PS2Runtime::RecompiledFunction g_getFrameTexDescOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_getDispFbTexDescOriginal = nullptr;
+void getFrameTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+void getDispFbTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 // The flip's draw environment (below, with flipPacket).
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
 PS2Runtime::RecompiledFunction g_putDrawEnvOriginal = nullptr;
@@ -1302,7 +1310,9 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[nativefx] the flip's copy stays GS packets\n");
     }
     if (g_descTargets &&
-        !rg::timing::hookFunction(runtime, kSetFrameFromDesc, &setFrameFromDesc, g_setFrameFromDescOriginal))
+        (!rg::timing::hookFunction(runtime, kSetFrameFromDesc, &setFrameFromDesc, g_setFrameFromDescOriginal) ||
+         !rg::timing::hookFunction(runtime, kGetFrameTexDesc, &getFrameTexDesc, g_getFrameTexDescOriginal) ||
+         !rg::timing::hookFunction(runtime, kGetDispFbTexDesc, &getDispFbTexDesc, g_getDispFbTexDescOriginal)))
     {
         g_descTargets = false;
         std::fprintf(stderr, "[nativefx] render targets stay unnamed\n");
@@ -1535,6 +1545,47 @@ void syncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     g_syncPathOriginal(rdram, ctx, runtime);
+}
+
+// The descriptor a getter filled (its node: w at +2, h at +4, TEX0 at
+// +0x38), declared as the frame or the display buffer.
+void declareScreen(uint32_t node, dq8::gfx::namedtargets::Kind kind)
+{
+    if (node == 0u || !g_rdram)
+        return;
+    uint64_t tex0 = 0u;
+    int16_t width = 0, height = 0;
+    std::memcpy(&tex0, g_rdram + physical(node + 0x38u), sizeof(tex0));
+    std::memcpy(&width, g_rdram + physical(node + 2u), sizeof(width));
+    std::memcpy(&height, g_rdram + physical(node + 4u), sizeof(height));
+    dq8::gfx::namedtargets::Target target;
+    target.base = static_cast<uint32_t>(tex0 & 0x3FFFu) & ~31u;
+    target.bufferWidth = static_cast<uint32_t>((tex0 >> 14) & 0x3Fu);
+    target.width = width > 0 ? static_cast<uint32_t>(width) : target.bufferWidth * 64u;
+    target.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
+    target.psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
+    target.kind = kind;
+    dq8::gfx::namedtargets::declare(target);
+}
+
+void afterGetFrameTexDesc(uint8_t *, R5900Context *, PS2Runtime *, uint32_t node)
+{
+    declareScreen(node, dq8::gfx::namedtargets::Kind::Frame);
+}
+
+void afterGetDispFbTexDesc(uint8_t *, R5900Context *, PS2Runtime *, uint32_t node)
+{
+    declareScreen(node, dq8::gfx::namedtargets::Kind::Display);
+}
+
+void getFrameTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_getFrameTexDescOriginal, rdram, ctx, runtime, &afterGetFrameTexDesc, getRegU32(ctx, 5));
+}
+
+void getDispFbTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_getDispFbTexDescOriginal, rdram, ctx, runtime, &afterGetDispFbTexDesc, getRegU32(ctx, 5));
 }
 
 template <typename T> T readAt(uint32_t address)
