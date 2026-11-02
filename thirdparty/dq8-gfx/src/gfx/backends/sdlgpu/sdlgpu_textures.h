@@ -108,6 +108,8 @@ struct GsTextureCacheStats {
     uint64_t renderTargetSources = 0u;
     // Of those, 8-bit indexed ones built on the GPU from the target itself.
     uint64_t expandedFromTargets = 0u;
+    // Of those, built a page at a time from several targets (Rogue Galaxy: added).
+    uint64_t expandedFromSeveralTargets = 0u;
 
     double hitRate() const {
         return lookups == 0u ? 0.0

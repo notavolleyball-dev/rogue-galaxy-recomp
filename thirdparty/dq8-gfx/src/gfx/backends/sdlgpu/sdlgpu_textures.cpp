@@ -1253,6 +1253,36 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
         ++m_stats.targetReadsSkipped;
         target = nullptr;
     }
+    // Pages of several targets (Rogue Galaxy: added; the 512-wide read of
+    // 02ba0 over four): each page from the target that drew it, when every
+    // page has one (DQ8_GFX_NO_MULTI_TARGET_TEXTURES=1 reads them back).
+    std::vector<std::pair<GsSurface *, GsPageSet>> pieces;
+    static const bool multi = std::getenv("DQ8_GFX_NO_MULTI_TARGET_TEXTURES") == nullptr;
+    if (!target && multi && m_storeOn && blocksDrawn(key)) {
+        bool all = true;
+        gsForEachPage(texelPages, [&](uint32_t page) {
+            if (!all)
+                return;
+            GsPageSet one;
+            one.set(page);
+            GsSurface *owner = m_targets.nativeOwner(one, true);
+            if (!owner) {
+                all = false;
+                return;
+            }
+            auto it = std::find_if(pieces.begin(), pieces.end(), [&](const auto &p) { return p.first == owner; });
+            if (it == pieces.end())
+                it = pieces.insert(pieces.end(), {owner, GsPageSet{}});
+            it->second.set(page);
+        });
+        if (all && pieces.size() > 1u)
+            target = pieces.front().first;
+        else
+            pieces.clear();
+    }
+    for (size_t i = 1; i < pieces.size(); ++i)
+        if (!m_targets.refreshRegion(*pieces[i].first, m_targets.regionForPages(*pieces[i].first, pieces[i].second), error))
+            return false;
     if (!indexed && std::getenv("DQ8_GFX_DEBUG_DIRECT"))
         std::fprintf(stderr, "[direct] tbp %05x tbw %u %ux%u region %u,%u-%u,%u target %s\n", key.tbp0, key.tbw,
                      key.width, key.height, region.x0, region.y0, region.x1, region.y1, target ? "yes" : "no");
@@ -1343,11 +1373,44 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     else if (indexed)
         std::copy_n(m_clutRgba.begin(), std::min<size_t>(m_clutRgba.size(), palette.size()), palette.begin());
     entry.paletteFromTarget = paletteInTarget;
-    const bool done = indexed ? m_device.expandIndexed8(target->texture, palette.data(), entry.texture, key.width,
-                                                        key.height, rect, pages, error,
-                                                        paletteInTarget ? paletteTarget->texture : nullptr)
-                              : m_device.copyFromTarget(target->texture, entry.texture, key.width, key.height, rect,
-                                                        pages, preserve, error);
+    const auto expandFrom = [&](GsSurface &from, const SDL_Rect &area, SDL_GPUTexture *keep) {
+        std::array<uint32_t, 4> fromPages = pages;
+        fromPages[2] = from.base >> 5u;
+        fromPages[3] = from.bufferWidth | (std::max(from.scale, 1u) << 16u);
+        return indexed ? m_device.expandIndexed8(from.texture, palette.data(), entry.texture, key.width, key.height,
+                                                 area, fromPages, error,
+                                                 paletteInTarget ? paletteTarget->texture : nullptr)
+                       : m_device.copyFromTarget(from.texture, entry.texture, key.width, key.height, area, fromPages,
+                                                 keep, error);
+    };
+    bool done = true;
+    if (pieces.empty()) {
+        done = expandFrom(*target, rect, preserve);
+    } else {
+        // A pass a page, each from its own target; the first keeps what
+        // `preserve` held outside the region.
+        bool first = true;
+        for (const auto &[from, piecePages] : pieces) {
+            gsForEachPage(piecePages, [&](uint32_t page) {
+                if (!done)
+                    return;
+                GsPageSet one;
+                one.set(page);
+                GsRegion area = regionForPages(key, one);
+                area.x0 = std::max(area.x0, region.x0);
+                area.y0 = std::max(area.y0, region.y0);
+                area.x1 = std::min(area.x1, region.x1);
+                area.y1 = std::min(area.y1, region.y1);
+                if (area.empty())
+                    return;
+                const SDL_Rect pageRect{int(area.x0), int(area.y0), int(area.width()), int(area.height())};
+                done = expandFrom(*from, pageRect, first ? preserve : nullptr);
+                first = false;
+            });
+        }
+        if (done)
+            ++m_stats.expandedFromSeveralTargets;
+    }
     if (preserve) {
         // The copy was recorded; the old texture goes when it has run.
         SDL_ReleaseGPUTexture(m_device.handle(), preserve);
