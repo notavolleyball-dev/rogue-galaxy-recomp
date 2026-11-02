@@ -235,6 +235,10 @@ private:
         bool clutUploadPending = false;
         // Created as a colour target too, so it can be built on the GPU.
         bool renderable = false;
+        // Its palette was read on the GPU from the target holding it (Rogue
+        // Galaxy: added): a palette write re-expands it there, with no
+        // copy-out and no hash of local memory.
+        bool paletteFromTarget = false;
         // The invalidate() call that last visited this entry, so an entry
         // over several of a write's pages is visited once (Rogue Galaxy:
         // added).
@@ -315,6 +319,8 @@ private:
     // An 8-bit indexed texture whose texels a native CT32 target holds is
     // built on the GPU from that target rather than read back; `handled`
     // stays false when the texture is not one of those.
+    void targetPaletteCoordinates(const GsTextureKey &key, const GsSurface &target,
+                                  std::array<uint32_t, 256> &out) const;
     bool expandFromTarget(const GsTextureKey &key, Entry &entry, GsRegion region, bool &handled,
                           std::string &error);
     // Fills m_clutRgba with the texture's palette as final RGBA.

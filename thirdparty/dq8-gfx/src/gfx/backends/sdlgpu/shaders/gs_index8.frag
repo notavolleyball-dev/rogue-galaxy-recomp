@@ -25,8 +25,12 @@ uvec4 bytesAt(sampler2D source, ivec2 position) {
 
 void main() {
     uvec2 p = uvec2(gl_FragCoord.xy);
-    uint mode = params.pages.y >> 16u;
+    uint mode = (params.pages.y >> 16u) & 255u;
+    // Bit 24: the palette holds each entry's place in the target (x low 16
+    // bits, y high), not its colour (a CT32 CLUT inside the same target).
+    bool paletteInTarget = (params.pages.y & (1u << 24u)) != 0u;
     uint texturePagesPerRow = params.pages.y & 65535u;
+    uint scaleOf = max(params.pages.w >> 16u, 1u);
     // T8 pages are 128x64 texels, T4 128x128; the alpha formats are CT32
     // pages, 64x32, a texel to a pixel.
     uvec2 pageShift = mode == 0u ? uvec2(7u, 6u) : (mode == 1u ? uvec2(7u, 7u) : uvec2(6u, 5u));
@@ -50,5 +54,11 @@ void main() {
         uvec4 pixel = bytesAt(target, ivec2((origin + place.xy) * scale));
         index = pixel[place.z];
     }
-    outColor = texelFetch(palette, ivec2(index, 0), 0);
+    if (paletteInTarget) {
+        uvec4 at = bytesAt(palette, ivec2(index, 0));
+        uvec2 place = uvec2(at.x | (at.y << 8u), at.z | (at.w << 8u));
+        outColor = texelFetch(target, ivec2(place * scaleOf), 0);
+    } else {
+        outColor = texelFetch(palette, ivec2(index, 0), 0);
+    }
 }

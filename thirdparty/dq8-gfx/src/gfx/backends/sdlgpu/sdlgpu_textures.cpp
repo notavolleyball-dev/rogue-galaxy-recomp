@@ -3,6 +3,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "runtime/gs/ps2_gs_memory.h"
+#include "runtime/gs/ps2_gs_psmct32.h"
 
 #include <algorithm>
 #include <set>
@@ -714,7 +715,10 @@ SDL_GPUTexture *GsTextureCache::acquire(const GSDrawState &state, std::string &e
             entry.dirty.merge(regionForPages(key, entry.dirtyPages));
             entry.dirtyPages.reset();
         }
-        if (entry.clutDirty) {
+        if (entry.clutDirty && entry.paletteFromTarget) {
+            entry.clutDirty = false;
+            entry.dirty.merge(GsRegion{0u, 0u, key.width, key.height});
+        } else if (entry.clutDirty) {
             if (!resolveSource(key, {}, error)) return nullptr;
             refreshClut(key, entry);
         }
@@ -1139,6 +1143,40 @@ void GsTextureCache::markClutReads(const GsTextureKey &key, GsPageSet &pages) co
     }
 }
 
+// Where each palette entry of a CT32 CSM1 CLUT sits in the target that holds
+// it, as the GPU reads it: x in the low 16 bits, y in the high, in GS pixels
+// of the target (Rogue Galaxy: added; gs_index8.frag's palette-in-target
+// mode).
+void GsTextureCache::targetPaletteCoordinates(const GsTextureKey &key, const GsSurface &target,
+                                              std::array<uint32_t, 256> &out) const {
+    static const std::array<uint16_t, 2048> wordPixel = [] {
+        std::array<uint16_t, 2048> table{};
+        for (uint32_t y = 0u; y < 32u; ++y)
+            for (uint32_t x = 0u; x < 64u; ++x)
+                table[GSPSMCT32::addrPSMCT32(0u, 1u, x, y) >> 2u] = static_cast<uint16_t>(x | (y << 8u));
+        return table;
+    }();
+    const uint32_t clutWidth = std::max<uint32_t>(key.texclut & 0xffu, 1u);
+    const uint32_t clutOriginU = (key.texclut >> 8u) & 0xffu;
+    const uint32_t clutOriginV = (key.texclut >> 16u) & 0xffffu;
+    const uint32_t psm = key.psm & 0x3fu;
+    const bool fourBit = psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
+    const uint32_t targetPagesPerRow = std::max<uint32_t>(target.bufferWidth, 1u);
+    out.fill(0u);
+    for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u); ++raw) {
+        const uint32_t clutIndex = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
+        const uint32_t clutX = clutOriginU + (clutIndex & 0x0fu);
+        const uint32_t clutY = clutOriginV + (clutIndex >> 4u);
+        const uint32_t word = GSPSMCT32::addrPSMCT32(key.cbp, clutWidth, clutX, clutY) >> 2u;
+        const uint32_t page = (word >> 11u) & 511u;
+        const uint32_t relative = (page + 512u - ((target.base >> 5u) & 511u)) & 511u;
+        const uint16_t within = wordPixel[word & 2047u];
+        const uint32_t x = (relative % targetPagesPerRow) * 64u + (within & 0xffu);
+        const uint32_t y = (relative / targetPagesPerRow) * 32u + (within >> 8u);
+        out[raw] = (x & 0xffffu) | (y << 16u);
+    }
+}
+
 bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsRegion region,
                                       bool &handled, std::string &error) {
     handled = false;
@@ -1189,17 +1227,28 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     if (!target)
         return true;
 
-    // The palette is still read on the CPU; only the texels come from the
-    // target, so only their cells of it need be current (its other queued
-    // patches, the textures uploaded into its other pages, can wait: Rogue
-    // Galaxy, refreshRegion).
+    // The palette is read on the CPU, unless (Rogue Galaxy: added) it is a
+    // CT32 CSM1 palette inside the same target as the texels (the frame read
+    // as T8/T4 with its CLUT in the frame): then the shader fetches each
+    // entry from the target (DQ8_GFX_NO_TARGET_PALETTES=1 copies it out).
+    // Only the cells read need be current (the target's other queued
+    // patches, the textures uploaded into its other pages, can wait:
+    // refreshRegion).
     GsPageSet clutPages;
     if (indexed)
         markClutReads(key, clutPages);
-    if (!m_targets.copyOut(clutPages, error) ||
-        !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error))
+    static const bool targetPalettes = std::getenv("DQ8_GFX_NO_TARGET_PALETTES") == nullptr;
+    const bool paletteInTarget = indexed && targetPalettes && (key.cpsm & 0x3fu) == GS_PSM_CT32 &&
+                                 key.csm == 0u && clutPages.any() && (clutPages & ~target->pages).none() &&
+                                 m_targets.nativeOwner(clutPages, true) == target;
+    if (paletteInTarget) {
+        if (!m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages | clutPages), error))
+            return false;
+    } else if (!m_targets.copyOut(clutPages, error) ||
+               !m_targets.refreshRegion(*target, m_targets.regionForPages(*target, texelPages), error)) {
         return false;
-    if (indexed)
+    }
+    if (indexed && !paletteInTarget)
         buildPalette(key);
 
     SDL_GPUTexture *preserve = nullptr;
@@ -1239,12 +1288,17 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     const uint32_t texturePagesPerRow = !indexed ? key.tbw
                                         : mode < 2u ? std::max<uint32_t>(key.tbw >> 1u, 1u)
                                                     : std::max<uint32_t>(key.tbw, 1u);
-    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u, texturePagesPerRow | (indexed ? mode << 16u : 0u),
+    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u,
+                                        texturePagesPerRow | (indexed ? mode << 16u : 0u) |
+                                            (paletteInTarget ? 1u << 24u : 0u),
                                         target->base >> 5u,
                                         target->bufferWidth | (std::max(target->scale, 1u) << 16u)};
     std::array<uint32_t, 256> palette{};
-    if (indexed)
+    if (paletteInTarget)
+        targetPaletteCoordinates(key, *target, palette);
+    else if (indexed)
         std::copy_n(m_clutRgba.begin(), std::min<size_t>(m_clutRgba.size(), palette.size()), palette.begin());
+    entry.paletteFromTarget = paletteInTarget;
     const bool done = indexed ? m_device.expandIndexed8(target->texture, palette.data(), entry.texture, key.width,
                                                         key.height, rect, pages, error)
                               : m_device.copyFromTarget(target->texture, entry.texture, key.width, key.height, rect,
@@ -1452,7 +1506,7 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
         return false;
     if (expanded) {
         entry.identity = {};
-        entry.identity.clut = hashClutWindow(key);
+        entry.identity.clut = entry.paletteFromTarget ? 0u : hashClutWindow(key);
         ++m_stats.builds;
         return true;
     }
