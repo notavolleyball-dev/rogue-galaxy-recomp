@@ -975,6 +975,19 @@ done on the GPU), the fade's frame capture (`ScreenFadeBlockCaptureFrame`:
 a `GsDownloadImage` of the frame, a readback), and the menu's screen capture
 (`MenuCaptureScreenTex`). Builds; unverified on screen.
 
+**Where the GS still is (2026-11-02, after the run above):** the presenter
+shows the display frame the flip made (its own texture) and reads DISPFB only
+to know which; the movie's frames are named uploads drawn through a GsPkt
+block. What still goes through GS machinery: the register state of every
+draw (GSDrawState, the backend's vocabulary: kept), local-to-local copies
+(`DrawListAddVramCopyFixed`, on the GPU), the frame captures for the fade and
+the menu (readbacks of a GPU target, the pixels processed on the CPU), uploads
+the game does not name (the manager's callback, fonts), and the backend's
+local memory behind all of those. Phase 5 (deleting the GS path, page
+ownership, imports and the backend's local memory) waits for the pieces
+above to be checked on screen: until then they are each behind a switch with
+the GS path as the fallback.
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small
