@@ -766,9 +766,13 @@ struct Builder
                                     : 0u;
             op.flags |= ((tex0 >> 34) & 1u) ? GSNativeEffect::kTextureAlpha : 0u;
         }
+        // The GS blends the colour alone and writes As as the alpha: with
+        // the colour masked (FBMSK 0x00FFFFFF) a blend changes nothing, so
+        // such a sprite is drawn as the unblended alpha write it is (a
+        // weapon effect's tail, 2026-11-01, refused every frame otherwise).
         if (abe)
         {
-            op.flags |= GSNativeEffect::kBlend;
+            op.flags |= (op.flags & GSNativeEffect::kKeepColor) ? 0u : GSNativeEffect::kBlend;
             op.alpha = r.value[kAlpha + ctxt];
         }
         // COLCLAMP is 1 unless the game says otherwise; it never does here.
@@ -923,7 +927,9 @@ struct Builder
 
     static bool readsDestination(const GSNativeEffect::Op &op)
     {
-        if (!(op.flags & GSNativeEffect::kBlend))
+        // An alpha-only sprite keeps its ALPHA though it is not blended:
+        // whether it names Cd is judged as before.
+        if (!(op.flags & (GSNativeEffect::kBlend | GSNativeEffect::kKeepColor)))
             return false;
         const uint32_t a = op.alpha & 3u, b = (op.alpha >> 2) & 3u, c = (op.alpha >> 4) & 3u,
                        d = (op.alpha >> 6) & 3u;
@@ -1009,8 +1015,6 @@ struct Builder
             return "a sprite into a GS target from itself";
         if ((op.test & 1u) && (!tail || ((op.test >> 12) & 3u) != 0u))
             return "a sprite into a GS target with the alpha test";
-        if ((op.flags & GSNativeEffect::kKeepColor) && (op.flags & GSNativeEffect::kBlend))
-            return "a blended sprite into a GS target's alpha alone";
         if (!(op.flags & GSNativeEffect::kBlend))
             return nullptr;
         // (A - B) C + D with D = Cd and C not Ad: A = Cs and B = 0 (an

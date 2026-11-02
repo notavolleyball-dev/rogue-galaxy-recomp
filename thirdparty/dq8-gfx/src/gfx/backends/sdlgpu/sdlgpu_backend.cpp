@@ -2430,6 +2430,14 @@ struct SdlGpuBackend::Impl {
                     if (draw.blend == Blend::Write || ((op.alpha >> 6u) & 3u) != 1u)
                         return setError("object layers: a blend into a GS target it cannot draw");
                 }
+                // FBMSK 0x00FFFFFF: the alpha written alone (the builder never
+                // blends such a sprite: the GS's blend is of the colour).
+                if (op.flags & GSNativeEffect::kKeepColor) {
+                    if (op.flags & GSNativeEffect::kBlend)
+                        return setError("object layers: a blend into a GS target's alpha alone");
+                    draw.blend = Blend::AlphaOnly;
+                    draw.uniforms.control[0] |= 8192u;
+                }
                 const auto first = [](float edge, uint32_t bound) {
                     return std::max(uint32_t(std::max(std::ceil(edge), 0.0f)), bound);
                 };
