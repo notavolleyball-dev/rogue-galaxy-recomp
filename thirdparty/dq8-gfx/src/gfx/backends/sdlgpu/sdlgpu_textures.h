@@ -82,6 +82,8 @@ struct GsTextureCacheStats {
     // already held, so nothing was expanded or uploaded (Rogue Galaxy:
     // added).
     uint64_t unchangedUpdates = 0u;
+    // Of those, the ones whose raw blocks said so (gsHashBlocks).
+    uint64_t unchangedByBlocks = 0u;
     uint64_t evictions = 0u;
     // Reads served from the host writes' memory, and from local memory
     // (DQ8_GFX_UPLOAD_STORE; Rogue Galaxy: added).
@@ -203,6 +205,11 @@ private:
         GsPageSet texelPages;
         GsPageSet clutPages;
         GsTextureIdentity identity;
+        // gsHashBlocks over the texel blocks when identity.texels was last
+        // set from a whole-texture read, 0 when unknown (Rogue Galaxy:
+        // added). A rewrite whose blocks hash the same is unchanged without
+        // reading the texels out.
+        uint64_t blockHash = 0u;
         // Texels a host write has invalidated but which have not been
         // re-expanded yet. Empty means the texture is current.
         GsRegion dirty;

@@ -1276,6 +1276,7 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
         return false;
     if (expanded) {
         entry.identity.texels = 0u;
+        entry.blockHash = 0u;
         entry.clutUploadPending = false;
         entry.dirty.clear();
         ++m_stats.partialUpdates;
@@ -1321,9 +1322,28 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     // read; when they match, the expansion and the upload are skipped.
     // DQ8_GFX_NO_UNCHANGED_SKIP=1 expands them anyway, as before.
     static const bool skipUnchanged = std::getenv("DQ8_GFX_NO_UNCHANGED_SKIP") == nullptr;
-    if (skipUnchanged && wholeTexture && !entry.clutUploadPending && entry.identity.texels != 0u &&
-        expand(key, region, true) == entry.identity.texels) {
+    // The blocks' raw bytes first (Rogue Galaxy: added): the same hash says
+    // unchanged without reading the texels out of their swizzle, and a
+    // different one goes straight to the expansion, which still finds an
+    // unchanged texture by its texel hash below; reading the texels twice,
+    // to hash and then to expand, was most of the upload path's reads at
+    // the first boss. DQ8_GFX_NO_BLOCK_HASH=1 hashes the texels instead.
+    static const bool blockHashOn = std::getenv("DQ8_GFX_NO_BLOCK_HASH") == nullptr;
+    const bool mayBeUnchanged = skipUnchanged && wholeTexture && !entry.clutUploadPending &&
+                                entry.identity.texels != 0u;
+    const uint64_t blockHash =
+        blockHashOn && wholeTexture ? gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, key.width, key.height)
+                                    : 0u;
+    if (mayBeUnchanged && blockHash != 0u && entry.blockHash != 0u) {
+        if (blockHash == entry.blockHash) {
+            entry.dirty.clear();
+            ++m_stats.unchangedUpdates;
+            ++m_stats.unchangedByBlocks;
+            return true;
+        }
+    } else if (mayBeUnchanged && expand(key, region, true) == entry.identity.texels) {
         entry.dirty.clear();
+        entry.blockHash = blockHash;
         ++m_stats.unchangedUpdates;
         return true;
     }
@@ -1346,9 +1366,11 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     // texture against a replacement pack.
     if (wholeTexture) {
         entry.identity.texels = texelHash;
+        entry.blockHash = blockHash;
         entry.clutUploadPending = false;
     } else {
         entry.identity.texels = 0u;
+        entry.blockHash = 0u;
     }
     entry.dirty.clear();
     ++m_stats.partialUpdates;
@@ -1412,6 +1434,7 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     }
 
     entry.identity.texels = expand(key, {0u, 0u, width, height});
+    entry.blockHash = gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, width, height);
     dumpTexture(key, entry.identity, m_staging, m_stats.builds);
 
     SDL_GPUDevice *device = m_device.handle();

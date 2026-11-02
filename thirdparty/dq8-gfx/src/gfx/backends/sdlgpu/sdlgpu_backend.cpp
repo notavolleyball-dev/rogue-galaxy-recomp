@@ -4562,11 +4562,14 @@ struct SdlGpuBackend::Impl {
             // Texture updates that found the texels unchanged (Rogue Galaxy:
             // added).
             static uint64_t previousUnchanged = 0u;
+            static uint64_t previousByBlocks = 0u;
             if (textureStats().unchangedUpdates != previousUnchanged) {
-                std::snprintf(buf, sizeof(buf), " | textures unchanged %llu",
-                              static_cast<unsigned long long>(textureStats().unchangedUpdates - previousUnchanged));
+                std::snprintf(buf, sizeof(buf), " | textures unchanged %llu (by blocks %llu)",
+                              static_cast<unsigned long long>(textureStats().unchangedUpdates - previousUnchanged),
+                              static_cast<unsigned long long>(textureStats().unchangedByBlocks - previousByBlocks));
                 line += buf;
                 previousUnchanged = textureStats().unchangedUpdates;
+                previousByBlocks = textureStats().unchangedByBlocks;
             }
             // Primitives drawn from the host's larger versions, borders from
             // its border versions and shadows from its shadow versions (Rogue

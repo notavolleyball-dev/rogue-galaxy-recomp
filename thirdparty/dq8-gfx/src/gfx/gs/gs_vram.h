@@ -130,6 +130,14 @@ void gsMarkCoveredBlocks(GsBlockSet &blocks,
                          uint32_t y = 0u);
 // Every block of the pages given.
 void gsBlocksOfPages(GsBlockSet &blocks, const GsPageSet &pages);
+// A hash of the raw bytes of every block a width x height rectangle at
+// (0, 0) touches, as they sit in local memory, swizzled (Rogue Galaxy:
+// added). Cheap next to reading the texels out: a texture whose blocks hash
+// the same holds the same texels. Blocks the rectangle shares with other
+// data make it change more often than the texels, never less. 0 for a
+// format with no block table.
+uint64_t gsHashBlocks(const uint8_t *data, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, uint32_t width,
+                      uint32_t height);
 
 // A view over externally owned GS local memory. GS::init() hands the backend
 // the frontend's allocation and other code may read it, so backends write

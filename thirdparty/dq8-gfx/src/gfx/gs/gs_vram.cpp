@@ -956,6 +956,32 @@ void gsMarkBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, 
                      [&](uint32_t id) { blocks.set(id); });
 }
 
+uint64_t gsHashBlocks(const uint8_t *data, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, uint32_t width,
+                      uint32_t height) {
+    const GsPageExtent extent = gsPageExtent(psm);
+    const GsBlockExtent block = gsBlockExtent(psm);
+    if (!data || !extent.valid() || !block.valid() || width == 0u || height == 0u)
+        return 0u;
+    constexpr uint64_t kPrime = 1099511628211ull;
+    // Four lanes, so the multiplies do not wait on each other.
+    uint64_t lane[4] = {0xCBF29CE484222325ull, 0x84222325CBF29CE4ull, 0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full};
+    forEachBlockCell(baseBlock, bufferWidth, psm, 0u, (width - 1u) / block.width + 1u, 0u,
+                     (height - 1u) / block.height + 1u, [&](uint32_t id) {
+        const uint8_t *bytes = data + static_cast<size_t>(id) * kGsBlockBytes;
+        lane[0] = (lane[0] ^ id) * kPrime;
+        for (uint32_t i = 0u; i < kGsBlockBytes; i += 32u) {
+            uint64_t words[4];
+            std::memcpy(words, bytes + i, sizeof(words));
+            for (uint32_t k = 0u; k < 4u; ++k)
+                lane[k] = (lane[k] ^ words[k]) * kPrime;
+        }
+    });
+    uint64_t hash = lane[0];
+    for (uint32_t k = 1u; k < 4u; ++k)
+        hash = (hash ^ (lane[k] >> 29u) ^ lane[k]) * kPrime;
+    return hash != 0u ? hash : 1u;
+}
+
 void gsMarkCoveredBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm,
                          uint32_t width, uint32_t height, uint32_t x, uint32_t y) {
     const GsPageExtent extent = gsPageExtent(psm);
