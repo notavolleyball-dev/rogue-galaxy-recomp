@@ -75,6 +75,9 @@ struct SdlGpuStats {
     uint64_t nativeEffectOps = 0u;
     // Of them, plain copies done as texture copies (Rogue Galaxy: added).
     uint64_t nativeEffectCopies = 0u;
+    // The display frame copied into the GS display buffer for a reader other
+    // than the presenter's GPU paths and the native effects (Rogue Galaxy: added).
+    uint64_t displayMaterialized = 0u;
     uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
     // Objects drawn into object layers (GSNativeEffect::kRouteLayer), the
     // passes that laid them over the frame, those started because every
