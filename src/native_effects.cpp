@@ -2400,11 +2400,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         events.clear();
         const rg::gif::GifDecodeStats stats =
             rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
-        if (stats.truncated)
-        {
-            why = "a truncated packet";
-            return false;
-        }
+        // A tag cut at the packet's end (an IMAGE tag whose data follows
+        // through the image callback, a PACKED tag a DIRECT cuts short) is
+        // what GS::processGIFPacket takes as far as it goes and then drops:
+        // the events decoded up to the cut are what the GS would draw.
         if (stats.imageQwords != 0u)
         {
             // An upload: on as it is, in its place.
