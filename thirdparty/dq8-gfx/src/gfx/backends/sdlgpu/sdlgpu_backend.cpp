@@ -1877,22 +1877,20 @@ struct SdlGpuBackend::Impl {
         if (draw.snapshot || draw.feedback || draw.destination || nativeOnCpu) {
             ++stats.nativeMeshesExpanded;
             GSPrimitiveBatch triangle = standIn;
-            // Texel UVs (Rogue Galaxy: a mesh from GS packets) normalised first.
-            thread_local GSNativeMesh normalised;
-            const GSNativeMesh *expand = &mesh;
-            if ((mesh.header.source & 0x80000000u) != 0u) {
-                normalised = mesh;
-                const float us = 1.0f / std::max(1.0f, float(standIn.state.textureWidth));
-                const float vs = 1.0f / std::max(1.0f, float(standIn.state.textureHeight));
-                for (GSNativeMesh::Vertex &v : normalised.vertices) {
-                    v.u *= us;
-                    v.v *= vs;
-                }
-                expand = &normalised;
-            }
-            gsExpandNativeMesh(*expand, [&](const GSVertex *corners) {
-                for (size_t i = 0; i < 3u; ++i)
+            // Texel UVs (Rogue Galaxy: a mesh from GS packets, FST): the
+            // expansion's S and T are the texels, which an FST draw reads
+            // as U and V (1/16 texel fixed point).
+            const bool texelUvs = (mesh.header.source & 0x80000000u) != 0u;
+            gsExpandNativeMesh(mesh, [&](const GSVertex *corners) {
+                for (size_t i = 0; i < 3u; ++i) {
                     triangle.vertices[i] = corners[i];
+                    if (texelUvs) {
+                        triangle.vertices[i].u = static_cast<uint16_t>(
+                            std::clamp(std::lround(corners[i].s * 16.0f), 0l, 0xFFFFl));
+                        triangle.vertices[i].v = static_cast<uint16_t>(
+                            std::clamp(std::lround(corners[i].t * 16.0f), 0l, 0xFFFFl));
+                    }
+                }
                 appendPrimitive(triangle, offsetX, offsetY, depthScale);
             });
             return;
@@ -1903,19 +1901,17 @@ struct SdlGpuBackend::Impl {
             mesh.header.triangleList ? mesh.vertices.size() / 3u * 3u : mesh.vertices.size());
         const uint32_t first = static_cast<uint32_t>(vertices.size());
         const float record = static_cast<float>(nativeRecords.size());
-        // Rogue Galaxy: a mesh made from GS packets with texel UVs (FST) has
-        // the source's top bit set; its UVs are divided by the texture's size.
-        const bool texelUvs = (mesh.header.source & 0x80000000u) != 0u;
-        const float uScale = texelUvs ? 1.0f / std::max(1.0f, float(standIn.state.textureWidth)) : 1.0f;
-        const float vScale = texelUvs ? 1.0f / std::max(1.0f, float(standIn.state.textureHeight)) : 1.0f;
+        // Rogue Galaxy: a mesh made from GS packets with texel UVs (FST, the
+        // source's top bit) keeps them as texels: the draw is FST, and
+        // gs_draw.frag reads its coordinate as texels, without Q.
         for (uint32_t index = 0; index < count; ++index) {
             const GSNativeMesh::Vertex &in = mesh.vertices[index];
             GsGpuVertex out{};
             out.x = in.x;
             out.y = in.y;
             out.z = in.z;
-            out.q = in.u * uScale;
-            out.s = in.v * vScale;
+            out.q = in.u;
+            out.s = in.v;
             out.t = record;
             out.r = in.r;
             out.g = in.g;
@@ -2017,8 +2013,62 @@ struct SdlGpuBackend::Impl {
                 return;
             }
         }
-        const float corners[3][2] = {{x0, y0}, {x1, y0}, {x0, y1}};
-        const float st[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+        // Where the mesh can draw: its projected bounding box, within the
+        // scissor, when every vertex is in front of the eye (the GPU's clip
+        // only cuts it smaller); the scissor otherwise. The stand-in covers
+        // that, so the pages and regions the draw is booked as writing are
+        // the mesh's (Rogue Galaxy: a HUD mesh writing Z over a few pixels,
+        // not the whole screen's depth).
+        float bx0 = x0, by0 = y0, bx1 = x1, by1 = y1;
+        {
+            const auto &m = mesh.header.matrix;
+            float lowX = INFINITY, lowY = INFINITY, highX = -INFINITY, highY = -INFINITY;
+            bool inFront = true;
+            for (const GSNativeMesh::Vertex &v : mesh.vertices) {
+                float clip[4];
+                for (size_t i = 0; i < 4u; ++i)
+                    clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+                if (!(clip[3] > 0.0f)) {
+                    inFront = false;
+                    break;
+                }
+                const float px = clip[0] / clip[3], py = clip[1] / clip[3];
+                lowX = std::fmin(lowX, px);
+                lowY = std::fmin(lowY, py);
+                highX = std::fmax(highX, px);
+                highY = std::fmax(highY, py);
+            }
+            if (inFront && std::isfinite(lowX) && std::isfinite(highX) && std::isfinite(lowY) &&
+                std::isfinite(highY)) {
+                // A pixel past each edge: the stand-in's bounds are padded
+                // like any primitive's, and the program's rounding.
+                bx0 = std::clamp(std::floor(lowX) - 1.0f, x0, x1);
+                by0 = std::clamp(std::floor(lowY) - 1.0f, y0, y1);
+                bx1 = std::clamp(std::ceil(highX) + 1.0f, x0, x1);
+                by1 = std::clamp(std::ceil(highY) + 1.0f, y0, y1);
+            }
+        }
+        const float corners[3][2] = {{bx0, by0}, {bx1, by0}, {bx0, by1}};
+        float st[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+        // Texel UVs (Rogue Galaxy: a mesh from GS packets, FST): the stand-in
+        // samples the texels the mesh does, as the GS's own sprites bound the
+        // texture they read (a sprite over part of the frame reads that part,
+        // within the target, not the whole 512x512 texture past it).
+        const bool texelUvs = (mesh.header.source & 0x80000000u) != 0u;
+        float texel[2][2] = {{INFINITY, INFINITY}, {-INFINITY, -INFINITY}};
+        if (texelUvs) {
+            const auto &m = mesh.header.matrix;
+            for (const GSNativeMesh::Vertex &v : mesh.vertices) {
+                const float w = v.x * m[0][3] + v.y * m[1][3] + v.z * m[2][3] + m[3][3];
+                const float q = w != 0.0f ? 1.0f / w : 1.0f;
+                texel[0][0] = std::fmin(texel[0][0], v.u * q);
+                texel[0][1] = std::fmin(texel[0][1], v.v * q);
+                texel[1][0] = std::fmax(texel[1][0], v.u * q);
+                texel[1][1] = std::fmax(texel[1][1], v.v * q);
+            }
+        }
+        const bool bounded = texelUvs && std::isfinite(texel[0][0]) && std::isfinite(texel[1][0]) &&
+                             std::isfinite(texel[0][1]) && std::isfinite(texel[1][1]);
         for (size_t i = 0; i < 3u; ++i) {
             GSVertex &v = standIn.vertices[i];
             v.x = corners[i][0];
@@ -2027,8 +2077,14 @@ struct SdlGpuBackend::Impl {
             v.s = st[i][0];
             v.t = st[i][1];
             v.q = 1.0f;
-            v.u = static_cast<uint16_t>(st[i][0] * state.textureWidth * 16.0f);
-            v.v = static_cast<uint16_t>(st[i][1] * state.textureHeight * 16.0f);
+            if (bounded) {
+                const float u = texel[i == 1u ? 1 : 0][0], t = texel[i == 2u ? 1 : 0][1];
+                v.u = static_cast<uint16_t>(std::clamp(u * 16.0f, 0.0f, 65535.0f));
+                v.v = static_cast<uint16_t>(std::clamp(t * 16.0f, 0.0f, 65535.0f));
+            } else {
+                v.u = static_cast<uint16_t>(st[i][0] * state.textureWidth * 16.0f);
+                v.v = static_cast<uint16_t>(st[i][1] * state.textureHeight * 16.0f);
+            }
         }
         // Never the same-state path: that would append the stand-in.
         last.valid = false;

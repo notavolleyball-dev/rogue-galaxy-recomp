@@ -958,12 +958,33 @@ when it returns, replaces the blocks inside it), and the VIF1 thread turns
 the block into, in order, register-only packets (state, uploads) and native
 triangle meshes in window coordinates (`build2D`: sprites as two triangles
 with the second vertex's Z and colour, flat shading from the provoking
-vertex, texel UVs normalised by the block's TEX0). The GS no longer
+vertex, texel UVs kept as texels for the FST draw). The GS no longer
 assembles or kicks those vertices; it still keeps the register state, which
 is the backend's draw-state vocabulary. Lines and points become thin quads. Refused (sent as packets):
 PRMODE attributes (fog is carried per vertex in w). Next: the state from the API too (the
 `GsPkt` setters write into the builder at `+0x70`), so the block needs no
 GIF parsing at all. Builds; unverified on screen.
+
+**2D on screen (2026-11-02, checked on the walk with the bypass):** three
+faults made most 2D vanish. A block's DIRECT holds several GIF packets one
+after another and the GS reads past each EOP, but `build2D` decoded only up
+to the first (it now walks each packet as `eachPacket` splits them). Texel
+UVs were divided by the texture's size before an FST draw, whose
+`gs_draw.frag` takes its coordinate as texels: every glyph sampled texel 0
+(they now stay texels; a fogged mesh's are scaled by w, as gs_native.vert
+divides). And the stand-in primitive the backend gives a mesh covered the
+whole scissor and the whole texture: each mesh was booked as reading all of
+its 512x512 texture (past the frame's target: 3,000 texture builds from
+local memory instead of 37) and writing colour and Z over the whole screen
+(the HUD's compass, which writes Z, left the ground's next pass reading a
+depth buffer it had been told was rewritten: a water-like layer over the
+ground). The stand-in now covers the mesh's projected box and the texels its
+UVs reach. After a block the GS is given the vertex registers the meshes
+took in (RGBAQ, ST, UV, FOG) and the block's last PRIM. Boot, title, menus,
+HUD, minimap and field match the GS path's screenshots, with one
+difference: the dark band behind a field prompt ("Use transporter", strips
+of black at alpha 0x50 with an alpha test of GREATER 1) shows as a mesh and
+not through the GS path; which one is right is not settled.
 
 **The effects through the GsPkt blocks (2026-11-02):** the sword trails,
 the sun light, the battle bursts, the effect nodes, the fades, the lens
@@ -1029,8 +1050,8 @@ effects, VU1 programs not ported, the game thread's own draws) is drawn as
 native meshes too. The converter mirrors what the GS carries between
 packets (RGBAQ, ST, UV, PRIM from a tag, a strip under way, PRMODECONT and
 PRMODE) per thread, writes PRIM before each mesh so the GS's draw state
-matches, and sends texel UVs unnormalised under a header bit the backend
-divides out with the draw's texture size. So the GS frontend is down to
+matches, and sends texel UVs under a header bit (the FST draw reads them
+as texels; the backend bounds the texture read by them). So the GS frontend is down to
 its register file and transfers on the native path. Builds; unverified on
 screen.
 

@@ -145,8 +145,9 @@ void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &pack
 // (lines, points, PRMODE attributes, UVs with no TEX0 in the block): then
 // the packets go on whole.
 // GSNativeMesh::Header::source's top bit on a mesh build2D made from texel
-// UVs (FST): u and v are texels, and the backend divides them by the
-// texture's size at the draw (dq8-gfx's sdlgpu backend reads the same bit).
+// UVs (FST): u and v are texels, as the FST draw reads them, and the
+// backend bounds the texels the mesh samples by them (dq8-gfx's sdlgpu
+// backend reads the same bit).
 constexpr uint32_t kNativeMeshTexelUvs = 0x80000000u;
 
 struct Piece2D

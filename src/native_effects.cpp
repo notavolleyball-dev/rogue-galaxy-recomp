@@ -2307,10 +2307,18 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
                 h.fog[1] = 255.0f;
                 h.fog[2] = 0.0f;
                 h.fog[3] = 255.0f;
+                // Texel UVs too: an FST draw reads gs_native.vert's
+                // coordinate, (u, v) / w, as texels, without dividing by Q.
+                const bool texels = (meshPrim & 0x110u) == 0x110u;
                 for (GSNativeMesh::Vertex &v : mesh.mesh.vertices)
                 {
                     v.x *= v.z;
                     v.y *= v.z;
+                    if (texels)
+                    {
+                        v.u *= v.z;
+                        v.v *= v.z;
+                    }
                 }
             }
             mesh.mesh.header.vertexCount = static_cast<uint32_t>(mesh.mesh.vertices.size());
@@ -2395,142 +2403,174 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
     };
 
     bool ok = true;
+    bool anyVertex = false;
+    // One DIRECT's bytes hold as many GIF packets as the game put there, each
+    // up to its EOP, and the GS reads on past an EOP (eachPacket): every one
+    // of them, not only the first.
+    thread_local std::vector<std::pair<uint32_t, uint32_t>> pieces;
     for (const std::vector<uint8_t> &packet : packets)
     {
-        events.clear();
-        const rg::gif::GifDecodeStats stats =
-            rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
-        // A tag cut at the packet's end (an IMAGE tag whose data follows
-        // through the image callback, a PACKED tag a DIRECT cuts short) is
-        // what GS::processGIFPacket takes as far as it goes and then drops:
-        // the events decoded up to the cut are what the GS would draw.
-        if (stats.imageQwords != 0u)
+        pieces.clear();
+        eachPacket(packet.data(), static_cast<uint32_t>(packet.size()),
+                   [&](uint32_t at, uint32_t size) { pieces.emplace_back(at, size); });
+        for (const auto &[at, size] : pieces)
         {
-            // An upload: on as it is, in its place.
-            flushWrites();
-            closeMesh();
-            queue.clear();
-            Piece2D piece;
-            piece.packet = packet;
-            out.push_back(std::move(piece));
-            continue;
-        }
-        for (const rg::gif::GifEvent &e : events)
-        {
-            if (e.kind == rg::gif::GifEvent::Kind::Register)
+            events.clear();
+            const rg::gif::GifDecodeStats stats = rg::gif::decodeGifPacket(packet.data() + at, size, state, events);
+            // A tag cut at the packet's end (an IMAGE tag whose data follows
+            // through the image callback, a PACKED tag a DIRECT cuts short) is
+            // what GS::processGIFPacket takes as far as it goes and then drops:
+            // the events decoded up to the cut are what the GS would draw.
+            if (stats.imageQwords != 0u)
             {
-                if (e.reg == 0x1Au)
-                    carried.attributesFromPrim = (e.value & 1u) != 0u;
-                if (e.reg == 0x1Bu)
-                    carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
-                if (e.reg == 0x00u)
-                {
-                    queue.clear();
-                    queuePrim = 0xFFFFu;
-                }
+                // An upload: on as it is, in its place.
+                flushWrites();
                 closeMesh();
-                writes.emplace_back(e.reg, e.value);
+                queue.clear();
+                Piece2D piece;
+                piece.packet.assign(packet.begin() + at, packet.begin() + at + size);
+                out.push_back(std::move(piece));
                 continue;
             }
-            // With PRMODECONT's AC clear the attributes are PRMODE's.
-            const uint16_t prim = carried.attributesFromPrim
-                                      ? e.prim
-                                      : static_cast<uint16_t>((e.prim & 7u) | carried.prmode);
-            const uint32_t type = prim & 7u;
-            if (type == 7u)
+            for (const rg::gif::GifEvent &e : events)
             {
-                why = "a reserved primitive type";
-                return false;
-            }
-            if (prim != queuePrim)
-            {
-                queue.clear();
-                queuePrim = prim;
-            }
-            switch (type)
-            {
-            case 0u: // point: a pixel's square
-                if (e.drawing)
+                if (e.kind == rg::gif::GifEvent::Kind::Register)
                 {
-                    rg::gif::GifEvent a = e, b = e;
-                    a.x = static_cast<uint16_t>(e.x & ~15u);
-                    a.y = static_cast<uint16_t>(e.y & ~15u);
-                    b.x = static_cast<uint16_t>(a.x + 16u);
-                    b.y = static_cast<uint16_t>(a.y + 16u);
-                    sprite(a, b, static_cast<uint16_t>(prim & ~0x08u), ok);
-                }
-                break;
-            case 1u: // line
-            case 2u: // line strip
-                queue.push_back(e);
-                if (queue.size() > 2u)
-                    queue.erase(queue.begin());
-                if (queue.size() == 2u && e.drawing)
-                {
-                    // Half a pixel either side of the centre line, as the
-                    // backend widens the GS's lines.
-                    const rg::gif::GifEvent &p0 = queue[0], &p1 = queue[1];
-                    const float dx = (static_cast<float>(p1.x) - p0.x) / 16.0f;
-                    const float dy = (static_cast<float>(p1.y) - p0.y) / 16.0f;
-                    const float length = std::sqrt(dx * dx + dy * dy);
-                    const float nx = length > 1e-6f ? -dy / length * 0.5f : 0.5f;
-                    const float ny = length > 1e-6f ? dx / length * 0.5f : 0.0f;
-                    openMesh(prim);
-                    GSNativeMesh::Vertex v[4] = {vertexOf(p0, p1, prim, ok), vertexOf(p0, p1, prim, ok),
-                                                 vertexOf(p1, p1, prim, ok), vertexOf(p1, p1, prim, ok)};
-                    v[0].x += nx; v[0].y += ny;
-                    v[1].x -= nx; v[1].y -= ny;
-                    v[2].x -= nx; v[2].y -= ny;
-                    v[3].x += nx; v[3].y += ny;
-                    mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v[0], v[1], v[2], v[0], v[2], v[3]});
-                    if (type == 1u)
+                    if (e.reg == 0x1Au)
+                        carried.attributesFromPrim = (e.value & 1u) != 0u;
+                    if (e.reg == 0x1Bu)
+                        carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
+                    if (e.reg == 0x00u)
+                    {
                         queue.clear();
+                        queuePrim = 0xFFFFu;
+                    }
+                    closeMesh();
+                    writes.emplace_back(e.reg, e.value);
+                    continue;
                 }
-                else if (type == 1u && queue.size() == 2u)
+                anyVertex = true;
+                // With PRMODECONT's AC clear the attributes are PRMODE's.
+                const uint16_t prim = carried.attributesFromPrim
+                                          ? e.prim
+                                          : static_cast<uint16_t>((e.prim & 7u) | carried.prmode);
+                const uint32_t type = prim & 7u;
+                if (type == 7u)
+                {
+                    why = "a reserved primitive type";
+                    return false;
+                }
+                if (prim != queuePrim)
                 {
                     queue.clear();
+                    queuePrim = prim;
                 }
-                break;
-            case 6u: // sprite
-                queue.push_back(e);
-                if (queue.size() == 2u)
+                switch (type)
                 {
+                case 0u: // point: a pixel's square
                     if (e.drawing)
-                        sprite(queue[0], queue[1], prim, ok);
-                    queue.clear();
-                }
-                break;
-            case 3u: // triangle
-                queue.push_back(e);
-                if (queue.size() == 3u)
-                {
-                    if (e.drawing)
+                    {
+                        rg::gif::GifEvent a = e, b = e;
+                        a.x = static_cast<uint16_t>(e.x & ~15u);
+                        a.y = static_cast<uint16_t>(e.y & ~15u);
+                        b.x = static_cast<uint16_t>(a.x + 16u);
+                        b.y = static_cast<uint16_t>(a.y + 16u);
+                        sprite(a, b, static_cast<uint16_t>(prim & ~0x08u), ok);
+                    }
+                    break;
+                case 1u: // line
+                case 2u: // line strip
+                    queue.push_back(e);
+                    if (queue.size() > 2u)
+                        queue.erase(queue.begin());
+                    if (queue.size() == 2u && e.drawing)
+                    {
+                        // Half a pixel either side of the centre line, as the
+                        // backend widens the GS's lines.
+                        const rg::gif::GifEvent &p0 = queue[0], &p1 = queue[1];
+                        const float dx = (static_cast<float>(p1.x) - p0.x) / 16.0f;
+                        const float dy = (static_cast<float>(p1.y) - p0.y) / 16.0f;
+                        const float length = std::sqrt(dx * dx + dy * dy);
+                        const float nx = length > 1e-6f ? -dy / length * 0.5f : 0.5f;
+                        const float ny = length > 1e-6f ? dx / length * 0.5f : 0.0f;
+                        openMesh(prim);
+                        GSNativeMesh::Vertex v[4] = {vertexOf(p0, p1, prim, ok), vertexOf(p0, p1, prim, ok),
+                                                     vertexOf(p1, p1, prim, ok), vertexOf(p1, p1, prim, ok)};
+                        v[0].x += nx; v[0].y += ny;
+                        v[1].x -= nx; v[1].y -= ny;
+                        v[2].x -= nx; v[2].y -= ny;
+                        v[3].x += nx; v[3].y += ny;
+                        mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v[0], v[1], v[2], v[0], v[2], v[3]});
+                        if (type == 1u)
+                            queue.clear();
+                    }
+                    else if (type == 1u && queue.size() == 2u)
+                    {
+                        queue.clear();
+                    }
+                    break;
+                case 6u: // sprite
+                    queue.push_back(e);
+                    if (queue.size() == 2u)
+                    {
+                        if (e.drawing)
+                            sprite(queue[0], queue[1], prim, ok);
+                        queue.clear();
+                    }
+                    break;
+                case 3u: // triangle
+                    queue.push_back(e);
+                    if (queue.size() == 3u)
+                    {
+                        if (e.drawing)
+                            triangle(queue[0], queue[1], queue[2], prim, ok);
+                        queue.clear();
+                    }
+                    break;
+                case 4u: // strip
+                    queue.push_back(e);
+                    if (queue.size() > 3u)
+                        queue.erase(queue.begin());
+                    if (queue.size() == 3u && e.drawing)
                         triangle(queue[0], queue[1], queue[2], prim, ok);
-                    queue.clear();
+                    break;
+                case 5u: // fan
+                    if (queue.size() == 3u)
+                    {
+                        queue[1] = queue[2];
+                        queue.pop_back();
+                    }
+                    queue.push_back(e);
+                    if (queue.size() == 3u && e.drawing)
+                        triangle(queue[0], queue[1], queue[2], prim, ok);
+                    break;
+                default:
+                    break;
                 }
-                break;
-            case 4u: // strip
-                queue.push_back(e);
-                if (queue.size() > 3u)
-                    queue.erase(queue.begin());
-                if (queue.size() == 3u && e.drawing)
-                    triangle(queue[0], queue[1], queue[2], prim, ok);
-                break;
-            case 5u: // fan
-                if (queue.size() == 3u)
-                {
-                    queue[1] = queue[2];
-                    queue.pop_back();
-                }
-                queue.push_back(e);
-                if (queue.size() == 3u && e.drawing)
-                    triangle(queue[0], queue[1], queue[2], prim, ok);
-                break;
-            default:
-                break;
-            }
 
+            }
         }
+    }
+    // The vertex registers the meshes took in (RGBAQ, ST, UV, FOG) and PRIM
+    // as the packets left them: the GS keeps them for what comes next, and a
+    // packet after the block may draw with them (an ST and XYZ with the Q of
+    // an earlier RGBAQ).
+    if (anyVertex)
+    {
+        uint32_t q;
+        std::memcpy(&q, &state.q, sizeof(q));
+        uint32_t sBits, tBits;
+        std::memcpy(&sBits, &state.s, sizeof(sBits));
+        std::memcpy(&tBits, &state.t, sizeof(tBits));
+        closeMesh();
+        writes.emplace_back(0x00u, static_cast<uint64_t>(state.prim));
+        writes.emplace_back(0x01u, static_cast<uint64_t>(state.rgba[0]) | (static_cast<uint64_t>(state.rgba[1]) << 8) |
+                                       (static_cast<uint64_t>(state.rgba[2]) << 16) |
+                                       (static_cast<uint64_t>(state.rgba[3]) << 24) | (static_cast<uint64_t>(q) << 32));
+        writes.emplace_back(0x02u, static_cast<uint64_t>(sBits) | (static_cast<uint64_t>(tBits) << 32));
+        writes.emplace_back(0x03u, static_cast<uint64_t>(state.u & 0x3FFFu) |
+                                       (static_cast<uint64_t>(state.v & 0x3FFFu) << 16));
+        writes.emplace_back(0x0Au, static_cast<uint64_t>(state.f) << 56);
     }
     flushWrites();
     closeMesh();
