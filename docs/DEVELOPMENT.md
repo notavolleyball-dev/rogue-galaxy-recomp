@@ -70,6 +70,7 @@ thread contexts) and a thread's call chain read from the dump with
 | `RG_GS_DEPTH_READS=queue` | Serve the game's depth readbacks through the GS worker queue |
 | `RG_MUTE=1` | No sound output (the IOP still runs) |
 | `RG_INPUT="30:CROSS:150,..."` | Scripted pad input: seconds, buttons (`+`-joined; `LUP` etc. for the left stick, `RUP` etc. for the right), milliseconds; with `RG_INPUT_CLOCK=pad` both numbers count the game's pad reads, so a script replays alike at any host speed |
+| `RG_SPEED=N[@FRAME]` | The game's speed, as the menu's fast-forward (`2` = F4 at its default, `0` unpaced), from the start or from that pad frame; for scripted runs, whose hidden window never runs the menu or its `RG_UI_SCRIPT`. A scripted walk keeps its timing only at the speed it was written for, so start it after the input (`native-perf.sh`'s walk: `@3700`) |
 | `RG_TRACE=0xADDR,...` | Log calls of main-ELF functions with guest thread, sp, ra and a0-a3 (`RG_TRACE_PEEK` words, `RG_TRACE_ARG0` offsets from a0, `RG_TRACE_LIMIT` calls each, default 16) |
 | `RG_DUMP=0xFUNC:file` | Append each call of a `FUNC(dst, src, size)` to file: dst, size and the bytes at src |
 | `RG_WATCH=0xADDR,...` | Print guest words, I/O registers included, every `RG_WATCH_MS` (default 1000) |
