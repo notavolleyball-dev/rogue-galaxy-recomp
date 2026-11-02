@@ -5087,13 +5087,15 @@ struct SdlGpuBackend::Impl {
             const GsTextureCacheStats &t = textures->stats();
             std::fprintf(stderr,
                          "[native-memory] expands named %llu, not named: no name %llu, shape %llu, palette %llu | "
-                         "uploads named %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
+                         "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
                          "from targets on the GPU %llu, local-memory reads %llu | copies %llu, host reads %llu\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedMissNoName),
                          static_cast<unsigned long long>(t.namedMissShape),
                          static_cast<unsigned long long>(t.namedMissPalette),
                          static_cast<unsigned long long>(t.uploadsNamed),
+                         static_cast<unsigned long long>(t.uploadsSelfNamed),
+                         static_cast<unsigned long long>(t.uploadsPatched),
                          static_cast<unsigned long long>(t.uploadsUnnamed),
                          static_cast<unsigned long long>(t.unnamedUploadBytes / 1024u),
                          static_cast<unsigned long long>(named.pushed),

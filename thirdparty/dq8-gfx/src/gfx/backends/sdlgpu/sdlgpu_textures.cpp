@@ -1655,11 +1655,11 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
 
 // --- Textures by name (Rogue Galaxy: added) --------------------------------
 
-void GsTextureCache::dropNamed(const GsBlockSet &blocks) {
+void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
     if (m_named.empty() || (m_namedBlocks & blocks).none())
         return;
     for (auto it = m_named.begin(); it != m_named.end();) {
-        if ((it->second.blocks & blocks).any())
+        if (it->first != keep && (it->second.blocks & blocks).any())
             it = m_named.erase(it);
         else
             ++it;
@@ -1697,43 +1697,90 @@ void GsTextureCache::noteUnnamedUpload(const GSTransferCommand &command) {
     }
 }
 
+namespace {
+uint32_t namedBits(uint32_t psm) {
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT32: return 32u;
+    case GS_PSM_CT24: return 24u;
+    case GS_PSM_CT16: case GS_PSM_CT16S: return 16u;
+    case GS_PSM_T8: case GS_PSM_T8H: return 8u;
+    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH: return 4u;
+    default: return 0u;
+    }
+}
+} // namespace
+
 void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     if (m_namedOpen)
         finishNamedUpload(); // a short one: dropped there
+    if (command.direction == 1u)
+        return; // a read writes nothing
     const uint32_t dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
     const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
-    // Whatever this transfer writes is no longer the image named there.
-    if (!m_named.empty()) {
-        GsBlockSet written;
-        gsMarkBlocks(written, command.bitbltbuf.dbp, dbw, dpsm, command.trxpos.dsax + command.trxreg.rrw,
-                     command.trxpos.dsay + command.trxreg.rrh);
-        dropNamed(written);
-    }
+    const uint32_t x = command.trxpos.dsax, y = command.trxpos.dsay;
+    const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
+    GsBlockSet written;
+    if (!m_named.empty())
+        gsMarkBlocks(written, command.bitbltbuf.dbp, dbw, dpsm, x + w, y + h);
     static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
-    if (command.direction != 0u)
-        return;
-    if (off || command.trxpos.dsax != 0u || command.trxpos.dsay != 0u || !namedtextures::active()) {
-        noteUnnamedUpload(command);
+    const uint32_t bits = namedBits(dpsm);
+    if (command.direction != 0u || off || bits == 0u || w == 0u || h == 0u || !namedtextures::active()) {
+        dropNamed(written);
+        if (command.direction == 0u)
+            noteUnnamedUpload(command);
         return;
     }
+
+    // Into part of a named image in its own format (glyphs, a region
+    // redrawn on the CPU): the image is patched, not dropped.
+    if (x != 0u || y != 0u) {
+        const auto found = m_named.find(command.bitbltbuf.dbp);
+        const bool patchable = found != m_named.end() && !found->second.upload.preSwizzled &&
+                               (found->second.upload.dpsm & 0x3fu) == dpsm &&
+                               (found->second.upload.psm & 0x3fu) == dpsm &&
+                               std::max<uint32_t>(found->second.upload.dbw, 1u) == dbw &&
+                               x + w <= found->second.upload.textureWidth &&
+                               y + h <= found->second.upload.textureHeight && (bits != 4u || (x % 2u == 0u && w % 2u == 0u));
+        if (!patchable) {
+            dropNamed(written);
+            noteUnnamedUpload(command);
+            return;
+        }
+        dropNamed(written, command.bitbltbuf.dbp);
+        m_namedPending = {};
+        m_namedPending.upload = found->second.upload;
+        m_namedPatch = {x, y, w, h};
+        m_namedPatching = true;
+        m_namedExpected = (static_cast<size_t>(w) * h * bits + 7u) / 8u;
+        m_namedPending.bytes.reserve(m_namedExpected);
+        m_namedOpen = true;
+        ++m_stats.uploadsPatched;
+        return;
+    }
+
+    dropNamed(written);
     namedtextures::Upload upload;
-    if (!namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, command.trxreg.rrw, command.trxreg.rrh, upload)) {
-        noteUnnamedUpload(command);
-        return;
-    }
-    ++m_stats.uploadsNamed;
-    uint32_t bits = 0u;
-    switch (dpsm) {
-    case GS_PSM_CT32: bits = 32u; break;
-    case GS_PSM_CT24: bits = 24u; break;
-    case GS_PSM_CT16: case GS_PSM_CT16S: bits = 16u; break;
-    case GS_PSM_T8: case GS_PSM_T8H: bits = 8u; break;
-    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH: bits = 4u; break;
-    default: return;
+    if (namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, w, h, upload)) {
+        ++m_stats.uploadsNamed;
+    } else {
+        // No record: the transfer names itself, an image of its own format
+        // and size, which serves the textures that read it the same way.
+        upload = {};
+        upload.dbp = command.bitbltbuf.dbp;
+        upload.dbw = dbw;
+        upload.dpsm = dpsm;
+        upload.width = w;
+        upload.height = h;
+        upload.psm = dpsm;
+        upload.textureBufferWidth = dbw;
+        upload.textureWidth = w;
+        upload.textureHeight = h;
+        ++m_stats.uploadsSelfNamed;
     }
     m_namedPending = {};
     m_namedPending.upload = upload;
-    m_namedExpected = (static_cast<size_t>(upload.width) * upload.height * bits + 7u) / 8u;
+    m_namedPatching = false;
+    m_namedExpected = (static_cast<size_t>(upload.width) * upload.height * namedBits(upload.dpsm) + 7u) / 8u;
     if (m_namedExpected == 0u)
         return;
     m_namedPending.bytes.reserve(m_namedExpected);
@@ -1745,6 +1792,30 @@ void GsTextureCache::finishNamedUpload() {
     m_namedOpen = false;
     NamedImage image = std::move(m_namedPending);
     m_namedPending = {};
+    if (m_namedPatching) {
+        m_namedPatching = false;
+        const auto found = m_named.find(image.upload.dbp);
+        if (found == m_named.end())
+            return;
+        if (image.bytes.size() < m_namedExpected) {
+            GsBlockSet blocks = found->second.blocks;
+            dropNamed(blocks);
+            return;
+        }
+        // Rows of the patch into the linear image, in its own format.
+        NamedImage &target = found->second;
+        const uint32_t bits = namedBits(target.upload.psm);
+        const size_t rowBytes = static_cast<size_t>(m_namedPatch[2]) * bits / 8u;
+        const size_t stride = static_cast<size_t>(target.upload.textureWidth) * bits / 8u;
+        for (uint32_t row = 0u; row < m_namedPatch[3]; ++row) {
+            const size_t to = (static_cast<size_t>(m_namedPatch[1]) + row) * stride +
+                              static_cast<size_t>(m_namedPatch[0]) * bits / 8u;
+            if (to + rowBytes > target.bytes.size())
+                break;
+            std::memcpy(target.bytes.data() + to, image.bytes.data() + row * rowBytes, rowBytes);
+        }
+        return;
+    }
     if (image.bytes.size() < m_namedExpected)
         return;
     const namedtextures::Upload &u = image.upload;
@@ -1803,7 +1874,7 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         if (key.csm != 0u)
             return miss(m_stats.namedMissPalette);
         const auto clutFound = m_named.find(key.cbp);
-        if (clutFound == m_named.end() || !clutFound->second.upload.palette ||
+        if (clutFound == m_named.end() || clutFound->second.upload.preSwizzled ||
             (clutFound->second.upload.dpsm & 0x3fu) != (key.cpsm & 0x3fu))
             return miss(m_stats.namedMissPalette);
         clut = &clutFound->second;

@@ -98,6 +98,8 @@ struct GsTextureCacheStats {
     uint64_t namedMissPalette = 0u;
     uint64_t uploadsNamed = 0u;
     uint64_t uploadsUnnamed = 0u;
+    uint64_t uploadsSelfNamed = 0u; // no record: named by their own format and size
+    uint64_t uploadsPatched = 0u;   // into part of a named image
     uint64_t unnamedUploadBytes = 0u;
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
@@ -376,13 +378,15 @@ private:
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
-    void dropNamed(const GsBlockSet &blocks);
+    void dropNamed(const GsBlockSet &blocks, uint32_t keep = ~0u);
     // Expands the region from a named image when one serves this key (and
     // its palette, for an indexed one); false leaves m_staging untouched.
     bool expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash);
     std::unordered_map<uint32_t, NamedImage> m_named;
     GsBlockSet m_namedBlocks;
     bool m_namedOpen = false;
+    bool m_namedPatching = false;
+    std::array<uint32_t, 4> m_namedPatch{}; // x, y, width, height
     NamedImage m_namedPending;
     size_t m_namedExpected = 0;
     // Replacement packs are keyed by the GS path's hashes: their reads stay
