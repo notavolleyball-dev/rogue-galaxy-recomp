@@ -943,7 +943,7 @@ packet order; the texture cache takes the record matching each host-to-GS
 transfer (`gfx/gs/gs_named_textures.h`), keeps the bytes linear in the
 texture's own format, and expands textures and palettes (CSM1, CT32 or CT16)
 from them. A draw, copy or other upload over the blocks drops the name and
-the GS-layout path serves as before. Since the same day, an upload no record names (fonts, the manager's own palette uploads) names itself by its format and size, and an upload into part of a named image in its format patches it rather than dropping it. Not yet: content-keyed sharing between
+the GS-layout path serves as before. Since the same day, an upload no record names (fonts, the manager's own palette uploads) names itself by its format and size, and an upload into part of a named image in its format patches it rather than dropping it. A named CT32 image read as T8, T4 or an alpha format (the audit's largest class) is reinterpreted from its own bytes: each texel's byte address in the read's layout, then the CT32 word holding it. Not yet: content-keyed sharing between
 names (the same art uploaded to two places decodes twice), the identity
 hashes replacement packs use, and the uploads the manager's own callback
 makes. Builds; unverified on screen.

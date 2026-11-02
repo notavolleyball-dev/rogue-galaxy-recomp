@@ -374,6 +374,10 @@ private:
         namedtextures::Upload upload;
         std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
         GsBlockSet blocks;
+        // A CT32 image read in another format (Rogue Galaxy: the 8-bit art
+        // sent as CT32): each CT32 word's pixel + 1 in the image, by word
+        // address from the image's base; built on first use.
+        mutable std::vector<uint32_t> wordToPixel;
     };
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);

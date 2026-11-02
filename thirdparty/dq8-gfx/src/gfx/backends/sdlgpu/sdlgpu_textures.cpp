@@ -4,6 +4,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 
 #include <algorithm>
@@ -1858,12 +1859,39 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const NamedImage &image = found->second;
     const namedtextures::Upload &u = image.upload;
     const uint32_t psm = key.psm & 0x3fu;
-    if (u.palette || (u.psm & 0x3fu) != psm || std::max<uint32_t>(key.tbw, 1u) != std::max<uint32_t>(u.textureBufferWidth, 1u))
+    // A CT32 image read as 8 or 4 bits, through the GS's layouts: the
+    // texel's byte address, then the CT32 word holding it in the image.
+    const bool indexedRead = psm == GS_PSM_T8 || psm == GS_PSM_T4 || psm == GS_PSM_T8H || psm == GS_PSM_T4HL ||
+                             psm == GS_PSM_T4HH;
+    const uint32_t keyTbw = std::max<uint32_t>(key.tbw, 1u);
+    const uint32_t imageTbw = std::max<uint32_t>(u.dbw, 1u);
+    const bool reinterpret = !u.palette && !u.preSwizzled && (u.psm & 0x3fu) == GS_PSM_CT32 && indexedRead &&
+                             ((psm == GS_PSM_T8 || psm == GS_PSM_T4) ? std::max<uint32_t>(keyTbw >> 1u, 1u) == imageTbw
+                                                                     : keyTbw == imageTbw);
+    if (!reinterpret &&
+        (u.palette || (u.psm & 0x3fu) != psm || keyTbw != std::max<uint32_t>(u.textureBufferWidth, 1u)))
         return miss(m_stats.namedMissShape);
-    const uint32_t w = u.textureWidth, h = u.textureHeight;
+    const uint32_t w = reinterpret ? key.width : u.textureWidth, h = reinterpret ? key.height : u.textureHeight;
     const auto pow2 = [](uint32_t v) { uint32_t p = 1u; while (p < v) p <<= 1u; return p; };
-    if (key.width > pow2(w) || key.height > pow2(h))
+    if (!reinterpret && (key.width > pow2(w) || key.height > pow2(h)))
         return miss(m_stats.namedMissShape);
+    if (reinterpret && image.wordToPixel.empty()) {
+        const uint32_t rows = (u.height + 31u) / 32u;
+        image.wordToPixel.assign(static_cast<size_t>(rows) * imageTbw * 2048u, 0u);
+        for (uint32_t py = 0u; py < u.height; ++py)
+            for (uint32_t px = 0u; px < u.width; ++px) {
+                const uint32_t word = GSPSMCT32::addrPSMCT32(0u, imageTbw, px, py) >> 2u;
+                if (word < image.wordToPixel.size())
+                    image.wordToPixel[word] = py * u.width + px + 1u;
+            }
+    }
+    // The byte at a byte address of the image, or 0 past it.
+    const auto byteAt = [&](uint32_t address) -> uint32_t {
+        const uint32_t word = address >> 2u;
+        if (word >= image.wordToPixel.size() || image.wordToPixel[word] == 0u)
+            return 0u;
+        return image.bytes[static_cast<size_t>(image.wordToPixel[word] - 1u) * 4u + (address & 3u)];
+    };
 
     const bool indexed = gsIsIndexedPsm(key.psm);
     const bool fourBit = psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
@@ -1910,7 +1938,22 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         for (uint32_t x = region.x0; x < region.x1; ++x) {
             uint32_t color = 0u;
             uint32_t raw = 0u;
-            if (x < w && y < h) {
+            if (reinterpret) {
+                switch (psm) {
+                case GS_PSM_T8: raw = byteAt(GSPSMT8::addrPSMT8(0u, keyTbw, x, y)); break;
+                case GS_PSM_T4: {
+                    const uint32_t nibble = GSPSMT4::addrPSMT4(0u, keyTbw, x, y);
+                    raw = (byteAt(nibble >> 1u) >> ((nibble & 1u) * 4u)) & 0x0fu;
+                    break;
+                }
+                default: {
+                    const uint32_t alpha = byteAt((GSPSMCT32::addrPSMCT32(0u, keyTbw, x, y) & ~3u) + 3u);
+                    raw = psm == GS_PSM_T8H ? alpha : (psm == GS_PSM_T4HL ? (alpha & 0x0fu) : (alpha >> 4u));
+                    break;
+                }
+                }
+                color = palette[raw];
+            } else if (x < w && y < h) {
                 const size_t i = static_cast<size_t>(y) * w + x;
                 switch (psm) {
                 case GS_PSM_CT32:
