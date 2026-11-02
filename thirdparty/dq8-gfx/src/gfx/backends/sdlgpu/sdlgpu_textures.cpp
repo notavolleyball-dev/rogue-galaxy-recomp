@@ -271,13 +271,25 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
         m_uploads.clear();
     m_uploads.push_back(record);
     ++m_uploadSerial;
+    const uint32_t psm = record.dpsm & 0x3fu;
+    static const bool decodeStore = std::getenv("DQ8_GFX_DECODE_STORE") != nullptr;
+    m_uploadCopied = !decodeStore && m_vram.attached() &&
+                     (psm == GS_PSM_CT32 || psm == GS_PSM_T8 || psm == GS_PSM_T4);
     m_shadowTransfer->begin(command);
     m_auditPending = static_cast<uint32_t>(m_uploads.size()) + 15u;
 }
 
 void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
-    if (m_tracking && m_shadowTransfer)
+    if (m_tracking && m_shadowTransfer && !m_uploadCopied)
         m_shadowTransfer->upload(data, sizeBytes);
+}
+
+void GsTextureCache::noteUploadLanded(const GSTransferCommand &command, uint32_t copiedBefore, uint32_t copiedAfter) {
+    if (!m_tracking || !m_uploadCopied || copiedAfter <= copiedBefore)
+        return;
+    m_shadow.copyLanded(m_vram, command.bitbltbuf.dpsm, command.bitbltbuf.dbp,
+                        std::max<uint32_t>(command.bitbltbuf.dbw, 1u), command.trxpos.dsax, command.trxpos.dsay,
+                        command.trxreg.rrw, copiedBefore, copiedAfter);
 }
 
 void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource source) {

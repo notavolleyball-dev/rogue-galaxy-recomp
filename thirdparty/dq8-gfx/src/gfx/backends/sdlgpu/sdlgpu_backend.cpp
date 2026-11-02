@@ -5959,6 +5959,8 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     if (m_impl->textures && command.direction == 0u)
         m_impl->textures->noteUploadData(data, sizeBytes);
     m_impl->transfer->upload(data, sizeBytes);
+    if (m_impl->textures && command.direction == 0u && before.direction == 0u)
+        m_impl->textures->noteUploadLanded(command, before.copiedPixels, m_impl->transfer->snapshot().copiedPixels);
     if (m_impl->coveredTransferOpen) {
         const auto state = m_impl->transfer->snapshot();
         m_impl->coveredTransferOpen = state.direction == 0u && state.copiedPixels < state.totalPixels;

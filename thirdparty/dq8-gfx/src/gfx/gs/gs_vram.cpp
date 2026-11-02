@@ -682,7 +682,69 @@ void writeRun(uint8_t *data, uint32_t base, uint32_t bw, uint32_t dsax, uint32_t
     }
 }
 
+template <class F>
+void copyRectBlocks(GsVram &target, const GsVram &source, uint32_t psm, uint32_t base, uint32_t bw, uint32_t x,
+                    uint32_t y, uint32_t w, uint32_t h) {
+    const BlockMap<F> to = blockMap<F>(target.data(), base, bw);
+    const BlockMap<F> from = blockMap<F>(const_cast<uint8_t *>(source.data()), base, bw);
+    const uint32_t x1 = x + w, y1 = y + h;
+    for (uint32_t by = y / F::kBlockH * F::kBlockH; by < y1; by += F::kBlockH) {
+        for (uint32_t bx = x / F::kBlockW * F::kBlockW; bx < x1; bx += F::kBlockW) {
+            if (bx >= x && bx + F::kBlockW <= x1 && by >= y && by + F::kBlockH <= y1) {
+                std::memcpy(to(bx, by), from(bx, by), 256u);
+                continue;
+            }
+            const uint32_t tx0 = std::max(bx, x), tx1 = std::min(bx + F::kBlockW, x1);
+            const uint32_t ty0 = std::max(by, y), ty1 = std::min(by + F::kBlockH, y1);
+            for (uint32_t ty = ty0; ty < ty1; ++ty)
+                for (uint32_t tx = tx0; tx < tx1; ++tx)
+                    target.write(psm, base, bw, tx, ty, source.read(psm, base, bw, tx, ty));
+        }
+    }
+}
+
 } // namespace
+
+bool GsVram::copyRect(const GsVram &source, uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                      uint32_t w, uint32_t h) {
+    if (!attached() || !source.attached())
+        return true;
+    if (w == 0u || h == 0u)
+        return true;
+    switch (psm & 0x3fu) {
+    case GS_PSM_CT32:
+        copyRectBlocks<FormatCT32>(*this, source, psm, base, bw, x, y, w, h);
+        return true;
+    case GS_PSM_T8:
+        copyRectBlocks<FormatT8>(*this, source, psm, base, bw, x, y, w, h);
+        return true;
+    case GS_PSM_T4:
+        copyRectBlocks<FormatT4>(*this, source, psm, base, bw, x, y, w, h);
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool GsVram::copyLanded(const GsVram &source, uint32_t psm, uint32_t base, uint32_t bw, uint32_t dsax,
+                        uint32_t dsay, uint32_t rrw, uint32_t first, uint32_t end) {
+    if (rrw == 0u || end <= first)
+        return true;
+    uint32_t row = first / rrw, column = first % rrw;
+    const uint32_t lastRow = end / rrw, lastColumn = end % rrw;
+    if (row == lastRow)
+        return copyRect(source, psm, base, bw, dsax + column, dsay + row, lastColumn - column, 1u);
+    bool ok = true;
+    if (column != 0u) {
+        ok = copyRect(source, psm, base, bw, dsax + column, dsay + row, rrw - column, 1u);
+        ++row;
+    }
+    if (lastRow > row)
+        ok = copyRect(source, psm, base, bw, dsax, dsay + row, rrw, lastRow - row) && ok;
+    if (lastColumn != 0u)
+        ok = copyRect(source, psm, base, bw, dsax, dsay + lastRow, lastColumn, 1u) && ok;
+    return ok;
+}
 
 void GsVram::writeRunT8(uint32_t base, uint32_t bw, uint32_t dsax, uint32_t rowEnd, uint32_t x, uint32_t y,
                         const uint8_t *src, uint32_t count) {

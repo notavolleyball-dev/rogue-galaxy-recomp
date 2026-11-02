@@ -141,6 +141,12 @@ public:
     // noteUpload: a host write is about to begin (before its invalidation).
     void noteUpload(const GSTransferCommand &command);
     void noteUploadData(const uint8_t *data, uint32_t sizeBytes);
+    // After a payload of `command` landed in local memory, pixels
+    // [copiedBefore, copiedAfter) of its rectangle: the host writes' memory
+    // takes the same texels from local memory, for the formats copyRect
+    // handles, instead of decoding the payload a second time
+    // (noteUploadData skips those; Rogue Galaxy: added).
+    void noteUploadLanded(const GSTransferCommand &command, uint32_t copiedBefore, uint32_t copiedAfter);
     bool auditEnabled() const { return m_auditOn; }
     // The classes so far, one line each, for the stats report.
     std::string auditReport() const;
@@ -272,6 +278,9 @@ private:
     GsBlockSet m_coveredBlocks;
     uint64_t m_coveredBlocksFor = 0u;
     uint64_t m_uploadSerial = 0u;
+    // The current upload's format is copied from local memory
+    // (noteUploadLanded) rather than decoded again.
+    bool m_uploadCopied = false;
     std::vector<uint32_t> m_writer;
     // The blocks something other than a host write touched since an upload
     // last covered them: what the host writes' memory cannot be trusted for.

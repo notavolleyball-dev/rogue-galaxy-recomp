@@ -8,6 +8,7 @@
 #include <vector>
 
 #if defined(RG_HAS_SDLGPU)
+#include "gfx/gs/gs_transfer.h"
 #include "gfx/gs/gs_vram.h"
 #endif
 #include "runtime/gs/ps2_gs_memory.h"
@@ -134,6 +135,83 @@ bool vramRunWriters()
 }
 #endif
 
+#if defined(RG_HAS_SDLGPU)
+// The host writes' memory filled by copying each payload's landed pixels
+// out of local memory (GsVram::copyLanded) against decoding the payload a
+// second time, as GsTextureCache did: same bytes, for random transfers
+// split into random payloads, local memory and the store starting apart.
+bool storeCopiesUploads()
+{
+    GSMem::InitLookupTables();
+    constexpr uint32_t kSize = 4u * 1024u * 1024u;
+    std::vector<uint8_t> local(kSize), decoded(kSize), copied(kSize);
+    dq8::gfx::GsVram localVram, decodedVram, copiedVram;
+    localVram.attach(local.data(), kSize);
+    decodedVram.attach(decoded.data(), kSize);
+    copiedVram.attach(copied.data(), kSize);
+    dq8::gfx::GsTransferEngine localEngine(localVram), decodedEngine(decodedVram);
+    std::mt19937 rng(4321);
+    const uint8_t formats[3] = {GS_PSM_CT32, GS_PSM_T8, GS_PSM_T4};
+    for (int round = 0; round < 300; ++round)
+    {
+        for (size_t i = 0; i < kSize; ++i)
+        {
+            local[i] = static_cast<uint8_t>(rng());
+            decoded[i] = copied[i] = static_cast<uint8_t>(rng());
+        }
+        GSTransferCommand command{};
+        command.direction = 0u;
+        command.bitbltbuf.dpsm = formats[round % 3];
+        command.bitbltbuf.dbw = static_cast<uint8_t>(1u + rng() % 16u);
+        command.bitbltbuf.dbp = rng() % 0x3000u;
+        // Half the rounds block-aligned, as most textures are.
+        const bool aligned = (round & 4) != 0;
+        command.trxpos.dsax = static_cast<uint16_t>(aligned ? (rng() % 8u) * 32u : rng() % 300u);
+        command.trxpos.dsay = static_cast<uint16_t>(aligned ? (rng() % 8u) * 16u : rng() % 300u);
+        command.trxreg.rrw = static_cast<uint16_t>(aligned ? 32u << (rng() % 3u) : 1u + rng() % 200u);
+        command.trxreg.rrh = static_cast<uint16_t>(aligned ? 16u << (rng() % 3u) : 1u + rng() % 64u);
+        const uint32_t pixels = uint32_t(command.trxreg.rrw) * command.trxreg.rrh;
+        const uint32_t bytes = command.bitbltbuf.dpsm == GS_PSM_CT32 ? pixels * 4u
+                               : command.bitbltbuf.dpsm == GS_PSM_T8 ? pixels
+                                                                      : (pixels + 1u) / 2u;
+        std::vector<uint8_t> payload(bytes);
+        for (auto &b : payload)
+        {
+            b = static_cast<uint8_t>(rng());
+        }
+        localEngine.begin(command);
+        decodedEngine.begin(command);
+        for (uint32_t offset = 0u; offset < bytes;)
+        {
+            // Payloads of whole quadwords, as IMAGE carries them, or any size.
+            uint32_t size = 1u + rng() % std::max<uint32_t>(bytes / 3u, 1u);
+            if (rng() % 2u)
+            {
+                size = (size + 15u) & ~15u;
+            }
+            size = std::min(size, bytes - offset);
+            const uint32_t before = localEngine.snapshot().copiedPixels;
+            localEngine.upload(payload.data() + offset, size);
+            decodedEngine.upload(payload.data() + offset, size);
+            copiedVram.copyLanded(localVram, command.bitbltbuf.dpsm, command.bitbltbuf.dbp,
+                                  std::max<uint32_t>(command.bitbltbuf.dbw, 1u), command.trxpos.dsax,
+                                  command.trxpos.dsay, command.trxreg.rrw, before,
+                                  localEngine.snapshot().copiedPixels);
+            offset += size;
+        }
+        if (std::memcmp(decoded.data(), copied.data(), kSize) != 0)
+        {
+            std::fprintf(stderr, "[selftest] store copy differs: psm %02x dbp 0x%x dbw %u %ux%u at (%u,%u)\n",
+                         command.bitbltbuf.dpsm, command.bitbltbuf.dbp, command.bitbltbuf.dbw, command.trxreg.rrw,
+                         command.trxreg.rrh, command.trxpos.dsax, command.trxpos.dsay);
+            return false;
+        }
+    }
+    std::printf("[selftest] host writes' memory copied from local memory matches decoding over 300 transfers\n");
+    return true;
+}
+#endif
+
 } // namespace
 
 bool runSelfTestIfRequested(int &status)
@@ -148,6 +226,7 @@ bool runSelfTestIfRequested(int &status)
     if (std::string(which) == "gs" || std::string(which) == "all")
     {
         ok = vramRunWriters() && ok;
+        ok = storeCopiesUploads() && ok;
     }
 #endif
     status = ok ? 0 : 1;

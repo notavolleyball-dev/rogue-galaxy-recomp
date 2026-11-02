@@ -156,6 +156,18 @@ public:
     uint32_t read(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
     void write(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
 
+    // The texels of a w x h rectangle at (x, y) copied from `source`, as
+    // write(read()) for each would (Rogue Galaxy: added): the blocks the
+    // rectangle covers whole as 256-byte copies, the texels of the others
+    // one by one. For PSMCT32, PSMT8 and PSMT4; false for another format,
+    // with nothing copied.
+    bool copyRect(const GsVram &source, uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y,
+                  uint32_t w, uint32_t h);
+    // Pixels [first, end) of a host-to-local transfer's rectangle (rows of
+    // rrw from (dsax, dsay)), copied by copyRect as up to three rectangles.
+    bool copyLanded(const GsVram &source, uint32_t psm, uint32_t base, uint32_t bw, uint32_t dsax, uint32_t dsay,
+                    uint32_t rrw, uint32_t first, uint32_t end);
+
     // A host-to-local run of PSMT8 or PSMT4 pixels: `count` pixels from
     // (x, y), wrapping to dsax at rowEnd, exactly as `count` calls to write()
     // would store them. T4 takes two pixels per byte, low nibble first.
