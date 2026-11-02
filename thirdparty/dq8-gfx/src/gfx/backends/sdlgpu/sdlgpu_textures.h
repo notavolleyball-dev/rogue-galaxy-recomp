@@ -312,6 +312,7 @@ private:
     // m_uploadSerial (counts noteUpload calls).
     GsBlockSet m_coveredBlocks;
     uint64_t m_coveredBlocksFor = 0u;
+    uint64_t m_coveredAppliedFor = 0u; // the upload whose covered blocks were taken out of m_drawnBlocks
     uint64_t m_uploadSerial = 0u;
     // The current upload's format is copied from local memory
     // (noteUploadLanded) rather than decoded again.
@@ -386,6 +387,10 @@ private:
         std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
         GsBlockSet blocks;
         bool swizzled = false;
+        // Under the bypass a named upload's bytes skip the host writes'
+        // memory (m_shadow) and are written there only when something reads
+        // its blocks from it or it is dropped (writeNamedToShadow).
+        bool owedToShadow = false;
         // A hash of `bytes`, made on first use and cleared when they change:
         // a texture's identity from it needs no pass over its texels.
         mutable uint64_t contentHash = 0u; // pre-swizzled 8-bit art still as uploaded (linearize)
@@ -402,7 +407,14 @@ private:
     uint32_t m_namedCopyKeep = ~0u; // the named image the current copy wrote
     bool namedWithin(uint32_t first, uint32_t last) const;
     static void linearize(NamedImage &image);
-    static uint64_t contentHashOf(const NamedImage &image); // a named image's span meets these blocks
+    static uint64_t contentHashOf(const NamedImage &image);
+    void writeNamedToShadow(NamedImage &image);
+    void settleShadow(const GsBlockSet &blocks);
+    bool namedServes(const GsTextureKey &key);
+    bool m_namedSkipShadow = false;    // this upload's bytes go to m_shadow only if needed
+    GSTransferCommand m_namedSkipCommand{};
+    uint32_t m_namedOwed = 0u;          // named images owed to m_shadow
+    const GsBlockSet *m_dropCovered = nullptr; // blocks the writer dropping names replaces whole // a named image's span meets these blocks
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
@@ -429,11 +441,14 @@ private:
                           uint64_t &hash, std::string &error);
     // What the last expandNamed read: an image's own T8/T4 texels (direct),
     // its size, and the palette it built.
-    const NamedImage *m_namedLastImage = nullptr;
+    NamedImage *m_namedLastImage = nullptr;
     bool m_namedLastDirect = false;
     uint32_t m_namedLastWidth = 0u, m_namedLastHeight = 0u;
     std::array<uint32_t, 256> m_namedLastPalette{};
     std::vector<uint8_t> m_indexStaging;
+    // R8 index textures by size (width | height << 16), uploaded cycled.
+    std::unordered_map<uint32_t, SDL_GPUTexture *> m_indexTextures;
+    bool m_uploadCycle = false; // uploadBytes cycles its destination
     // Transfer buffers come from a pool guarded by the device's submission
     // serials: the movie path uploads dozens of regions a frame, and creating
     // a fresh buffer per region spent a quarter of the EE thread inside the

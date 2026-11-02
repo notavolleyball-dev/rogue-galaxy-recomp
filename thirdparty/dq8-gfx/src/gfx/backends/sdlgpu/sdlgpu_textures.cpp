@@ -220,6 +220,12 @@ GsTextureCache::GsTextureCache(SdlGpuDevice &device, GsVram &vram, GsTargetCache
 GsTextureCache::~GsTextureCache() {
     reset();
     releaseLarger();
+    if (m_device.valid())
+        for (auto &[size, texture] : m_indexTextures) {
+            (void)size;
+            SDL_ReleaseGPUTexture(m_device.handle(), texture);
+        }
+    m_indexTextures.clear();
 }
 
 void GsTextureCache::releaseLarger() {
@@ -291,7 +297,7 @@ void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
         if (m_namedPending.bytes.size() >= m_namedExpected)
             finishNamedUpload();
     }
-    if (m_tracking && m_shadowTransfer && !m_uploadCopied)
+    if (m_tracking && m_shadowTransfer && !m_uploadCopied && !m_namedSkipShadow)
         m_shadowTransfer->upload(data, sizeBytes);
 }
 
@@ -327,9 +333,13 @@ void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource sourc
                                     record->x, record->y);
                 m_coveredBlocksFor = m_uploadSerial;
             }
-            if ((m_drawnBlocks & m_coveredBlocks).any()) {
-                m_drawnBlocks &= ~m_coveredBlocks;
-                ++m_drawnGeneration;
+            // Once per upload: no draw lands between one transfer's payloads.
+            if (m_coveredAppliedFor != m_uploadSerial) {
+                m_coveredAppliedFor = m_uploadSerial;
+                if ((m_drawnBlocks & m_coveredBlocks).any()) {
+                    m_drawnBlocks &= ~m_coveredBlocks;
+                    ++m_drawnGeneration;
+                }
             }
         }
     }
@@ -552,6 +562,8 @@ GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
     const GsBlockSet blocks = blocksFor(key);
     if ((blocks & m_drawnBlocks).none()) {
         ++m_stats.uploadStoreReads;
+        if (m_namedOwed != 0u && !namedServes(key))
+            settleShadow(blocks);
         return &m_shadow;
     }
     ++m_stats.localMemoryReads;
@@ -1082,7 +1094,7 @@ bool GsTextureCache::uploadBytes(SDL_GPUTexture *texture, const GsRegion &region
     // cycle stays false: a cycled destination would come back with its
     // untouched texels undefined, which a partial update must not do. The
     // buffer side is guarded by the pool fence instead.
-    SDL_UploadToGPUTexture(copy, &source, &destination, false);
+    SDL_UploadToGPUTexture(copy, &source, &destination, m_uploadCycle);
     SDL_EndGPUCopyPass(copy);
     recycleUploadBuffer(upload);
     return true;
@@ -1564,9 +1576,14 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
     static const bool blockHashOn = std::getenv("DQ8_GFX_NO_BLOCK_HASH") == nullptr;
     const bool mayBeUnchanged = skipUnchanged && wholeTexture && !entry.clutUploadPending &&
                                 entry.identity.texels != 0u;
+    // Named textures are identified by their images' hashes (expand), and
+    // their blocks in memory may not hold their bytes (owed under the
+    // bypass): no block hash for them.
+    const bool named = namedServes(key);
     const uint64_t blockHash =
-        blockHashOn && wholeTexture ? gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, key.width, key.height)
-                                    : 0u;
+        blockHashOn && wholeTexture && !named
+            ? gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, key.width, key.height)
+            : 0u;
     if (mayBeUnchanged && blockHash != 0u && entry.blockHash != 0u) {
         if (blockHash == entry.blockHash) {
             entry.dirty.clear();
@@ -1678,7 +1695,7 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
     }
 
     entry.identity.texels = expand(key, {0u, 0u, width, height});
-    entry.blockHash = gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, width, height);
+    entry.blockHash = namedServes(key) ? 0u : gsHashBlocks(m_src->data(), key.tbp0, key.tbw, key.psm, width, height);
     dumpTexture(key, entry.identity, m_staging, m_stats.builds);
 
     SDL_GPUDevice *device = m_device.handle();
@@ -1781,11 +1798,72 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
     for (auto it = m_named.begin(); it != m_named.end();) {
         const NamedImage &image = it->second;
         if (it->first != keep && image.firstBlock <= last && first <= image.lastBlock &&
-            (image.blocks & blocks).any())
+            (image.blocks & blocks).any()) {
+            if (image.owedToShadow) {
+                // Blocks of it the writer does not replace whole keep its bytes.
+                if (!m_dropCovered || (image.blocks & ~*m_dropCovered).any())
+                    writeNamedToShadow(it->second);
+                else
+                    --m_namedOwed;
+            }
             it = m_named.erase(it);
+        }
         else
             ++it;
     }
+}
+
+// An owed named image into the host writes' memory, as its upload would
+// have written it: the upload as sent, or (pre-swizzled art made linear) the
+// same bytes as a T8 image, which lands in the same place.
+void GsTextureCache::writeNamedToShadow(NamedImage &image) {
+    if (!image.owedToShadow)
+        return;
+    image.owedToShadow = false;
+    if (m_namedOwed)
+        --m_namedOwed;
+    if (!m_shadowTransfer)
+        return;
+    const namedtextures::Upload &u = image.upload;
+    GSTransferCommand command{};
+    command.direction = 0u;
+    command.bitbltbuf.dbp = u.dbp;
+    if (u.preSwizzled && !image.swizzled) {
+        command.bitbltbuf.dbw = std::max<uint32_t>(u.textureBufferWidth, 1u);
+        command.bitbltbuf.dpsm = GS_PSM_T8;
+        command.trxreg.rrw = u.textureWidth;
+        command.trxreg.rrh = u.textureHeight;
+    } else {
+        command.bitbltbuf.dbw = std::max<uint32_t>(u.dbw, 1u);
+        command.bitbltbuf.dpsm = u.dpsm;
+        command.trxreg.rrw = u.width;
+        command.trxreg.rrh = u.height;
+    }
+    m_shadowTransfer->begin(command);
+    m_shadowTransfer->upload(image.bytes.data(), static_cast<uint32_t>(image.bytes.size()));
+}
+
+// Before a read of the host writes' memory: the owed images it reaches.
+void GsTextureCache::settleShadow(const GsBlockSet &blocks) {
+    if (m_namedOwed == 0u)
+        return;
+    uint32_t first = 0u, last = 0u;
+    if (!blockSpan(blocks, first, last))
+        return;
+    for (auto &[base, image] : m_named) {
+        (void)base;
+        if (image.owedToShadow && image.firstBlock <= last && first <= image.lastBlock && (image.blocks & blocks).any())
+            writeNamedToShadow(image);
+    }
+}
+
+// Whether the named images give this whole texture (its texels, and its
+// palette if it has one): then nothing reads its blocks from memory.
+bool GsTextureCache::namedServes(const GsTextureKey &key) {
+    if (m_identityRead || !namedtextures::active())
+        return false;
+    uint64_t hash = 0u;
+    return expandNamed(key, {0u, 0u, key.width, key.height}, true, hash);
 }
 
 bool GsTextureCache::namedWithin(uint32_t first, uint32_t last) const {
@@ -1839,15 +1917,26 @@ uint32_t namedBits(uint32_t psm) {
 void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     if (m_namedOpen)
         finishNamedUpload(); // a short one: dropped there
+    m_namedSkipShadow = false;
     if (command.direction == 1u)
         return; // a read writes nothing
     const uint32_t dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
     const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
     const uint32_t x = command.trxpos.dsax, y = command.trxpos.dsay;
     const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
-    GsBlockSet written;
+    GsBlockSet written, covered;
     if (!m_named.empty())
         gsMarkBlocks(written, command.bitbltbuf.dbp, dbw, dpsm, x + w, y + h);
+    if (m_namedOwed != 0u && command.direction == 0u)
+        gsMarkCoveredBlocks(covered, command.bitbltbuf.dbp, dbw, dpsm, w, h, x, y);
+    // The drops below: an owed image this upload replaces whole needs no
+    // write of its own (a local copy's or a read's drops always write it).
+    struct CoveredScope {
+        const GsBlockSet *&slot;
+        ~CoveredScope() { slot = nullptr; }
+    } coveredScope{m_dropCovered};
+    if (command.direction == 0u)
+        m_dropCovered = &covered;
     static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
     const uint32_t bits = namedBits(dpsm);
     if (command.direction != 0u || off || bits == 0u || w == 0u || h == 0u || !namedtextures::active()) {
@@ -1912,6 +2001,12 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     m_namedPending.bytes.reserve(m_namedExpected);
     gsMarkBlocks(m_namedPending.blocks, upload.dbp, dbw, dpsm, upload.width, upload.height);
     m_namedOpen = true;
+    // Under the bypass the bytes go to the named image alone; m_shadow gets
+    // them when a read reaches them (settleShadow) or the image is dropped.
+    if (m_tracking && !m_auditOn && gsNativeBypass()) {
+        m_namedSkipShadow = true;
+        m_namedSkipCommand = command;
+    }
 }
 
 namespace {
@@ -1986,18 +2081,38 @@ void GsTextureCache::finishNamedUpload() {
         target.contentHash = 0u;
         return;
     }
+    // Not kept as a named image: the bytes the shadow skipped go there now.
+    const auto unkept = [&] {
+        if (m_namedSkipShadow && m_shadowTransfer) {
+            m_shadowTransfer->begin(m_namedSkipCommand);
+            m_shadowTransfer->upload(image.bytes.data(), static_cast<uint32_t>(image.bytes.size()));
+        }
+        m_namedSkipShadow = false;
+    };
     if (image.bytes.size() < m_namedExpected)
-        return;
+        return unkept();
     const namedtextures::Upload &u = image.upload;
     if (u.preSwizzled) {
         // Kept as uploaded; made linear when a texture first reads it
         // (linearize): most uploads are sent again before any draw reads them.
         if (!unswizzleMap(u))
-            return; // not this layout after all: leave it unnamed
+            return unkept(); // not this layout after all: leave it unnamed
         image.swizzled = true;
     }
     if (!blockSpan(image.blocks, image.firstBlock, image.lastBlock))
-        return;
+        return unkept();
+    if (m_namedSkipShadow) {
+        image.owedToShadow = true;
+        ++m_namedOwed;
+    }
+    const auto previous = m_named.find(u.dbp);
+    if (previous != m_named.end() && previous->second.owedToShadow) {
+        // Replaced in place: its blocks not this image's keep its bytes.
+        if ((previous->second.blocks & ~image.blocks).any())
+            writeNamedToShadow(previous->second);
+        else
+            --m_namedOwed;
+    }
     m_named[u.dbp] = std::move(image);
 }
 
@@ -2047,8 +2162,7 @@ void GsTextureCache::linearize(NamedImage &image) {
     const size_t count = map->size();
     for (size_t i = 0; i < count; ++i)
         to[i] = from[index[i]];
-    image.bytes = std::move(linear);
-    image.contentHash = 0u;
+    image.bytes = std::move(linear); // the same picture: contentHash stands
 }
 
 bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
@@ -2062,8 +2176,7 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const auto found = m_named.find(key.tbp0);
     if (found == m_named.end())
         return miss(m_stats.namedMissNoName);
-    linearize(found->second);
-    const NamedImage &image = found->second;
+    NamedImage &image = found->second;
     const namedtextures::Upload &u = image.upload;
     const uint32_t psm = key.psm & 0x3fu;
     // A CT32 image read as 8 or 4 bits, through the GS's layouts: the
@@ -2160,6 +2273,7 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         hash = identity;
         return true;
     }
+    linearize(image); // after the identity: its hash is of the bytes as uploaded
     const uint32_t regionWidth = region.width();
     m_staging.assign(static_cast<size_t>(regionWidth) * region.height() * 4u, 0u);
     for (uint32_t y = region.y0; y < region.y1; ++y) {
@@ -2241,6 +2355,7 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
     // Texels past the image read as 0, not palette[0]: those stay on the CPU.
     if (region.x1 > m_namedLastWidth || region.y1 > m_namedLastHeight)
         return true;
+    linearize(*m_namedLastImage); // the identity read it as uploaded
     const NamedImage &image = *m_namedLastImage;
     const bool fourBit = psm == GS_PSM_T4;
     const uint32_t w = m_namedLastWidth;
@@ -2268,15 +2383,21 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
     info.num_levels = 1u;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    SDL_GPUTexture *indices = SDL_CreateGPUTexture(device, &info);
+    // One texture a size, kept: uploaded cycled, so a use still in flight
+    // keeps its contents (creating one per update was 1.6% of the samples).
+    SDL_GPUTexture *&indices = m_indexTextures[rowBytes | (region.height() << 16u)];
     if (!indices) {
-        error = std::string("SDL_CreateGPUTexture(named indices): ") + SDL_GetError();
-        return false;
+        indices = SDL_CreateGPUTexture(device, &info);
+        if (!indices) {
+            error = std::string("SDL_CreateGPUTexture(named indices): ") + SDL_GetError();
+            return false;
+        }
     }
-    if (!uploadBytes(indices, {0u, 0u, rowBytes, region.height()}, m_indexStaging.data(), 1u, error)) {
-        SDL_ReleaseGPUTexture(device, indices);
+    m_uploadCycle = true;
+    const bool uploaded = uploadBytes(indices, {0u, 0u, rowBytes, region.height()}, m_indexStaging.data(), 1u, error);
+    m_uploadCycle = false;
+    if (!uploaded)
         return false;
-    }
     if (!entry.renderable) {
         info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
         info.width = key.width;
@@ -2284,7 +2405,6 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
         info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
         SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &info);
         if (!texture) {
-            SDL_ReleaseGPUTexture(device, indices);
             error = std::string("SDL_CreateGPUTexture(named on GPU): ") + SDL_GetError();
             return false;
         }
@@ -2301,7 +2421,6 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
     const SDL_Rect rect{int(region.x0), int(region.y0), int(region.width()), int(region.height())};
     const bool done = m_device.expandIndexed8(indices, m_namedLastPalette.data(), entry.texture, key.width,
                                               key.height, rect, pages, error);
-    SDL_ReleaseGPUTexture(device, indices); // released once the expansion has run
     if (!done)
         return false;
     entry.paletteFromTarget = false;
@@ -2391,6 +2510,7 @@ bool GsTextureCache::expandNamedWithTargetPalette(const GsTextureKey &key, Entry
 
 
 void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
+    m_namedSkipShadow = false; // set again by beginNamedUpload for the upload it names
     m_namedCopyKeep = ~0u;
     if (command.direction != 2u || m_named.empty())
         return;
