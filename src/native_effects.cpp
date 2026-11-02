@@ -293,6 +293,36 @@ void cblurDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_cblurDrawOriginal, rdram, ctx, runtime, &afterCBlurDraw, stackTop());
 }
 
+// FocusFilterDrawMaybe and ShadowMapBlur (RG_NATIVE_FOCUS, RG_NATIVE_SHADOW_MAP):
+// sprite effects through the builder, as the bloom; both use the CT16 view of
+// a buffer the colour filter does (kGreenToAlpha where its masks are those).
+// ShadowMapRender is not hooked: its models are VU1 draws (native already) and
+// its sprites use the destination alpha test, which the builder refuses.
+constexpr uint32_t kFocusFilter = 0x0017C000u;
+constexpr uint32_t kShadowMapBlur = 0x00145B60u;
+PS2Runtime::RecompiledFunction g_focusOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_shadowMapBlurOriginal = nullptr;
+
+void afterFocus(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::Focus);
+}
+
+void focusFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_focusOriginal, rdram, ctx, runtime, &afterFocus, stackTop());
+}
+
+void afterShadowMapBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::ShadowMapBlur);
+}
+
+void shadowMapBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_shadowMapBlurOriginal, rdram, ctx, runtime, &afterShadowMapBlur, stackTop());
+}
+
 PS2Runtime::RecompiledFunction g_refractionOriginal = nullptr;
 
 void afterRefraction(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
@@ -532,6 +562,8 @@ bool g_dof = false;
 bool g_refraction = false;
 bool g_flip = false;
 bool g_colorFilter = false;
+bool g_focus = false;
+bool g_shadowMap = false;
 // The flip's draw environment (below, with flipPacket).
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
 PS2Runtime::RecompiledFunction g_putDrawEnvOriginal = nullptr;
@@ -1136,6 +1168,8 @@ const char *name(Effect effect)
     case Effect::CompositeTail: return "composite tail";
     case Effect::Flip: return "flip";
     case Effect::ColorFilter: return "color filter";
+    case Effect::Focus: return "focus";
+    case Effect::ShadowMapBlur: return "shadow map blur";
     default: return "none";
     }
 }
@@ -1163,9 +1197,11 @@ bool enabled()
         g_refraction = flag("RG_NATIVE_REFRACTION", native);
         g_flip = flag("RG_NATIVE_FLIP", native);
         g_colorFilter = flag("RG_NATIVE_COLOR_FILTER", native);
+        g_focus = flag("RG_NATIVE_FOCUS", native);
+        g_shadowMap = flag("RG_NATIVE_SHADOW_MAP", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_colorFilter || g_probe;
+               g_colorFilter || g_focus || g_shadowMap || g_probe;
     }();
     return on;
 }
@@ -1207,6 +1243,14 @@ void install(PS2Runtime &runtime)
     if (g_refraction && !rg::timing::hookFunction(runtime, kRefraction, &refractionCaptureFrame, g_refractionOriginal))
     {
         std::fprintf(stderr, "[nativefx] the refraction's capture stays GS packets\n");
+    }
+    if (g_focus && !rg::timing::hookFunction(runtime, kFocusFilter, &focusFilterDraw, g_focusOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the focus filter stays GS packets\n");
+    }
+    if (g_shadowMap && !rg::timing::hookFunction(runtime, kShadowMapBlur, &shadowMapBlur, g_shadowMapBlurOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the shadow map's blur stays GS packets\n");
     }
     if (debugColorFilter() != 0u)
         rg::timing::hookFunction(runtime, kGameSceneTintApply, &gameSceneTintApply, g_tintApplyOriginal);
@@ -1649,7 +1693,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     const bool probing = effect == Effect::Probe;
     if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
         effect != Effect::Dof && effect != Effect::CBlurDraw && effect != Effect::Refraction &&
-        effect != Effect::CompositeTail && effect != Effect::Flip && !probing)
+        effect != Effect::CompositeTail && effect != Effect::Flip && effect != Effect::Focus &&
+        effect != Effect::ShadowMapBlur && !probing)
     {
         why = "no such effect";
         return false;

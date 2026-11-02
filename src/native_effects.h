@@ -71,6 +71,10 @@ enum class Effect : uint8_t
     // built from its arguments (Place::unit: the colour), its packets sent
     // on with their kicks withheld.
     ColorFilter,
+    // FocusFilterDrawMaybe (RG_NATIVE_FOCUS) and ShadowMapBlur
+    // (RG_NATIVE_SHADOW_MAP): built from their sprites, as the bloom.
+    Focus,
+    ShadowMapBlur,
 };
 const char *probeName(uint32_t unit);
 
