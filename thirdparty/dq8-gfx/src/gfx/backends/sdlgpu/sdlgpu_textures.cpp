@@ -263,7 +263,14 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
                 command.trxpos.dsax, command.trxpos.dsay);
     gsMarkCoveredPages(record.covered, record.dbp, record.dbw, record.dpsm, record.w, record.h,
                        command.trxpos.dsax, command.trxpos.dsay);
+    // Only the upload audit reads back past records (auditPages); without
+    // it the latest is all auditStamp needs, and keeping every one grew
+    // the vector by several MB a second at the first boss (Rogue Galaxy:
+    // fixed).
+    if (!m_auditOn)
+        m_uploads.clear();
     m_uploads.push_back(record);
+    ++m_uploadSerial;
     m_shadowTransfer->begin(command);
     m_auditPending = static_cast<uint32_t>(m_uploads.size()) + 15u;
 }
@@ -286,16 +293,25 @@ void GsTextureCache::auditStamp(const GsPageSet &pages, InvalidationSource sourc
             gsBlocksOfPages(m_drawnBlocks, pages);
             ++m_drawnGeneration;
         } else {
-            gsBlocksOfPages(m_drawnBlocks, pages & ~record->pages);
-            GsBlockSet covered;
-            gsMarkCoveredBlocks(covered, record->dbp, record->dbw, record->dpsm, record->w, record->h, record->x,
-                                record->y);
-            if ((m_drawnBlocks & covered).any()) {
-                m_drawnBlocks &= ~covered;
+            const GsPageSet outside = pages & ~record->pages;
+            if (outside.any())
+                gsBlocksOfPages(m_drawnBlocks, outside);
+            // The record's whole blocks, once per upload rather than once
+            // per payload (Rogue Galaxy: changed).
+            if (m_coveredBlocksFor != m_uploadSerial) {
+                m_coveredBlocks.reset();
+                gsMarkCoveredBlocks(m_coveredBlocks, record->dbp, record->dbw, record->dpsm, record->w, record->h,
+                                    record->x, record->y);
+                m_coveredBlocksFor = m_uploadSerial;
+            }
+            if ((m_drawnBlocks & m_coveredBlocks).any()) {
+                m_drawnBlocks &= ~m_coveredBlocks;
                 ++m_drawnGeneration;
             }
         }
     }
+    if (!m_auditOn)
+        return; // the writers by page are the audit's report alone
     gsForEachPage(pages, [&](uint32_t page) {
         uint32_t &writer = m_writer[page];
         if (source == InvalidationSource::Draw)

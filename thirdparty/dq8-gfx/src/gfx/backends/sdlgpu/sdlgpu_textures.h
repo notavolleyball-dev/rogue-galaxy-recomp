@@ -267,6 +267,11 @@ private:
         ~SourceScope() { cache.m_src = saved; }
     };
     uint32_t m_auditPending = 0u;
+    // gsMarkCoveredBlocks of the upload m_coveredBlocksFor names, by
+    // m_uploadSerial (counts noteUpload calls).
+    GsBlockSet m_coveredBlocks;
+    uint64_t m_coveredBlocksFor = 0u;
+    uint64_t m_uploadSerial = 0u;
     std::vector<uint32_t> m_writer;
     // The blocks something other than a host write touched since an upload
     // last covered them: what the host writes' memory cannot be trusted for.

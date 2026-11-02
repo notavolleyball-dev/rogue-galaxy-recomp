@@ -244,6 +244,7 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
     const uint32_t rrw = m_command.trxreg.rrw;
     const uint32_t dsax = m_command.trxpos.dsax;
     const uint32_t dsay = m_command.trxpos.dsay;
+    const uint32_t copiedBefore = m_state.copiedPixels;
     uint32_t offset = 0u;
     bool wrote = false;
 
@@ -388,8 +389,24 @@ void GsTransferEngine::upload(const uint8_t *data, uint32_t sizeBytes) {
         break;
     }
 
-    if (wrote && m_invalidate)
-        m_invalidate(destinationPages());
+    // Only the rows this payload reached (Rogue Galaxy: changed; every
+    // payload invalidated the whole transfer's pages, and a texture cache
+    // walk and an audit stamp over them each time were 2% of the GS
+    // worker at the first boss). Rows the next payloads fill are
+    // invalidated when they land.
+    if (wrote && m_invalidate) {
+        const uint32_t copiedAfter = std::max<uint32_t>(m_state.copiedPixels, copiedBefore + 1u);
+        const uint32_t firstRow = copiedBefore / rrw;
+        const uint32_t endRow = std::min<uint32_t>((copiedAfter - 1u) / rrw + 1u, m_command.trxreg.rrh);
+        if (m_state.direction != kHostToLocal && firstRow == 0u) {
+            m_invalidate(destinationPages());
+        } else {
+            GsPageSet pages;
+            gsMarkPages(pages, dbp, dbw, dpsm, rrw, std::max<uint32_t>(endRow, firstRow + 1u) - firstRow, dsax,
+                        dsay + firstRow);
+            m_invalidate(pages);
+        }
+    }
     if (m_repeatsOn && m_state.direction != kHostToLocal)
         finishRepeatCheck();
 

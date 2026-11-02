@@ -650,6 +650,11 @@ struct SdlGpuBackend::Impl {
     std::vector<uint8_t> ownedMemory;
     std::unique_ptr<GsTransferEngine> transfer;
     GSTransferCommand transferCommand{};
+    // The pages transferCommand's destination touches and those it covers
+    // whole, for UploadImage, once per transfer instead of once per payload
+    // (Rogue Galaxy: added).
+    GsPageSet transferPages, transferCovered;
+    bool transferPagesValid = false;
     bool patchingHostWrite = false;
     // A host write that skipped resolving the pages it covers is still arriving.
     bool coveredTransferOpen = false;
@@ -5719,6 +5724,7 @@ void SdlGpuBackend::Initialize(uint8_t *vram, uint32_t vramSize) {
     }
     m_impl->vram.attach(vram, vramSize);
     m_impl->transferCommand = {};
+    m_impl->transferPagesValid = false;
     m_impl->patchingHostWrite = false;
     m_impl->transfer = std::make_unique<GsTransferEngine>(m_impl->vram);
     m_impl->transfer->setResolveHook([impl = m_impl.get()](const GsPageSet &pages) {
@@ -5780,6 +5786,7 @@ void SdlGpuBackend::Reset() {
     m_impl->clearBatches();
     m_impl->vertices.clear();
     m_impl->transferCommand = {};
+    m_impl->transferPagesValid = false;
     m_impl->patchingHostWrite = false;
     if (m_impl->transfer)
         m_impl->transfer->reset();
@@ -5831,6 +5838,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
         if (!m_impl->flushFor(m_impl->stats.flushLocalCopy)) return;
         if (m_impl->gpuLocalCopy(command)) {
             m_impl->transferCommand = command;
+            m_impl->transferPagesValid = false;
             return;
         }
     }
@@ -5892,6 +5900,7 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
     }
     m_impl->noteRoundTrip(command);
     m_impl->transferCommand = command;
+    m_impl->transferPagesValid = false;
     if (command.direction == 0u && m_impl->textures)
         m_impl->textures->noteUpload(command);
     m_impl->transfer->begin(command);
@@ -5918,10 +5927,20 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
                                                  : GsTargetCache::gsPatchableHostWrite(dpsm);
     GsPageSet pages;
     if (before.direction == 0u && before.totalPixels != 0u && patchable && data && sizeBytes != 0u) {
-        gsMarkPages(pages, command.bitbltbuf.dbp,
-                    std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
-                    command.trxreg.rrw, command.trxreg.rrh,
-                    command.trxpos.dsax, command.trxpos.dsay);
+        if (!m_impl->transferPagesValid) {
+            m_impl->transferPages.reset();
+            m_impl->transferCovered.reset();
+            gsMarkPages(m_impl->transferPages, command.bitbltbuf.dbp,
+                        std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
+                        command.trxreg.rrw, command.trxreg.rrh,
+                        command.trxpos.dsax, command.trxpos.dsay);
+            gsMarkCoveredPages(m_impl->transferCovered, command.bitbltbuf.dbp,
+                               std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
+                               command.trxreg.rrw, command.trxreg.rrh,
+                               command.trxpos.dsax, command.trxpos.dsay);
+            m_impl->transferPagesValid = true;
+        }
+        pages = m_impl->transferPages;
         // Draws can occur between IMAGE fragments, so recheck ownership at
         // each payload before any CPU bytes change; the queued draws go
         // first only when they touch these pages (transferConflicts).
@@ -5931,11 +5950,7 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
             if (!m_impl->flushDraws()) return;
         }
         m_impl->patchingHostWrite = m_impl->targets->canPatchHostWrite(pages);
-        GsPageSet covered;
-        gsMarkCoveredPages(covered, command.bitbltbuf.dbp,
-                           std::max<uint32_t>(command.bitbltbuf.dbw, 1u), dpsm,
-                           command.trxreg.rrw, command.trxreg.rrh,
-                           command.trxpos.dsax, command.trxpos.dsay);
+        const GsPageSet &covered = m_impl->transferCovered;
         if (!m_impl->patchingHostWrite) {
             if (!m_impl->settleFor(pages, GsResolveReason::HostWrite, true, covered, false)) return;
             m_impl->coveredTransferOpen = m_impl->coveredTransferOpen || covered.any();
