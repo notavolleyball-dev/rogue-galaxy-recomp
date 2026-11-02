@@ -75,6 +75,11 @@ enum class Effect : uint8_t
     // (RG_NATIVE_SHADOW_MAP): built from their sprites, as the bloom.
     Focus,
     ShadowMapBlur,
+    // DrawListBeginPrim to DrawListEndPrim (RG_NATIVE_2D): a block the game
+    // built through its GsPkt API (sprites, UI, 2D). Its primitives become
+    // native meshes in window coordinates (build2D); only its register
+    // state and uploads go on to the GS.
+    Prim2D,
 };
 const char *probeName(uint32_t unit);
 
@@ -133,6 +138,18 @@ struct Box
 bool clearBox(const std::vector<std::vector<uint8_t>> &packets, Box &box);
 // Debugging: the registers and primitives of `packets`, one line each.
 void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets);
+
+// A Prim2D block, in order: register-only packets (state, uploads: sent on
+// as they are) and meshes (the primitives, in window coordinates, a triangle
+// list each). False when the block holds something it cannot express
+// (lines, points, PRMODE attributes, UVs with no TEX0 in the block): then
+// the packets go on whole.
+struct Piece2D
+{
+    std::vector<uint8_t> packet; // when not empty
+    GSNativeMesh mesh;           // otherwise
+};
+bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why);
 // The 8 KiB pages of GS memory (block address / 32) a box covers.
 void boxPages(const Box &box, uint32_t &first, uint32_t &last);
 // When a packet starts a transfer into GS memory: the pages it may write.

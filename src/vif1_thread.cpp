@@ -1110,6 +1110,7 @@ struct HeldEffect
 thread_local HeldEffect t_held;
 std::atomic<uint64_t> g_effectsNative{0u};
 std::atomic<uint64_t> g_effectsAsPackets{0u};
+std::atomic<uint64_t> g_prim2DNative{0u}, g_prim2DPackets{0u};
 
 // The EE address of a packet in the VIF1 thread's list, or ~0u.
 uint32_t listAddress(const uint8_t *data)
@@ -1136,6 +1137,47 @@ void flushEffect()
         return;
     }
     GS &gs = *t_held.gs;
+    // RG_NATIVE_2D: a GsPkt block, its primitives as native meshes and its
+    // register state and uploads on to the GS, in their order.
+    if (t_held.effect == rg::nativefx::Effect::Prim2D)
+    {
+        thread_local std::vector<rg::nativefx::Piece2D> pieces;
+        std::string refused;
+        if (rg::nativefx::build2D(t_held.packets, pieces, refused))
+        {
+            for (const rg::nativefx::Piece2D &piece : pieces)
+            {
+                if (!piece.packet.empty())
+                    sendPacket(gs, piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                else if (g_stage)
+                    g_stage->mesh(piece.mesh);
+                else
+                    gs.submitNativeMesh(piece.mesh);
+            }
+            ++g_prim2DNative;
+        }
+        else
+        {
+            for (const std::vector<uint8_t> &packet : t_held.packets)
+                sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+            static std::vector<std::string> told;
+            if (told.size() < 8u && std::find(told.begin(), told.end(), refused) == told.end())
+            {
+                told.push_back(refused);
+                std::fprintf(stderr, "[nativefx] a 2D block stays packets: %s\n", refused.c_str());
+            }
+            ++g_prim2DPackets;
+        }
+        const uint64_t blocks = g_prim2DNative.load() + g_prim2DPackets.load();
+        if (blocks == 1u || blocks % 36000u == 0u)
+            std::fprintf(stderr, "[nativefx] 2D blocks: %llu native, %llu as packets\n",
+                         static_cast<unsigned long long>(g_prim2DNative.load()),
+                         static_cast<unsigned long long>(g_prim2DPackets.load()));
+        t_held.effect = rg::nativefx::Effect::None;
+        t_held.unit = 0u;
+        t_held.packets.clear();
+        return;
+    }
     static const bool supported = gs.supportsNativeEffects();
     thread_local GSNativeEffect effect;
     thread_local std::vector<std::vector<uint8_t>> withheld;

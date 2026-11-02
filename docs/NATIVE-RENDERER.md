@@ -945,6 +945,21 @@ names (the same art uploaded to two places decodes twice), the identity
 hashes replacement packs use, and the uploads the manager's own callback
 makes. Builds; unverified on screen.
 
+**2D through the GsPkt API (2026-11-02, `RG_NATIVE_2D`):** the game builds
+its 2D in blocks: `DrawListBeginPrim_141b00` opens a `GsPkt` builder at the
+frame stack's top and `DrawListEndPrim_141a20` closes it and appends the
+draw environment. The hooks mark each block (an effect's own range, added
+when it returns, replaces the blocks inside it), and the VIF1 thread turns
+the block into, in order, register-only packets (state, uploads) and native
+triangle meshes in window coordinates (`build2D`: sprites as two triangles
+with the second vertex's Z and colour, flat shading from the provoking
+vertex, texel UVs normalised by the block's TEX0). The GS no longer
+assembles or kicks those vertices; it still keeps the register state, which
+is the backend's draw-state vocabulary. Refused (sent as packets): lines,
+points, fog, PRMODE attributes. Next: the state from the API too (the
+`GsPkt` setters write into the builder at `+0x70`), so the block needs no
+GIF parsing at all. Builds; unverified on screen.
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small

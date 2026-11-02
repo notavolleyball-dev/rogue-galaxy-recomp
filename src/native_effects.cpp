@@ -568,6 +568,14 @@ bool g_focus = false;
 bool g_shadowMap = false;
 bool g_descTargets = false;
 bool g_namedTextures = false;
+bool g_prim2D = false;
+// DrawListBeginPrim_141b00 / DrawListEndPrim_141a20: the GsPkt API's blocks.
+constexpr uint32_t kDrawListBeginPrim = 0x00141B00u;
+constexpr uint32_t kDrawListEndPrim = 0x00141A20u;
+PS2Runtime::RecompiledFunction g_beginPrimOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_endPrimOriginal = nullptr;
+void drawListBeginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+void drawListEndPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 // TexBuildUploadPkt_158610: every upload of a name table image.
 constexpr uint32_t kTexBuildUploadPkt = 0x00158610u;
 PS2Runtime::RecompiledFunction g_texBuildUploadOriginal = nullptr;
@@ -1182,6 +1190,7 @@ const char *name(Effect effect)
     case Effect::ColorFilter: return "color filter";
     case Effect::Focus: return "focus";
     case Effect::ShadowMapBlur: return "shadow map blur";
+    case Effect::Prim2D: return "2d";
     default: return "none";
     }
 }
@@ -1213,9 +1222,10 @@ bool enabled()
         g_shadowMap = flag("RG_NATIVE_SHADOW_MAP", native);
         g_descTargets = flag("RG_NATIVE_DESC_TARGETS", native);
         g_namedTextures = flag("RG_NATIVE_NAMED_TEXTURES", native);
+        g_prim2D = flag("RG_NATIVE_2D", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_namedTextures || g_probe;
+               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_namedTextures || g_prim2D || g_probe;
     }();
     return on;
 }
@@ -1289,6 +1299,13 @@ void install(PS2Runtime &runtime)
     {
         g_namedTextures = false;
         std::fprintf(stderr, "[nativefx] textures stay unnamed\n");
+    }
+    if (g_prim2D &&
+        (!rg::timing::hookFunction(runtime, kDrawListBeginPrim, &drawListBeginPrim, g_beginPrimOriginal) ||
+         !rg::timing::hookFunction(runtime, kDrawListEndPrim, &drawListEndPrim, g_endPrimOriginal)))
+    {
+        g_prim2D = false;
+        std::fprintf(stderr, "[nativefx] 2D stays GS packets\n");
     }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
@@ -1405,6 +1422,34 @@ void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         dq8::gfx::namedtargets::declare(target);
     }
     g_setFrameFromDescOriginal(rdram, ctx, runtime);
+}
+
+// DrawListBeginPrim opens a GsPkt block at the frame stack's top;
+// DrawListEndPrim closes it (and appends the draw environment). Blocks can
+// sit inside a hooked effect's calls: the effect's range, added when it
+// returns, replaces theirs.
+std::vector<uint32_t> t_primTops; // game thread
+
+void drawListBeginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (t_primTops.size() < 16u)
+        t_primTops.push_back(stackTop());
+    g_beginPrimOriginal(rdram, ctx, runtime);
+}
+
+void afterEndPrim(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+{
+    if (t_primTops.empty())
+        return;
+    const uint32_t top = t_primTops.back();
+    t_primTops.pop_back();
+    if (t_primTops.empty())
+        addRange(top, stackTop(), Effect::Prim2D);
+}
+
+void drawListEndPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    rg::hooks::callThen(g_endPrimOriginal, rdram, ctx, runtime, &afterEndPrim, 0u);
 }
 
 template <typename T> T readAt(uint32_t address)
@@ -2022,6 +2067,248 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
             }
         }
     }
+    return true;
+}
+
+
+// --- 2D from the GsPkt API (RG_NATIVE_2D) ----------------------------------
+
+namespace
+{
+std::vector<uint8_t> adPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
+{
+    std::vector<uint8_t> packet(16u + writes.size() * 16u);
+    // NLOOP writes, EOP, PACKED, one register: A+D.
+    const uint64_t tag[2] = {static_cast<uint64_t>(writes.size()) | (1ull << 15) | (1ull << 60), 0xEull};
+    std::memcpy(packet.data(), tag, sizeof(tag));
+    for (size_t i = 0; i < writes.size(); ++i)
+    {
+        const uint64_t pair[2] = {writes[i].second, writes[i].first};
+        std::memcpy(packet.data() + 16u + i * 16u, pair, sizeof(pair));
+    }
+    return packet;
+}
+
+GSNativeMesh::Header screenHeader()
+{
+    GSNativeMesh::Header header{};
+    header.matrix[0][0] = header.matrix[1][1] = header.matrix[2][2] = header.matrix[3][3] = 1.0f;
+    header.fog[0] = header.fog[1] = 255.0f; // F = 255: no fog
+    header.colorMax[0] = header.colorMax[1] = header.colorMax[2] = header.colorMax[3] = 255.0f;
+    header.triangleList = 1u;
+    return header;
+}
+} // namespace
+
+bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why)
+{
+    out.clear();
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> events;
+    std::vector<std::pair<uint8_t, uint64_t>> writes;
+    // TEX0's TW and TH by context, when the block wrote it.
+    int tw[2] = {-1, -1}, th[2] = {-1, -1};
+    Piece2D mesh;
+    uint16_t meshPrim = 0xFFFFu;
+    std::vector<rg::gif::GifEvent> queue;
+    uint16_t queuePrim = 0xFFFFu;
+
+    const auto closeMesh = [&] {
+        if (!mesh.mesh.vertices.empty())
+        {
+            mesh.mesh.header.vertexCount = static_cast<uint32_t>(mesh.mesh.vertices.size());
+            out.push_back(std::move(mesh));
+        }
+        mesh = Piece2D{};
+        meshPrim = 0xFFFFu;
+    };
+    const auto flushWrites = [&] {
+        if (!writes.empty())
+        {
+            closeMesh();
+            Piece2D piece;
+            piece.packet = adPacket(writes);
+            out.push_back(std::move(piece));
+            writes.clear();
+        }
+    };
+    const auto vertexOf = [&](const rg::gif::GifEvent &e, const rg::gif::GifEvent &provoking, uint16_t prim, bool &ok) {
+        GSNativeMesh::Vertex v;
+        v.x = static_cast<float>(e.x) / 16.0f;
+        v.y = static_cast<float>(e.y) / 16.0f;
+        v.z = static_cast<float>(e.z);
+        const rg::gif::GifEvent &c = (prim & 0x08u) ? e : provoking; // IIP
+        v.r = c.rgba[0];
+        v.g = c.rgba[1];
+        v.b = c.rgba[2];
+        v.a = c.rgba[3];
+        if (prim & 0x10u) // TME
+        {
+            if (prim & 0x100u) // FST: texel UVs, 10.4
+            {
+                const int context = (prim >> 9) & 1;
+                if (tw[context] < 0)
+                {
+                    ok = false;
+                    return v;
+                }
+                v.u = static_cast<float>(e.u) / 16.0f / static_cast<float>(1u << tw[context]);
+                v.v = static_cast<float>(e.v) / 16.0f / static_cast<float>(1u << th[context]);
+            }
+            else
+            {
+                const float q = e.q != 0.0f ? e.q : 1.0f;
+                v.u = e.s / q;
+                v.v = e.t / q;
+            }
+        }
+        return v;
+    };
+    const auto openMesh = [&](uint16_t prim) {
+        if (meshPrim == prim)
+            return;
+        closeMesh();
+        // The draw state the mesh takes is the GS's PRIM: its attributes,
+        // as a triangle.
+        writes.emplace_back(0x00u, static_cast<uint64_t>((prim & ~7u) | 3u));
+        flushWrites();
+        mesh.mesh.header = screenHeader();
+        meshPrim = prim;
+    };
+    const auto triangle = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, const rg::gif::GifEvent &c,
+                              uint16_t prim, bool &ok) {
+        openMesh(prim);
+        mesh.mesh.vertices.push_back(vertexOf(a, c, prim, ok));
+        mesh.mesh.vertices.push_back(vertexOf(b, c, prim, ok));
+        mesh.mesh.vertices.push_back(vertexOf(c, c, prim, ok));
+    };
+    const auto sprite = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, uint16_t prim, bool &ok) {
+        openMesh(prim);
+        // Corners from the two vertices; Z and colour are the second's.
+        rg::gif::GifEvent corner[4] = {a, b, a, b};
+        corner[0].z = corner[2].z = b.z;
+        corner[1].x = b.x; corner[1].y = a.y; corner[1].u = b.u; corner[1].v = a.v; corner[1].s = b.s; corner[1].t = a.t;
+        corner[2].x = a.x; corner[2].y = b.y; corner[2].u = a.u; corner[2].v = b.v; corner[2].s = a.s; corner[2].t = b.t;
+        corner[1].q = corner[2].q = b.q;
+        corner[0].q = a.q;
+        const GSNativeMesh::Vertex v0 = vertexOf(corner[0], b, prim & ~0x08u, ok);
+        const GSNativeMesh::Vertex v1 = vertexOf(corner[1], b, prim & ~0x08u, ok);
+        const GSNativeMesh::Vertex v2 = vertexOf(corner[2], b, prim & ~0x08u, ok);
+        const GSNativeMesh::Vertex v3 = vertexOf(corner[3], b, prim & ~0x08u, ok);
+        mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v0, v1, v3, v0, v3, v2});
+    };
+
+    bool ok = true;
+    for (const std::vector<uint8_t> &packet : packets)
+    {
+        events.clear();
+        const rg::gif::GifDecodeStats stats =
+            rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
+        if (stats.truncated)
+        {
+            why = "a truncated packet";
+            return false;
+        }
+        if (stats.imageQwords != 0u)
+        {
+            // An upload: on as it is, in its place.
+            flushWrites();
+            closeMesh();
+            queue.clear();
+            Piece2D piece;
+            piece.packet = packet;
+            out.push_back(std::move(piece));
+            continue;
+        }
+        for (const rg::gif::GifEvent &e : events)
+        {
+            if (e.kind == rg::gif::GifEvent::Kind::Register)
+            {
+                if (e.reg == 0x1Au && (e.value & 1u) == 0u)
+                {
+                    why = "PRMODE attributes";
+                    return false;
+                }
+                if (e.reg == 0x06u || e.reg == 0x07u)
+                {
+                    tw[e.reg - 0x06u] = static_cast<int>((e.value >> 26) & 0xFu);
+                    th[e.reg - 0x06u] = static_cast<int>((e.value >> 30) & 0xFu);
+                }
+                if (e.reg == 0x00u)
+                {
+                    queue.clear();
+                    queuePrim = 0xFFFFu;
+                }
+                closeMesh();
+                writes.emplace_back(e.reg, e.value);
+                continue;
+            }
+            const uint16_t prim = e.prim;
+            const uint32_t type = prim & 7u;
+            if (type <= 2u || type == 7u)
+            {
+                why = "points or lines";
+                return false;
+            }
+            if ((prim & 0x20u) && e.f != 0xFFu)
+            {
+                why = "fogged vertices";
+                return false;
+            }
+            if (prim != queuePrim)
+            {
+                queue.clear();
+                queuePrim = prim;
+            }
+            switch (type)
+            {
+            case 6u: // sprite
+                queue.push_back(e);
+                if (queue.size() == 2u)
+                {
+                    if (e.drawing)
+                        sprite(queue[0], queue[1], prim, ok);
+                    queue.clear();
+                }
+                break;
+            case 3u: // triangle
+                queue.push_back(e);
+                if (queue.size() == 3u)
+                {
+                    if (e.drawing)
+                        triangle(queue[0], queue[1], queue[2], prim, ok);
+                    queue.clear();
+                }
+                break;
+            case 4u: // strip
+                queue.push_back(e);
+                if (queue.size() > 3u)
+                    queue.erase(queue.begin());
+                if (queue.size() == 3u && e.drawing)
+                    triangle(queue[0], queue[1], queue[2], prim, ok);
+                break;
+            case 5u: // fan
+                if (queue.size() == 3u)
+                {
+                    queue[1] = queue[2];
+                    queue.pop_back();
+                }
+                queue.push_back(e);
+                if (queue.size() == 3u && e.drawing)
+                    triangle(queue[0], queue[1], queue[2], prim, ok);
+                break;
+            default:
+                break;
+            }
+            if (!ok)
+            {
+                why = "texel UVs with no TEX0 in the block";
+                return false;
+            }
+        }
+    }
+    flushWrites();
+    closeMesh();
     return true;
 }
 
