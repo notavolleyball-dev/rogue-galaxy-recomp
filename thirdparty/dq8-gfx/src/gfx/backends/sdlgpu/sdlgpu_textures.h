@@ -384,6 +384,8 @@ private:
         namedtextures::Upload upload;
         std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
         GsBlockSet blocks;
+        bool swizzled = false; // pre-swizzled 8-bit art still as uploaded (linearize)
+        uint32_t firstBlock = 0u, lastBlock = 0u; // the span of `blocks`: most checks end at it
         // A CT32 image read in another format (Rogue Galaxy: the 8-bit art
         // sent as CT32): each CT32 word's pixel + 1 in the image, by word
         // address from the image's base; built on first use.
@@ -394,6 +396,8 @@ private:
     bool expandNamedWithTargetPalette(const GsTextureKey &key, Entry &entry, bool &handled, std::string &error);
     bool m_wantIndices = false;
     uint32_t m_namedCopyKeep = ~0u; // the named image the current copy wrote
+    bool namedWithin(uint32_t first, uint32_t last) const;
+    static void linearize(NamedImage &image); // a named image's span meets these blocks
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
@@ -402,7 +406,6 @@ private:
     // its palette, for an indexed one); false leaves m_staging untouched.
     bool expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash);
     std::unordered_map<uint32_t, NamedImage> m_named;
-    GsBlockSet m_namedBlocks;
     bool m_namedOpen = false;
     bool m_namedPatching = false;
     std::array<uint32_t, 4> m_namedPatch{}; // x, y, width, height

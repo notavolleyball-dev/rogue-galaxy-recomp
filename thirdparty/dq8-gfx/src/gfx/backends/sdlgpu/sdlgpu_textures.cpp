@@ -510,7 +510,12 @@ GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
 }
 
 void GsTextureCache::noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32_t psm, const GsRegion &region) {
-    if (!m_named.empty() && !region.empty()) {
+    // A bound on the blocks the draw reaches (a page of 32 blocks is at
+    // least 32 rows and at most 64 pixels wide): most draws miss every named
+    // image by it, without marking their blocks.
+    const uint32_t pageRows = (region.y1 + 31u) / 32u;
+    const uint32_t reach = base + pageRows * std::max<uint32_t>(bufferWidth, 1u) * 32u;
+    if (!m_named.empty() && !region.empty() && namedWithin(base, reach == base ? base : reach - 1u)) {
         GsBlockSet drawn;
         gsMarkBlocks(drawn, base, std::max<uint32_t>(bufferWidth, 1u), psm, region.x1, region.y1);
         dropNamed(drawn);
@@ -1734,25 +1739,52 @@ bool GsTextureCache::build(const GsTextureKey &key, Entry &entry, std::string &e
 
 // --- Textures by name (Rogue Galaxy: added) --------------------------------
 
+namespace {
+// The first and last block a set holds (false when it holds none).
+bool blockSpan(const GsBlockSet &blocks, uint32_t &first, uint32_t &last) {
+    // By 64-bit words (libstdc++'s bitset is its array of them).
+    static_assert(sizeof(GsBlockSet) == GsBlockSet().size() / 8u);
+    const uint64_t *words = reinterpret_cast<const uint64_t *>(&blocks);
+    constexpr size_t count = sizeof(GsBlockSet) / sizeof(uint64_t);
+    size_t low = 0u;
+    while (low < count && words[low] == 0u)
+        ++low;
+    if (low == count)
+        return false;
+    size_t high = count - 1u;
+    while (words[high] == 0u)
+        --high;
+    first = static_cast<uint32_t>(low * 64u + static_cast<size_t>(__builtin_ctzll(words[low])));
+    last = static_cast<uint32_t>(high * 64u + 63u - static_cast<size_t>(__builtin_clzll(words[high])));
+    return true;
+}
+} // namespace
+
 void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
-    if (m_named.empty() || (m_namedBlocks & blocks).none())
+    if (m_named.empty())
         return;
-    bool erased = false;
+    // Each image's span first: most writes (draws, uploads elsewhere) miss
+    // every image without a look at their 16384-bit sets.
+    uint32_t first = 0u, last = 0u;
+    if (!blockSpan(blocks, first, last))
+        return;
     for (auto it = m_named.begin(); it != m_named.end();) {
-        if (it->first != keep && (it->second.blocks & blocks).any()) {
+        const NamedImage &image = it->second;
+        if (it->first != keep && image.firstBlock <= last && first <= image.lastBlock &&
+            (image.blocks & blocks).any())
             it = m_named.erase(it);
-            erased = true;
-        } else {
+        else
             ++it;
-        }
     }
-    if (!erased)
-        return;
-    m_namedBlocks.reset();
+}
+
+bool GsTextureCache::namedWithin(uint32_t first, uint32_t last) const {
     for (const auto &[base, image] : m_named) {
         (void)base;
-        m_namedBlocks |= image.blocks;
+        if (image.firstBlock <= last && first <= image.lastBlock)
+            return true;
     }
+    return false;
 }
 
 // An upload no record names: what local memory must still hold for the
@@ -1872,6 +1904,49 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     m_namedOpen = true;
 }
 
+namespace {
+// 8-bit art sent as CT32 at half the size: its bytes are the T8 page
+// layout's, read as CT32 words. Per T8 texel, its byte in the upload,
+// through the two layouts; null when the shape is not that layout. The game
+// sends the same few shapes every frame, so each shape's map is made once.
+const std::vector<uint32_t> *unswizzleMap(const namedtextures::Upload &u) {
+    const uint32_t w32 = u.width, h32 = u.height, w8 = u.textureWidth, h8 = u.textureHeight;
+    const uint32_t tbw32 = std::max<uint32_t>(u.dbw, 1u), tbw8 = std::max<uint32_t>(u.textureBufferWidth, 1u);
+    const std::array<uint32_t, 6> shape = {w32, h32, tbw32, w8, h8, tbw8};
+    static thread_local std::map<std::array<uint32_t, 6>, std::vector<uint32_t>> maps;
+    auto known = maps.find(shape);
+    if (known == maps.end()) {
+        if (maps.size() >= 256u)
+            maps.clear();
+        // Word address to upload pixel, as a flat table over the
+        // upload's own words; then each T8 texel's byte through it. An
+        // empty map: not this layout after all.
+        uint32_t maxWord = 0u;
+        for (uint32_t y = 0u; y < h32; ++y)
+            for (uint32_t x = 0u; x < w32; ++x)
+                maxWord = std::max(maxWord, GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u);
+        std::vector<uint32_t> pixelOfWord(static_cast<size_t>(maxWord) + 1u, ~0u);
+        for (uint32_t y = 0u; y < h32; ++y)
+            for (uint32_t x = 0u; x < w32; ++x)
+                pixelOfWord[GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u] = y * w32 + x;
+        std::vector<uint32_t> byteOf(static_cast<size_t>(w8) * h8);
+        for (uint32_t y = 0u; y < h8 && !byteOf.empty(); ++y) {
+            for (uint32_t x = 0u; x < w8; ++x) {
+                const uint32_t address = GSPSMT8::addrPSMT8(0u, tbw8, x, y);
+                const uint32_t word = address >> 2u;
+                if (word >= pixelOfWord.size() || pixelOfWord[word] == ~0u) {
+                    byteOf.clear();
+                    break;
+                }
+                byteOf[static_cast<size_t>(y) * w8 + x] = pixelOfWord[word] * 4u + (address & 3u);
+            }
+        }
+        known = maps.emplace(shape, std::move(byteOf)).first;
+    }
+    return known->second.empty() ? nullptr : &known->second;
+}
+} // namespace
+
 void GsTextureCache::finishNamedUpload() {
     m_namedOpen = false;
     NamedImage image = std::move(m_namedPending);
@@ -1904,55 +1979,32 @@ void GsTextureCache::finishNamedUpload() {
         return;
     const namedtextures::Upload &u = image.upload;
     if (u.preSwizzled) {
-        // 8-bit art sent as CT32 at half the size: its bytes are the T8
-        // page layout's, read as CT32 words. Each T8 texel's byte is found
-        // through the two layouts, once, so the image is kept linear.
-        // The game sends the same few shapes every frame: each shape's map
-        // (per T8 texel, its byte in the upload) is made once and kept.
-        const uint32_t w32 = u.width, h32 = u.height, w8 = u.textureWidth, h8 = u.textureHeight;
-        const uint32_t tbw32 = std::max<uint32_t>(u.dbw, 1u), tbw8 = std::max<uint32_t>(u.textureBufferWidth, 1u);
-        const std::array<uint32_t, 6> shape = {w32, h32, tbw32, w8, h8, tbw8};
-        static thread_local std::map<std::array<uint32_t, 6>, std::vector<uint32_t>> maps;
-        auto known = maps.find(shape);
-        if (known == maps.end()) {
-            if (maps.size() >= 256u)
-                maps.clear();
-            // Word address to upload pixel, as a flat table over the
-            // upload's own words; then each T8 texel's byte through it. An
-            // empty map: not this layout after all.
-            uint32_t maxWord = 0u;
-            for (uint32_t y = 0u; y < h32; ++y)
-                for (uint32_t x = 0u; x < w32; ++x)
-                    maxWord = std::max(maxWord, GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u);
-            std::vector<uint32_t> pixelOfWord(static_cast<size_t>(maxWord) + 1u, ~0u);
-            for (uint32_t y = 0u; y < h32; ++y)
-                for (uint32_t x = 0u; x < w32; ++x)
-                    pixelOfWord[GSPSMCT32::addrPSMCT32(0u, tbw32, x, y) >> 2u] = y * w32 + x;
-            std::vector<uint32_t> byteOf(static_cast<size_t>(w8) * h8);
-            for (uint32_t y = 0u; y < h8 && !byteOf.empty(); ++y) {
-                for (uint32_t x = 0u; x < w8; ++x) {
-                    const uint32_t address = GSPSMT8::addrPSMT8(0u, tbw8, x, y);
-                    const uint32_t word = address >> 2u;
-                    if (word >= pixelOfWord.size() || pixelOfWord[word] == ~0u) {
-                        byteOf.clear();
-                        break;
-                    }
-                    byteOf[static_cast<size_t>(y) * w8 + x] = pixelOfWord[word] * 4u + (address & 3u);
-                }
-            }
-            known = maps.emplace(shape, std::move(byteOf)).first;
-        }
-        const std::vector<uint32_t> &byteOf = known->second;
-        if (byteOf.empty())
+        // Kept as uploaded; made linear when a texture first reads it
+        // (linearize): most uploads are sent again before any draw reads them.
+        if (!unswizzleMap(u))
             return; // not this layout after all: leave it unnamed
-        std::vector<uint8_t> linear(byteOf.size());
-        const uint8_t *from = image.bytes.data();
-        for (size_t i = 0; i < byteOf.size(); ++i)
-            linear[i] = from[byteOf[i]];
-        image.bytes = std::move(linear);
+        image.swizzled = true;
     }
-    m_namedBlocks |= image.blocks;
+    if (!blockSpan(image.blocks, image.firstBlock, image.lastBlock))
+        return;
     m_named[u.dbp] = std::move(image);
+}
+
+void GsTextureCache::linearize(NamedImage &image) {
+    if (!image.swizzled)
+        return;
+    image.swizzled = false;
+    const std::vector<uint32_t> *map = unswizzleMap(image.upload);
+    if (!map)
+        return;
+    std::vector<uint8_t> linear(map->size());
+    const uint8_t *const from = image.bytes.data();
+    const uint32_t *const index = map->data();
+    uint8_t *const to = linear.data();
+    const size_t count = map->size();
+    for (size_t i = 0; i < count; ++i)
+        to[i] = from[index[i]];
+    image.bytes = std::move(linear);
 }
 
 bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
@@ -1964,6 +2016,7 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const auto found = m_named.find(key.tbp0);
     if (found == m_named.end())
         return miss(m_stats.namedMissNoName);
+    linearize(found->second);
     const NamedImage &image = found->second;
     const namedtextures::Upload &u = image.upload;
     const uint32_t psm = key.psm & 0x3fu;
