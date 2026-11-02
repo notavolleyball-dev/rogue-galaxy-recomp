@@ -63,6 +63,10 @@ enum class Effect : uint8_t
     // renderer (Place::unit: which, probeName), its packets traced and
     // what the builder makes of them logged, then sent on as they are.
     Probe,
+    // GfxFlipBuffersMaybe's copy of the frame into the display buffer
+    // (RG_NATIVE_FLIP): sent from the game thread, not the VIF1 lists, so
+    // taken by flipPacket rather than by packet memory.
+    Flip,
 };
 const char *probeName(uint32_t unit);
 
@@ -81,6 +85,24 @@ bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.
 void install(PS2Runtime &runtime);
+
+// RG_NATIVE_FLIP (with the native renderer unless set). GfxFlipBuffersMaybe
+// (RGDecomp's C) sends, from the game thread: a draw environment whose FRAME
+// is the display buffer (CT24), then a packet it built once and sends every
+// frame: ALPHA 0x8000000064, TEST 0x20002, PRMODE 0x110 and DECAL sprites
+// of the frame, 16 pixels wide (nearest; one bilinear sprite when the
+// display's height is not the frame's); then the environment back. The
+// flip's hook (src/flip_pacing.cpp) marks it; the game thread's packets go
+// through flipPacket, which turns the sprites into a Flip effect: one copy
+// the renderer does on the GPU instead of 32 draws.
+bool flipNative();
+void beginFlip();
+void endFlip();
+// The game thread's own GIF packet: true when it was the flip's copy, with
+// the effect and what to send in its place (the sprites' packet, its kicks
+// withheld: the GS registers end as they would have), then the effect.
+bool flipPacket(const uint8_t *data, uint32_t size, GSNativeEffect &out,
+                std::vector<std::vector<uint8_t>> &withheld);
 
 // The effect whose packets the EE address holds (any of RDRAM's windows).
 Effect effectAt(uint32_t address);

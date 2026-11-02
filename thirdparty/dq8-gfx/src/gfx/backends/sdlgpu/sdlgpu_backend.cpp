@@ -2834,6 +2834,68 @@ struct SdlGpuBackend::Impl {
     // GS buffer taken over is drawn as an own one at its surface's scale,
     // from the surface, and its last sprite into the surface.
     std::vector<SdlGpuDevice::EffectDraw> effectBatch;
+    // A native effect's op that is a plain copy of texels (Rogue Galaxy:
+    // added): DECAL, nearest, one texel to a pixel in the same direction,
+    // nothing blended or tested, from another GS surface at the target's
+    // scale; the alpha the texture's (TCC, CT32), or not kept (a CT24
+    // target). DQ8_GFX_FX_NO_COPY=1 draws them.
+    bool copyOp(const GSNativeEffect::Op &op, const GSNativeEffect::Buffer &targetBuffer, const GsSurface *source,
+                bool sourceIsSurface, const GsSurface &target, uint32_t x0, uint32_t y0, uint32_t x1,
+                uint32_t y1) const {
+        static const bool off = [] {
+            const char *value = std::getenv("DQ8_GFX_FX_NO_COPY");
+            return value && *value && std::strcmp(value, "0") != 0;
+        }();
+        using E = GSNativeEffect;
+        if (off || !source || !sourceIsSurface || source == &target || !source->texture || !target.texture ||
+            source->scale != target.scale)
+            return false;
+        constexpr uint32_t allowed = E::kDecal | E::kTextureAlpha | E::kColClamp | E::kCt24 | E::kTexaFromGs;
+        if (!(op.flags & E::kDecal) || (op.flags & ~allowed) != 0u || (op.test & 1u) ||
+            (op.zbuf != 0u && ((op.test >> 16u) & 1u)))
+            return false;
+        const bool targetCt24 = (targetBuffer.psm & 0x3fu) == GS_PSM_CT24;
+        if (!targetCt24 && (!(op.flags & E::kTextureAlpha) || (op.flags & E::kCt24)))
+            return false;
+        const auto whole = [](float value) { return value == std::floor(value); };
+        for (int k = 0; k < 4; ++k)
+            if (!whole(op.rect[k]) || !whole(op.uv[k]))
+                return false;
+        if (op.uv[2] - op.uv[0] != op.rect[2] - op.rect[0] || op.uv[3] - op.uv[1] != op.rect[3] - op.rect[1])
+            return false;
+        const float u0 = op.uv[0] + (float(x0) - op.rect[0]);
+        const float v0 = op.uv[1] + (float(y0) - op.rect[1]);
+        return u0 >= 0.0f && v0 >= 0.0f && u0 + float(x1 - x0) <= float(source->width) &&
+               v0 + float(y1 - y0) <= float(source->height);
+    }
+
+    bool copyRegion(const GsSurface &source, GsSurface &target, const GSNativeEffect::Op &op, uint32_t x0,
+                    uint32_t y0, uint32_t x1, uint32_t y1, std::string &error) {
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "effect copy");
+        if (!commands)
+            return false;
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        if (!copy) {
+            device.cancelPending();
+            error = std::string("SDL_BeginGPUCopyPass(effect copy): ") + SDL_GetError();
+            return false;
+        }
+        const uint32_t scale = target.scale;
+        SDL_GPUTextureLocation from{}, into{};
+        from.texture = source.texture;
+        from.x = uint32_t(op.uv[0] + (float(x0) - op.rect[0])) * scale;
+        from.y = uint32_t(op.uv[1] + (float(y0) - op.rect[1])) * scale;
+        into.texture = target.texture;
+        into.x = x0 * scale;
+        into.y = y0 * scale;
+        SDL_CopyGPUTextureToTexture(copy, &from, &into, (x1 - x0) * scale, (y1 - y0) * scale, 1u, false);
+        SDL_EndGPUCopyPass(copy);
+        if (++stats.nativeEffectCopies == 1u)
+            std::fprintf(stderr, "[fx] a plain copy done as a texture copy (%ux%u at %ux)\n", x1 - x0, y1 - y0,
+                         scale);
+        return true;
+    }
+
     bool submitEffect(const GSNativeEffect &effect) {
         if (effect.command != GSNativeEffect::kSprites)
             return device.valid() && layerCommand(effect);
@@ -3035,6 +3097,19 @@ struct SdlGpuBackend::Impl {
                 const uint32_t scale = target.scale;
                 const SDL_Rect scissor{int(x0 * scale), int(y0 * scale), int((x1 - x0) * scale),
                                        int((y1 - y0) * scale)};
+                // A sprite that only moves a GS buffer's texels into another
+                // (Rogue Galaxy's flip, RG_NATIVE_FLIP: the frame into the
+                // display buffer) is a texture copy, at the targets' scale.
+                if (copyOp(op, effect.buffers[op.target], source ? source->surface : nullptr,
+                           source && source->current < 0, *target.surface, x0, y0, x1, y1)) {
+                    if (!flushBatch())
+                        return setError(std::move(error));
+                    if (!copyRegion(*source->surface, *target.surface, op, x0, y0, x1, y1, error))
+                        return setError(std::move(error));
+                    targets->markDrawn(*target.surface, GsRegion{x0, y0, x1, y1});
+                    ++stats.nativeEffectOps;
+                    continue;
+                }
                 // The GS's (A - B) C + D with D = Cd, as the effect's builder
                 // allows them: A = Cs and B = 0 adds, A = 0 and B = Cs
                 // subtracts, A = Cs and B = Cd lays the source over.

@@ -1550,6 +1550,23 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
             return;
         }
     }
+    // RG_NATIVE_FLIP: the flip's copy, from the game thread.
+    if (!t_onVif1Thread && rg::nativefx::flipNative())
+    {
+        static const bool supported = gs.supportsNativeEffects();
+        thread_local GSNativeEffect effect;
+        thread_local std::vector<std::vector<uint8_t>> withheld;
+        if (supported && rg::nativefx::flipPacket(data, size, effect, withheld))
+        {
+            // sendPacket drains the lists first: the effect follows them.
+            for (const std::vector<uint8_t> &packet : withheld)
+            {
+                sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+            }
+            gs.submitNativeEffect(effect);
+            return;
+        }
+    }
     sendPacket(gs, data, size);
 }
 

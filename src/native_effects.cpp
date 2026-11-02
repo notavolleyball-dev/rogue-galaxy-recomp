@@ -455,6 +455,11 @@ bool g_cblur = false;
 bool g_bloom = false;
 bool g_dof = false;
 bool g_refraction = false;
+bool g_flip = false;
+// The flip's draw environment (below, with flipPacket).
+constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
+PS2Runtime::RecompiledFunction g_putDrawEnvOriginal = nullptr;
+void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
 // --- Packets -----------------------------------------------------------
 
@@ -612,6 +617,8 @@ struct Builder
     // A composite's tail: sprites from the object's buffer (its layer, not
     // the GS's) over the frame, alpha tested.
     bool tail = false;
+    // The flip's copy: into the display buffer, which is CT24.
+    bool flip = false;
     // Per op: how many CT16 strips a kGreenToAlpha op stands for.
     std::array<uint32_t, GSNativeEffect::kMaxOps> strips{};
 
@@ -692,7 +699,11 @@ struct Builder
         const uint64_t zbuf = r.value[kZbuf + ctxt];
         if (((frame >> 24) & 0x3Fu) == 2u && (frame >> 32) == 0xFFFFu)
             return greenToAlpha(r, prim, ctxt, v0, v1);
-        if (((frame >> 24) & 0x3Fu) != 0u ||
+        // CT24 for the flip alone: the display buffer, a buffer of its own
+        // format (the GS writes its colour and keeps no alpha; what a CT24
+        // surface holds there is the draws').
+        const uint32_t framePsm = static_cast<uint32_t>((frame >> 24) & 0x3Fu);
+        if ((framePsm != 0u && !(flip && framePsm == 1u)) ||
             ((frame >> 32) != 0u && (frame >> 32) != 0xFF000000u && (frame >> 32) != 0x00FFFFFFu))
         {
             missing = "a sprite into a target not CT32, or masked (FRAME " + std::to_string(frame) + ")";
@@ -726,7 +737,7 @@ struct Builder
                     : (frame >> 32) == 0x00FFFFFFu ? GSNativeEffect::kKeepColor
                                                    : 0u;
         const BufferKey target{static_cast<uint32_t>(frame & 0x1FFu) << 5u, static_cast<uint32_t>((frame >> 16) & 0x3Fu),
-                               0u};
+                               framePsm};
         const int targetIndex = buffer(target);
         if (targetIndex < 0)
             return fail("more buffers than an effect has");
@@ -1047,6 +1058,7 @@ const char *name(Effect effect)
     case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
+    case Effect::Flip: return "flip";
     default: return "none";
     }
 }
@@ -1072,8 +1084,10 @@ bool enabled()
         g_bloom = flag("RG_NATIVE_BLOOM", native);
         g_dof = flag("RG_NATIVE_DOF", native);
         g_refraction = flag("RG_NATIVE_REFRACTION", native);
+        g_flip = flag("RG_NATIVE_FLIP", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
-        return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_probe;
+        return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
+               g_probe;
     }();
     return on;
 }
@@ -1116,6 +1130,11 @@ void install(PS2Runtime &runtime)
     {
         std::fprintf(stderr, "[nativefx] the refraction's capture stays GS packets\n");
     }
+    if (g_flip && !rg::timing::hookFunction(runtime, kSceGsPutDrawEnv, &putDrawEnv, g_putDrawEnvOriginal))
+    {
+        g_flip = false;
+        std::fprintf(stderr, "[nativefx] the flip's copy stays GS packets\n");
+    }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
     if (g_composites &&
@@ -1125,6 +1144,137 @@ void install(PS2Runtime &runtime)
         g_composites = false;
         std::fprintf(stderr, "[nativefx] the composites stay unbatched\n");
     }
+}
+
+bool flipNative()
+{
+    return enabled() && g_flip;
+}
+
+namespace
+{
+// Game thread: inside the flip, and the last packet it sent there (the draw
+// environment the copy's sprites are drawn under).
+thread_local bool t_inFlip = false;
+thread_local std::vector<uint8_t> t_flipEnvironment;
+
+// GfxFlipBuffersMaybe's sprite packet: its blend, test and PRMODE, and
+// sprites; nothing else the game sends from its thread looks so.
+bool isFlipCopy(const uint8_t *data, uint32_t size)
+{
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> events;
+    rg::gif::decodeGifPacket(data, size, state, events);
+    bool alpha = false, test = false, prmode = false, sprite = false;
+    for (const rg::gif::GifEvent &event : events)
+    {
+        if (event.kind == rg::gif::GifEvent::Kind::Register)
+        {
+            alpha |= event.reg == kAlpha && event.value == 0x8000000064ull;
+            test |= event.reg == kTest && event.value == 0x20002ull;
+            prmode |= event.reg == kPrmode && event.value == 0x110ull;
+            continue;
+        }
+        sprite |= (event.prim & 7u) == 6u && event.drawing;
+    }
+    return alpha && test && prmode && sprite;
+}
+
+bool writesFrame(const std::vector<uint8_t> &packet)
+{
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> events;
+    rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
+    for (const rg::gif::GifEvent &event : events)
+        if (event.kind == rg::gif::GifEvent::Kind::Register && (event.reg == kFrame || event.reg == kFrame + 1u))
+            return true;
+    return false;
+}
+} // namespace
+
+// sceGsPutDrawEnv is the runtime's (Kernel/Stubs/GS.cpp): it writes its eight
+// register pairs into the GS and sends no packet. Inside the flip, the pairs
+// as an A+D packet stand for the draw environment the copy is drawn under:
+// the context registers alone (the first "pair" is the environment's GIF
+// tag, which the stub reads as one).
+namespace
+{
+void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (t_inFlip && g_rdram)
+    {
+        const uint32_t address = getRegU32(ctx, 4);
+        std::vector<uint8_t> packet(16u);
+        uint32_t count = 0u;
+        for (uint32_t i = 0u; i < 8u; ++i)
+        {
+            uint64_t pair[2];
+            std::memcpy(pair, g_rdram + physical(address + i * 16u), sizeof(pair));
+            const uint64_t reg = pair[1];
+            if (reg < 0x14u || reg > 0x63u)
+                continue;
+            const uint8_t *bytes = reinterpret_cast<const uint8_t *>(pair);
+            packet.insert(packet.end(), bytes, bytes + 16u);
+            ++count;
+        }
+        // NLOOP pairs, EOP, PACKED, one register: A+D.
+        const uint64_t tag[2] = {static_cast<uint64_t>(count) | (1ull << 15) | (1ull << 60), 0xEull};
+        std::memcpy(packet.data(), tag, sizeof(tag));
+        if (count != 0u)
+            t_flipEnvironment = std::move(packet);
+    }
+    g_putDrawEnvOriginal(rdram, ctx, runtime);
+}
+} // namespace
+
+void beginFlip()
+{
+    t_inFlip = flipNative();
+    t_flipEnvironment.clear();
+}
+
+void endFlip()
+{
+    t_inFlip = false;
+    t_flipEnvironment.clear();
+}
+
+bool flipPacket(const uint8_t *data, uint32_t size, GSNativeEffect &out,
+                std::vector<std::vector<uint8_t>> &withheld)
+{
+    if (!t_inFlip)
+        return false;
+    if (!isFlipCopy(data, size))
+    {
+        t_flipEnvironment.assign(data, data + size);
+        return false;
+    }
+    std::string why;
+    bool built = false;
+    if (t_flipEnvironment.empty() || !writesFrame(t_flipEnvironment))
+    {
+        why = "no draw environment before it";
+    }
+    else
+    {
+        // The environment went on already: its registers are what the
+        // builder needs, and it sends the sprites' packet alone.
+        const std::vector<std::vector<uint8_t>> packets{t_flipEnvironment, std::vector<uint8_t>(data, data + size)};
+        built = build(Effect::Flip, packets, out, withheld, why);
+        if (built)
+            withheld.erase(withheld.begin());
+    }
+    t_flipEnvironment.clear();
+    if (!built)
+    {
+        static bool told = false;
+        if (!told)
+        {
+            told = true;
+            std::fprintf(stderr, "[nativefx] the flip's copy stays GS packets: %s\n", why.c_str());
+        }
+    }
+    return built;
 }
 
 Place placeAt(uint32_t address)
@@ -1316,13 +1466,14 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
     const bool probing = effect == Effect::Probe;
     if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
         effect != Effect::Dof && effect != Effect::CBlurDraw && effect != Effect::Refraction &&
-        effect != Effect::CompositeTail && !probing)
+        effect != Effect::CompositeTail && effect != Effect::Flip && !probing)
     {
         why = "no such effect";
         return false;
     }
     Builder builder{out, why};
     builder.tail = effect == Effect::CompositeTail;
+    builder.flip = effect == Effect::Flip;
     static const bool traceShadow = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
     static int traced[16] = {};
     builder.trace = traceShadow &&
