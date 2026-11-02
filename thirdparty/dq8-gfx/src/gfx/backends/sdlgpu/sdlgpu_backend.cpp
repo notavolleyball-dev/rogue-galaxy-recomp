@@ -687,6 +687,16 @@ struct SdlGpuBackend::Impl {
         uint32_t scale = 1u;
         // The texture holds what the GS surface does not.
         bool pending = false;
+        // The flip's copy not made yet (DQ8_GFX_ALWAYS_COPY_DISPLAY=1 makes
+        // it at the flip): the frame surface at sourceBase holds the image
+        // until it is next written; the presenter reads it there.
+        bool deferred = false;
+        uint32_t sourceBase = 0u, sourcePsm = 0u, sourceBlocks = 0u;
+        // The frame shown from it, and the last flip something else read the
+        // displayed frame (CBlur, a fade's zoom).
+        bool presented = false;
+        uint64_t flips = 0u, lastRead = 0u;
+        bool everRead = false;
     } displayFrame;
     uint64_t depthProbeSequence = 0u;
     bool depthProbeFailed = false;
@@ -2938,31 +2948,41 @@ struct SdlGpuBackend::Impl {
             return false;
         if (!flushDraws())
             return true;
+        // A flip the last one's copy was still deferred for: decided now.
+        resolveDeferredFlip(false);
         // What the GS surface held before, should the texture lose it.
         if (displayFrame.pending && (displayFrame.base != into.base || displayFrame.scale != source->scale))
             materializeDisplay();
         const uint32_t scale = std::max(source->scale, 1u);
-        const uint32_t width = into.width * scale, height = into.height * scale;
-        if (!displayFrame.texture || displayFrame.textureWidth != width || displayFrame.textureHeight != height) {
-            if (displayFrame.texture)
-                SDL_ReleaseGPUTexture(device.handle(), displayFrame.texture);
-            SDL_GPUTextureCreateInfo info{};
-            info.type = SDL_GPU_TEXTURETYPE_2D;
-            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-            info.width = width;
-            info.height = height;
-            info.layer_count_or_depth = 1u;
-            info.num_levels = 1u;
-            info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-            displayFrame.texture = SDL_CreateGPUTexture(device.handle(), &info);
-            displayFrame.textureWidth = width;
-            displayFrame.textureHeight = height;
-            if (!displayFrame.texture) {
-                displayFrame.pending = false;
-                setError(std::string("SDL_CreateGPUTexture(display frame): ") + SDL_GetError());
-                return true;
-            }
+        ++displayFrame.flips;
+        displayFrame.presented = false;
+        static const bool alwaysCopy = [] {
+            const char *value = std::getenv("DQ8_GFX_ALWAYS_COPY_DISPLAY");
+            return value && *value && std::strcmp(value, "0") != 0;
+        }();
+        // The frame where the buffer is, whole: no copy until it is needed.
+        const bool aligned = x0 == 0u && y0 == 0u && op.uv[0] == op.rect[0] && op.uv[1] == op.rect[1] &&
+                             x1 >= into.width && y1 >= into.height && source->width >= into.width &&
+                             source->height >= into.height;
+        if (!alwaysCopy && aligned) {
+            displayFrame.base = into.base;
+            displayFrame.fbw = std::max(into.fbw, 1u);
+            displayFrame.psm = into.psm & 0x3fu;
+            displayFrame.width = into.width;
+            displayFrame.height = into.height;
+            displayFrame.scale = scale;
+            displayFrame.sourceBase = source->base;
+            displayFrame.sourcePsm = source->psm;
+            displayFrame.sourceBlocks = std::max(source->bufferWidth, 1u) * source->height;
+            displayFrame.pending = true;
+            displayFrame.deferred = true;
+            ++stats.nativeEffects;
+            ++stats.nativeEffectOps;
+            return true;
+        }
+        if (!ensureDisplayTexture(into.width * scale, into.height * scale)) {
+            displayFrame.pending = false;
+            return true;
         }
         SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "display frame");
         if (!commands) {
@@ -2991,6 +3011,7 @@ struct SdlGpuBackend::Impl {
         displayFrame.height = into.height;
         displayFrame.scale = scale;
         displayFrame.pending = true;
+        displayFrame.deferred = false;
         ++stats.nativeEffects;
         ++stats.nativeEffectOps;
         if (++stats.nativeEffectCopies == 1u)
@@ -2999,10 +3020,98 @@ struct SdlGpuBackend::Impl {
         return true;
     }
 
+    bool ensureDisplayTexture(uint32_t width, uint32_t height) {
+        if (displayFrame.texture && displayFrame.textureWidth == width && displayFrame.textureHeight == height)
+            return true;
+        if (displayFrame.texture)
+            SDL_ReleaseGPUTexture(device.handle(), displayFrame.texture);
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        displayFrame.texture = SDL_CreateGPUTexture(device.handle(), &info);
+        displayFrame.textureWidth = width;
+        displayFrame.textureHeight = height;
+        if (!displayFrame.texture) {
+            setError(std::string("SDL_CreateGPUTexture(display frame): ") + SDL_GetError());
+            return false;
+        }
+        return true;
+    }
+
+    // The frame surface a deferred flip shows, while it still holds it.
+    GsSurface *deferredSource() const {
+        if (!displayFrame.deferred || !targets)
+            return nullptr;
+        GsSurface *source = targets->findColorSurface(displayFrame.sourceBase, displayFrame.sourcePsm);
+        return source && source->texture && source->scale == displayFrame.scale ? source : nullptr;
+    }
+
+    bool writesDeferredSource(uint32_t base) const {
+        return displayFrame.deferred && base >= displayFrame.sourceBase &&
+               base < displayFrame.sourceBase + displayFrame.sourceBlocks;
+    }
+
+    // A deferred flip's copy, made or dropped: made when the frame is not
+    // shown yet, when something read the displayed frame in the last two
+    // flips (CBlur, a fade's zoom), or with `needed` (a reader now); else
+    // the frame surface is about to be drawn over and nothing will ask for
+    // the frame, so there is nothing to copy. (A reader that comes back
+    // after a pause reads the GS buffer's older frame once, then the copies
+    // resume.)
+    void resolveDeferredFlip(bool needed) {
+        if (!displayFrame.deferred)
+            return;
+        GsSurface *source = deferredSource();
+        displayFrame.deferred = false;
+        const bool recent = displayFrame.everRead && displayFrame.flips - displayFrame.lastRead <= 2u;
+        if (!source || !(needed || !displayFrame.presented || recent)) {
+            displayFrame.pending = false;
+            ++stats.displayCopiesSkipped;
+            return;
+        }
+        const uint32_t scale = displayFrame.scale;
+        if (!flushDraws() || !ensureDisplayTexture(displayFrame.width * scale, displayFrame.height * scale)) {
+            displayFrame.pending = false;
+            return;
+        }
+        std::string error;
+        SDL_GPUCommandBuffer *commands = device.pendingCommands(error, "display frame");
+        SDL_GPUCopyPass *copy = commands ? SDL_BeginGPUCopyPass(commands) : nullptr;
+        if (!copy) {
+            if (commands)
+                device.cancelPending();
+            displayFrame.pending = false;
+            setError(error.empty() ? std::string("SDL_BeginGPUCopyPass(display frame): ") + SDL_GetError() : error);
+            return;
+        }
+        SDL_GPUTextureLocation src{}, dst{};
+        src.texture = source->texture;
+        dst.texture = displayFrame.texture;
+        SDL_CopyGPUTextureToTexture(copy, &src, &dst, displayFrame.width * scale, displayFrame.height * scale, 1u,
+                                    false);
+        SDL_EndGPUCopyPass(copy);
+        ++stats.nativeEffectCopies;
+    }
+
+    void noteDisplayRead() {
+        displayFrame.everRead = true;
+        displayFrame.lastRead = displayFrame.flips;
+    }
+
     // The display frame into the GS surface, for what reads or writes the
     // display buffer's memory other than the presenter's GPU paths and the
     // native effects.
     void materializeDisplay() {
+        if (!displayFrame.pending)
+            return;
+        noteDisplayRead();
+        resolveDeferredFlip(true);
         if (!displayFrame.pending)
             return;
         displayFrame.pending = false;
@@ -3042,11 +3151,19 @@ struct SdlGpuBackend::Impl {
         ++stats.displayMaterialized;
     }
 
-    // The display frame's texture when it stands for the buffer at `base`.
-    SDL_GPUTexture *displayTexture(uint32_t base, uint32_t factor) const {
-        return displayFrame.pending && base == displayFrame.base && displayFrame.scale == factor
-                   ? displayFrame.texture
-                   : nullptr;
+    // The display frame's texture when it stands for the buffer at `base`
+    // (a deferred flip's: the frame surface's), for the presenter.
+    SDL_GPUTexture *displayTexture(uint32_t base, uint32_t factor) {
+        if (!displayFrame.pending || base != displayFrame.base || displayFrame.scale != factor)
+            return nullptr;
+        SDL_GPUTexture *texture = displayFrame.texture;
+        if (displayFrame.deferred) {
+            GsSurface *source = deferredSource();
+            texture = source ? source->texture : nullptr;
+        }
+        if (texture)
+            displayFrame.presented = true;
+        return texture;
     }
 
     bool copyRegion(const GsSurface &source, GsSurface &target, const GSNativeEffect::Op &op, uint32_t x0,
@@ -3077,12 +3194,27 @@ struct SdlGpuBackend::Impl {
     }
 
     bool submitEffect(const GSNativeEffect &effect) {
-        if (effect.command != GSNativeEffect::kSprites)
+        if (effect.command != GSNativeEffect::kSprites) {
+            resolveDeferredFlip(false);
             return device.valid() && layerCommand(effect);
+        }
         if (!compositeLayers())
             return false;
         if (device.valid() && targets && flipToDisplayFrame(effect))
             return true;
+        if (displayFrame.deferred) {
+            bool writes = effect.command != GSNativeEffect::kSprites;
+            for (uint32_t n = 0; n < effect.opCount && !writes; ++n)
+                writes = effect.ops[n].target < effect.bufferCount &&
+                         writesDeferredSource(effect.buffers[effect.ops[n].target].base);
+            for (uint32_t i = 0; i < effect.bufferCount && displayFrame.deferred; ++i)
+                if (effect.buffers[i].base == displayFrame.base) {
+                    noteDisplayRead();
+                    resolveDeferredFlip(true);
+                }
+            if (writes)
+                resolveDeferredFlip(false);
+        }
         // An effect drawing into the display buffer gets it back in its surface.
         for (uint32_t n = 0; n < effect.opCount && displayFrame.pending; ++n)
             if (effect.ops[n].target < effect.bufferCount && inDisplay(effect.buffers[effect.ops[n].target].base))
@@ -3117,6 +3249,7 @@ struct SdlGpuBackend::Impl {
             Live &entry = live[i];
             // The display buffer, only read here: the display frame's texture.
             if (buffer.external == 1u && displayFrame.pending && buffer.base == displayFrame.base) {
+                noteDisplayRead();
                 entry.textures[0] = displayFrame.texture;
                 entry.current = 0;
                 entry.scale = displayFrame.scale;
@@ -3468,6 +3601,8 @@ struct SdlGpuBackend::Impl {
     }
 
     void submit(const GSPrimitiveBatch &batch) {
+        if (writesDeferredSource(uint32_t(batch.state.context.frame.fbp) << 5u))
+            resolveDeferredFlip(false);
         if (displayFrame.pending &&
             (inDisplay(uint32_t(batch.state.context.frame.fbp) << 5u) ||
              (batch.state.prim.tme && inDisplay(uint32_t(batch.state.context.tex0.tbp0)))))
@@ -6333,6 +6468,7 @@ void SdlGpuBackend::Reset() {
     if (m_impl->targets)
         m_impl->targets->reset();
     m_impl->displayFrame.pending = false;
+    m_impl->displayFrame.deferred = false;
     depthprobe::reset();
 }
 
@@ -6345,6 +6481,8 @@ void SdlGpuBackend::Submit(const GSPrimitiveBatch &batch) {
 void SdlGpuBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
+    if (m_impl->writesDeferredSource(uint32_t(state.context.frame.fbp) << 5u))
+        m_impl->resolveDeferredFlip(false);
     m_impl->submitNative(mesh, state);
 }
 
@@ -6374,6 +6512,8 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
     Impl::ScopedTimer timer(m_impl->backendNanos);
     ++m_impl->stats.transfersBegun;
     m_impl->noteTransferInterrupted();
+    if (command.direction != 1u && m_impl->writesDeferredSource(command.bitbltbuf.dbp))
+        m_impl->resolveDeferredFlip(false);
     if (m_impl->displayFrame.pending &&
         ((command.direction != 1u && m_impl->inDisplay(command.bitbltbuf.dbp)) ||
          (command.direction != 0u && m_impl->inDisplay(command.bitbltbuf.sbp))))
@@ -6660,6 +6800,8 @@ bool SdlGpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba) {
     std::lock_guard lock(m_impl->mutex);
     if (!m_impl->device.valid() || !gsIsColorFramePsm(context.frame.psm))
         return false;
+    if (m_impl->writesDeferredSource(uint32_t(context.frame.fbp) << 5u))
+        m_impl->resolveDeferredFlip(false);
     if (!m_impl->flushDraws())
         return false;
 
