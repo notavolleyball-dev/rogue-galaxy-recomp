@@ -81,6 +81,10 @@ struct SdlGpuStats {
     // Flips whose copy was never made: shown from the frame, then drawn over
     // with nothing asking for it (Rogue Galaxy: added).
     uint64_t displayCopiesSkipped = 0u;
+    // Local-to-local copies and local-to-host reads the game asked for
+    // (Rogue Galaxy: added; the native path's remaining uses of local memory).
+    uint64_t localCopies = 0;
+    uint64_t hostReads = 0;
     uint64_t nativeEffectNanos[3] = {}; // the flush before, the buffers, the sprites
     // Objects drawn into object layers (GSNativeEffect::kRouteLayer), the
     // passes that laid them over the frame, those started because every

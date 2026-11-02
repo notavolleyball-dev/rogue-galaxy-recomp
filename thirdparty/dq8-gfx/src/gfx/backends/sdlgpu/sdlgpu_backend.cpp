@@ -5078,12 +5078,30 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(textures->stats().uploadStoreReads),
                          static_cast<unsigned long long>(textures->stats().localMemoryReads),
                          static_cast<unsigned long long>(textures->stats().targetReadsSkipped));
-        if (textures && textures->stats().namedExpands != 0u) {
+        if (textures && namedtextures::active()) {
+            // What the native path still needs local memory for (cumulative):
+            // expansions not named and why, uploads no record names, the
+            // game's copies and reads in GS addresses. Resolves by reason are
+            // on the `resolves` line.
             const auto named = namedtextures::stats();
-            std::fprintf(stderr, "[named-textures] expands %llu, uploads named %llu of %llu queued (%llu dropped)\n",
-                         static_cast<unsigned long long>(textures->stats().namedExpands),
-                         static_cast<unsigned long long>(named.matched), static_cast<unsigned long long>(named.pushed),
-                         static_cast<unsigned long long>(named.dropped));
+            const GsTextureCacheStats &t = textures->stats();
+            std::fprintf(stderr,
+                         "[native-memory] expands named %llu, not named: no name %llu, shape %llu, palette %llu | "
+                         "uploads named %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
+                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu, host reads %llu\n",
+                         static_cast<unsigned long long>(t.namedExpands),
+                         static_cast<unsigned long long>(t.namedMissNoName),
+                         static_cast<unsigned long long>(t.namedMissShape),
+                         static_cast<unsigned long long>(t.namedMissPalette),
+                         static_cast<unsigned long long>(t.uploadsNamed),
+                         static_cast<unsigned long long>(t.uploadsUnnamed),
+                         static_cast<unsigned long long>(t.unnamedUploadBytes / 1024u),
+                         static_cast<unsigned long long>(named.pushed),
+                         static_cast<unsigned long long>(named.dropped),
+                         static_cast<unsigned long long>(t.expandedFromTargets),
+                         static_cast<unsigned long long>(t.localMemoryReads),
+                         static_cast<unsigned long long>(stats.localCopies),
+                         static_cast<unsigned long long>(stats.hostReads));
         }
         if (transfer && transfer->repeatsEnabled()) {
             static GsTransferEngine::RepeatStats before{};
@@ -6526,6 +6544,10 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
         ((command.direction != 1u && m_impl->inDisplay(command.bitbltbuf.dbp)) ||
          (command.direction != 0u && m_impl->inDisplay(command.bitbltbuf.sbp))))
         m_impl->materializeDisplay();
+    if (command.direction == 2u)
+        ++m_impl->stats.localCopies;
+    else if (command.direction == 1u)
+        ++m_impl->stats.hostReads;
     if (command.direction == 2u) {
         if (!m_impl->flushFor(m_impl->stats.flushLocalCopy)) return;
         if (m_impl->gpuLocalCopy(command)) {

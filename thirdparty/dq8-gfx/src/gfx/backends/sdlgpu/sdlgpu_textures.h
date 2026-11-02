@@ -91,6 +91,14 @@ struct GsTextureCacheStats {
     uint64_t uploadStoreReads = 0u;
     uint64_t targetReadsSkipped = 0u;
     uint64_t namedExpands = 0u; // textures expanded from a named upload (Rogue Galaxy: added)
+    // Why an expansion was not named, and the uploads named or not
+    // (Rogue Galaxy: added; what the native path still needs local memory for).
+    uint64_t namedMissNoName = 0u;
+    uint64_t namedMissShape = 0u;
+    uint64_t namedMissPalette = 0u;
+    uint64_t uploadsNamed = 0u;
+    uint64_t uploadsUnnamed = 0u;
+    uint64_t unnamedUploadBytes = 0u;
     uint64_t localMemoryReads = 0u;
     uint64_t texelsExpanded = 0u;
     // Textures sourced from a region a render target owns. Correct, but the
@@ -366,6 +374,7 @@ private:
         GsBlockSet blocks;
     };
     void beginNamedUpload(const GSTransferCommand &command);
+    void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
     void dropNamed(const GsBlockSet &blocks);
     // Expands the region from a named image when one serves this key (and

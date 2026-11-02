@@ -817,7 +817,7 @@ void GsTextureCache::buildPalette(const GsTextureKey &key) {
 }
 
 uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly) {
-    if (!m_identityRead && !m_named.empty()) {
+    if (!m_identityRead && namedtextures::active()) {
         uint64_t namedHash = 0u;
         if (expandNamed(key, region, hashOnly, namedHash))
             return namedHash;
@@ -1671,6 +1671,32 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks) {
     }
 }
 
+// An upload no record names: what local memory must still hold for the
+// native path. DQ8_GFX_WARN_UNNAMED=1 prints each new shape once.
+void GsTextureCache::noteUnnamedUpload(const GSTransferCommand &command) {
+    const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
+    uint32_t bits = 32u;
+    switch (dpsm) {
+    case GS_PSM_CT24: bits = 24u; break;
+    case GS_PSM_CT16: case GS_PSM_CT16S: bits = 16u; break;
+    case GS_PSM_T8: case GS_PSM_T8H: bits = 8u; break;
+    case GS_PSM_T4: case GS_PSM_T4HL: case GS_PSM_T4HH: bits = 4u; break;
+    default: break;
+    }
+    ++m_stats.uploadsUnnamed;
+    m_stats.unnamedUploadBytes += static_cast<uint64_t>(command.trxreg.rrw) * command.trxreg.rrh * bits / 8u;
+    static const bool warn = std::getenv("DQ8_GFX_WARN_UNNAMED") != nullptr;
+    if (warn) {
+        static std::set<std::string> seen;
+        char line[128];
+        std::snprintf(line, sizeof line, "dbp %05x dbw %u dpsm %02x %ux%u at %u,%u", command.bitbltbuf.dbp,
+                      command.bitbltbuf.dbw, dpsm, command.trxreg.rrw, command.trxreg.rrh, command.trxpos.dsax,
+                      command.trxpos.dsay);
+        if (seen.size() < 256u && seen.insert(line).second)
+            std::fprintf(stderr, "[unnamed-upload] %s\n", line);
+    }
+}
+
 void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     if (m_namedOpen)
         finishNamedUpload(); // a short one: dropped there
@@ -1684,12 +1710,18 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
         dropNamed(written);
     }
     static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
-    if (off || command.direction != 0u || command.trxpos.dsax != 0u || command.trxpos.dsay != 0u ||
-        !namedtextures::active())
+    if (command.direction != 0u)
         return;
+    if (off || command.trxpos.dsax != 0u || command.trxpos.dsay != 0u || !namedtextures::active()) {
+        noteUnnamedUpload(command);
+        return;
+    }
     namedtextures::Upload upload;
-    if (!namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, command.trxreg.rrw, command.trxreg.rrh, upload))
+    if (!namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, command.trxreg.rrw, command.trxreg.rrh, upload)) {
+        noteUnnamedUpload(command);
         return;
+    }
+    ++m_stats.uploadsNamed;
     uint32_t bits = 0u;
     switch (dpsm) {
     case GS_PSM_CT32: bits = 32u; break;
@@ -1744,18 +1776,23 @@ void GsTextureCache::finishNamedUpload() {
 }
 
 bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
+    const auto miss = [&](uint64_t &counter) {
+        if (!hashOnly)
+            ++counter;
+        return false;
+    };
     const auto found = m_named.find(key.tbp0);
     if (found == m_named.end())
-        return false;
+        return miss(m_stats.namedMissNoName);
     const NamedImage &image = found->second;
     const namedtextures::Upload &u = image.upload;
     const uint32_t psm = key.psm & 0x3fu;
     if (u.palette || (u.psm & 0x3fu) != psm || std::max<uint32_t>(key.tbw, 1u) != std::max<uint32_t>(u.textureBufferWidth, 1u))
-        return false;
+        return miss(m_stats.namedMissShape);
     const uint32_t w = u.textureWidth, h = u.textureHeight;
     const auto pow2 = [](uint32_t v) { uint32_t p = 1u; while (p < v) p <<= 1u; return p; };
     if (key.width > pow2(w) || key.height > pow2(h))
-        return false;
+        return miss(m_stats.namedMissShape);
 
     const bool indexed = gsIsIndexedPsm(key.psm);
     const bool fourBit = psm == GS_PSM_T4 || psm == GS_PSM_T4HL || psm == GS_PSM_T4HH;
@@ -1764,22 +1801,22 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const NamedImage *clut = nullptr;
     if (indexed) {
         if (key.csm != 0u)
-            return false;
+            return miss(m_stats.namedMissPalette);
         const auto clutFound = m_named.find(key.cbp);
         if (clutFound == m_named.end() || !clutFound->second.upload.palette ||
             (clutFound->second.upload.dpsm & 0x3fu) != (key.cpsm & 0x3fu))
-            return false;
+            return miss(m_stats.namedMissPalette);
         clut = &clutFound->second;
         const uint32_t cpsm = key.cpsm & 0x3fu;
         const bool sixteen = cpsm == GS_PSM_CT16 || cpsm == GS_PSM_CT16S;
         if (!sixteen && cpsm != GS_PSM_CT32)
-            return false;
+            return miss(m_stats.namedMissPalette);
         const uint32_t cw = clut->upload.width, ch = clut->upload.height;
         for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u); ++raw) {
             const uint32_t index = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
             const uint32_t cx = index & 0x0fu, cy = index >> 4u;
             if (cx >= cw || cy >= ch)
-                return false;
+                return miss(m_stats.namedMissPalette);
             const size_t at = static_cast<size_t>(cy) * cw + cx;
             uint32_t value = 0u;
             if (sixteen) {
