@@ -1795,13 +1795,22 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
     uint32_t first = 0u, last = 0u;
     if (!blockSpan(blocks, first, last))
         return;
+    GsBlockSet covered;
+    bool coveredMarked = false;
     for (auto it = m_named.begin(); it != m_named.end();) {
         const NamedImage &image = it->second;
         if (it->first != keep && image.firstBlock <= last && first <= image.lastBlock &&
             (image.blocks & blocks).any()) {
             if (image.owedToShadow) {
                 // Blocks of it the writer does not replace whole keep its bytes.
-                if (!m_dropCovered || (image.blocks & ~*m_dropCovered).any())
+                if (m_dropCoveredBy && !coveredMarked) {
+                    const GSTransferCommand &c = *m_dropCoveredBy;
+                    gsMarkCoveredBlocks(covered, c.bitbltbuf.dbp, std::max<uint32_t>(c.bitbltbuf.dbw, 1u),
+                                        c.bitbltbuf.dpsm & 0x3fu, c.trxreg.rrw, c.trxreg.rrh, c.trxpos.dsax,
+                                        c.trxpos.dsay);
+                    coveredMarked = true;
+                }
+                if (!m_dropCoveredBy || (image.blocks & ~covered).any())
                     writeNamedToShadow(it->second);
                 else
                     --m_namedOwed;
@@ -1924,19 +1933,18 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
     const uint32_t x = command.trxpos.dsax, y = command.trxpos.dsay;
     const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
-    GsBlockSet written, covered;
+    GsBlockSet written;
     if (!m_named.empty())
         gsMarkBlocks(written, command.bitbltbuf.dbp, dbw, dpsm, x + w, y + h);
-    if (m_namedOwed != 0u && command.direction == 0u)
-        gsMarkCoveredBlocks(covered, command.bitbltbuf.dbp, dbw, dpsm, w, h, x, y);
     // The drops below: an owed image this upload replaces whole needs no
     // write of its own (a local copy's or a read's drops always write it).
+    // Its covered blocks are marked only if an owed image is in the way.
     struct CoveredScope {
-        const GsBlockSet *&slot;
+        const GSTransferCommand *&slot;
         ~CoveredScope() { slot = nullptr; }
-    } coveredScope{m_dropCovered};
+    } coveredScope{m_dropCoveredBy};
     if (command.direction == 0u)
-        m_dropCovered = &covered;
+        m_dropCoveredBy = &command;
     static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
     const uint32_t bits = namedBits(dpsm);
     if (command.direction != 0u || off || bits == 0u || w == 0u || h == 0u || !namedtextures::active()) {
@@ -2236,7 +2244,25 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         if (!sixteen && cpsm != GS_PSM_CT32)
             return miss(m_stats.namedMissPalette);
         const uint32_t cw = clut->upload.width, ch = clut->upload.height;
-        for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u); ++raw) {
+        // How far the indices reach into the palette depends on the formats
+        // and CSA alone: worked out once, so the identity check (hashOnly)
+        // needs no palette (resolving 256 indices for it every call was
+        // 0.7% of the samples).
+        static thread_local std::unordered_map<uint32_t, uint32_t> reach;
+        const uint32_t reachKey = cpsm | (key.csm << 6u) | ((key.csa & 0x1fu) << 7u) | (psm << 12u);
+        auto known = reach.find(reachKey);
+        if (known == reach.end()) {
+            uint32_t maxX = 0u, maxY = 0u;
+            for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u); ++raw) {
+                const uint32_t index = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
+                maxX = std::max(maxX, index & 0x0fu);
+                maxY = std::max(maxY, index >> 4u);
+            }
+            known = reach.emplace(reachKey, maxX | (maxY << 16u)).first;
+        }
+        if ((known->second & 0xffffu) >= cw || (known->second >> 16u) >= ch)
+            return miss(m_stats.namedMissPalette);
+        for (uint32_t raw = 0u; raw < (fourBit ? 16u : 256u) && (!hashOnly || m_namedWantPalette); ++raw) {
             const uint32_t index = resolveClutIndex(raw, key.cpsm, key.csm, key.csa, key.psm);
             const uint32_t cx = index & 0x0fu, cy = index >> 4u;
             if (cx >= cw || cy >= ch)
@@ -2350,7 +2376,10 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
     const bool whole = region.x0 == 0u && region.y0 == 0u && region.x1 == key.width && region.y1 == key.height;
     if (!whole && !entry.renderable)
         return true;
-    if (!expandNamed(key, region, true, hash) || !m_namedLastDirect || !m_namedLastImage)
+    m_namedWantPalette = true;
+    const bool named = expandNamed(key, region, true, hash);
+    m_namedWantPalette = false;
+    if (!named || !m_namedLastDirect || !m_namedLastImage)
         return true;
     // Texels past the image read as 0, not palette[0]: those stay on the CPU.
     if (region.x1 > m_namedLastWidth || region.y1 > m_namedLastHeight)

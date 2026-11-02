@@ -6765,9 +6765,10 @@ void SdlGpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes) {
     Impl::ScopedTimer timer(m_impl->backendNanos);
     m_impl->stats.transferBytes += sizeBytes;
     if (m_impl->bypassingUpload) {
-        // The native bypass: the bytes go to the texture cache alone.
+        // The native bypass: the bytes go to the texture cache alone (its
+        // pages were invalidated once, at bypassUpload: no draw lands
+        // between one transfer's payloads).
         m_impl->textures->noteUploadData(data, sizeBytes);
-        m_impl->textures->invalidate(m_impl->bypassPages, GsTextureCache::InvalidationSource::HostWrite);
         return;
     }
     if (!m_impl->transfer) return;

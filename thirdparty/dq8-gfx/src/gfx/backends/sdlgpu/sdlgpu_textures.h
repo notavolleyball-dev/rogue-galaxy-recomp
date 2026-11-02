@@ -414,7 +414,8 @@ private:
     bool m_namedSkipShadow = false;    // this upload's bytes go to m_shadow only if needed
     GSTransferCommand m_namedSkipCommand{};
     uint32_t m_namedOwed = 0u;          // named images owed to m_shadow
-    const GsBlockSet *m_dropCovered = nullptr; // blocks the writer dropping names replaces whole // a named image's span meets these blocks
+    const GSTransferCommand *m_dropCoveredBy = nullptr; // the upload dropping names (its whole blocks keep none)
+    bool m_namedWantPalette = false; // expandNamed builds the palette even for an identity // a named image's span meets these blocks
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
