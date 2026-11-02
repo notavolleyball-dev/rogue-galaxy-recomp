@@ -67,6 +67,10 @@ enum class Effect : uint8_t
     // (RG_NATIVE_FLIP): sent from the game thread, not the VIF1 lists, so
     // taken by flipPacket rather than by packet memory.
     Flip,
+    // ScreenColorFilterMaybe (RG_NATIVE_COLOR_FILTER): the scene's tint,
+    // built from its arguments (Place::unit: the colour), its packets sent
+    // on with their kicks withheld.
+    ColorFilter,
 };
 const char *probeName(uint32_t unit);
 

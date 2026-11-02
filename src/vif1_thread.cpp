@@ -1532,7 +1532,8 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
         const uint32_t address = listAddress(data);
         const rg::nativefx::Place place = address == ~0u ? rg::nativefx::Place{} : rg::nativefx::placeAt(address);
         const rg::nativefx::Effect effect = place.effect;
-        const uint32_t unit = effect == rg::nativefx::Effect::Probe ? place.unit : 0u;
+        const uint32_t unit =
+            effect == rg::nativefx::Effect::Probe || effect == rg::nativefx::Effect::ColorFilter ? place.unit : 0u;
         if (effect != t_held.effect || unit != t_held.unit)
         {
             flushEffect();

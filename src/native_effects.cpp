@@ -206,6 +206,81 @@ void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
 }
 
+// ScreenColorFilterMaybe(r, g, b) (RGDecomp's C; GameSceneTintApply's, for
+// the grayscale filter task): the frame's alpha from its green, through a
+// CT16 view of it drawn onto itself 8 pixels over, then the frame Cs Ad:
+// (r, g, b) times the frame's green / 128. The colour is the range's unit
+// (and bit 24, so none is 0).
+constexpr uint32_t kColorFilter = 0x00179C60u;
+PS2Runtime::RecompiledFunction g_colorFilterOriginal = nullptr;
+uint32_t g_colorFilterUnit = 0u; // game thread only
+
+void afterColorFilter(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+{
+    addRange(top, stackTop(), Effect::ColorFilter, g_colorFilterUnit);
+}
+
+void colorFilter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    g_colorFilterUnit = (getRegU32(ctx, 4) & 0xFFu) | ((getRegU32(ctx, 5) & 0xFFu) << 8) |
+                        ((getRegU32(ctx, 6) & 0xFFu) << 16) | (1u << 24);
+    rg::hooks::callThen(g_colorFilterOriginal, rdram, ctx, runtime, &afterColorFilter, stackTop());
+}
+
+// RG_DEBUG_COLOR_FILTER=RRGGBB: GameSceneTintApply (the grayscale filter
+// task's, each frame the task runs) calls the filter with this colour as if
+// the scene's tint were on, to see it where no scene tints. It calls the
+// filter directly and marks its packets itself: callThen's return hook is
+// for calls the game makes, not for one made from native code.
+uint32_t debugColorFilter()
+{
+    static const uint32_t color = [] {
+        const char *value = std::getenv("RG_DEBUG_COLOR_FILTER");
+        return value && *value ? (static_cast<uint32_t>(std::strtoul(value, nullptr, 16)) | (1u << 24)) : 0u;
+    }();
+    return color;
+}
+
+constexpr uint32_t kGameSceneTintApply = 0x001CE8F0u;
+PS2Runtime::RecompiledFunction g_tintApplyOriginal = nullptr;
+
+void gameSceneTintApply(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (const uint32_t color = debugColorFilter(); color != 0u)
+    {
+        static bool told = false;
+        if (!told)
+        {
+            told = true;
+            std::fprintf(stderr, "[nativefx] debug colour filter %06x from GameSceneTintApply\n", color & 0xFFFFFFu);
+        }
+        // The call GameSceneTintApply makes when the scene's tint is on.
+        const R5900Context saved = *ctx;
+        const auto set = [&](int reg, uint32_t value) {
+            ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
+        };
+        set(4, (color >> 16) & 0xFFu);
+        set(5, (color >> 8) & 0xFFu);
+        set(6, color & 0xFFu);
+        if (g_colorFilterOriginal)
+        {
+            const uint32_t top = stackTop();
+            g_colorFilterOriginal(rdram, ctx, runtime);
+            // The unit as colorFilter makes it: r in the low byte.
+            const uint32_t unit =
+                ((color >> 16) & 0xFFu) | (color & 0xFF00u) | ((color & 0xFFu) << 16) | (1u << 24);
+            addRange(top, stackTop(), Effect::ColorFilter, unit);
+        }
+        else if (PS2Runtime::RecompiledFunction filter = runtime->lookupFunction(kColorFilter))
+        {
+            filter(rdram, ctx, runtime);
+        }
+        *ctx = saved;
+        return;
+    }
+    g_tintApplyOriginal(rdram, ctx, runtime);
+}
+
 PS2Runtime::RecompiledFunction g_cblurDrawOriginal = nullptr;
 
 void afterCBlurDraw(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
@@ -456,6 +531,7 @@ bool g_bloom = false;
 bool g_dof = false;
 bool g_refraction = false;
 bool g_flip = false;
+bool g_colorFilter = false;
 // The flip's draw environment (below, with flipPacket).
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
 PS2Runtime::RecompiledFunction g_putDrawEnvOriginal = nullptr;
@@ -1059,6 +1135,7 @@ const char *name(Effect effect)
     case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
     case Effect::Flip: return "flip";
+    case Effect::ColorFilter: return "color filter";
     default: return "none";
     }
 }
@@ -1085,9 +1162,10 @@ bool enabled()
         g_dof = flag("RG_NATIVE_DOF", native);
         g_refraction = flag("RG_NATIVE_REFRACTION", native);
         g_flip = flag("RG_NATIVE_FLIP", native);
+        g_colorFilter = flag("RG_NATIVE_COLOR_FILTER", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_probe;
+               g_colorFilter || g_probe;
     }();
     return on;
 }
@@ -1129,6 +1207,13 @@ void install(PS2Runtime &runtime)
     if (g_refraction && !rg::timing::hookFunction(runtime, kRefraction, &refractionCaptureFrame, g_refractionOriginal))
     {
         std::fprintf(stderr, "[nativefx] the refraction's capture stays GS packets\n");
+    }
+    if (debugColorFilter() != 0u)
+        rg::timing::hookFunction(runtime, kGameSceneTintApply, &gameSceneTintApply, g_tintApplyOriginal);
+    if (g_colorFilter &&
+        !rg::timing::hookFunction(runtime, kColorFilter, &colorFilter, g_colorFilterOriginal))
+    {
+        std::fprintf(stderr, "[nativefx] the colour filter stays GS packets\n");
     }
     if (g_flip && !rg::timing::hookFunction(runtime, kSceGsPutDrawEnv, &putDrawEnv, g_putDrawEnvOriginal))
     {
@@ -1458,11 +1543,109 @@ void observe(Effect effect, const uint8_t *data, uint32_t size)
     }
 }
 
+namespace
+{
+// The colour filter from its arguments (the unit), not its sprites: the
+// packets give only the frame they end on (FRAME and SCISSOR, context 1,
+// last written: the draw environment put back for the second pass). Two
+// ops into the frame, taken over: its alpha from its green (kGreenToAlpha,
+// as the CT16 view's copy leaves it), then (r, g, b, 0x80) with ALPHA
+// A = Cs, B = 0, C = Ad, D = 0.
+bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t unit, GSNativeEffect &out,
+                      std::vector<std::vector<uint8_t>> &withheld, std::string &why)
+{
+    uint64_t frame = 0u, scissor = 0u;
+    bool haveFrame = false, haveScissor = false;
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> events;
+    for (const std::vector<uint8_t> &packet : packets)
+    {
+        eachPacket(packet.data(), static_cast<uint32_t>(packet.size()), [&](uint32_t at, uint32_t size) {
+            events.clear();
+            rg::gif::decodeGifPacket(packet.data() + at, size, state, events);
+            for (const rg::gif::GifEvent &event : events)
+            {
+                if (event.kind != rg::gif::GifEvent::Kind::Register)
+                    continue;
+                if (event.reg == kFrame)
+                {
+                    frame = event.value;
+                    haveFrame = true;
+                }
+                else if (event.reg == kScissor)
+                {
+                    scissor = event.value;
+                    haveScissor = true;
+                }
+            }
+        });
+    }
+    if (!haveFrame || !haveScissor)
+    {
+        why = "no draw environment among its packets";
+        return false;
+    }
+    if (((frame >> 24) & 0x3Fu) != 0u || (frame >> 32) != 0u)
+    {
+        why = "a frame not CT32, or masked";
+        return false;
+    }
+    const uint32_t width = static_cast<uint32_t>((scissor >> 16) & 0x7FFu) + 1u;
+    const uint32_t height = static_cast<uint32_t>((scissor >> 48) & 0x7FFu) + 1u;
+    out.bufferCount = 1u;
+    GSNativeEffect::Buffer &buffer = out.buffers[0];
+    buffer.base = static_cast<uint32_t>(frame & 0x1FFu) << 5u;
+    buffer.fbw = static_cast<uint32_t>((frame >> 16) & 0x3Fu);
+    buffer.psm = 0u;
+    buffer.width = std::max(width, buffer.fbw * 64u);
+    buffer.height = height;
+    buffer.external = GSNativeEffect::kTakenOver;
+    const auto whole = [&](GSNativeEffect::Op &op) {
+        op.target = 0u;
+        op.source = -1;
+        op.rect[2] = static_cast<float>(width);
+        op.rect[3] = static_cast<float>(height);
+        op.scissor[2] = width - 1u;
+        op.scissor[3] = height - 1u;
+    };
+    out.opCount = 2u;
+    GSNativeEffect::Op &alpha = out.ops[0];
+    whole(alpha);
+    alpha.flags = GSNativeEffect::kGreenToAlpha | GSNativeEffect::kColClamp;
+    GSNativeEffect::Op &tint = out.ops[1];
+    whole(tint);
+    tint.flags = GSNativeEffect::kBlend | GSNativeEffect::kColClamp;
+    tint.alpha = 0x98u; // A = Cs, B = 0, C = Ad, D = 0; FIX 0
+    tint.rgba[0] = static_cast<uint8_t>(unit & 0xFFu);
+    tint.rgba[1] = static_cast<uint8_t>((unit >> 8) & 0xFFu);
+    tint.rgba[2] = static_cast<uint8_t>((unit >> 16) & 0xFFu);
+    tint.rgba[3] = 0x80u;
+    for (const std::vector<uint8_t> &packet : packets)
+    {
+        withheld.push_back(packet);
+        withholdKicks(withheld.back());
+    }
+    if (g_log)
+    {
+        static bool shown = false;
+        if (!shown)
+        {
+            shown = true;
+            std::fprintf(stderr, "[nativefx] color filter: %02x%02x%02x over %05x fbw %u %ux%u\n", tint.rgba[0],
+                         tint.rgba[1], tint.rgba[2], buffer.base, buffer.fbw, width, height);
+        }
+    }
+    return true;
+}
+} // namespace
+
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit)
 {
     out = GSNativeEffect{};
     withheld.clear();
+    if (effect == Effect::ColorFilter)
+        return buildColorFilter(packets, unit, out, withheld, why);
     const bool probing = effect == Effect::Probe;
     if (effect != Effect::Glare && effect != Effect::Shadow && effect != Effect::CBlur && effect != Effect::Bloom &&
         effect != Effect::Dof && effect != Effect::CBlurDraw && effect != Effect::Refraction &&
