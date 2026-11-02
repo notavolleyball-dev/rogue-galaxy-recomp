@@ -993,6 +993,22 @@ from the target (they were rebuilt from its stale pixels, ~400 a frame).
 Walk at 4x: GS backend 44% of the wall with the bypass (41% with no named
 textures at all); the load menu and field match the GS path's screenshots.
 
+**Local memory under the bypass (2026-11-02):** with `DQ8_GFX_NATIVE_BYPASS=1`
+nothing on the walk (boot, title movie, load menu, field) writes GS local
+memory: every upload is a named image (records, self-named ones from the
+first upload on, and canvases for what GS memory would merge: the movie's
+CT32 macroblocks at an offset into `02a00`, and T4HL/T4HH title images
+sharing one buffer's words), named uploads over a target's pages take them
+from the target, copies between named images (pre-swizzled ones included,
+the texture animations) are made between their bytes and go no further, and
+no target resolves. The texture cache's host-writes memory is a lazy cache
+of the named images: written only when a texture names cannot serve reads
+it (the font page, read as one T4 texture over many glyph images: 37 such
+builds on the walk) or a named image is dropped with blocks nothing
+replaces. `DQ8_GFX_WARN_MEMORY=1` lists what still uses memory. Walk ceiling
+at 4x: 200.9 fps (202.5 with named textures off); boot, menu and field
+match the GS path's screenshots.
+
 **Where the GS still is (2026-11-02, after the run above):** the presenter
 shows the display frame the flip made (its own texture) and reads DISPFB only
 to know which; the movie's frames are named uploads drawn through a GsPkt

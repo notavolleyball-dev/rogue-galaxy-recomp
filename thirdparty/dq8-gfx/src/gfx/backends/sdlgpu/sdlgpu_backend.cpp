@@ -5,6 +5,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "gfx/backends/sdlgpu/sdlgpu_textures.h"
 #include "gfx/gs/gs_depth_probe.h"
+#include "gfx/gs/gs_memory_uses.h"
 #include "gfx/gs/gs_named_textures.h"
 #include "gfx/gs/gs_host_reads.h"
 #include "gfx/gs/gs_state.h"
@@ -3232,14 +3233,21 @@ struct SdlGpuBackend::Impl {
                                                   command.trxreg.rrw, command.trxreg.rrh);
         if (targets->ownsAny(pages)) {
             ++stats.uploadsIntoTargets;
+            char shape[128];
+            std::snprintf(shape, sizeof shape, "onto a target (%s) dbp %05x dbw %u dpsm %02x %ux%u%s",
+                          recorded ? "named" : "unnamed", command.bitbltbuf.dbp, command.bitbltbuf.dbw,
+                          command.bitbltbuf.dpsm & 0x3fu, command.trxreg.rrw, command.trxreg.rrh,
+                          (command.trxpos.dsax | command.trxpos.dsay) ? " at an offset" : "");
             // A named upload over pages a target drew replaces them: the
             // target gives them up, or every texture read there would be
             // rebuilt from the target's stale pixels (~400 a frame on the
-            // walk). It goes on through local memory, as an upload no target
-            // holds, so a later use of the target finds its bytes there.
-            if (recorded)
-                targets->invalidate(pages);
-            return false;
+            // walk). Under the bypass a target never imports local memory,
+            // so the bytes need go nowhere but the named image.
+            if (!recorded) {
+                memoryuses::note(memoryuses::Kind::UploadToMemory, shape);
+                return false;
+            }
+            targets->invalidate(pages);
         }
         ++stats.uploadsBypassed;
         textures->noteUpload(command);
@@ -5206,7 +5214,7 @@ struct SdlGpuBackend::Impl {
             std::fprintf(stderr,
                          "[native-memory] expands named %llu (on the GPU %llu), not named: no name %llu, shape %llu, palette %llu | "
                          "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
-                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets) | bypass: uploads %llu, onto targets %llu, resolves skipped %llu\n",
+                         "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets) | bypass: uploads %llu, onto targets %llu, resolves skipped %llu | memory uses: %s\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedOnGpu),
                          static_cast<unsigned long long>(t.namedMissNoName),
@@ -5227,7 +5235,7 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(stats.hostReadsNative),
                          static_cast<unsigned long long>(stats.uploadsBypassed),
                          static_cast<unsigned long long>(stats.uploadsIntoTargets),
-                         static_cast<unsigned long long>(t.resolvesBypassed));
+                         static_cast<unsigned long long>(t.resolvesBypassed), memoryuses::summary().c_str());
         }
         if (transfer && transfer->repeatsEnabled()) {
             static GsTransferEngine::RepeatStats before{};
@@ -6687,6 +6695,32 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
             m_impl->transferPagesValid = false;
             return;
         }
+    }
+    if (gsNativeBypass() && command.direction == 2u && m_impl->textures && m_impl->textures->lastCopyNamed()) {
+        // Made between the named images' bytes (noteTransferStart): under
+        // the bypass nothing reads local memory, so the copy goes no further.
+        GsPageSet destination;
+        gsMarkPages(destination, command.bitbltbuf.dbp, std::max<uint32_t>(command.bitbltbuf.dbw, 1u),
+                    command.bitbltbuf.dpsm, command.trxreg.rrw, command.trxreg.rrh, command.trxpos.dsax,
+                    command.trxpos.dsay);
+        m_impl->invalidatePages(destination);
+        m_impl->transferCommand = command;
+        m_impl->transferPagesValid = false;
+        return;
+    }
+    if (gsNativeBypass() && command.direction != 0u) {
+        const GSBitBltBuf &b = command.bitbltbuf;
+        char shape[160];
+        std::snprintf(shape, sizeof shape, "%s sbp %05x sbw %u spsm %02x %u,%u -> dbp %05x dbw %u dpsm %02x %u,%u %ux%u",
+                      command.direction == 1u ? "to host" : (m_impl->textures && m_impl->textures->lastCopyNamed() ? "named" : "in memory"),
+                      b.sbp, b.sbw, b.spsm & 0x3fu, command.trxpos.ssax, command.trxpos.ssay, b.dbp, b.dbw,
+                      b.dpsm & 0x3fu, command.trxpos.dsax, command.trxpos.dsay, command.trxreg.rrw, command.trxreg.rrh);
+        std::string described = shape;
+        if (m_impl->textures)
+            described += " [from " + m_impl->textures->describeNamed(b.sbp) + "; to " +
+                         m_impl->textures->describeNamed(b.dbp) + "]";
+        memoryuses::note(command.direction == 1u ? memoryuses::Kind::HostRead : memoryuses::Kind::LocalCopy,
+                         described.c_str());
     }
     if (gsTargetTraceEnabled())
         std::fprintf(stderr, "[target] transfer dir=%u dbp=%05x dbw=%u dpsm=%02x %ux%u@%u,%u sbp=%05x sbw=%u spsm=%02x\n",

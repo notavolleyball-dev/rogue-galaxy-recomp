@@ -292,6 +292,10 @@ private:
     bool blocksDrawn(const GsTextureKey &key) const { return (blocksFor(key) & m_drawnBlocks).any(); }
     // The palette's blocks only (Rogue Galaxy: added).
     bool clutBlocksDrawn(const GsTextureKey &key) const {
+        // Under the bypass the drawn blocks are not kept: the callers' own
+        // test of the target holding the palette decides.
+        if (gsNativeBypass())
+            return true;
         GsBlockSet blocks;
         const uint32_t clutWidth = (key.texclut & 0xffu) + 16u;
         const uint32_t clutHeight = ((key.texclut >> 16u) & 0xffffu) + 16u;
@@ -391,6 +395,12 @@ private:
         // memory (m_shadow) and are written there only when something reads
         // its blocks from it or it is dropped (writeNamedToShadow).
         bool owedToShadow = false;
+        // A CT32 image over a whole buffer width that uploads write into
+        // (Rogue Galaxy: added, under the bypass): CT32 rectangles at an
+        // offset (the movie's macroblocks), and T8H/T4HL/T4HH bits in its
+        // words' top byte, where the GS keeps them. Read in other formats
+        // through the layouts (reinterpret).
+        bool canvas = false;
         // A hash of `bytes`, made on first use and cleared when they change:
         // a texture's identity from it needs no pass over its texels.
         mutable uint64_t contentHash = 0u; // pre-swizzled 8-bit art still as uploaded (linearize)
@@ -415,7 +425,12 @@ private:
     GSTransferCommand m_namedSkipCommand{};
     uint32_t m_namedOwed = 0u;          // named images owed to m_shadow
     const GSTransferCommand *m_dropCoveredBy = nullptr; // the upload dropping names (its whole blocks keep none)
-    bool m_namedWantPalette = false; // expandNamed builds the palette even for an identity // a named image's span meets these blocks
+    bool m_namedWantPalette = false;
+    const char *m_namedMissWhy = "no name"; // why the last expandNamed missed
+public:
+    bool lastCopyNamed() const { return m_namedCopyKeep != ~0u; } // the transfer begun was a copy between named images
+    std::string describeNamed(uint32_t base) const; // the named image at a base, for diagnostics
+private: // expandNamed builds the palette even for an identity // a named image's span meets these blocks
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
@@ -427,6 +442,8 @@ private:
     bool m_namedOpen = false;
     bool m_namedPatching = false;
     std::array<uint32_t, 4> m_namedPatch{}; // x, y, width, height
+    uint32_t m_namedPatchFormat = 0u;       // the patching upload's own format
+    NamedImage *canvasFor(uint32_t dbp, uint32_t dbw, uint32_t height);
     NamedImage m_namedPending;
     size_t m_namedExpected = 0;
     // Replacement packs are keyed by the GS path's hashes: their reads stay

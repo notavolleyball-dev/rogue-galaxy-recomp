@@ -1,4 +1,5 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
+#include "gfx/gs/gs_memory_uses.h"
 
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
 #include "gfx/gs/gs_named_targets.h"
@@ -1171,6 +1172,12 @@ bool GsTargetCache::resolveRegion(GsSurface &surface, GsRegion region,
 
 void GsTargetCache::writeResolved(GsSurface &surface, GsRegion region,
                                   const uint8_t *pixels) {
+    if (gsNativeBypass()) {
+        char shape[96];
+        std::snprintf(shape, sizeof shape, "base %05x psm %02x %ux%u", surface.base, surface.psm, region.width(),
+                      region.height());
+        memoryuses::note(memoryuses::Kind::Resolve, shape);
+    }
     if (traceEnabled()) {
         uint64_t nonBlack = 0u;
         const size_t bytes = size_t(region.width()) * region.height() * 4u;

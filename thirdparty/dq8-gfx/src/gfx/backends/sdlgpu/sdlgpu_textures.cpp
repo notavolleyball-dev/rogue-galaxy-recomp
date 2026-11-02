@@ -2,6 +2,7 @@
 
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
+#include "gfx/gs/gs_memory_uses.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
@@ -16,6 +17,14 @@
 #include <cstring>
 
 namespace dq8::gfx {
+namespace {
+// Names are read once the host names anything; under the native bypass
+// from the start, uploads before the first record naming themselves.
+bool namedOn() {
+    return namedtextures::active() || gsNativeBypass();
+}
+} // namespace
+
 
 namespace {
 
@@ -456,7 +465,9 @@ void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource sourc
         gsBlocksOfPages(blocks, pages);
         dropNamed(blocks, m_namedCopyKeep);
     }
-    if (m_tracking)
+    // The drawn blocks only choose between the two memories, which the
+    // bypass does not (sourceFor).
+    if (m_tracking && !gsNativeBypass())
         auditStamp(pages, source);
     // Draws mostly land in pages no texture reads; the walk below, over up
     // to 2048 entries, ran for every flush and every host write.
@@ -530,7 +541,7 @@ void GsTextureCache::noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32
         gsMarkBlocks(drawn, base, std::max<uint32_t>(bufferWidth, 1u), psm, region.x1, region.y1);
         dropNamed(drawn);
     }
-    if (!m_tracking || region.empty())
+    if (!m_tracking || region.empty() || gsNativeBypass())
         return;
     DrawMemo &memo = m_drawMemo[base];
     if (memo.generation == m_drawnGeneration && memo.bw == bufferWidth && memo.psm == psm &&
@@ -560,6 +571,14 @@ GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
     if (!m_storeOn)
         return &m_vram;
     const GsBlockSet blocks = blocksFor(key);
+    // Under the bypass local memory is never written: a texture names do
+    // not serve reads the host writes' memory, filled from the named images
+    // it reaches (settleShadow), whatever drew there since.
+    if (gsNativeBypass()) {
+        if (m_namedOwed != 0u && !namedServes(key))
+            settleShadow(blocks);
+        return &m_shadow;
+    }
     if ((blocks & m_drawnBlocks).none()) {
         ++m_stats.uploadStoreReads;
         if (m_namedOwed != 0u && !namedServes(key))
@@ -836,10 +855,24 @@ void GsTextureCache::buildPalette(const GsTextureKey &key) {
 }
 
 uint64_t GsTextureCache::expand(const GsTextureKey &key, const GsRegion &region, bool hashOnly) {
-    if (!m_identityRead && namedtextures::active()) {
+    if (!m_identityRead && namedOn()) {
         uint64_t namedHash = 0u;
         if (expandNamed(key, region, hashOnly, namedHash))
             return namedHash;
+    }
+    if (!hashOnly && !m_identityRead && gsNativeBypass()) {
+        GsPageSet texelPages, clutPages;
+        markTexelPages(key, texelPages);
+        markClutPages(key, clutPages);
+        const bool clutNamed = m_named.find(key.cbp) != m_named.end();
+        char shape[224];
+        std::snprintf(shape, sizeof shape,
+                      "tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x csm %u: %s; texels %s, palette %s%s",
+                      key.tbp0, key.tbw, key.psm & 0x3fu, key.width, key.height, key.cbp, key.cpsm & 0x3fu, key.csm,
+                      m_namedMissWhy, m_targets.ownsAny(texelPages) ? "in a target" : "in no target",
+                      clutPages.none() ? "none" : (m_targets.ownsAny(clutPages) ? "in a target" : "in no target"),
+                      clutPages.none() ? "" : (clutNamed ? " (named)" : " (unnamed)"));
+        memoryuses::note(memoryuses::Kind::TextureFromMemory, shape);
     }
     const TexaState texa = unpackTexa(key.texa);
     const uint32_t clutWidth = std::max<uint32_t>(key.texclut & 0xffu, 1u);
@@ -1869,10 +1902,66 @@ void GsTextureCache::settleShadow(const GsBlockSet &blocks) {
 // Whether the named images give this whole texture (its texels, and its
 // palette if it has one): then nothing reads its blocks from memory.
 bool GsTextureCache::namedServes(const GsTextureKey &key) {
-    if (m_identityRead || !namedtextures::active())
+    if (m_identityRead || !namedOn())
         return false;
     uint64_t hash = 0u;
     return expandNamed(key, {0u, 0u, key.width, key.height}, true, hash);
+}
+
+// The canvas at a base and buffer width, made or grown to `height` rows; a
+// named image of another kind there is dropped (as an upload over it would).
+GsTextureCache::NamedImage *GsTextureCache::canvasFor(uint32_t dbp, uint32_t dbw, uint32_t height) {
+    const uint32_t width = dbw * 64u;
+    if (width == 0u || height == 0u || height > 2048u)
+        return nullptr;
+    auto found = m_named.find(dbp);
+    if (found != m_named.end() && (!found->second.canvas || std::max<uint32_t>(found->second.upload.dbw, 1u) != dbw)) {
+        writeNamedToShadow(found->second); // what it held stays where a read of memory finds it
+        m_named.erase(found);
+        found = m_named.end();
+    }
+    if (found == m_named.end()) {
+        NamedImage image;
+        image.canvas = true;
+        namedtextures::Upload &u = image.upload;
+        u.dbp = dbp;
+        u.dbw = dbw;
+        u.dpsm = u.psm = GS_PSM_CT32;
+        u.textureBufferWidth = dbw;
+        u.width = u.textureWidth = width;
+        found = m_named.emplace(dbp, std::move(image)).first;
+    }
+    NamedImage &canvas = found->second;
+    if (canvas.upload.textureHeight < height) {
+        canvas.upload.height = canvas.upload.textureHeight = height;
+        canvas.bytes.resize(static_cast<size_t>(width) * height * 4u, 0u);
+        canvas.blocks.reset();
+        gsMarkBlocks(canvas.blocks, dbp, dbw, GS_PSM_CT32, width, height);
+        blockSpan(canvas.blocks, canvas.firstBlock, canvas.lastBlock);
+        canvas.wordToPixel.clear();
+        canvas.contentHash = 0u;
+    }
+    return &canvas;
+}
+
+std::string GsTextureCache::describeNamed(uint32_t base) const {
+    const auto found = m_named.find(base);
+    if (found == m_named.end()) {
+        // An image holding the block, if any.
+        for (const auto &[at, image] : m_named)
+            if (base < image.blocks.size() && image.blocks.test(base)) {
+                char text[96];
+                std::snprintf(text, sizeof text, "inside %05x (psm %02x dbw %u %ux%u)", at, image.upload.psm & 0x3fu,
+                              image.upload.dbw, image.upload.textureWidth, image.upload.textureHeight);
+                return text;
+            }
+        return "none";
+    }
+    const namedtextures::Upload &u = found->second.upload;
+    char text[96];
+    std::snprintf(text, sizeof text, "psm %02x dbw %u %ux%u%s", u.psm & 0x3fu, u.dbw, u.textureWidth, u.textureHeight,
+                  u.preSwizzled ? " pre-swizzled" : "");
+    return text;
 }
 
 bool GsTextureCache::namedWithin(uint32_t first, uint32_t last) const {
@@ -1897,6 +1986,13 @@ void GsTextureCache::noteUnnamedUpload(const GSTransferCommand &command) {
     default: break;
     }
     ++m_stats.uploadsUnnamed;
+    if (gsNativeBypass()) {
+        char shape[128];
+        std::snprintf(shape, sizeof shape, "unnamed dbp %05x dbw %u dpsm %02x %ux%u%s", command.bitbltbuf.dbp,
+                      command.bitbltbuf.dbw, command.bitbltbuf.dpsm & 0x3fu, command.trxreg.rrw, command.trxreg.rrh,
+                      (command.trxpos.dsax | command.trxpos.dsay) ? " at an offset" : "");
+        memoryuses::note(memoryuses::Kind::UploadToMemory, shape);
+    }
     m_stats.unnamedUploadBytes += static_cast<uint64_t>(command.trxreg.rrw) * command.trxreg.rrh * bits / 8u;
     static const bool warn = std::getenv("DQ8_GFX_WARN_UNNAMED") != nullptr;
     if (warn) {
@@ -1947,11 +2043,41 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
         m_dropCoveredBy = &command;
     static const bool off = std::getenv("DQ8_GFX_NO_NAMED_TEXTURES") != nullptr;
     const uint32_t bits = namedBits(dpsm);
-    if (command.direction != 0u || off || bits == 0u || w == 0u || h == 0u || !namedtextures::active()) {
+    if (command.direction != 0u || off || bits == 0u || w == 0u || h == 0u || !namedOn()) {
         dropNamed(written);
         if (command.direction == 0u)
             noteUnnamedUpload(command);
         return;
+    }
+
+    // Under the bypass, uploads GS memory would merge: CT32 rectangles at
+    // an offset with no image of their own to patch, and the alpha formats,
+    // which share CT32 words. They go into a canvas at their base.
+    const bool alphaFormat = dpsm == GS_PSM_T8H || dpsm == GS_PSM_T4HL || dpsm == GS_PSM_T4HH;
+    if (gsNativeBypass() && (alphaFormat || (dpsm == GS_PSM_CT32 && (x != 0u || y != 0u))) && x + w <= dbw * 64u &&
+        (!alphaFormat || bits != 4u || (x % 2u == 0u && w % 2u == 0u))) {
+        const auto found = m_named.find(command.bitbltbuf.dbp);
+        const bool ownImage = found != m_named.end() && !found->second.canvas && !alphaFormat &&
+                              !found->second.upload.preSwizzled && (found->second.upload.psm & 0x3fu) == dpsm &&
+                              (found->second.upload.dpsm & 0x3fu) == dpsm &&
+                              std::max<uint32_t>(found->second.upload.dbw, 1u) == dbw &&
+                              x + w <= found->second.upload.textureWidth && y + h <= found->second.upload.textureHeight;
+        if (!ownImage) {
+            NamedImage *canvas = canvasFor(command.bitbltbuf.dbp, dbw, y + h);
+            if (canvas) {
+                dropNamed(written, command.bitbltbuf.dbp);
+                m_namedPending = {};
+                m_namedPending.upload = canvas->upload;
+                m_namedPatch = {x, y, w, h};
+                m_namedPatchFormat = dpsm;
+                m_namedPatching = true;
+                m_namedExpected = (static_cast<size_t>(w) * h * bits + 7u) / 8u;
+                m_namedPending.bytes.reserve(m_namedExpected);
+                m_namedOpen = true;
+                ++m_stats.uploadsPatched;
+                return;
+            }
+        }
     }
 
     // Into part of a named image in its own format (glyphs, a region
@@ -1973,6 +2099,7 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
         m_namedPending = {};
         m_namedPending.upload = found->second.upload;
         m_namedPatch = {x, y, w, h};
+        m_namedPatchFormat = dpsm;
         m_namedPatching = true;
         m_namedExpected = (static_cast<size_t>(w) * h * bits + 7u) / 8u;
         m_namedPending.bytes.reserve(m_namedExpected);
@@ -2074,8 +2201,29 @@ void GsTextureCache::finishNamedUpload() {
             dropNamed(blocks);
             return;
         }
-        // Rows of the patch into the linear image, in its own format.
         NamedImage &target = found->second;
+        const uint32_t patchFormat = m_namedPatchFormat & 0x3fu;
+        if (target.canvas && (patchFormat == GS_PSM_T8H || patchFormat == GS_PSM_T4HL || patchFormat == GS_PSM_T4HH)) {
+            // Into the top byte of the canvas's words, as the GS keeps them.
+            const uint32_t stride = target.upload.textureWidth;
+            for (uint32_t row = 0u; row < m_namedPatch[3]; ++row)
+                for (uint32_t col = 0u; col < m_namedPatch[2]; ++col) {
+                    const size_t i = static_cast<size_t>(row) * m_namedPatch[2] + col;
+                    const size_t at = ((static_cast<size_t>(m_namedPatch[1]) + row) * stride + m_namedPatch[0] + col) * 4u + 3u;
+                    if (at >= target.bytes.size())
+                        continue;
+                    uint8_t &top = target.bytes[at];
+                    if (patchFormat == GS_PSM_T8H)
+                        top = image.bytes[i];
+                    else {
+                        const uint8_t v = (image.bytes[i >> 1u] >> ((i & 1u) * 4u)) & 0x0fu;
+                        top = patchFormat == GS_PSM_T4HL ? uint8_t((top & 0xf0u) | v) : uint8_t((top & 0x0fu) | (v << 4u));
+                    }
+                }
+            target.contentHash = 0u;
+            return;
+        }
+        // Rows of the patch into the linear image, in its own format.
         const uint32_t bits = namedBits(target.upload.psm);
         const size_t rowBytes = static_cast<size_t>(m_namedPatch[2]) * bits / 8u;
         const size_t stride = static_cast<size_t>(target.upload.textureWidth) * bits / 8u;
@@ -2177,6 +2325,9 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
     const auto miss = [&](uint64_t &counter) {
         if (!hashOnly)
             ++counter;
+        m_namedMissWhy = &counter == &m_stats.namedMissNoName ? "no name"
+                         : &counter == &m_stats.namedMissShape ? "shape"
+                                                                : "palette";
         return false;
     };
     m_namedLastImage = nullptr;
@@ -2193,9 +2344,12 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
                              psm == GS_PSM_T4HH;
     const uint32_t keyTbw = std::max<uint32_t>(key.tbw, 1u);
     const uint32_t imageTbw = std::max<uint32_t>(u.dbw, 1u);
+    // Under the bypass any buffer width: the layouts take the texel to its
+    // word wherever it is (texels past the image read as 0).
     const bool reinterpret = !u.palette && !u.preSwizzled && (u.psm & 0x3fu) == GS_PSM_CT32 && indexedRead &&
-                             ((psm == GS_PSM_T8 || psm == GS_PSM_T4) ? std::max<uint32_t>(keyTbw >> 1u, 1u) == imageTbw
-                                                                     : keyTbw == imageTbw);
+                             (gsNativeBypass() ||
+                              ((psm == GS_PSM_T8 || psm == GS_PSM_T4) ? std::max<uint32_t>(keyTbw >> 1u, 1u) == imageTbw
+                                                                      : keyTbw == imageTbw));
     if (!reinterpret &&
         (u.palette || (u.psm & 0x3fu) != psm || keyTbw != std::max<uint32_t>(u.textureBufferWidth, 1u)))
         return miss(m_stats.namedMissShape);
@@ -2366,7 +2520,7 @@ bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, con
                                       uint64_t &hash, std::string &error) {
     handled = false;
     static const bool on = std::getenv("DQ8_GFX_NO_NAMED_GPU") == nullptr;
-    if (!on || m_identityRead || !namedtextures::active() || region.empty() || !entry.texture)
+    if (!on || m_identityRead || !namedOn() || region.empty() || !entry.texture)
         return true;
     const uint32_t psm = key.psm & 0x3fu;
     if (psm != GS_PSM_T8 && psm != GS_PSM_T4)
@@ -2462,7 +2616,7 @@ bool GsTextureCache::expandNamedWithTargetPalette(const GsTextureKey &key, Entry
                                                   std::string &error) {
     handled = false;
     static const bool on = std::getenv("DQ8_GFX_NO_TARGET_PALETTES") == nullptr;
-    if (!on || !gsIsIndexedPsm(key.psm) || !namedtextures::active() || (key.cpsm & 0x3fu) != GS_PSM_CT32 ||
+    if (!on || !gsIsIndexedPsm(key.psm) || !namedOn() || (key.cpsm & 0x3fu) != GS_PSM_CT32 ||
         key.csm != 0u || !m_storeOn || !clutBlocksDrawn(key))
         return true;
     GsPageSet clutPages;
@@ -2548,9 +2702,14 @@ void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
     const auto from = m_named.find(b.sbp);
     const auto to = m_named.find(b.dbp);
     const uint32_t spsm = b.spsm & 0x3fu, dpsm = b.dpsm & 0x3fu;
+    // Pre-swizzled 8-bit art is T8 at its texture buffer width once made
+    // linear (the texture animations copy between such images).
     const auto usable = [](const NamedImage &image, uint32_t psm, uint32_t bw) {
-        return !image.upload.preSwizzled && (image.upload.psm & 0x3fu) == psm &&
-               (image.upload.dpsm & 0x3fu) == psm && std::max<uint32_t>(image.upload.dbw, 1u) == std::max<uint32_t>(bw, 1u);
+        const namedtextures::Upload &u = image.upload;
+        if (u.preSwizzled)
+            return (u.psm & 0x3fu) == psm && std::max<uint32_t>(u.textureBufferWidth, 1u) == std::max<uint32_t>(bw, 1u);
+        return (u.psm & 0x3fu) == psm && (u.dpsm & 0x3fu) == psm &&
+               std::max<uint32_t>(u.dbw, 1u) == std::max<uint32_t>(bw, 1u);
     };
     const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
     const uint32_t sx = command.trxpos.ssax, sy = command.trxpos.ssay;
@@ -2563,6 +2722,8 @@ void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
     const uint32_t bits = namedBits(spsm);
     if (bits == 0u)
         return;
+    linearize(from->second);
+    linearize(to->second);
     // Through a copy of the source rows, so an overlapping copy within one
     // image reads what was there before.
     const std::vector<uint8_t> source = from->second.bytes;

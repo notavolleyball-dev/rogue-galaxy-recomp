@@ -41,6 +41,7 @@ add_library(dq8_gfx_gs STATIC
     src/gfx/gs/gs_transfer.cpp
     src/gfx/gs/gs_state.cpp
     src/gfx/gs/gs_depth_probe.cpp
+    src/gfx/gs/gs_memory_uses.cpp
     src/gfx/gs/gs_named_targets.cpp
     src/gfx/gs/gs_named_textures.cpp
     src/gfx/gs/gs_host_reads.cpp
