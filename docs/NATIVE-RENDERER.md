@@ -108,6 +108,12 @@ below):
    `00000` read over the flip surface's tail rows remains (rows past 448). They
    are served by resolves into the backend's memory; sampling the targets on
    the GPU would remove the readbacks (`copyFromTarget` is the CT32 start).
+   **2026-11-02:** T4 and the alpha formats (T8H, T4HL, T4HH) now expand
+   from a CT32 target on the GPU as T8 did (`gs_index8.frag`'s placement
+   table gained T4's 128x128 page; `DQ8_GFX_NO_INDEXED4_TARGETS=1` off).
+   Left: the palettes inside targets (`copyOut`, a small readback each), and
+   reads spanning several targets (`02ba0` at 512 wide). Builds; unverified
+   on screen.
 3. *The 2D batcher* (item 5 above): kept as the translator the end-state
    section calls enough for phase 5 ("Shrinks": the packets keep arriving, a
    thin translator feeds the sprite batcher; the sdlgpu backend already draws

@@ -1147,7 +1147,23 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     // flip's copy of the frame into the display buffer reads the frame so,
     // every frame; through local memory that was a readback of the whole
     // frame, an expansion and an upload.
-    const bool indexed = (key.psm & 0x3fu) == GS_PSM_T8;
+    // Also (Rogue Galaxy: added) T4, and the alpha formats T8H, T4HL and
+    // T4HH, which read a CT32 target's alpha byte: the frame read as T4 with
+    // its palette (DQ8_GFX_NO_INDEXED4_TARGETS=1 reads those back instead).
+    static const bool indexed4 = std::getenv("DQ8_GFX_NO_INDEXED4_TARGETS") == nullptr;
+    const uint32_t texturePsm = key.psm & 0x3fu;
+    uint32_t mode = 0u;
+    switch (texturePsm) {
+    case GS_PSM_T8: mode = 0u; break;
+    case GS_PSM_T4: mode = 1u; break;
+    case GS_PSM_T8H: mode = 2u; break;
+    case GS_PSM_T4HL: mode = 3u; break;
+    case GS_PSM_T4HH: mode = 4u; break;
+    default: mode = 5u; break;
+    }
+    if (mode != 0u && mode != 5u && !indexed4)
+        mode = 5u;
+    const bool indexed = mode != 5u;
     static const bool direct = std::getenv("DQ8_GFX_NO_DIRECT_TARGET_TEXTURES") == nullptr;
     if ((!indexed && !((key.psm & 0x3fu) == GS_PSM_CT32 && direct)) || (key.tbp0 & 31u) != 0u)
         return true;
@@ -1218,10 +1234,18 @@ bool GsTextureCache::expandFromTarget(const GsTextureKey &key, Entry &entry, GsR
     }
 
     const SDL_Rect rect{int(region.x0), int(region.y0), int(region.width()), int(region.height())};
-    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u, indexed ? std::max<uint32_t>(key.tbw >> 1u, 1u) : key.tbw,
+    // T8 and T4 pages are two buffer-width units wide; the alpha formats
+    // are CT32's pages.
+    const uint32_t texturePagesPerRow = !indexed ? key.tbw
+                                        : mode < 2u ? std::max<uint32_t>(key.tbw >> 1u, 1u)
+                                                    : std::max<uint32_t>(key.tbw, 1u);
+    const std::array<uint32_t, 4> pages{key.tbp0 >> 5u, texturePagesPerRow | (indexed ? mode << 16u : 0u),
                                         target->base >> 5u,
                                         target->bufferWidth | (std::max(target->scale, 1u) << 16u)};
-    const bool done = indexed ? m_device.expandIndexed8(target->texture, m_clutRgba.data(), entry.texture, key.width,
+    std::array<uint32_t, 256> palette{};
+    if (indexed)
+        std::copy_n(m_clutRgba.begin(), std::min<size_t>(m_clutRgba.size(), palette.size()), palette.begin());
+    const bool done = indexed ? m_device.expandIndexed8(target->texture, palette.data(), entry.texture, key.width,
                                                         key.height, rect, pages, error)
                               : m_device.copyFromTarget(target->texture, entry.texture, key.width, key.height, rect,
                                                         pages, preserve, error);

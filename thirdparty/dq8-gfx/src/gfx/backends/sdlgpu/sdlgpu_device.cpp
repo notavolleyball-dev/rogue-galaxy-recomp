@@ -27,6 +27,7 @@
 #include "gs_reinterpret.vert.msl.h"
 #endif
 #include "runtime/gs/ps2_gs_psmct32.h"
+#include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
 
 #include <chrono>
@@ -813,11 +814,11 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
     texture.height = 1u;
     m_index8Palette = SDL_CreateGPUTexture(m_device, &texture);
     texture.width = 128u;
-    texture.height = 64u;
+    texture.height = 192u; // T8's 128x64, then T4's 128x128
     m_index8Placement = SDL_CreateGPUTexture(m_device, &texture);
     SDL_GPUTransferBufferCreateInfo buffer{};
     buffer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    buffer.size = 128u * 64u * 4u;
+    buffer.size = 128u * 192u * 4u;
     m_index8Upload = SDL_CreateGPUTransferBuffer(m_device, &buffer);
     if (!m_index8Palette || !m_index8Placement || !m_index8Upload)
         return fail("SDL_CreateGPU*(index8 resources)");
@@ -841,6 +842,19 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
             out[3] = 0u;
         }
     }
+    // PSMT4 (Rogue Galaxy: added): addrPSMT4 counts nibbles.
+    for (uint32_t y = 0u; y < 128u; ++y) {
+        for (uint32_t x = 0u; x < 128u; ++x) {
+            const uint32_t nibble = GSPSMT4::addrPSMT4(0u, 2u, x, y);
+            const uint32_t byte = nibble >> 1u;
+            const uint16_t pixel = wordPixel[byte >> 2u];
+            uint8_t *out = mapped + ((64u + y) * 128u + x) * 4u;
+            out[0] = static_cast<uint8_t>(pixel & 0xffu);
+            out[1] = static_cast<uint8_t>(pixel >> 8u);
+            out[2] = static_cast<uint8_t>(byte & 3u);
+            out[3] = static_cast<uint8_t>(nibble & 1u);
+        }
+    }
     SDL_UnmapGPUTransferBuffer(m_device, m_index8Upload);
     SDL_GPUCommandBuffer *commands = pendingCommands(error);
     if (!commands)
@@ -850,11 +864,11 @@ bool SdlGpuDevice::createIndex8(std::string &error) {
         cancelPending();
         return fail("SDL_BeginGPUCopyPass(index8 placement)");
     }
-    const SDL_GPUTextureTransferInfo from{m_index8Upload, 0u, 128u, 64u};
+    const SDL_GPUTextureTransferInfo from{m_index8Upload, 0u, 128u, 192u};
     SDL_GPUTextureRegion to{};
     to.texture = m_index8Placement;
     to.w = 128u;
-    to.h = 64u;
+    to.h = 192u;
     to.d = 1u;
     SDL_UploadToGPUTexture(copy, &from, &to, false);
     SDL_EndGPUCopyPass(copy);
