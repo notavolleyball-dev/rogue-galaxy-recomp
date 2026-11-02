@@ -9,6 +9,7 @@
 #include <mutex>
 #include <utility>
 
+#include "gfx/gs/gs_named_targets.h"
 #include "gif_events.h"
 #include "native_renderer.h"
 #include "ps2_runtime.h"
@@ -564,6 +565,11 @@ bool g_flip = false;
 bool g_colorFilter = false;
 bool g_focus = false;
 bool g_shadowMap = false;
+bool g_descTargets = false;
+// DrawEnvSetFrameFromDesc_144fe0: the game's offscreen targets, by descriptor.
+constexpr uint32_t kSetFrameFromDesc = 0x00144FE0u;
+PS2Runtime::RecompiledFunction g_setFrameFromDescOriginal = nullptr;
+void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 // The flip's draw environment (below, with flipPacket).
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
 PS2Runtime::RecompiledFunction g_putDrawEnvOriginal = nullptr;
@@ -1199,9 +1205,10 @@ bool enabled()
         g_colorFilter = flag("RG_NATIVE_COLOR_FILTER", native);
         g_focus = flag("RG_NATIVE_FOCUS", native);
         g_shadowMap = flag("RG_NATIVE_SHADOW_MAP", native);
+        g_descTargets = flag("RG_NATIVE_DESC_TARGETS", native);
         g_probe = flag("RG_NATIVE_EFFECTS_PROBE", false);
         return g_glare || g_shadow || g_composites || g_cblur || g_bloom || g_dof || g_refraction || g_flip ||
-               g_colorFilter || g_focus || g_shadowMap || g_probe;
+               g_colorFilter || g_focus || g_shadowMap || g_descTargets || g_probe;
     }();
     return on;
 }
@@ -1263,6 +1270,12 @@ void install(PS2Runtime &runtime)
     {
         g_flip = false;
         std::fprintf(stderr, "[nativefx] the flip's copy stays GS packets\n");
+    }
+    if (g_descTargets &&
+        !rg::timing::hookFunction(runtime, kSetFrameFromDesc, &setFrameFromDesc, g_setFrameFromDescOriginal))
+    {
+        g_descTargets = false;
+        std::fprintf(stderr, "[nativefx] render targets stay unnamed\n");
     }
     if (g_probe)
         installProbes(runtime, std::make_integer_sequence<uint32_t, kProbes>{});
@@ -1353,6 +1366,32 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             t_flipEnvironment = std::move(packet);
     }
     g_putDrawEnvOriginal(rdram, ctx, runtime);
+}
+
+// DrawEnvSetFrameFromDesc_144fe0(env, desc, flags): when desc is set, the
+// draw environment's FRAME becomes the descriptor's TEX0 (+0x38: TBP0 in 14
+// bits, TBW in 6, PSM in 6) with its height (+4, s16). Every offscreen
+// buffer the effects draw into (CBlur's, the bloom's, the glare's, the shadow
+// map, the per-object composites, the minimap, the mob preview) comes
+// through here, so declaring each names it for the backend.
+void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t desc = getRegU32(ctx, 5);
+    if (desc != 0u && g_rdram)
+    {
+        uint64_t tex0 = 0u;
+        int16_t height = 0;
+        std::memcpy(&tex0, g_rdram + physical(desc + 0x38u), sizeof(tex0));
+        std::memcpy(&height, g_rdram + physical(desc + 4u), sizeof(height));
+        dq8::gfx::namedtargets::Target target;
+        target.base = static_cast<uint32_t>(tex0 & 0x3FFFu) & ~31u;
+        target.bufferWidth = static_cast<uint32_t>((tex0 >> 14) & 0x3Fu);
+        target.width = target.bufferWidth * 64u;
+        target.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
+        target.psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
+        dq8::gfx::namedtargets::declare(target);
+    }
+    g_setFrameFromDescOriginal(rdram, ctx, runtime);
 }
 } // namespace
 

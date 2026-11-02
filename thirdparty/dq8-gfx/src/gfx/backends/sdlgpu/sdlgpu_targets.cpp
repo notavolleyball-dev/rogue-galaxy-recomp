@@ -1,6 +1,7 @@
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 
 #include "gfx/backends/sdlgpu/sdlgpu_device.h"
+#include "gfx/gs/gs_named_targets.h"
 #include "runtime/gs/gs_types.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
@@ -37,10 +38,18 @@ void setDiscardImportQuery(bool (*query)()) {
     g_discardImportQuery = query;
 }
 
+// The offscreen buffers the game clears before it draws into them hold
+// nothing local memory could add. When the host names its targets
+// (gfx/gs/gs_named_targets.h: every target the game sets from a texture
+// descriptor smaller than the screen), those are the ones; otherwise
+// Rogue Galaxy's per-object buffers, 0x2A20 up to the glare's 0x2C40.
 static bool discardsImports(const GsSurface &surface) {
     static const bool keep = std::getenv("DQ8_GFX_KEEP_OBJECT_IMPORTS") != nullptr;
-    return !keep && surface.psm == GS_PSM_CT32 && surface.base >= 0x2A20u && surface.base < 0x2C40u &&
-           g_discardImportQuery != nullptr && g_discardImportQuery();
+    if (keep || surface.psm != GS_PSM_CT32 || g_discardImportQuery == nullptr || !g_discardImportQuery())
+        return false;
+    if (namedtargets::active())
+        return namedtargets::offscreen(surface.base, surface.psm);
+    return surface.base >= 0x2A20u && surface.base < 0x2C40u;
 }
 
 bool gsTargetTraceEnabled() {

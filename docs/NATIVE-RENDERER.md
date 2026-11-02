@@ -856,7 +856,9 @@ and the palettes draws wrote.
 **Step 3b, imports nothing reads (2026-11-01):** the per-object offscreen
 buffers (`02a20` up to `02c40`; the game clears an object's box before it is
 drawn into them) no longer import what local memory holds under them when
-the native renderer is on (`DQ8_GFX_KEEP_OBJECT_IMPORTS=1` imports):
+the native renderer is on (`DQ8_GFX_KEEP_OBJECT_IMPORTS=1` imports; since
+2026-11-02 the buffers are the ones the game names, see "Render targets by
+descriptor" below):
 walk and battle byte-identical, the walk's `refreshes` from 2,979 Kpx to 579
 per 60 frames, the battle's from 13,499 to 10,063. Two things this did not
 get: the buffer at `02a00` (512x448) and the host writes patched into the
@@ -906,6 +908,18 @@ to `vg1`/`vb1`; 254,352 target reads skipped in the battle, its `refreshes`
 from 10 Mpx to 3 Kpx per 60 frames. Palettes inside a target (the frame at
 `00000`, `03f80`) are copied out region-wise (`GsTargetCache::copyOut`, the
 target stays the owner) instead of resolving everything the GPU holds of it.
+
+**Render targets by descriptor (2026-11-02, `RG_NATIVE_DESC_TARGETS`):** the
+game sets its offscreen targets from texture descriptors
+(`DrawEnvSetFrameFromDesc_144fe0`: TEX0 at +0x38, height at +4), and the hook
+declares each to the backend (`gfx/gs/gs_named_targets.h`). Targets smaller
+than the screen are the game's cleared-before-use buffers and skip imports;
+the frame, the display buffer and the full-screen work buffer (`02a00`) are
+screen-sized and keep them. This replaces the fixed `0x2A20`-`0x2C40` range
+and covers the shadow map, the minimap and the mob preview the range missed.
+Push and pop (`DrawEnvPush_144830`/`Pop_144800`) are copies of the 0x190-byte
+environment on an 8-deep stack and need no hook: the target is always one a
+descriptor or the video mode set. Builds; unverified on screen.
 
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
