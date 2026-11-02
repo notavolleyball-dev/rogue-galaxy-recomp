@@ -1036,10 +1036,15 @@ void GsTextureCache::releaseUploadPool() {
 
 bool GsTextureCache::uploadRegion(SDL_GPUTexture *texture, const GsRegion &region,
                                   std::string &error) {
+    return uploadBytes(texture, region, m_staging.data(), 4u, error);
+}
+
+bool GsTextureCache::uploadBytes(SDL_GPUTexture *texture, const GsRegion &region, const uint8_t *data,
+                                 uint32_t bytesPerTexel, std::string &error) {
     SDL_GPUDevice *device = m_device.handle();
     const uint32_t width = region.width();
     const uint32_t height = region.height();
-    const size_t bytes = static_cast<size_t>(width) * height * 4u;
+    const size_t bytes = static_cast<size_t>(width) * height * bytesPerTexel;
 
     SDL_GPUTransferBuffer *upload = takeUploadBuffer(bytes);
     if (!upload) {
@@ -1051,7 +1056,7 @@ bool GsTextureCache::uploadRegion(SDL_GPUTexture *texture, const GsRegion &regio
         error = std::string("SDL_MapGPUTransferBuffer(texture cache): ") + SDL_GetError();
         return false;
     }
-    std::memcpy(mapped, m_staging.data(), bytes);
+    std::memcpy(mapped, data, bytes);
     SDL_UnmapGPUTransferBuffer(device, upload);
 
     SDL_GPUCommandBuffer *commands = m_device.pendingCommands(error, "texture upload");
@@ -1575,13 +1580,18 @@ bool GsTextureCache::update(const GsTextureKey &key, Entry &entry, std::string &
         ++m_stats.unchangedUpdates;
         return true;
     }
-    const uint64_t texelHash = expand(key, region);
+    uint64_t texelHash = 0u;
+    bool onGpu = false;
+    if (!expandNamedOnGpu(key, entry, region, onGpu, texelHash, error))
+        return false;
+    if (!onGpu)
+        texelHash = expand(key, region);
     // A whole-texture re-expand whose raw texels hash to what we already hold,
     // with no palette change waiting, is the title screen re-uploading its own
     // UI: the GPU texture is already right, so skip the transfer entirely.
     const bool unchanged = wholeTexture && !entry.clutUploadPending &&
                            texelHash == entry.identity.texels;
-    if (!unchanged) {
+    if (!unchanged && !onGpu) {
         beforeRewrite(entry.texture);
         if (!uploadRegion(entry.texture, region, error))
             return false;
@@ -1973,6 +1983,7 @@ void GsTextureCache::finishNamedUpload() {
                 break;
             std::memcpy(target.bytes.data() + to, image.bytes.data() + row * rowBytes, rowBytes);
         }
+        target.contentHash = 0u;
         return;
     }
     if (image.bytes.size() < m_namedExpected)
@@ -1990,6 +2001,38 @@ void GsTextureCache::finishNamedUpload() {
     m_named[u.dbp] = std::move(image);
 }
 
+namespace {
+// Eight bytes a step, four lanes (one serial chain per texel was most of a
+// named texture's identity check).
+uint64_t hashBytes(const std::vector<uint8_t> &bytes) {
+    constexpr uint64_t k = 0x9E3779B97F4A7C15ull;
+    uint64_t lane[4] = {k, k ^ 1u, k ^ 2u, k ^ 3u};
+    const uint8_t *at = bytes.data();
+    size_t left = bytes.size();
+    while (left >= 32u) {
+        for (int i = 0; i < 4; ++i) {
+            uint64_t word;
+            std::memcpy(&word, at + i * 8, 8);
+            lane[i] = (lane[i] ^ word) * k;
+            lane[i] ^= lane[i] >> 29;
+        }
+        at += 32;
+        left -= 32u;
+    }
+    uint64_t tail = 0u;
+    std::memcpy(&tail, at, left);
+    uint64_t h = hashStep(hashStep(hashStep(hashStep(lane[0], lane[1]), lane[2]), lane[3]), tail);
+    return hashStep(h, bytes.size()) | 1u; // never 0: 0 is "not made yet"
+}
+
+} // namespace
+
+uint64_t GsTextureCache::contentHashOf(const NamedImage &image) {
+    if (image.contentHash == 0u)
+        image.contentHash = hashBytes(image.bytes);
+    return image.contentHash;
+}
+
 void GsTextureCache::linearize(NamedImage &image) {
     if (!image.swizzled)
         return;
@@ -2005,6 +2048,7 @@ void GsTextureCache::linearize(NamedImage &image) {
     for (size_t i = 0; i < count; ++i)
         to[i] = from[index[i]];
     image.bytes = std::move(linear);
+    image.contentHash = 0u;
 }
 
 bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
@@ -2013,6 +2057,8 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
             ++counter;
         return false;
     };
+    m_namedLastImage = nullptr;
+    m_namedLastDirect = false;
     const auto found = m_named.find(key.tbp0);
     if (found == m_named.end())
         return miss(m_stats.namedMissNoName);
@@ -2094,13 +2140,30 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
         }
     }
 
+    m_namedLastImage = &image;
+    m_namedLastDirect = !reinterpret && !m_wantIndices && (psm == GS_PSM_T8 || psm == GS_PSM_T4);
+    m_namedLastWidth = w;
+    m_namedLastHeight = h;
+    m_namedLastPalette = palette;
+    // The identity: the image's and the palette's bytes (each hashed once
+    // per upload), how they are read, and the region. The game uploads its
+    // textures again every frame and each one in use is checked; a pass
+    // over every texel to hash it was the named path's main cost.
+    uint64_t identity = hashStep(hashStep(hashStep(kHashSeed ^ 0x6e616d6564ull, key.width), key.height), key.psm);
+    identity = hashStep(hashStep(identity, u.node), contentHashOf(image));
+    identity = hashStep(hashStep(identity, key.tbw), key.texa);
+    identity = hashStep(identity, key.cpsm | (key.csm << 8u) | (key.csa << 16u) | (m_wantIndices ? 1u << 24u : 0u));
+    identity = hashStep(hashStep(identity, region.x0 | (region.y0 << 16u)), region.x1 | (region.y1 << 16u));
+    if (clut)
+        identity = hashStep(hashStep(identity, clut->upload.node), contentHashOf(*clut));
+    if (hashOnly) {
+        hash = identity;
+        return true;
+    }
     const uint32_t regionWidth = region.width();
-    if (!hashOnly)
-        m_staging.assign(static_cast<size_t>(regionWidth) * region.height() * 4u, 0u);
-    uint64_t texelHash = hashStep(hashStep(hashStep(kHashSeed ^ 0x6e616d6564ull, key.width), key.height), key.psm);
-    texelHash = hashStep(texelHash, u.node);
+    m_staging.assign(static_cast<size_t>(regionWidth) * region.height() * 4u, 0u);
     for (uint32_t y = region.y0; y < region.y1; ++y) {
-        uint8_t *row = hashOnly ? nullptr : m_staging.data() + static_cast<size_t>(y - region.y0) * regionWidth * 4u;
+        uint8_t *row = m_staging.data() + static_cast<size_t>(y - region.y0) * regionWidth * 4u;
         for (uint32_t x = region.x0; x < region.x1; ++x) {
             uint32_t color = 0u;
             uint32_t raw = 0u;
@@ -2150,18 +2213,102 @@ bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region
                     return false;
                 }
             }
-            texelHash = hashStep(texelHash, raw);
-            if (row)
-                std::memcpy(row + (x - region.x0) * 4u, &color, 4u);
+            std::memcpy(row + (x - region.x0) * 4u, &color, 4u);
         }
     }
-    if (clut)
-        texelHash = hashStep(texelHash, clut->upload.node);
     ++m_stats.namedExpands;
-    hash = texelHash;
+    hash = identity;
     return true;
 }
 
+
+bool GsTextureCache::expandNamedOnGpu(const GsTextureKey &key, Entry &entry, const GsRegion &region, bool &handled,
+                                      uint64_t &hash, std::string &error) {
+    handled = false;
+    static const bool on = std::getenv("DQ8_GFX_NO_NAMED_GPU") == nullptr;
+    if (!on || m_identityRead || !namedtextures::active() || region.empty() || !entry.texture)
+        return true;
+    const uint32_t psm = key.psm & 0x3fu;
+    if (psm != GS_PSM_T8 && psm != GS_PSM_T4)
+        return true;
+    // Whole textures, or parts of one already drawn into (a new texture
+    // would lose the texels outside the part).
+    const bool whole = region.x0 == 0u && region.y0 == 0u && region.x1 == key.width && region.y1 == key.height;
+    if (!whole && !entry.renderable)
+        return true;
+    if (!expandNamed(key, region, true, hash) || !m_namedLastDirect || !m_namedLastImage)
+        return true;
+    // Texels past the image read as 0, not palette[0]: those stay on the CPU.
+    if (region.x1 > m_namedLastWidth || region.y1 > m_namedLastHeight)
+        return true;
+    const NamedImage &image = *m_namedLastImage;
+    const bool fourBit = psm == GS_PSM_T4;
+    const uint32_t w = m_namedLastWidth;
+
+    // The index bytes of the region's rows (T4: from an even texel, two a byte).
+    const uint32_t x0 = fourBit ? region.x0 & ~1u : region.x0;
+    const uint32_t rowBytes = fourBit ? (region.x1 - x0 + 1u) / 2u : region.x1 - x0;
+    const size_t stride = fourBit ? (w + 1u) / 2u : w;
+    m_indexStaging.resize(static_cast<size_t>(rowBytes) * region.height());
+    for (uint32_t y = region.y0; y < region.y1; ++y) {
+        const size_t from = static_cast<size_t>(y) * stride + (fourBit ? x0 / 2u : x0);
+        if (from + rowBytes > image.bytes.size())
+            return true;
+        std::memcpy(m_indexStaging.data() + static_cast<size_t>(y - region.y0) * rowBytes, image.bytes.data() + from,
+                    rowBytes);
+    }
+
+    SDL_GPUDevice *device = m_device.handle();
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    info.width = rowBytes;
+    info.height = region.height();
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture *indices = SDL_CreateGPUTexture(device, &info);
+    if (!indices) {
+        error = std::string("SDL_CreateGPUTexture(named indices): ") + SDL_GetError();
+        return false;
+    }
+    if (!uploadBytes(indices, {0u, 0u, rowBytes, region.height()}, m_indexStaging.data(), 1u, error)) {
+        SDL_ReleaseGPUTexture(device, indices);
+        return false;
+    }
+    if (!entry.renderable) {
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.width = key.width;
+        info.height = key.height;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &info);
+        if (!texture) {
+            SDL_ReleaseGPUTexture(device, indices);
+            error = std::string("SDL_CreateGPUTexture(named on GPU): ") + SDL_GetError();
+            return false;
+        }
+        beforeRewrite(entry.texture);
+        SDL_ReleaseGPUTexture(device, entry.texture);
+        entry.texture = texture;
+        entry.renderable = true;
+    } else {
+        beforeRewrite(entry.texture);
+    }
+    // Mode 5 (T8) or 6 (T4); pages.x: the index texture's origin in texels.
+    const std::array<uint32_t, 4> pages{x0 | (region.y0 << 16u), 1u | ((fourBit ? 6u : 5u) << 16u), 0u,
+                                        1u | (1u << 16u)};
+    const SDL_Rect rect{int(region.x0), int(region.y0), int(region.width()), int(region.height())};
+    const bool done = m_device.expandIndexed8(indices, m_namedLastPalette.data(), entry.texture, key.width,
+                                              key.height, rect, pages, error);
+    SDL_ReleaseGPUTexture(device, indices); // released once the expansion has run
+    if (!done)
+        return false;
+    entry.paletteFromTarget = false;
+    ++m_stats.namedOnGpu;
+    handled = true;
+    return true;
+}
 
 bool GsTextureCache::expandNamedWithTargetPalette(const GsTextureKey &key, Entry &entry, bool &handled,
                                                   std::string &error) {
@@ -2271,6 +2418,7 @@ void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
     // image reads what was there before.
     const std::vector<uint8_t> source = from->second.bytes;
     std::vector<uint8_t> &dest = to->second.bytes;
+    to->second.contentHash = 0u; // written below
     const uint32_t sw = from->second.upload.textureWidth, dw = to->second.upload.textureWidth;
     const auto get = [&](uint32_t x, uint32_t y) -> uint32_t {
         const size_t i = static_cast<size_t>(y) * sw + x;

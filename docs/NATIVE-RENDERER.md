@@ -978,6 +978,21 @@ and the menu's (`MenuCaptureScreenTex`) `sceGsExecStoreImage` of colour is
 served from the GPU target in GS order straight into the game's buffer
 (`gfx/gs/gs_host_reads.h`, `DQ8_GFX_NO_HOST_READS=1` off). Builds; unverified on screen.
 
+**Named textures, cost (2026-11-02, measured on the walk):** the named
+path had made the GS worker slower than the GS path (31 fps at 3x, the
+backend at 103% of the wall): each pre-swizzled upload built a hash map
+per texel, every draw and upload scanned 16384-bit block sets, and every
+texture in use was hashed texel by texel each frame to find it unchanged
+(the game uploads its textures again every frame). Now the unswizzle map is
+made once per shape and applied only when a texture reads the image, block
+sets are checked after each image's span, an image's bytes are hashed once
+per upload for the identity, and the T8/T4 texels that do change are
+decoded on the GPU from their bytes (`DQ8_GFX_NO_NAMED_GPU=1` off). Under
+`DQ8_GFX_NATIVE_BYPASS` a named upload over a target's pages takes them
+from the target (they were rebuilt from its stale pixels, ~400 a frame).
+Walk at 4x: GS backend 44% of the wall with the bypass (41% with no named
+textures at all); the load menu and field match the GS path's screenshots.
+
 **Where the GS still is (2026-11-02, after the run above):** the presenter
 shows the display frame the flip made (its own texture) and reads DISPFB only
 to know which; the movie's frames are named uploads drawn through a GsPkt

@@ -114,6 +114,7 @@ struct GsTextureCacheStats {
     uint64_t expandedFromSeveralTargets = 0u;
     // Named texels expanded on the GPU with a palette a target drew.
     uint64_t namedWithTargetPalettes = 0u;
+    uint64_t namedOnGpu = 0u;
 
     double hitRate() const {
         return lookups == 0u ? 0.0
@@ -384,7 +385,10 @@ private:
         namedtextures::Upload upload;
         std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
         GsBlockSet blocks;
-        bool swizzled = false; // pre-swizzled 8-bit art still as uploaded (linearize)
+        bool swizzled = false;
+        // A hash of `bytes`, made on first use and cleared when they change:
+        // a texture's identity from it needs no pass over its texels.
+        mutable uint64_t contentHash = 0u; // pre-swizzled 8-bit art still as uploaded (linearize)
         uint32_t firstBlock = 0u, lastBlock = 0u; // the span of `blocks`: most checks end at it
         // A CT32 image read in another format (Rogue Galaxy: the 8-bit art
         // sent as CT32): each CT32 word's pixel + 1 in the image, by word
@@ -397,7 +401,8 @@ private:
     bool m_wantIndices = false;
     uint32_t m_namedCopyKeep = ~0u; // the named image the current copy wrote
     bool namedWithin(uint32_t first, uint32_t last) const;
-    static void linearize(NamedImage &image); // a named image's span meets these blocks
+    static void linearize(NamedImage &image);
+    static uint64_t contentHashOf(const NamedImage &image); // a named image's span meets these blocks
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();
@@ -415,6 +420,20 @@ private:
     // on it.
     bool m_identityRead = false;
     bool uploadRegion(SDL_GPUTexture *texture, const GsRegion &region, std::string &error);
+    // `bytesPerTexel`-wide rows of `data` into the texture at `region`.
+    bool uploadBytes(SDL_GPUTexture *texture, const GsRegion &region, const uint8_t *data, uint32_t bytesPerTexel,
+                     std::string &error);
+    // Named T8/T4 texels decoded on the GPU (Rogue Galaxy: added): their
+    // bytes uploaded as they are, the palette applied by gs_index8.
+    bool expandNamedOnGpu(const GsTextureKey &key, Entry &entry, const GsRegion &region, bool &handled,
+                          uint64_t &hash, std::string &error);
+    // What the last expandNamed read: an image's own T8/T4 texels (direct),
+    // its size, and the palette it built.
+    const NamedImage *m_namedLastImage = nullptr;
+    bool m_namedLastDirect = false;
+    uint32_t m_namedLastWidth = 0u, m_namedLastHeight = 0u;
+    std::array<uint32_t, 256> m_namedLastPalette{};
+    std::vector<uint8_t> m_indexStaging;
     // Transfer buffers come from a pool guarded by the device's submission
     // serials: the movie path uploads dozens of regions a frame, and creating
     // a fresh buffer per region spent a quarter of the EE thread inside the

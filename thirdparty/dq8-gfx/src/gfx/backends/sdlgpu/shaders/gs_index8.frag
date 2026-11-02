@@ -44,9 +44,15 @@ void main() {
     uint scale = max(params.pages.w >> 16u, 1u);
     uvec2 origin = uvec2((relative % pagesPerRow) * 64u, (relative / pagesPerRow) * 32u);
     uint index;
-    if (mode == 5u) {
-        // Rogue Galaxy: the indices uploaded as they are, one a texel in R.
-        index = bytesAt(target, ivec2(p)).r;
+    if (mode == 5u || mode == 6u) {
+        // Rogue Galaxy: the indices uploaded as they are, in R, the index
+        // texture's origin in pages.x; mode 6 is T4, two texels a byte from
+        // an even origin, the low nibble first.
+        uvec2 at = p - uvec2(params.pages.x & 65535u, params.pages.x >> 16u);
+        if (mode == 6u)
+            index = (bytesAt(target, ivec2(at.x >> 1u, at.y)).r >> ((p.x & 1u) * 4u)) & 15u;
+        else
+            index = bytesAt(target, ivec2(at)).r;
     } else if (mode >= 2u) {
         uvec4 pixel = bytesAt(target, ivec2((origin + (p & uvec2(63u, 31u))) * scale));
         index = mode == 2u ? pixel.a : (mode == 3u ? (pixel.a & 15u) : (pixel.a >> 4u));
