@@ -492,6 +492,12 @@ struct FormatT4 {
         const uint32_t shift = shift4(y);
         byte = static_cast<uint8_t>((byte & ~(0x0fu << shift)) | (value << shift));
     }
+    // The texel at (x, y) of `from`'s block into the same place of `to`'s.
+    static void copyTexel(uint8_t *to, const uint8_t *from, uint32_t x, uint32_t y) {
+        const uint32_t at = rowBytes4(y) + (kPieceByte4[x & 31u] ^ flip32(y));
+        const uint32_t mask = 0x0fu << shift4(y);
+        to[at] = static_cast<uint8_t>((to[at] & ~mask) | (from[at] & mask));
+    }
     static void group(uint8_t *block, uint32_t y, const uint8_t *src, uint32_t i) {
         if (i & 1u)
             writeGroup4<true>(block, y, src + (i >> 1u));
@@ -527,6 +533,10 @@ struct FormatT8 {
     static void texel(uint8_t *block, uint32_t x, uint32_t y, const uint8_t *src, uint32_t i) {
         block[rowBytes8(y) + (kPieceByte8[x & 15u] ^ flip32(y))] = src[i];
     }
+    static void copyTexel(uint8_t *to, const uint8_t *from, uint32_t x, uint32_t y) {
+        const uint32_t at = rowBytes8(y) + (kPieceByte8[x & 15u] ^ flip32(y));
+        to[at] = from[at];
+    }
     static void group(uint8_t *block, uint32_t y, const uint8_t *src, uint32_t i) {
         writeGroup8(block, y, src + i);
     }
@@ -551,6 +561,9 @@ struct Format32 {
 
     static void texel(uint8_t *block, uint32_t x, uint32_t y, const uint8_t *src, uint32_t i) {
         std::memcpy(block + texelByte32(x, y), src + i * 4u, 4u);
+    }
+    static void copyTexel(uint8_t *to, const uint8_t *from, uint32_t x, uint32_t y) {
+        std::memcpy(to + texelByte32(x, y), from + texelByte32(x, y), 4u);
     }
     static void group(uint8_t *block, uint32_t y, const uint8_t *src, uint32_t i) {
         writeGroup32(block, y, src + i * 4u);
@@ -694,11 +707,15 @@ void copyRectBlocks(GsVram &target, const GsVram &source, uint32_t psm, uint32_t
                 std::memcpy(to(bx, by), from(bx, by), 256u);
                 continue;
             }
+            // Both memories place a texel at the same byte of the same
+            // block, so a texel's copy is of its bytes there.
             const uint32_t tx0 = std::max(bx, x), tx1 = std::min(bx + F::kBlockW, x1);
             const uint32_t ty0 = std::max(by, y), ty1 = std::min(by + F::kBlockH, y1);
+            uint8_t *const toBlock = to(bx, by);
+            const uint8_t *const fromBlock = from(bx, by);
             for (uint32_t ty = ty0; ty < ty1; ++ty)
                 for (uint32_t tx = tx0; tx < tx1; ++tx)
-                    target.write(psm, base, bw, tx, ty, source.read(psm, base, bw, tx, ty));
+                    F::copyTexel(toBlock, fromBlock, tx, ty);
         }
     }
 }
