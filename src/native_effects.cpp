@@ -2201,6 +2201,25 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
     const auto closeMesh = [&] {
         if (!mesh.mesh.vertices.empty())
         {
+            if (meshPrim != 0xFFFFu && (meshPrim & 0x20u))
+            {
+                // Fogged: clip = (x w, y w, 0, w) with w = 1 + F/255, and
+                // F = -255 + 255 w gives each vertex its own F back (the
+                // shader's varyings are noperspective; Z is the vertex's own).
+                GSNativeMesh::Header &h = mesh.mesh.header;
+                h.matrix[2][2] = 0.0f;
+                h.matrix[2][3] = 1.0f;
+                h.matrix[3][3] = 0.0f;
+                h.fog[0] = -255.0f;
+                h.fog[1] = 255.0f;
+                h.fog[2] = 0.0f;
+                h.fog[3] = 255.0f;
+                for (GSNativeMesh::Vertex &v : mesh.mesh.vertices)
+                {
+                    v.x *= v.z;
+                    v.y *= v.z;
+                }
+            }
             mesh.mesh.header.vertexCount = static_cast<uint32_t>(mesh.mesh.vertices.size());
             out.push_back(std::move(mesh));
         }
@@ -2223,6 +2242,8 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         v.y = static_cast<float>(e.y) / 16.0f;
         v.z = static_cast<float>(e.z);
         v.depth = v.z; // the Z as the packet has it
+        if (prim & 0x20u) // FGE: w carries F (closeMesh scales x and y by it)
+            v.z = 1.0f + (static_cast<float>(e.f) + 0.25f) / 255.0f;
         const rg::gif::GifEvent &c = (prim & 0x08u) ? e : provoking; // IIP
         v.r = c.rgba[0];
         v.g = c.rgba[1];
@@ -2334,11 +2355,6 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             if (type == 7u)
             {
                 why = "a reserved primitive type";
-                return false;
-            }
-            if ((prim & 0x20u) && e.f != 0xFFu)
-            {
-                why = "fogged vertices";
                 return false;
             }
             if (prim != queuePrim)

@@ -55,7 +55,7 @@ any of it) to 56.7 fps, the GPU about 17.6 ms a frame and limiting
    `02a00` a frame (item 2).
 2. **Native draws for the VU1 programs still on packets** (2026-11-02:
    their native packets now go through `build2D`, `RG_NATIVE_VU1_MESHES`:
-   the primitives as meshes, the register state as packets; fogged chunks
+   the primitives as meshes, the register state as packets; fog per vertex in w;
    stay packets; builds, unverified on screen): outlines (about
    17% of the field's vertices), shadow volumes (5%), particles, the
    projected texture, the object set-up. They are computed natively but
@@ -959,7 +959,7 @@ with the second vertex's Z and colour, flat shading from the provoking
 vertex, texel UVs normalised by the block's TEX0). The GS no longer
 assembles or kicks those vertices; it still keeps the register state, which
 is the backend's draw-state vocabulary. Lines and points become thin quads. Refused (sent as packets):
-fog, PRMODE attributes. Next: the state from the API too (the
+PRMODE attributes (fog is carried per vertex in w). Next: the state from the API too (the
 `GsPkt` setters write into the builder at `+0x70`), so the block needs no
 GIF parsing at all. Builds; unverified on screen.
 
