@@ -1638,7 +1638,79 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
     sendPacket(gs, data, size);
 }
 
+void sendRaw(GS &gs, const uint8_t *data, uint32_t size);
+
+// RG_NATIVE_ALL_PACKETS (on with the native renderer): every GIF packet on
+// its way to the GS goes through build2D first, its primitives drawn as
+// native meshes and only its register state and uploads sent on, so the GS
+// never assembles or kicks a vertex. The converter carries the GS's vertex
+// state from packet to packet per thread. A packet it refuses goes as it is.
+bool convertAll()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_NATIVE_ALL_PACKETS");
+        return value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
+    }();
+    return on;
+}
+std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_meshesFromPackets{0u};
+
 void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
+{
+    if (convertAll() && data && size >= 16u)
+    {
+        thread_local std::vector<std::vector<uint8_t>> one(1);
+        thread_local std::vector<rg::nativefx::Piece2D> pieces;
+        one[0].assign(data, data + size);
+        std::string why;
+        if (rg::nativefx::build2D(one, pieces, why))
+        {
+            const bool anyMesh = std::any_of(pieces.begin(), pieces.end(),
+                                             [](const rg::nativefx::Piece2D &p) { return p.packet.empty(); });
+            if (!anyMesh)
+            {
+                sendRaw(gs, data, size);
+                return;
+            }
+            for (const rg::nativefx::Piece2D &piece : pieces)
+            {
+                if (!piece.packet.empty())
+                {
+                    sendRaw(gs, piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                    continue;
+                }
+                ++g_meshesFromPackets;
+                if (g_stage && t_onVif1Thread)
+                {
+                    g_stage->mesh(piece.mesh);
+                    continue;
+                }
+                if (g_stage)
+                    g_thread->drain();
+                gs.submitNativeMesh(piece.mesh);
+            }
+            const uint64_t count = ++g_packetsConverted;
+            if (count == 1u || count % 100000u == 0u)
+                std::fprintf(stderr, "[nativefx] packets as meshes: %llu (%llu meshes), %llu refused\n",
+                             static_cast<unsigned long long>(count),
+                             static_cast<unsigned long long>(g_meshesFromPackets.load()),
+                             static_cast<unsigned long long>(g_packetsRefused.load()));
+            return;
+        }
+        ++g_packetsRefused;
+        static std::vector<std::string> told;
+        static std::mutex toldMutex;
+        std::lock_guard lock(toldMutex);
+        if (told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
+        {
+            told.push_back(why);
+            std::fprintf(stderr, "[nativefx] a packet stays a packet: %s\n", why.c_str());
+        }
+    }
+    sendRaw(gs, data, size);
+}
+
+void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 {
     if (g_stage && t_onVif1Thread)
     {

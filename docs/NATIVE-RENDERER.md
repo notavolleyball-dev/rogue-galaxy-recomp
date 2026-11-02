@@ -989,6 +989,18 @@ ownership, imports and the backend's local memory) waits for the pieces
 above to be checked on screen: until then they are each behind a switch with
 the GS path as the fallback.
 
+**Every packet as meshes (2026-11-02, `RG_NATIVE_ALL_PACKETS`):** the
+conversion that the GsPkt blocks and the meshless VU1 programs go through
+now takes every GIF packet before the GS: what no hook names (refused
+effects, VU1 programs not ported, the game thread's own draws) is drawn as
+native meshes too. The converter mirrors what the GS carries between
+packets (RGBAQ, ST, UV, PRIM from a tag, a strip under way, PRMODECONT and
+PRMODE) per thread, writes PRIM before each mesh so the GS's draw state
+matches, and sends texel UVs unnormalised under a header bit the backend
+divides out with the draw's texture size. So the GS frontend is down to
+its register file and transfers on the native path. Builds; unverified on
+screen.
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small

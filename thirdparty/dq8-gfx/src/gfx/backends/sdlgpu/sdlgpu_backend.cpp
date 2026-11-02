@@ -1875,7 +1875,20 @@ struct SdlGpuBackend::Impl {
         if (draw.snapshot || draw.feedback || draw.destination || nativeOnCpu) {
             ++stats.nativeMeshesExpanded;
             GSPrimitiveBatch triangle = standIn;
-            gsExpandNativeMesh(mesh, [&](const GSVertex *corners) {
+            // Texel UVs (Rogue Galaxy: a mesh from GS packets) normalised first.
+            thread_local GSNativeMesh normalised;
+            const GSNativeMesh *expand = &mesh;
+            if ((mesh.header.source & 0x80000000u) != 0u) {
+                normalised = mesh;
+                const float us = 1.0f / std::max(1.0f, float(standIn.state.textureWidth));
+                const float vs = 1.0f / std::max(1.0f, float(standIn.state.textureHeight));
+                for (GSNativeMesh::Vertex &v : normalised.vertices) {
+                    v.u *= us;
+                    v.v *= vs;
+                }
+                expand = &normalised;
+            }
+            gsExpandNativeMesh(*expand, [&](const GSVertex *corners) {
                 for (size_t i = 0; i < 3u; ++i)
                     triangle.vertices[i] = corners[i];
                 appendPrimitive(triangle, offsetX, offsetY, depthScale);
@@ -1888,14 +1901,19 @@ struct SdlGpuBackend::Impl {
             mesh.header.triangleList ? mesh.vertices.size() / 3u * 3u : mesh.vertices.size());
         const uint32_t first = static_cast<uint32_t>(vertices.size());
         const float record = static_cast<float>(nativeRecords.size());
+        // Rogue Galaxy: a mesh made from GS packets with texel UVs (FST) has
+        // the source's top bit set; its UVs are divided by the texture's size.
+        const bool texelUvs = (mesh.header.source & 0x80000000u) != 0u;
+        const float uScale = texelUvs ? 1.0f / std::max(1.0f, float(standIn.state.textureWidth)) : 1.0f;
+        const float vScale = texelUvs ? 1.0f / std::max(1.0f, float(standIn.state.textureHeight)) : 1.0f;
         for (uint32_t index = 0; index < count; ++index) {
             const GSNativeMesh::Vertex &in = mesh.vertices[index];
             GsGpuVertex out{};
             out.x = in.x;
             out.y = in.y;
             out.z = in.z;
-            out.q = in.u;
-            out.s = in.v;
+            out.q = in.u * uScale;
+            out.s = in.v * vScale;
             out.t = record;
             out.r = in.r;
             out.g = in.g;
@@ -1928,7 +1946,7 @@ struct SdlGpuBackend::Impl {
         }
         // The program that built it, for the GPU time label; ~0 when the
         // draw holds more than one's.
-        const uint32_t source = mesh.header.source;
+        const uint32_t source = mesh.header.source & 0x7FFFFFFFu;
         draw.nativeSource = !draw.native ? source : draw.nativeSource == source ? source : ~0u;
         draw.native = true;
         draw.pipeline.nativeMesh = 1u;

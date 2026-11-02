@@ -2239,15 +2239,24 @@ GSNativeMesh::Header screenHeader()
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why)
 {
     out.clear();
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
+    // What the GS would carry from one packet to the next, mirrored per
+    // thread: the GIF vertex state, a strip or fan under way, PRMODE.
+    struct Carried
+    {
+        rg::gif::GifState state;
+        std::vector<rg::gif::GifEvent> queue;
+        uint16_t queuePrim = 0xFFFFu;
+        bool attributesFromPrim = true; // PRMODECONT AC
+        uint16_t prmode = 0u;
+    };
+    thread_local Carried carried;
+    rg::gif::GifState &state = carried.state;
+    std::vector<rg::gif::GifEvent> &queue = carried.queue;
+    uint16_t &queuePrim = carried.queuePrim;
+    thread_local std::vector<rg::gif::GifEvent> events;
     std::vector<std::pair<uint8_t, uint64_t>> writes;
-    // TEX0's TW and TH by context, when the block wrote it.
-    int tw[2] = {-1, -1}, th[2] = {-1, -1};
     Piece2D mesh;
     uint16_t meshPrim = 0xFFFFu;
-    std::vector<rg::gif::GifEvent> queue;
-    uint16_t queuePrim = 0xFFFFu;
 
     const auto closeMesh = [&] {
         if (!mesh.mesh.vertices.empty())
@@ -2302,16 +2311,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         v.a = c.rgba[3];
         if (prim & 0x10u) // TME
         {
-            if (prim & 0x100u) // FST: texel UVs, 10.4
+            if (prim & 0x100u) // FST: texel UVs, 10.4; the backend normalises them (kTexelUvs)
             {
-                const int context = (prim >> 9) & 1;
-                if (tw[context] < 0)
-                {
-                    ok = false;
-                    return v;
-                }
-                v.u = static_cast<float>(e.u) / 16.0f / static_cast<float>(1u << tw[context]);
-                v.v = static_cast<float>(e.v) / 16.0f / static_cast<float>(1u << th[context]);
+                v.u = static_cast<float>(e.u) / 16.0f;
+                v.v = static_cast<float>(e.v) / 16.0f;
             }
             else
             {
@@ -2331,6 +2334,8 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         writes.emplace_back(0x00u, static_cast<uint64_t>((prim & ~7u) | 3u));
         flushWrites();
         mesh.mesh.header = screenHeader();
+        if ((prim & 0x110u) == 0x110u)
+            mesh.mesh.header.source = kNativeMeshTexelUvs;
         meshPrim = prim;
     };
     const auto triangle = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, const rg::gif::GifEvent &c,
@@ -2382,16 +2387,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         {
             if (e.kind == rg::gif::GifEvent::Kind::Register)
             {
-                if (e.reg == 0x1Au && (e.value & 1u) == 0u)
-                {
-                    why = "PRMODE attributes";
-                    return false;
-                }
-                if (e.reg == 0x06u || e.reg == 0x07u)
-                {
-                    tw[e.reg - 0x06u] = static_cast<int>((e.value >> 26) & 0xFu);
-                    th[e.reg - 0x06u] = static_cast<int>((e.value >> 30) & 0xFu);
-                }
+                if (e.reg == 0x1Au)
+                    carried.attributesFromPrim = (e.value & 1u) != 0u;
+                if (e.reg == 0x1Bu)
+                    carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
                 if (e.reg == 0x00u)
                 {
                     queue.clear();
@@ -2401,7 +2400,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
                 writes.emplace_back(e.reg, e.value);
                 continue;
             }
-            const uint16_t prim = e.prim;
+            // With PRMODECONT's AC clear the attributes are PRMODE's.
+            const uint16_t prim = carried.attributesFromPrim
+                                      ? e.prim
+                                      : static_cast<uint16_t>((e.prim & 7u) | carried.prmode);
             const uint32_t type = prim & 7u;
             if (type == 7u)
             {
@@ -2495,11 +2497,7 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             default:
                 break;
             }
-            if (!ok)
-            {
-                why = "texel UVs with no TEX0 in the block";
-                return false;
-            }
+
         }
     }
     flushWrites();
