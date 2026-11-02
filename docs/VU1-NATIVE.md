@@ -160,7 +160,7 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | C | 0x10e0-0x11b0 | `780d503e649c9116` | One material color for every vertex (with 87.y & 0x200: 82 * 43, no ambient) |
 | F | 0x39d0-0x3a68 | `d3f6f6312a13ff1c` | UV scroll (declined when active) |
 | B | 0x0960-0x1020 | `26a933a58f99a9da` | Skinning: entries for 1, 2 and 4 bones (A enters at 0x960 plus TOP+1.w pairs with 76.z set); per bone the position (w 1) times weight / 255 times the matrix at quads 900 + 2 * index |
-| B | 0x0960-0x0f30 | `542b235c4775a710` | The outlines' skinning: 1 bone (positions only) and 2 bones |
+| B | 0x0960-0x0f30 | `542b235c4775a710` | The outlines' and shadow volumes' skinning: 1 bone (positions only), 2 bones, and 4 (entries 4 and 6, 0x9b0: positions skinned as `26a933a5`'s, normals only scaled; the skinned shadow volumes' 4-bone models, read from the code 2026-11-01 and checked with `--synth-bones`) |
 | B | 0x0960-0x09e0 | `a293001f25f94532` | Positions only, one entry (shadow volumes) |
 | A | 0x0320-0x04e8 | `3f6df595be6e31b7` | The outline driver: header with PRIM 1 (lines), calls B and C, no D, E or F |
 | C | 0x10e0-0x1e70 | `3689bac97cae3c73` | The toon outlines (`buildOutline`): edges as four offset lines; with TOP.x 19 a silhouette test from the two adjacent triangles. Packets only: `gpu` mode sends them as `skip` does |
@@ -168,17 +168,17 @@ Quadwords (16 bytes); `TOP` is the chunk's buffer (VIF TOP, `XTOP`).
 | D | 0x1900-0x2890 | `8ecadb3a83d5e584` | The particles (`buildParticles`): camera-facing quads, scaled and turned (cosine and sine from a polynomial in a triangle wave), four vertices of ST, RGBA, XYZF2 each; one corner outside clip space hides all four. Packets only |
 | A | 0x0320-0x05c0 | `4beba151fbf23f60` | The projected texture driver: as the strip A, but C last and no D |
 | F | 0x39d0-0x3af8 | `15be21a50caaa048` | Projected UVs (position through quads 30-33 times the model, divided by w) and the color (128, 128, 128, 82.w * 81.w * 128) |
-| C | 0x10e0-0x1b00 | `3b890d00703404b6` | The projected texture's transform and kick (`buildProjector`): scaled, capped z; guard band and backfaces re-tested per vertex over its triangle; triangle lists declined. Packets only |
+| C | 0x10e0-0x1b00 | `3b890d00703404b6` | The projected texture's transform and kick (`buildProjector`): scaled, capped z; guard band and backfaces re-tested per vertex over its triangle; triangle lists by its own path (each triangle judged at its last vertex, all three guard bands on the unscaled z, the facing sign fixed; checked with `--synth-list`). Packets only |
 | A | 0x0320-0x0500 | `821b638f42fcaa6e` | The shadow volume driver: header with PRIM 5 (fans), calls B and C |
 | C | 0x10e0-0x1938 | `dc8dbfe4905cb635` | The shadow volumes (`buildShadow`): each triangle lit (normal . light > 1e-4) and inside is extruded into five fans, each after the A+D packet at quad 38 (facing) or 35. Packets only |
 | C | 0x10e0-0x1240 | `91f542d069307d6c` | Lighting: four directional lights (lanes of quads 100-102) on the normal, each clamped at 0, colors 33-36 and ambient 37 times the material 82 (`Lights`) |
 | C | 0x10e0-0x14a0 | `2460e5281034f152` | `91f542d0`'s lighting times each vertex's color / 32768 * 256 (87.y & 0x100 declined) |
 | F | 0x39d0-0x3b70 | `150031ee1534d185` | Sphere map: UV = (normal through quads 24-26 times 64-66, xy, + 1) / 2 (`SphereMap`) |
 | B | 0x0960-0x0b38 | `6e42dac662887054` | The overlay sprites (the `:960` rows), run by an MSCAL of their own (`drawsAtCall`): 32-pixel columns over the bounds in quads 98/99, one pixel wider, within quads 140/141, with the tag at 144 in buffers 145 and 165. Packets only; leaves 144-169 as the VU1 does |
-| D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path is declined. Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
+| D | 0x1900-0x20c8 | `a786efabfa469ada` | Guard band and backfaces; its own triangle-list path judges a triangle at a time (any vertex outside the guard band, or cross * sign > 0 with the strips' first-triangle sign throughout), ADC on its last vertex only (2026-11-01, `--synth-list`). Also the name of its compiled routine, the VIF1 thread's busiest (`docs/STATUS.md`) |
 | D | 0x1900-0x1c38 | `126a58a39a8f944a` | Guard band; strips and lists |
 | D | 0x1900-0x1bc0 | `4b7b81f2fe1beeef` | No culling; strips and lists |
-| D | 0x1900-0x21e0 | `93cfd2f5a1056991` | Guard band and backfaces with `b8ea8ed5`'s depth and bounds; its triangle lists are declined |
+| D | 0x1900-0x21e0 | `93cfd2f5a1056991` | Guard band and backfaces with `b8ea8ed5`'s depth and bounds; its triangle lists as `a786efab`'s |
 | D | 0x1900-0x1cb8 | `634107b0f8a88c88` | The guard band (its z before the scale) with `b8ea8ed5`'s depth and bounds |
 | D | 0x1900-0x1b98 | `b8ea8ed53805b0c4` | No culling; z times 87.z, at most 1.y; the vertices' bounds (x, y, z, fog) widen quads 98 and 99, which the `:960` sprite programs read, so `skip` and `gpu` write them too (`applyMemoryEffects`) |
 | F | 0x39d0-0x3b98 | `9df36d6a55fdb496` | Wave: positions turned in x and y about (0, 84.x) by an angle growing with y (`Wave`) |
@@ -221,7 +221,7 @@ holds, when it is called), so the program names carry "(unverified)" and
 | F | `a04c11ce` | Swell: each position pushed out along its normal by (n * q1) * w * s, q1 = 84.x / D, s = clamp((84.y - w) / 84.y, 0.2, 1); only with the one-color C (which overwrites the colors it also writes) | matches the interpreter, clamp included |
 | B | `89123290` | Skinning of **float** positions the EE uploaded (1, 2, 4 bones, as `26a933a5`): positions only, in place; the normals and UVs are floats too (`rawFloats`) | matches (oracle `--synth-floats` floats the sections) |
 | B | `36d686cd` | That, and the normals skinned too | matches |
-| D | `312d076b` | `a786efab`'s guard band and backfaces, but the colors are floats read from the colors section (103.w) and no ST is written (an untextured draw); strips, lists declined. Packets only | matches (`--synth-float-colors`, ST ignored) |
+| D | `312d076b` | `a786efab`'s guard band and backfaces, but the colors are floats read from the colors section (103.w) and no ST is written (an untextured draw); strips and lists as `a786efab`'s. Packets only | matches (`--synth-float-colors`, ST ignored; lists with `--synth-list`) |
 
 The recorded beam (A, F and D above) is not in this list: it has a
 recording (31 vertices, matched exactly).
@@ -267,9 +267,13 @@ Left to the VU1, chunk by chunk:
 - **Clipping** (slot E: 6e420ef8, and 860dd144 in the projected texture)
   in the packet modes (`check`, `1`, `skip`). The GPU path takes the strip
   programs' clipping chunks and draws them clipped; it never needs E.
-- **Paths no recording took**: the triangle lists of the backface D pieces
-  (a786efab, 93cfd2f5) and of the projected texture's C; 87.y & 0x100 in
-  the vertex-color C pieces (70362be4, 2460e528).
+- **Paths no recording took**: 87.y & 0x100 in the vertex-color C pieces
+  (70362be4, 2460e528). The backface D pieces' and the projected texture's
+  triangle lists and the shadow skinning's four bones, which play reached
+  (2026-11-01: about 0.4% of the chunks of an evening, left to the VU1),
+  are native since, read from the code and checked with the oracle's
+  `--synth-list` and `--synth-bones` (README); lists whose count is not
+  whole triangles stay on the VU1 (its loop would run past the end).
 - **Pieces no recording reached** (`census.py`): A 8855d9e7, c8143ab4,
   964be3bc, cf7a85a5 (at 0x0c8); B 36d686cd, 89123290, 857fbbc2; C
   127ca0b4, e3bca52a; D 1bd1b5c0, 2feaa9a1, 312d076b; E 56d6683a, ab37fe79,
