@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <utility>
 
@@ -1623,6 +1624,26 @@ void getDispFbTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_getDispFbTexDescOriginal, rdram, ctx, runtime, &afterGetDispFbTexDesc, getRegU32(ctx, 5));
 }
 
+// Texture sources (textureSource): start -> (end, frame last seen).
+struct TextureSources
+{
+    std::mutex mutex;
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> ranges;
+    uint32_t frame = 0u;
+};
+TextureSources g_textureSources;
+
+void noteTextureSource(uint32_t address, uint32_t bytes)
+{
+    if (address == 0u || bytes == 0u)
+        return;
+    const uint32_t start = address & 0x1FFFFFFFu;
+    std::lock_guard lock(g_textureSources.mutex);
+    auto &range = g_textureSources.ranges[start];
+    range.first = std::max(range.first, start + bytes);
+    range.second = g_textureSources.frame;
+}
+
 template <typename T> T readAt(uint32_t address)
 {
     T value{};
@@ -1683,6 +1704,11 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         // The palettes, unless the node's manager uploads them through its
         // own callback (a transfer of a shape not known here).
+        if (clut != 0u && (nodeBpp == 8 || nodeBpp == 4))
+        {
+            const int32_t stride = readAt<int16_t>(tex + 0x30u);
+            noteTextureSource(clut, std::max<uint32_t>(count, 1u) * static_cast<uint32_t>(std::max<int32_t>(stride, 0x400)));
+        }
         if (n > 0u && clut != 0u && !(fn != 0u && mode == 0u) && (nodeBpp == 8 || nodeBpp == 4))
         {
             for (uint32_t i = 0u; i < count; ++i)
@@ -1707,6 +1733,7 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             const uint32_t mip = readAt<uint32_t>(tex + 0x50u + i * 4u);
             if (mip == 0u || w <= 0 || h <= 0)
                 break;
+            noteTextureSource(mip, static_cast<uint32_t>(bpp * w * h / 8));
             if (tbw == 0u)
                 tbw = 1u;
             named::Upload upload;
@@ -1734,8 +1761,27 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 } // namespace
 
+bool textureSource(uint32_t address, uint32_t bytes)
+{
+    const uint32_t start = address & 0x1FFFFFFFu;
+    std::lock_guard lock(g_textureSources.mutex);
+    auto it = g_textureSources.ranges.upper_bound(start);
+    if (it == g_textureSources.ranges.begin())
+        return false;
+    --it;
+    return start + bytes <= it->second.first && g_textureSources.frame - it->second.second <= 2u;
+}
+
 void beginFlip()
 {
+    {
+        // A range no upload has read for a while may be something else now.
+        std::lock_guard lock(g_textureSources.mutex);
+        ++g_textureSources.frame;
+        if ((g_textureSources.frame & 63u) == 0u)
+            for (auto it = g_textureSources.ranges.begin(); it != g_textureSources.ranges.end();)
+                it = g_textureSources.frame - it->second.second > 2u ? g_textureSources.ranges.erase(it) : std::next(it);
+    }
     t_inFlip = flipNative();
     t_flipEnvironment.clear();
 }

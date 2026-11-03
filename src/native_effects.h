@@ -193,6 +193,11 @@ void observe2D(const uint8_t *data, uint32_t size);
 // goes to it as it is, a native effect, a libgraph stub), with
 // takeOwedRegisters. Transfers, TEXFLUSH, SIGNAL, FINISH and LABEL still go.
 bool drawStateOwned();
+
+// Main-memory ranges the game's texture uploads read (TexBuildUploadPkt_158610:
+// the image nodes' mips and palettes), seen in the last two frames: what the
+// VIF1 list copy may leave in place (src/vif1_thread.cpp).
+bool textureSource(uint32_t address, uint32_t bytes);
 // The draw state now (for a mesh made elsewhere, a VU1 program's).
 GSDrawState mirroredDrawState();
 // The owed registers as one A+D packet; false when none are owed.

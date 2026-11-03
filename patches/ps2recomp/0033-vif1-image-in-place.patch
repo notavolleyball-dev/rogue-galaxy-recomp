@@ -1,0 +1,33 @@
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -383,6 +383,12 @@
+     void processVIF0Data(const uint8_t *data, uint32_t sizeBytes);
+     void processVIF1Data(uint32_t srcPhysAddr, uint32_t sizeBytes);
+     void processVIF1Data(const uint8_t *data, uint32_t sizeBytes);
++    // A DIRECT's payload that continues the open GIF IMAGE transfer, from
++    // wherever it lies (Rogue Galaxy: added; textures sent by reference are
++    // handed over from main memory instead of a copy of the list). False,
++    // and nothing done, unless an image transfer of at least `qwc` is open
++    // and goes to the image callback.
++    bool continueVIF1Image(const uint8_t *data, uint32_t qwc);
+     // The VIF code processVIF1Data is at, for the callbacks it makes (an
+     // MSCAL's position in its data; Rogue Galaxy: added).
+     const uint8_t *vif1Cursor() const { return m_vif1Cursor; }
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -316,6 +316,15 @@
+     processVIF1Data(m_rdram + srcPhys, sizeBytes);
+ }
+ 
++bool PS2Memory::continueVIF1Image(const uint8_t *data, uint32_t qwc)
++{
++    if (!data || qwc == 0u || m_vif1PendingPath2ImageQwc < qwc || !m_gifImageCallback || m_gifArbiter)
++        return false;
++    m_gifImageCallback(data, qwc * 16u);
++    m_vif1PendingPath2ImageQwc -= qwc;
++    return true;
++}
++
+ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+ {
+     if (sizeBytes == 0u)

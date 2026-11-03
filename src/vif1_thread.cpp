@@ -253,19 +253,67 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 // vector through them copied most of that twice, while a second walk for
 // the size alone read every tag again (thousands a frame, 2% of the game
 // thread in a battle).
+struct ListExternal
+{
+    uint32_t at;
+    const uint8_t *data;
+    uint32_t qwc;
+    uint32_t code; // the DIRECT, for the fallback
+};
+
+// RG_VIF1_REF_IMAGES (on with the native renderer): texture bytes a list
+// sends by reference stay in main memory (gatherChain, List::External).
+bool refImages()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_VIF1_REF_IMAGES");
+        return value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
+    }();
+    return on;
+}
+std::atomic<uint64_t> g_refImageBytes{0u}, g_refImageFallbacks{0u}, g_refImageCount{0u};
+
 void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out,
-                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr)
+                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr,
+                 std::vector<ListExternal> *externals = nullptr)
 {
     out.clear();
-    // (address, bytes) of each piece, in order. send() runs on the game
+    if (externals)
+        externals->clear();
+    // (address, bytes) of each piece, in order; bytes 0 for a payload left in
+    // place (its quadwords and DIRECT in `kept`). send() runs on the game
     // thread alone.
     thread_local std::vector<std::pair<uint32_t, uint32_t>> spans;
+    thread_local std::vector<std::pair<uint32_t, uint32_t>> kept;
     spans.clear();
+    kept.clear();
     size_t total = 0u;
+    const uint8_t *const rdram = memory.getRDRAM();
     walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc) {
         if (tte)
         {
             // With TTE every tag supplies two VIFcodes before its payload.
+            // A texture sent by reference (GsBuildImageUploadRefPkt_158390,
+            // RGDecomp: a REF whose second VIFcode is DIRECT of exactly its
+            // payload, the IMAGE tag in the CNT before it) is copied up to
+            // that DIRECT; its bytes go from main memory when the list runs.
+            if (externals && qwc >= 8u && !memory.isScratchpad(tagAddress) && !memory.isScratchpad(data))
+            {
+                const uint32_t tagPhys = memory.translateAddress(tagAddress);
+                const uint32_t dataPhys = memory.translateAddress(data);
+                uint32_t code = 0u;
+                if (tagPhys + 16u <= PS2_RAM_SIZE)
+                    std::memcpy(&code, rdram + tagPhys + 12u, 4u);
+                if ((code & 0x7F000000u) == 0x50000000u && (code & 0xFFFFu) == qwc &&
+                    dataPhys + qwc * 16u <= PS2_RAM_SIZE && rg::nativefx::textureSource(data, qwc * 16u))
+                {
+                    spans.emplace_back(tagAddress + 8u, 4u);
+                    total += 4u;
+                    spans.emplace_back(dataPhys, 0u);
+                    kept.emplace_back(qwc, code);
+                    return true;
+                }
+            }
             spans.emplace_back(tagAddress + 8u, 8u);
             total += 8u;
         }
@@ -281,8 +329,15 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vect
         // A garbage chain can sum to more than a buffer can hold; the list
         // then ends where the copy stops, like one that cannot be read.
         out.reserve(total);
+        size_t keptIndex = 0u;
         for (const auto &[address, bytes] : spans)
         {
+            if (bytes == 0u)
+            {
+                const auto &[qwc, code] = kept[keptIndex++];
+                externals->push_back({static_cast<uint32_t>(out.size()), rdram + address, qwc, code});
+                continue;
+            }
             if (origins)
             {
                 origins->emplace_back(static_cast<uint32_t>(out.size()), address);
@@ -605,6 +660,10 @@ PS2Runtime *g_runtime = nullptr;
 struct List
 {
     std::vector<uint8_t> data;
+    // Texture bytes left in main memory (gatherChain): a REF payload whose
+    // DIRECT continues an image transfer goes from there, at `at` in data.
+    using External = ListExternal;
+    std::vector<External> externals;
     bool dBit = false;
     bool tBit = false;
     // With RG_VU1_CAPTURE or RG_DRAW_ORIGINS: where each piece of `data`
@@ -1030,6 +1089,46 @@ public:
     }
 
 private:
+    // The list in pieces: its bytes up to each texture left in main memory,
+    // that texture's bytes into the open image transfer from where they
+    // lie, and so on. When no transfer is open for them after all, they go
+    // through the interpreter as the copy would have had them.
+    void runWithExternals(PS2Memory &memory)
+    {
+        const uint8_t *const data = m_current.data.data();
+        const uint32_t size = static_cast<uint32_t>(m_current.data.size());
+        uint32_t from = 0u;
+        for (const List::External &external : m_current.externals)
+        {
+            if (external.at > from)
+                memory.processVIF1Data(data + from, external.at - from);
+            from = external.at;
+            g_refImageBytes.fetch_add(external.qwc * 16u, std::memory_order_relaxed);
+            g_refImageCount.fetch_add(1u, std::memory_order_relaxed);
+            if (!memory.continueVIF1Image(external.data, external.qwc))
+            {
+                thread_local std::vector<uint8_t> copy;
+                copy.resize(4u + external.qwc * 16u);
+                std::memcpy(copy.data(), &external.code, 4u);
+                std::memcpy(copy.data() + 4u, external.data, external.qwc * 16u);
+                memory.processVIF1Data(copy.data(), static_cast<uint32_t>(copy.size()));
+                g_refImageFallbacks.fetch_add(1u, std::memory_order_relaxed);
+            }
+        }
+        if (size > from)
+            memory.processVIF1Data(data + from, size - from);
+        const uint64_t count = g_refImageCount.load(std::memory_order_relaxed);
+        static uint64_t told = 0u;
+        if (count >= told + 200000u || told == 0u)
+        {
+            told = count;
+            std::fprintf(stderr, "[vif1] textures from main memory: %llu (%llu MB), %llu through a copy\n",
+                         static_cast<unsigned long long>(count),
+                         static_cast<unsigned long long>(g_refImageBytes.load() >> 20),
+                         static_cast<unsigned long long>(g_refImageFallbacks.load()));
+        }
+    }
+
     void run()
     {
         ThreadNaming::SetCurrentThreadName("VIF1");
@@ -1057,7 +1156,11 @@ private:
                 t_listData = m_current.data.data();
                 t_listSize = m_current.data.size();
                 t_listOrigins = &m_current.origins;
-                if (!m_current.data.empty())
+                if (!m_current.externals.empty())
+                {
+                    runWithExternals(memory);
+                }
+                else if (!m_current.data.empty())
                 {
                     memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
                 }
@@ -1964,7 +2067,8 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         static uint32_t listNumber = 0u;
         list.number = ++listNumber;
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
-                    (g_capture || g_drawOrigins || nativeEffects()) ? &list.origins : nullptr);
+                    (g_capture || g_drawOrigins || nativeEffects()) ? &list.origins : nullptr,
+                    refImages() && !g_capture && !g_drawOrigins ? &list.externals : nullptr);
     }
     reportFinished(rdram, ctx, runtime);
     g_thread->submit(std::move(list));
