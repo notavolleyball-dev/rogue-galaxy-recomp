@@ -794,6 +794,16 @@ struct SdlGpuBackend::Impl {
         // primitive inside the box adds no page.
         bool boxPages = false;
         float offsetX = 0.0f, offsetY = 0.0f, depthScale = 0.0f;
+        // The blend the open batch took from its first primitive's vertex
+        // alpha: that alpha as a constant factor (fixedAlpha, -1 if none),
+        // and whether the Cs As + Cd rule applies and chose to scale Cs
+        // (alpha past 0x80). A primitive whose alpha would choose another
+        // goes down the full path (Rogue Galaxy: added; a strip whose first
+        // triangle is all alpha 0 drew the rest at alpha 0, the field's
+        // prompt band).
+        int fixedAlpha = -1;
+        bool scaledAddRule = false;
+        bool scaledAdd = false;
     } last;
 
     // False sends the primitive down the full path.
@@ -816,6 +826,21 @@ struct SdlGpuBackend::Impl {
         const size_t span = last.alphaPass ? 2u : 1u;
         if (open < span)
             return false;
+        if (last.fixedAlpha >= 0 || last.scaledAddRule) {
+            const uint8_t count = batch.vertexCount;
+            if (last.fixedAlpha >= 0) {
+                const uint8_t a = batch.vertices[count - 1u].a;
+                const bool constant = !state.prim.iip || state.prim.type == GS_PRIM_SPRITE ||
+                    std::all_of(batch.vertices.begin(), batch.vertices.begin() + count,
+                                [a](const GSVertex &v) { return v.a == a; });
+                if (!constant || a != static_cast<uint8_t>(last.fixedAlpha))
+                    return false;
+            }
+            if (last.scaledAddRule &&
+                std::any_of(batch.vertices.begin(), batch.vertices.begin() + count,
+                            [](const GSVertex &v) { return v.a > 0x80u; }) != last.scaledAdd)
+                return false;
+        }
         if (last.textured) {
             ++stats.texturedPrimitives;
             // This primitive may reach texels the one before did not. Within
@@ -3990,6 +4015,7 @@ struct SdlGpuBackend::Impl {
                         written.width(), written.height(), written.x0, written.y0);
 
         GsAlphaState alpha = gsDecodeAlpha(context.alpha);
+        int fixedFromVertex = -1;
         // A constant factor leaves the shader free to store the original alpha.
         if (!device.framebufferFetch() && state.prim.abe && alpha.c == kBlendAlphaSource &&
             (!state.prim.tme || !context.tex0.tcc)) {
@@ -4000,6 +4026,7 @@ struct SdlGpuBackend::Impl {
             if (constant && a <= 0x80u) {
                 alpha.c = kBlendAlphaFixed;
                 alpha.fix = a;
+                fixedFromVertex = a;
             }
         }
         // Cs As + Cd with the vertex's alpha past 0x80 (the town's sparkles
@@ -4007,9 +4034,10 @@ struct SdlGpuBackend::Impl {
         // scales Cs as the GS does and the blend adds it, so it needs no
         // destination read (Rogue Galaxy: added).
         bool scaledAdd = false;
-        if (!device.framebufferFetch() && state.prim.abe && alpha.c == kBlendAlphaSource &&
+        const bool scaledAddRule = !device.framebufferFetch() && state.prim.abe && alpha.c == kBlendAlphaSource &&
             alpha.a == kBlendSource && alpha.b == kBlendZero && alpha.d == kBlendDest &&
-            (!state.prim.tme || !context.tex0.tcc) &&
+            (!state.prim.tme || !context.tex0.tcc);
+        if (scaledAddRule &&
             std::any_of(batch.vertices.begin(), batch.vertices.begin() + batch.vertexCount,
                         [](const GSVertex &v) { return v.a > 0x80u; })) {
             alpha.c = kBlendAlphaFixed;
@@ -4540,6 +4568,9 @@ struct SdlGpuBackend::Impl {
                      !widens && !nativeMesh &&
                      (!state.prim.tme || plainTexture);
         if (last.valid) {
+            last.fixedAlpha = fixedFromVertex;
+            last.scaledAddRule = scaledAddRule;
+            last.scaledAdd = scaledAdd;
             std::memcpy(&last.state, &state, sizeof(last.state));
             last.color = color;
             last.alphaPass = alphaPass;

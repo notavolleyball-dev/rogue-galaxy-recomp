@@ -981,10 +981,16 @@ depth buffer it had been told was rewritten: a water-like layer over the
 ground). The stand-in now covers the mesh's projected box and the texels its
 UVs reach. After a block the GS is given the vertex registers the meshes
 took in (RGBAQ, ST, UV, FOG) and the block's last PRIM. Boot, title, menus,
-HUD, minimap and field match the GS path's screenshots, with one
-difference: the dark band behind a field prompt ("Use transporter", strips
-of black at alpha 0x50 with an alpha test of GREATER 1) shows as a mesh and
-not through the GS path; which one is right is not settled.
+HUD, minimap and field match the GS path's screenshots. The one
+difference, the dark band behind a field prompt ("Use transporter"), was
+the GS path's fault: its same-state fast path appended the band's strip
+triangles (black, alpha 0 at the ends and 0x50 inside) to a draw whose
+first triangle, all alpha 0, had turned its alpha into a constant blend
+factor of 0, so the band drew nothing. The fast path now declines a
+primitive whose vertex alpha would choose another blend. `RG_NATIVE_ALL_PACKETS`
+draws the walk as the GS path does too (46 texture builds from the lazy
+cache instead of 37: minimap icons read from small targets with a named
+palette).
 
 **The effects through the GsPkt blocks (2026-11-02):** the sword trails,
 the sun light, the battle bursts, the effect nodes, the fades, the lens
@@ -1052,8 +1058,8 @@ packets (RGBAQ, ST, UV, PRIM from a tag, a strip under way, PRMODECONT and
 PRMODE) per thread, writes PRIM before each mesh so the GS's draw state
 matches, and sends texel UVs under a header bit (the FST draw reads them
 as texels; the backend bounds the texture read by them). So the GS frontend is down to
-its register file and transfers on the native path. Builds; unverified on
-screen.
+its register file and transfers on the native path. Checked on the walk
+(2026-11-02, with the 2D fixes above).
 
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
