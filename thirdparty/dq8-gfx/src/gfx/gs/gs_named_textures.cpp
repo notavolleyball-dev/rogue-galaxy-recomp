@@ -129,7 +129,7 @@ bool take(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t he
     return false;
 }
 
-bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height) {
+bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, Upload *out) {
     Queue &q = queue();
     if (!q.active.load(std::memory_order_acquire))
         return false;
@@ -138,8 +138,11 @@ bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t he
     for (size_t i = 0; i < limit; ++i) {
         const Upload &r = q.records[i];
         if (r.dbp == dbp && r.dbw == dbw && (r.dpsm & 0x3fu) == (dpsm & 0x3fu) && r.width == width &&
-            r.height == height)
+            r.height == height) {
+            if (out)
+                *out = r;
             return true;
+        }
     }
     return false;
 }

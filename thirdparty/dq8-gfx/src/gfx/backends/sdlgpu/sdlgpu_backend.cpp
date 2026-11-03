@@ -5349,7 +5349,7 @@ struct SdlGpuBackend::Impl {
             const GsTextureCacheStats &t = textures->stats();
             std::fprintf(stderr,
                          "[native-memory] expands named %llu (on the GPU %llu), not named: no name %llu, shape %llu, palette %llu | "
-                         "uploads named %llu (held: kept %llu, adopted %llu), self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
+                         "uploads named %llu (held: unchanged %llu, kept %llu, adopted %llu), self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
                          "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets) | bypass: uploads %llu, onto targets %llu, resolves skipped %llu | memory uses: %s\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedOnGpu),
@@ -5357,6 +5357,7 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(t.namedMissShape),
                          static_cast<unsigned long long>(t.namedMissPalette),
                          static_cast<unsigned long long>(t.uploadsNamed),
+                         static_cast<unsigned long long>(t.uploadsUnchanged),
                          static_cast<unsigned long long>(t.uploadsKept),
                          static_cast<unsigned long long>(t.uploadsAdopted),
                          static_cast<unsigned long long>(t.uploadsSelfNamed),
@@ -6820,6 +6821,16 @@ void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
 
 void SdlGpuBackend::beginTransfer(const GSTransferCommand &command) {
     std::lock_guard lock(m_impl->mutex);
+    // A held upload of the image already there changes nothing: no pages,
+    // no drops, no invalidation, and the open batch stays open.
+    if (m_impl->held && m_impl->transfer && m_impl->textures && gsNativeBypass() &&
+        m_impl->textures->reuploadUnchanged(command, *m_impl->held)) {
+        ++m_impl->stats.transfersBegun;
+        ++m_impl->stats.uploadsBypassed;
+        m_impl->bypassingUpload = false;
+        m_impl->heldTaken = true;
+        return;
+    }
     m_impl->last.valid = false;
     if (!m_impl->transfer)
         return;

@@ -2418,6 +2418,33 @@ uint64_t keptKey(const namedtextures::Upload &u, uint64_t hash) {
 }
 } // namespace
 
+bool GsTextureCache::reuploadUnchanged(const GSTransferCommand &command, const namedtextures::Held &held) {
+    static const bool off = std::getenv("DQ8_GFX_NO_KEPT_IMAGES") != nullptr;
+    if (off || command.direction != 0u || command.trxpos.dsax != 0u || command.trxpos.dsay != 0u || !namedOn())
+        return false;
+    const auto found = m_named.find(command.bitbltbuf.dbp);
+    if (found == m_named.end())
+        return false;
+    const NamedImage &image = found->second;
+    const namedtextures::Upload &was = image.upload;
+    const uint32_t dbw = std::max<uint32_t>(command.bitbltbuf.dbw, 1u);
+    const uint32_t dpsm = command.bitbltbuf.dpsm & 0x3fu;
+    const uint32_t w = command.trxreg.rrw, h = command.trxreg.rrh;
+    if (image.canvas || image.contentHash != held.hash || std::max<uint32_t>(was.dbw, 1u) != dbw ||
+        (was.dpsm & 0x3fu) != dpsm || was.width != w || was.height != h)
+        return false;
+    namedtextures::Upload record;
+    if (!namedtextures::peek(command.bitbltbuf.dbp, dbw, dpsm, w, h, &record) || record.node != was.node ||
+        record.psm != was.psm || record.preSwizzled != was.preSwizzled || record.palette != was.palette ||
+        record.textureWidth != was.textureWidth || record.textureHeight != was.textureHeight ||
+        record.textureBufferWidth != was.textureBufferWidth)
+        return false;
+    namedtextures::take(command.bitbltbuf.dbp, dbw, dpsm, w, h, record);
+    ++m_stats.uploadsNamed;
+    ++m_stats.uploadsUnchanged;
+    return true;
+}
+
 bool GsTextureCache::noteHeldUpload(namedtextures::Held &held) {
     // Only a whole named upload whose bytes the host writes' memory does not
     // want now (the bypass owes them); anything else takes its payload.

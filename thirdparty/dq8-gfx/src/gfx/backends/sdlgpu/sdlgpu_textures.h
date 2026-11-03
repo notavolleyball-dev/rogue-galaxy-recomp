@@ -104,6 +104,7 @@ struct GsTextureCacheStats {
     uint64_t uploadsPatched = 0u;   // into part of a named image
     uint64_t uploadsKept = 0u;      // held uploads of an image already kept: no bytes handled
     uint64_t uploadsAdopted = 0u;   // held uploads of a new image: its buffer taken as it came
+    uint64_t uploadsUnchanged = 0u; // held uploads of the image already there: nothing done
     uint64_t namedCopies = 0u;      // local copies made between named images
     uint64_t resolvesBypassed = 0u; // texture reads of targets the bypass did not resolve
     uint64_t unnamedUploadBytes = 0u;
@@ -172,6 +173,10 @@ public:
     // just after noteUpload: true when it was taken whole, and no payload
     // need follow (Rogue Galaxy: added).
     bool noteHeldUpload(namedtextures::Held &held);
+    // A held upload of exactly the named image already at its base (the same
+    // bytes, named the same way): nothing to do but take its record (Rogue
+    // Galaxy: added; a quarter of the walk's uploads).
+    bool reuploadUnchanged(const GSTransferCommand &command, const namedtextures::Held &held);
     // After a payload of `command` landed in local memory, pixels
     // [copiedBefore, copiedAfter) of its rectangle: the host writes' memory
     // takes the same texels from local memory, for the formats copyRect
