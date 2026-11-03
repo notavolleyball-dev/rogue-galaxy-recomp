@@ -804,6 +804,11 @@ struct SdlGpuBackend::Impl {
         int fixedAlpha = -1;
         bool scaledAddRule = false;
         bool scaledAdd = false;
+        // The open batch is a native mesh's (its pipeline draws meshes), and
+        // whether it culls back faces: only a mesh joins it, and only a
+        // primitive joins a primitive's (Rogue Galaxy: added).
+        bool native = false;
+        bool nativeBackface = false;
     } last;
 
     // False sends the primitive down the full path.
@@ -887,12 +892,19 @@ struct SdlGpuBackend::Impl {
             }
         }
         const uint32_t firstVertex = static_cast<uint32_t>(vertices.size());
-        appendPrimitive(batch, last.offsetX, last.offsetY, last.depthScale);
+        const uint32_t firstIndex = static_cast<uint32_t>(indices.size());
+        if (nativeMesh)
+            appendNative(*nativeMesh, batch, batches[open - span], last.offsetX, last.offsetY, last.depthScale);
+        else
+            appendPrimitive(batch, last.offsetX, last.offsetY, last.depthScale);
         const uint32_t addedVertices = static_cast<uint32_t>(vertices.size()) - firstVertex;
+        const uint32_t addedIndices = static_cast<uint32_t>(indices.size()) - firstIndex;
         if (larger)
             toLargerTexels(firstVertex, largerArea);
-        if (addedVertices == 0u)
+        if (addedVertices == 0u || (nativeMesh && batches[open - span].native && addedIndices == 0u))
             return true;
+        if (nativeMesh)
+            ++stats.nativeSameState;
         ++stats.primitivesDrawn;
         ++stats.sameStatePrimitives;
         stats.trianglesDrawn += addedVertices / 3u;
@@ -911,6 +923,7 @@ struct SdlGpuBackend::Impl {
         }
         for (size_t index = open - span; index < open; ++index) {
             batches[index].vertexCount += addedVertices;
+            batches[index].indexCount += addedIndices;
             if (!inside) {
                 batches[index].written = grown;
                 batches[index].writtenPages |= grownPages;
@@ -1989,6 +2002,20 @@ struct SdlGpuBackend::Impl {
             std::memcpy(r.clipPlanes, mesh.header.clipPlanes, sizeof(r.clipPlanes));
     }
 
+    // What submit() and submitOne() do before their same-state test, for a
+    // mesh about to join the open batch: nothing to land first, no copy the
+    // host's region pack draws apart.
+    bool joinsOpenNative(const GSPrimitiveBatch &standIn) {
+        if (writesDeferredSource(uint32_t(standIn.state.context.frame.fbp) << 5u) || displayFrame.pending)
+            return false;
+        if (regionPack && (shadowCopy(standIn) || borderCopy(standIn) != 0))
+            return false;
+        ++stats.primitivesSubmitted;
+        ++tracedBatch;
+        noteTransferInterrupted();
+        return true;
+    }
+
     // A native strip through submit(): a stand-in primitive covering the
     // scissor and sampling the whole texture, with the strip's alpha, gets
     // the targets, texture, flushes and pages any primitive there would; the
@@ -2111,9 +2138,20 @@ struct SdlGpuBackend::Impl {
                 v.v = static_cast<uint16_t>(st[i][1] * state.textureHeight * 16.0f);
             }
         }
-        // Never the same-state path: that would append the stand-in.
-        last.valid = false;
+        // The same state as the open native batch: the mesh joins it, with
+        // the checks a primitive of that state gets (submitSameState), and
+        // without the full path's target, view, page and texture lookups
+        // (Rogue Galaxy: added; every mesh took the full path, a fifth of
+        // the backend thread). DQ8_GFX_NO_NATIVE_SAME_STATE=1 turns it off.
+        static const bool sameOff = std::getenv("DQ8_GFX_NO_NATIVE_SAME_STATE") != nullptr;
         nativeMesh = &mesh;
+        if (!sameOff && last.valid && last.native && last.nativeBackface == mesh.header.backface &&
+            std::memcmp(&state, &last.state, sizeof(state)) == 0 && joinsOpenNative(standIn) &&
+            submitSameState(standIn)) {
+            nativeMesh = nullptr;
+            return;
+        }
+        last.valid = false;
         submit(standIn);
         nativeMesh = nullptr;
     }
@@ -3910,7 +3948,8 @@ struct SdlGpuBackend::Impl {
             return;
         if (!gsIsColorFramePsm(context.frame.psm))
             return;
-        if (last.valid && std::memcmp(&state, &last.state, sizeof(state)) == 0 && submitSameState(batch))
+        if (last.valid && (last.native == (nativeMesh != nullptr)) &&
+            std::memcmp(&state, &last.state, sizeof(state)) == 0 && submitSameState(batch))
             return;
         last.valid = false;
 
@@ -4572,10 +4611,12 @@ struct SdlGpuBackend::Impl {
         // past the buffer decides per vertex whether the surface widens.
         const bool widens = static_cast<uint32_t>(context.scissor.x1) + 1u > bufferPixels && bufferPixels != 0u;
         last.valid = !feedbackRecorded && !draw.feedback && !draw.destination && !draw.source && !clearsWhole &&
-                     !widens && !nativeMesh &&
+                     !widens && (!nativeMesh || draw.native) &&
                      (!state.prim.tme || plainTexture);
         if (last.valid) {
             last.fixedAlpha = fixedFromVertex;
+            last.native = nativeMesh != nullptr;
+            last.nativeBackface = nativeMesh && nativeMesh->header.backface;
             last.scaledAddRule = scaledAddRule;
             last.scaledAdd = scaledAdd;
             std::memcpy(&last.state, &state, sizeof(last.state));
@@ -5266,7 +5307,7 @@ struct SdlGpuBackend::Impl {
         std::fprintf(stderr,
                      "[gfx] same-state primitives %llu of %llu submitted | flushes: settle=%llu transfer=%llu "
                      "snapshot=%llu alias=%llu texread=%llu feedback=%llu localcopy=%llu present=%llu "
-                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (on the CPU %llu, "
+                     "rewrite=%llu of %llu | covered-releases=%llu (%llu pages) | native strips=%llu (same-state %llu, on the CPU %llu, "
                      "draws %llu, off screen %llu) | native effects=%llu (%llu sprites; ms flush %.2f buffers %.2f sprites %.2f)"
                      " | layers objects=%llu composites=%llu (full %llu, lost %llu)\n",
                      d(stats.sameStatePrimitives, previousSameState), d(stats.primitivesSubmitted, previousSubmitted),
@@ -5279,6 +5320,7 @@ struct SdlGpuBackend::Impl {
                      d(stats.coveredReleases, previousReasons.coveredReleases),
                      d(stats.coveredPages, previousReasons.coveredPages),
                      d(stats.nativeMeshes, previousReasons.nativeMeshes),
+                     d(stats.nativeSameState, previousReasons.nativeSameState),
                      d(stats.nativeMeshesExpanded, previousReasons.nativeMeshesExpanded),
                      d(stats.nativeDraws, previousReasons.nativeDraws),
                      d(stats.nativeMeshesCulled, previousReasons.nativeMeshesCulled),

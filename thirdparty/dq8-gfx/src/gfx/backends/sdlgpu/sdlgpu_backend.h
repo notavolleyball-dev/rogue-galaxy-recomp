@@ -70,6 +70,7 @@ struct SdlGpuStats {
     // screen, not drawn (Rogue Galaxy: added).
     uint64_t nativeDraws = 0u;
     uint64_t nativeMeshesCulled = 0u;
+    uint64_t nativeSameState = 0u; // meshes that joined the open batch (Rogue Galaxy: added)
     // GSNativeEffects drawn, and their sprites (Rogue Galaxy: added).
     uint64_t nativeEffects = 0u;
     uint64_t nativeEffectOps = 0u;
