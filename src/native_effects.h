@@ -92,6 +92,8 @@ struct Place
 };
 
 bool enabled();
+// RG_NATIVE_2D, once its hooks are in.
+bool prim2DEnabled();
 const char *name(Effect effect);
 // RG_NATIVE_COMPOSITE (likewise): the VIF1 thread batches stage E's objects.
 bool compositesBatched();
@@ -156,6 +158,10 @@ struct Piece2D
     GSNativeMesh mesh;           // otherwise
 };
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why);
+// A packet going to the GS as it is, not through build2D, while a
+// conversion is on: the state build2D mirrors (PRIM, the vertex registers,
+// PRMODECONT, PRMODE) follows it, as the GS's does.
+void observe2D(const uint8_t *data, uint32_t size);
 // The 8 KiB pages of GS memory (block address / 32) a box covers.
 void boxPages(const Box &box, uint32_t &first, uint32_t &last);
 // When a packet starts a transfer into GS memory: the pages it may write.

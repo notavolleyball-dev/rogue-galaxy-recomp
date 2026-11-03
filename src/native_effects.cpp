@@ -2269,20 +2269,58 @@ GSNativeMesh::Header screenHeader()
 }
 } // namespace
 
+namespace
+{
+// What the GS would carry from one packet to the next, mirrored per thread:
+// the GIF vertex state, a strip or fan under way, PRMODECONT and PRMODE.
+// build2D keeps it for what it converts, observe2D for what goes to the GS
+// as it is.
+struct Carried
+{
+    rg::gif::GifState state;
+    std::vector<rg::gif::GifEvent> queue;
+    uint16_t queuePrim = 0xFFFFu;
+    bool attributesFromPrim = true; // PRMODECONT AC
+    uint16_t prmode = 0u;
+};
+thread_local Carried t_carried;
+} // namespace
+
+bool prim2DEnabled()
+{
+    return g_prim2D;
+}
+
+void observe2D(const uint8_t *data, uint32_t size)
+{
+    Carried &carried = t_carried;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
+        events.clear();
+        rg::gif::decodeGifPacket(data + at, piece, carried.state, events);
+        for (const rg::gif::GifEvent &e : events)
+        {
+            if (e.kind == rg::gif::GifEvent::Kind::Register)
+            {
+                if (e.reg == 0x1Au)
+                    carried.attributesFromPrim = (e.value & 1u) != 0u;
+                else if (e.reg == 0x1Bu)
+                    carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
+                else if (e.reg != 0x00u)
+                    continue;
+            }
+            // A PRIM write, or a vertex the GS queued itself: whatever strip
+            // the converter had under way is not the GS's any more.
+            carried.queue.clear();
+            carried.queuePrim = 0xFFFFu;
+        }
+    });
+}
+
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why)
 {
     out.clear();
-    // What the GS would carry from one packet to the next, mirrored per
-    // thread: the GIF vertex state, a strip or fan under way, PRMODE.
-    struct Carried
-    {
-        rg::gif::GifState state;
-        std::vector<rg::gif::GifEvent> queue;
-        uint16_t queuePrim = 0xFFFFu;
-        bool attributesFromPrim = true; // PRMODECONT AC
-        uint16_t prmode = 0u;
-    };
-    thread_local Carried carried;
+    Carried &carried = t_carried;
     rg::gif::GifState &state = carried.state;
     std::vector<rg::gif::GifEvent> &queue = carried.queue;
     uint16_t &queuePrim = carried.queuePrim;

@@ -562,6 +562,18 @@ GifStage *g_stage = nullptr;
 void deliverPacket(GS &gs, const uint8_t *data, uint32_t size);
 // RG_NATIVE_GLARE: sends on the effect the VIF1 thread holds the packets of.
 void flushEffect();
+bool vu1Meshes();
+bool inCompositeTail();
+// Set while what build2D made goes to the GS: its own writes are already in
+// its mirror.
+thread_local bool t_converterOutput = false;
+struct ConverterOutput
+{
+    bool previous = t_converterOutput;
+    ConverterOutput() { t_converterOutput = true; }
+    ~ConverterOutput() { t_converterOutput = previous; }
+};
+bool anyConversion();
 // RG_NATIVE_COMPOSITE: sends on the composites' tails it holds.
 void flushComposites();
 // A native strip likewise, in order with the packets.
@@ -882,15 +894,13 @@ public:
                 // object set-up) have their native packets' primitives drawn
                 // as meshes too, as the GsPkt blocks are (build2D): only the
                 // register state goes on to the GS.
-                static const bool asMeshes = [] {
-                    const char *value = std::getenv("RG_NATIVE_VU1_MESHES");
-                    return value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
-                }();
+                const bool asMeshes = vu1Meshes();
                 thread_local std::vector<rg::nativefx::Piece2D> pieces;
                 std::string refused;
                 if (asMeshes && nativeMode() == rg::vu1native::Mode::Gpu && !rg::vu1native::hasMesh(*native) &&
-                    rg::nativefx::build2D(m_nativePackets, pieces, refused))
+                    !inCompositeTail() && rg::nativefx::build2D(m_nativePackets, pieces, refused))
                 {
+                    const ConverterOutput converted;
                     for (const rg::nativefx::Piece2D &piece : pieces)
                     {
                         if (!piece.packet.empty())
@@ -1170,6 +1180,7 @@ void flushEffect()
         std::string refused;
         if (rg::nativefx::build2D(t_held.packets, pieces, refused))
         {
+            const ConverterOutput converted;
             for (const rg::nativefx::Piece2D &piece : pieces)
             {
                 if (!piece.packet.empty())
@@ -1285,6 +1296,19 @@ struct CompositeBatch
 };
 thread_local CompositeBatch t_batch;
 std::atomic<uint64_t> g_compositeUnits{0u}, g_compositeRouted{0u}, g_compositeRuns{0u}, g_compositeRefused{0u};
+
+// Whether what a VU1 program kicks now belongs to a composite's tail: the
+// tail's packets are held and laid over from the object's layer, so a
+// program there sends packets, not meshes (RG_NATIVE_VU1_MESHES).
+bool inCompositeTail()
+{
+    if (!composites() || !t_onVif1Thread)
+        return false;
+    if (t_batch.state == CompositeBatch::State::Tail)
+        return true;
+    const uint32_t cursor = g_vif1Memory ? listAddress(g_vif1Memory->vif1Cursor()) : ~0u;
+    return cursor != ~0u && rg::nativefx::placeAt(cursor).effect == rg::nativefx::Effect::CompositeTail;
+}
 
 void sendEffect(GS &gs, const GSNativeEffect &effect)
 {
@@ -1640,6 +1664,16 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 
 void sendRaw(GS &gs, const uint8_t *data, uint32_t size);
 
+// RG_NATIVE_VU1_MESHES (on with the native renderer).
+bool vu1Meshes()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_NATIVE_VU1_MESHES");
+        return value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
+    }();
+    return on;
+}
+
 // RG_NATIVE_ALL_PACKETS (on with the native renderer): every GIF packet on
 // its way to the GS goes through build2D first, its primitives drawn as
 // native meshes and only its register state and uploads sent on, so the GS
@@ -1669,9 +1703,11 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
                                              [](const rg::nativefx::Piece2D &p) { return p.packet.empty(); });
             if (!anyMesh)
             {
+                const ConverterOutput converted; // build2D has seen it
                 sendRaw(gs, data, size);
                 return;
             }
+            const ConverterOutput converted;
             for (const rg::nativefx::Piece2D &piece : pieces)
             {
                 if (!piece.packet.empty())
@@ -1710,8 +1746,17 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
     sendRaw(gs, data, size);
 }
 
+// Whether build2D's mirror of the GS state has to follow the packets that
+// go to the GS as they are.
+bool anyConversion()
+{
+    return convertAll() || vu1Meshes() || rg::nativefx::prim2DEnabled();
+}
+
 void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 {
+    if (!t_converterOutput && anyConversion())
+        rg::nativefx::observe2D(data, size);
     if (g_stage && t_onVif1Thread)
     {
         g_stage->packet(data, size);

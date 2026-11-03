@@ -1061,6 +1061,21 @@ as texels; the backend bounds the texture read by them). So the GS frontend is d
 its register file and transfers on the native path. Checked on the walk
 (2026-11-02, with the 2D fixes above).
 
+**The meshless VU1 programs on screen (2026-11-02, `RG_NATIVE_VU1_MESHES`):**
+two faults. The converter's mirror of the GS state (PRIM, the vertex
+registers, PRMODECONT, PRMODE) only saw what it converted: the outlines
+draw lines under `PRMODE` 0x48 (blended, Gouraud) with `PRMODECONT` 0 set
+by packets that went to the GS as they were, so they came out as opaque
+black lines, and the shadow volumes likewise. Every packet that reaches the
+GS unconverted while a conversion is on now goes through the mirror too
+(`observe2D`). And a program kicked inside a composite's tail (the object
+lay-over, `RG_NATIVE_COMPOSITE`) sent meshes where the compositor holds the
+tail's packets, which ended every run (0 runs drawn, the characters read
+from their layer buffers as textures): those programs send packets. All
+three conversions together draw the walk as the GS path does (boot, title,
+menus, HUD, field; the compositor's 10,695 runs; 46 texture builds from the
+lazy cache).
+
 **What the effects cost (2026-11-01, measured, not guessed).** Per frame the
 effects run in this order, each reading and writing the frame after the one
 before: the plane shadow, CBlur, the frame captured into `03b80`, a small
