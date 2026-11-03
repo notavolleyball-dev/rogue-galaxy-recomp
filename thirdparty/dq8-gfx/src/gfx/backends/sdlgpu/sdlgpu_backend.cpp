@@ -474,6 +474,35 @@ bool markedCopy(const GSPrimitiveBatch &batch, int32_t marks) {
 // Rogue Galaxy's borders mix in: its marks, a sixteenth up for a border
 // whose first copy is a pixel up, three for one whose first is a pixel up
 // and left; 0 for any other draw.
+// Field by field: GSDrawState has padding between its fields, and the
+// copies a state takes on its way here (the GS worker's queue, the GIF
+// stage) carry its fields, not its padding. A memcmp of two equal states
+// failed every time, and no primitive or mesh took the same-state path
+// (Rogue Galaxy: fixed).
+bool sameContext(const GSContext &a, const GSContext &b) {
+    return a.frame.fbp == b.frame.fbp && a.frame.fbw == b.frame.fbw && a.frame.psm == b.frame.psm &&
+           a.frame.fbmsk == b.frame.fbmsk && a.scissor.x0 == b.scissor.x0 && a.scissor.x1 == b.scissor.x1 &&
+           a.scissor.y0 == b.scissor.y0 && a.scissor.y1 == b.scissor.y1 && a.tex0.tbp0 == b.tex0.tbp0 &&
+           a.tex0.tbw == b.tex0.tbw && a.tex0.psm == b.tex0.psm && a.tex0.tw == b.tex0.tw && a.tex0.th == b.tex0.th &&
+           a.tex0.tcc == b.tex0.tcc && a.tex0.tfx == b.tex0.tfx && a.tex0.cbp == b.tex0.cbp &&
+           a.tex0.cpsm == b.tex0.cpsm && a.tex0.csm == b.tex0.csm && a.tex0.csa == b.tex0.csa &&
+           a.tex0.cld == b.tex0.cld && a.xyoffset.ofx == b.xyoffset.ofx && a.xyoffset.ofy == b.xyoffset.ofy &&
+           a.zbuf.zbp == b.zbuf.zbp && a.zbuf.psm == b.zbuf.psm && a.zbuf.zmask == b.zbuf.zmask &&
+           a.tex1 == b.tex1 && a.miptbp1 == b.miptbp1 && a.miptbp2 == b.miptbp2 && a.clamp == b.clamp &&
+           a.alpha == b.alpha && a.test == b.test && a.fba == b.fba;
+}
+
+bool sameDrawState(const GSDrawState &a, const GSDrawState &b) {
+    const GSPrimReg &p = a.prim, &q = b.prim;
+    return p.type == q.type && p.iip == q.iip && p.tme == q.tme && p.fge == q.fge && p.abe == q.abe &&
+           p.aa1 == q.aa1 && p.fst == q.fst && p.ctxt == q.ctxt && p.fix == q.fix && a.texa.ta0 == b.texa.ta0 &&
+           a.texa.aem == b.texa.aem && a.texa.ta1 == b.texa.ta1 && a.texclut.cbw == b.texclut.cbw &&
+           a.texclut.cou == b.texclut.cou && a.texclut.cov == b.texclut.cov && a.pabe == b.pabe &&
+           a.scanmsk == b.scanmsk && a.dimx == b.dimx && a.dthe == b.dthe && a.colclamp == b.colclamp &&
+           a.fogR == b.fogR && a.fogG == b.fogG && a.fogB == b.fogB && a.textureWidth == b.textureWidth &&
+           a.textureHeight == b.textureHeight && a.linearFilter == b.linearFilter && sameContext(a.context, b.context);
+}
+
 int32_t borderCopy(const GSPrimitiveBatch &batch) {
     const int32_t marks = markedCopy(batch, 1) ? 1 : markedCopy(batch, 3) ? 3 : 0;
     if (marks == 0)
@@ -2146,7 +2175,7 @@ struct SdlGpuBackend::Impl {
         static const bool sameOff = std::getenv("DQ8_GFX_NO_NATIVE_SAME_STATE") != nullptr;
         nativeMesh = &mesh;
         if (!sameOff && last.valid && last.native && last.nativeBackface == mesh.header.backface &&
-            std::memcmp(&state, &last.state, sizeof(state)) == 0 && joinsOpenNative(standIn) &&
+            sameDrawState(state, last.state) && joinsOpenNative(standIn) &&
             submitSameState(standIn)) {
             nativeMesh = nullptr;
             return;
@@ -3949,7 +3978,7 @@ struct SdlGpuBackend::Impl {
         if (!gsIsColorFramePsm(context.frame.psm))
             return;
         if (last.valid && (last.native == (nativeMesh != nullptr)) &&
-            std::memcmp(&state, &last.state, sizeof(state)) == 0 && submitSameState(batch))
+            sameDrawState(state, last.state) && submitSameState(batch))
             return;
         last.valid = false;
 
