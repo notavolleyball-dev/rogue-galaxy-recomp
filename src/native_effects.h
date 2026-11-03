@@ -6,6 +6,8 @@
 
 #include "runtime/gs/gs_types.h"
 
+class GS;
+
 class PS2Runtime;
 
 // Post effects drawn by the renderer itself instead of as the GS sprites the
@@ -156,12 +158,33 @@ struct Piece2D
 {
     std::vector<uint8_t> packet; // when not empty
     GSNativeMesh mesh;           // otherwise
+    // The mesh's draw state, from the converter's own copy of the GS's draw
+    // registers (`stated`; drawStateOwned()).
+    GSDrawState state{};
+    bool stated = false;
 };
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why);
 // A packet going to the GS as it is, not through build2D, while a
 // conversion is on: the state build2D mirrors (PRIM, the vertex registers,
 // PRMODECONT, PRMODE) follows it, as the GS's does.
 void observe2D(const uint8_t *data, uint32_t size);
+
+// RG_NATIVE_DRAW_STATE (on with RG_NATIVE_ALL_PACKETS; docs/NATIVE-SUBMIT-PLAN.md
+// phase 2): the converter keeps the GS's draw registers itself (both
+// contexts, PRIM, PRMODE, PRMODECONT, TEXA, ... decoded as GS::writeRegister
+// decodes them, one copy for every thread, which take turns at the GS), and
+// each mesh it makes carries its draw state (Piece2D::state). The draw
+// registers of converted packets do not go to the GS front end: they are
+// owed to it, and sent just before anything reads its state (a packet that
+// goes to it as it is, a native effect, a libgraph stub), with
+// takeOwedRegisters. Transfers, TEXFLUSH, SIGNAL, FINISH and LABEL still go.
+bool drawStateOwned();
+// The draw state now (for a mesh made elsewhere, a VU1 program's).
+GSDrawState mirroredDrawState();
+// The owed registers as one A+D packet; false when none are owed.
+bool takeOwedRegisters(std::vector<uint8_t> &packet);
+// After something wrote the front end's registers directly: read them back.
+void readDrawRegisters(const GS &gs);
 // The 8 KiB pages of GS memory (block address / 32) a box covers.
 void boxPages(const Box &box, uint32_t &first, uint32_t &last);
 // When a packet starts a transfer into GS memory: the pages it may write.

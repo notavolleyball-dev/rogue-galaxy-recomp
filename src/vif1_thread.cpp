@@ -326,16 +326,22 @@ public:
     void image(const uint8_t *data, uint32_t size) { append(Kind::Image, data, size); }
     // A strip of a VU1 program done natively (RG_VU1_NATIVE=gpu): its header,
     // then its vertices, for GS::submitNativeMesh.
-    void mesh(const GSNativeMesh &mesh)
+    // With `state`, under that draw state (the converter's, phase 2 of
+    // docs/NATIVE-SUBMIT-PLAN.md) rather than the front end's.
+    void mesh(const GSNativeMesh &mesh, const GSDrawState *state = nullptr)
     {
-        m_meshBytes.resize(sizeof(GSNativeMesh::Header) + mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
-        std::memcpy(m_meshBytes.data(), &mesh.header, sizeof(mesh.header));
+        const size_t stateBytes = state ? kStateBytes : 0u;
+        m_meshBytes.resize(stateBytes + sizeof(GSNativeMesh::Header) +
+                           mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+        if (state)
+            std::memcpy(m_meshBytes.data(), state, sizeof(*state));
+        std::memcpy(m_meshBytes.data() + stateBytes, &mesh.header, sizeof(mesh.header));
         if (!mesh.vertices.empty())
         {
-            std::memcpy(m_meshBytes.data() + sizeof(mesh.header), mesh.vertices.data(),
+            std::memcpy(m_meshBytes.data() + stateBytes + sizeof(mesh.header), mesh.vertices.data(),
                         mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
         }
-        append(Kind::Mesh, m_meshBytes.data(), static_cast<uint32_t>(m_meshBytes.size()));
+        append(state ? Kind::StatedMesh : Kind::Mesh, m_meshBytes.data(), static_cast<uint32_t>(m_meshBytes.size()));
     }
     // A post effect the renderer draws itself, for GS::submitNativeEffect.
     void effect(const GSNativeEffect &effect)
@@ -411,7 +417,11 @@ private:
         Image,
         Mesh,
         Effect,
+        StatedMesh,
     };
+    // A GSDrawState ahead of a stated mesh's header, padded to keep the
+    // header and vertices 16-byte aligned.
+    static constexpr size_t kStateBytes = (sizeof(GSDrawState) + 15u) & ~size_t{15u};
     // A multiple of sixteen bytes, so the data after it stays quadword aligned.
     struct Header
     {
@@ -485,16 +495,24 @@ private:
                     {
                         m_gs.processGIFPacket(data, header.size);
                     }
-                    else if (header.kind == Kind::Mesh)
+                    else if (header.kind == Kind::Mesh || header.kind == Kind::StatedMesh)
                     {
-                        std::memcpy(&m_mesh.header, data, sizeof(m_mesh.header));
-                        m_mesh.vertices.resize((header.size - sizeof(m_mesh.header)) / sizeof(GSNativeMesh::Vertex));
+                        const bool stated = header.kind == Kind::StatedMesh;
+                        const size_t skip = stated ? kStateBytes : 0u;
+                        if (stated)
+                            std::memcpy(&m_state, data, sizeof(m_state));
+                        std::memcpy(&m_mesh.header, data + skip, sizeof(m_mesh.header));
+                        m_mesh.vertices.resize((header.size - skip - sizeof(m_mesh.header)) /
+                                               sizeof(GSNativeMesh::Vertex));
                         if (!m_mesh.vertices.empty())
                         {
-                            std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header),
+                            std::memcpy(m_mesh.vertices.data(), data + skip + sizeof(m_mesh.header),
                                         m_mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
                         }
-                        m_gs.submitNativeMesh(m_mesh);
+                        if (stated)
+                            m_gs.submitNativeMesh(m_mesh, m_state);
+                        else
+                            m_gs.submitNativeMesh(m_mesh);
                     }
                     else if (header.kind == Kind::Effect)
                     {
@@ -550,6 +568,7 @@ private:
     std::vector<uint8_t> m_staged;              // the VIF1 thread's
     std::vector<uint8_t> m_meshBytes;           // the VIF1 thread's
     GSNativeMesh m_mesh;                        // the stage's
+    GSDrawState m_state{};                      // the stage's
     GSNativeEffect m_effect;
     size_t m_outstanding = 0u;
     uint64_t m_published = 0u;
@@ -577,7 +596,7 @@ bool anyConversion();
 // RG_NATIVE_COMPOSITE: sends on the composites' tails it holds.
 void flushComposites();
 // A native strip likewise, in order with the packets.
-void deliverMesh(GS &gs, const GSNativeMesh &mesh);
+void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given = nullptr);
 // For busyReport's VU1 pair counts.
 PS2Runtime *g_runtime = nullptr;
 
@@ -906,7 +925,7 @@ public:
                         if (!piece.packet.empty())
                             deliverPacket(m_runtime.gs(), piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
                         else
-                            deliverMesh(m_runtime.gs(), piece.mesh);
+                            deliverMesh(m_runtime.gs(), piece.mesh, piece.stated ? &piece.state : nullptr);
                     }
                 }
                 else
@@ -1131,6 +1150,7 @@ private:
 Vif1Thread *g_thread = nullptr;
 
 void sendPacket(GS &gs, const uint8_t *data, uint32_t size);
+void payOwed(GS &gs);
 
 // RG_NATIVE_GLARE (src/native_effects.h): the packets of an effect the
 // renderer draws itself, held on the VIF1 thread until something else goes to
@@ -1186,7 +1206,9 @@ void flushEffect()
                 if (!piece.packet.empty())
                     sendPacket(gs, piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
                 else if (g_stage)
-                    g_stage->mesh(piece.mesh);
+                    g_stage->mesh(piece.mesh, piece.stated ? &piece.state : nullptr);
+                else if (piece.stated)
+                    gs.submitNativeMesh(piece.mesh, piece.state);
                 else
                     gs.submitNativeMesh(piece.mesh);
             }
@@ -1224,6 +1246,7 @@ void flushEffect()
         {
             sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
         }
+        payOwed(gs); // an effect may read the front end's TEXA
         if (g_stage)
         {
             g_stage->effect(effect);
@@ -1312,6 +1335,7 @@ bool inCompositeTail()
 
 void sendEffect(GS &gs, const GSNativeEffect &effect)
 {
+    payOwed(gs);
     if (g_stage)
         g_stage->effect(effect);
     else
@@ -1655,6 +1679,7 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
             {
                 sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
             }
+            payOwed(gs);
             gs.submitNativeEffect(effect);
             return;
         }
@@ -1701,7 +1726,9 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
         {
             const bool anyMesh = std::any_of(pieces.begin(), pieces.end(),
                                              [](const rg::nativefx::Piece2D &p) { return p.packet.empty(); });
-            if (!anyMesh)
+            // Owned draw state: the pieces carry only what the front end
+            // still needs, so they go even when nothing became a mesh.
+            if (!anyMesh && !rg::nativefx::drawStateOwned())
             {
                 const ConverterOutput converted; // build2D has seen it
                 sendRaw(gs, data, size);
@@ -1718,12 +1745,15 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
                 ++g_meshesFromPackets;
                 if (g_stage && t_onVif1Thread)
                 {
-                    g_stage->mesh(piece.mesh);
+                    g_stage->mesh(piece.mesh, piece.stated ? &piece.state : nullptr);
                     continue;
                 }
                 if (g_stage)
                     g_thread->drain();
-                gs.submitNativeMesh(piece.mesh);
+                if (piece.stated)
+                    gs.submitNativeMesh(piece.mesh, piece.state);
+                else
+                    gs.submitNativeMesh(piece.mesh);
             }
             const uint64_t count = ++g_packetsConverted;
             if (count == 1u || count % 100000u == 0u)
@@ -1753,10 +1783,33 @@ bool anyConversion()
     return convertAll() || vu1Meshes() || rg::nativefx::prim2DEnabled();
 }
 
+void sendToGs(GS &gs, const uint8_t *data, uint32_t size);
+
+// The draw registers converted packets owed the front end, sent ahead of
+// whatever reads its state next (drawStateOwned).
+void payOwed(GS &gs)
+{
+    if (!rg::nativefx::drawStateOwned())
+        return;
+    thread_local std::vector<uint8_t> owed;
+    if (rg::nativefx::takeOwedRegisters(owed))
+        sendToGs(gs, owed.data(), static_cast<uint32_t>(owed.size()));
+}
+
 void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 {
+    // A packet as it is may draw with the front end's state: it gets what
+    // it is owed first. The converter's own pieces (transfers, uploads,
+    // FINISH) read none of it.
+    if (!t_converterOutput)
+        payOwed(gs);
     if (!t_converterOutput && anyConversion())
         rg::nativefx::observe2D(data, size);
+    sendToGs(gs, data, size);
+}
+
+void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
+{
     if (g_stage && t_onVif1Thread)
     {
         g_stage->packet(data, size);
@@ -1773,7 +1826,7 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
     gs.processGIFPacket(data, size);
 }
 
-void deliverMesh(GS &gs, const GSNativeMesh &mesh)
+void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given)
 {
     if (composites() && t_onVif1Thread)
     {
@@ -1796,16 +1849,27 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh)
     {
         rg::debug::drawOriginsMesh(static_cast<uint32_t>(mesh.vertices.size()), t_vu1Tag, t_vu1Name);
     }
+    // Under the converter's draw state when it owns it: the front end's may
+    // be owed registers.
+    const bool owned = rg::nativefx::drawStateOwned();
+    thread_local GSDrawState state;
+    if (given)
+        state = *given;
+    else if (owned)
+        state = rg::nativefx::mirroredDrawState();
     if (g_stage && t_onVif1Thread)
     {
-        g_stage->mesh(mesh);
+        g_stage->mesh(mesh, owned ? &state : nullptr);
         return;
     }
     if (g_stage)
     {
         g_thread->drain();
     }
-    gs.submitNativeMesh(mesh);
+    if (owned)
+        gs.submitNativeMesh(mesh, state);
+    else
+        gs.submitNativeMesh(mesh);
 }
 // The thread that runs guest code, as the first hooked DMA call sees it.
 std::thread::id g_gameThread;
@@ -1931,7 +1995,15 @@ template <size_t Index>
 void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_thread->drain();
+    // The libgraph stubs write the front end's registers themselves
+    // (sceGsPutDrawEnv, sceGsSwapDBuff's environments and clear): it gets
+    // what it is owed first, and the converter reads them back after.
+    const bool owned = rg::nativefx::drawStateOwned();
+    if (owned)
+        payOwed(runtime->gs());
     g_gsWaiters[Index].second(rdram, ctx, runtime);
+    if (owned)
+        rg::nativefx::readDrawRegisters(runtime->gs());
 }
 
 template <size_t... I>
@@ -2081,6 +2153,7 @@ void submitEffectFromGame(GS &gs, const GSNativeEffect &effect)
 {
     if (g_stage)
         g_thread->drain();
+    payOwed(gs);
     gs.submitNativeEffect(effect);
 }
 

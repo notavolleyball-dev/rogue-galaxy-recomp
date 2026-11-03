@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include "gfx/gs/gs_host_reads.h"
 #include "vif1_thread.h"
 #include "gif_events.h"
+#include "runtime/gs/gs_frontend.h"
 #include "native_renderer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -2291,10 +2293,286 @@ bool prim2DEnabled()
     return g_prim2D;
 }
 
+namespace
+{
+// The GS's draw registers, as GS::writeRegisterUnlocked decodes them (the
+// front end's own fields; patch 0032's GS::DrawRegisters), and the writes
+// owed to the front end: by register, the latest value (TEX2 folded into
+// TEX0, which it rewrites in part).
+struct DrawRegisterMirror
+{
+    std::mutex mutex;
+    GS::DrawRegisters r;
+    GSPrimReg prim{}; // the effective PRIM (PRMODECONT applied), as m_prim
+    uint64_t owed[0x50]{};
+    std::bitset<0x50> owing;
+    bool tex0Known[2] = {false, false};
+    uint64_t tex0[2] = {0u, 0u}; // the raw TEX0 values, for TEX2's fold
+};
+DrawRegisterMirror g_mirror;
+
+GSPrimReg decodePrim(uint64_t value)
+{
+    GSPrimReg prim{};
+    prim.type = static_cast<GSPrimType>(value & 0x7u);
+    prim.iip = ((value >> 3) & 1u) != 0u;
+    prim.tme = ((value >> 4) & 1u) != 0u;
+    prim.fge = ((value >> 5) & 1u) != 0u;
+    prim.abe = ((value >> 6) & 1u) != 0u;
+    prim.aa1 = ((value >> 7) & 1u) != 0u;
+    prim.fst = ((value >> 8) & 1u) != 0u;
+    prim.ctxt = ((value >> 9) & 1u) != 0u;
+    prim.fix = ((value >> 10) & 1u) != 0u;
+    return prim;
+}
+
+uint64_t encodeTex0(const GSTex0Reg &t)
+{
+    return static_cast<uint64_t>(t.tbp0 & 0x3FFFu) | (static_cast<uint64_t>(t.tbw & 0x3Fu) << 14) |
+           (static_cast<uint64_t>(t.psm & 0x3Fu) << 20) | (static_cast<uint64_t>(t.tw & 0xFu) << 26) |
+           (static_cast<uint64_t>(t.th & 0xFu) << 30) | (static_cast<uint64_t>(t.tcc & 1u) << 34) |
+           (static_cast<uint64_t>(t.tfx & 3u) << 35) | (static_cast<uint64_t>(t.cbp & 0x3FFFu) << 37) |
+           (static_cast<uint64_t>(t.cpsm & 0xFu) << 51) | (static_cast<uint64_t>(t.csm & 1u) << 55) |
+           (static_cast<uint64_t>(t.csa & 0x1Fu) << 56) | (static_cast<uint64_t>(t.cld & 7u) << 61);
+}
+
+void decodeTex0(GSTex0Reg &t, uint64_t value)
+{
+    t.tbp0 = static_cast<uint32_t>(value & 0x3FFF);
+    t.tbw = static_cast<uint8_t>((value >> 14) & 0x3F);
+    t.psm = static_cast<uint8_t>((value >> 20) & 0x3F);
+    t.tw = static_cast<uint8_t>((value >> 26) & 0xF);
+    t.th = static_cast<uint8_t>((value >> 30) & 0xF);
+    t.tcc = static_cast<uint8_t>((value >> 34) & 0x1);
+    t.tfx = static_cast<uint8_t>((value >> 35) & 0x3);
+    t.cbp = static_cast<uint32_t>((value >> 37) & 0x3FFF);
+    t.cpsm = static_cast<uint8_t>((value >> 51) & 0xF);
+    t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+    t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+    t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+}
+
+// Registers whose writes still go to the front end: transfers, TEXFLUSH,
+// SIGNAL, FINISH, LABEL, and anything the mirror does not know.
+bool forwarded(uint8_t reg)
+{
+    switch (reg)
+    {
+    case 0x00: case 0x01: case 0x02: case 0x03: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A:
+    case 0x14: case 0x15: case 0x16: case 0x17: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C:
+    case 0x22: case 0x34: case 0x35: case 0x36: case 0x37: case 0x3B: case 0x3D: case 0x40: case 0x41:
+    case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47: case 0x48: case 0x49: case 0x4A:
+    case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+        return false;
+    default:
+        return true;
+    }
+}
+
+// One write, as the front end takes it. Caller holds the mutex.
+void mirrorWrite(DrawRegisterMirror &m, uint8_t reg, uint64_t value)
+{
+    GS::DrawRegisters &r = m.r;
+    const int ci = (reg & 1u) ? 1 : 0;
+    switch (reg)
+    {
+    case 0x00:
+        r.primRegister = decodePrim(value);
+        if (r.prmodecont)
+            m.prim = r.primRegister;
+        else
+            m.prim.type = r.primRegister.type;
+        break;
+    case 0x06: case 0x07:
+        decodeTex0(r.ctx[ci].tex0, value);
+        break;
+    case 0x08: case 0x09: r.ctx[ci].clamp = value; break;
+    case 0x14: case 0x15: r.ctx[ci].tex1 = value; break;
+    case 0x16: case 0x17: {
+        auto &t = r.ctx[ci].tex0;
+        t.psm = static_cast<uint8_t>((value >> 20) & 0x3F);
+        t.cbp = static_cast<uint32_t>((value >> 37) & 0x3FFF);
+        t.cpsm = static_cast<uint8_t>((value >> 51) & 0xF);
+        t.csm = static_cast<uint8_t>((value >> 55) & 0x1);
+        t.csa = static_cast<uint8_t>((value >> 56) & 0x1F);
+        t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
+        break;
+    }
+    case 0x18: case 0x19:
+        r.ctx[ci].xyoffset.ofx = static_cast<uint16_t>(value & 0xFFFF);
+        r.ctx[ci].xyoffset.ofy = static_cast<uint16_t>((value >> 32) & 0xFFFF);
+        break;
+    case 0x1A: {
+        r.prmodecont = (value & 1) != 0;
+        const GSPrimType type = r.primRegister.type;
+        m.prim = r.prmodecont ? r.primRegister : r.prmodeRegister;
+        m.prim.type = type;
+        break;
+    }
+    case 0x1B:
+        r.prmodeRegister = decodePrim(value);
+        if (!r.prmodecont)
+        {
+            const GSPrimType type = r.primRegister.type;
+            m.prim = r.prmodeRegister;
+            m.prim.type = type;
+        }
+        break;
+    case 0x1C:
+        r.texclut.cbw = static_cast<uint8_t>(value & 0x3Fu);
+        r.texclut.cou = static_cast<uint8_t>((value >> 6) & 0x3Fu);
+        r.texclut.cov = static_cast<uint16_t>((value >> 12) & 0x3FFu);
+        break;
+    case 0x22: r.scanmsk = value; break;
+    case 0x34: case 0x35: r.ctx[ci].miptbp1 = value; break;
+    case 0x36: case 0x37: r.ctx[ci].miptbp2 = value; break;
+    case 0x3B:
+        r.texa.ta0 = static_cast<uint8_t>(value & 0xFFu);
+        r.texa.aem = ((value >> 15) & 0x1u) != 0u;
+        r.texa.ta1 = static_cast<uint8_t>((value >> 32) & 0xFFu);
+        break;
+    case 0x3D:
+        r.fogR = static_cast<uint8_t>(value & 0xFFu);
+        r.fogG = static_cast<uint8_t>((value >> 8) & 0xFFu);
+        r.fogB = static_cast<uint8_t>((value >> 16) & 0xFFu);
+        break;
+    case 0x40: case 0x41:
+        r.ctx[ci].scissor.x0 = static_cast<uint16_t>(value & 0x7FF);
+        r.ctx[ci].scissor.x1 = static_cast<uint16_t>((value >> 16) & 0x7FF);
+        r.ctx[ci].scissor.y0 = static_cast<uint16_t>((value >> 32) & 0x7FF);
+        r.ctx[ci].scissor.y1 = static_cast<uint16_t>((value >> 48) & 0x7FF);
+        break;
+    case 0x42: case 0x43: r.ctx[ci].alpha = value; break;
+    case 0x44: r.dimx = value; break;
+    case 0x45: r.dthe = value; break;
+    case 0x46: r.colclamp = value; break;
+    case 0x47: r.ctx[0].test = value; break;
+    case 0x48: r.ctx[1].test = value; break;
+    case 0x49: r.pabe = (value & 1u) != 0u; break;
+    case 0x4A: case 0x4B: r.ctx[ci].fba = value; break;
+    case 0x4C: case 0x4D:
+        r.ctx[ci].frame.fbp = static_cast<uint32_t>(value & 0x1FF);
+        r.ctx[ci].frame.fbw = static_cast<uint32_t>((value >> 16) & 0x3F);
+        r.ctx[ci].frame.psm = static_cast<uint8_t>((value >> 24) & 0x3F);
+        r.ctx[ci].frame.fbmsk = static_cast<uint32_t>((value >> 32) & 0xFFFFFFFF);
+        break;
+    case 0x4E: case 0x4F:
+        r.ctx[ci].zbuf.zbp = value & 0x1FF;
+        r.ctx[ci].zbuf.psm = ((value >> 24) & 0xF) | 0x30;
+        r.ctx[ci].zbuf.zmask = (value >> 32) & 1;
+        break;
+    default:
+        break;
+    }
+}
+
+// A converted packet's draw register: the mirror takes it, and the front
+// end is owed it.
+void owe(DrawRegisterMirror &m, uint8_t reg, uint64_t value)
+{
+    mirrorWrite(m, reg, value);
+    if (reg >= 0x50u)
+        return;
+    if (reg == 0x16u || reg == 0x17u)
+    {
+        // TEX2 rewrites part of TEX0: owed as the TEX0 it makes.
+        const int ci = reg & 1u;
+        reg = static_cast<uint8_t>(0x06u + ci);
+        value = encodeTex0(m.r.ctx[ci].tex0);
+    }
+    m.owed[reg] = value;
+    m.owing.set(reg);
+}
+
+// A write the front end gets itself (a packet sent as it is).
+void seen(DrawRegisterMirror &m, uint8_t reg, uint64_t value)
+{
+    mirrorWrite(m, reg, value);
+    if (reg < 0x50u && reg != 0x16u && reg != 0x17u)
+        m.owing.reset(reg);
+}
+
+GSDrawState stateOf(const DrawRegisterMirror &m, const GSPrimReg &prim)
+{
+    GSDrawState state{};
+    state.context = m.r.ctx[prim.ctxt ? 1 : 0];
+    state.prim = prim;
+    state.texa = m.r.texa;
+    state.texclut = m.r.texclut;
+    state.pabe = m.r.pabe;
+    state.scanmsk = m.r.scanmsk;
+    state.dimx = m.r.dimx;
+    state.dthe = m.r.dthe;
+    state.colclamp = m.r.colclamp;
+    state.fogR = m.r.fogR;
+    state.fogG = m.r.fogG;
+    state.fogB = m.r.fogB;
+    state.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(state.context.tex0.tw, 10u));
+    state.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(state.context.tex0.th, 10u));
+    const uint64_t tex1 = state.context.tex1;
+    const uint8_t mmag = static_cast<uint8_t>((tex1 >> 5u) & 0x1u);
+    const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
+    state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
+    return state;
+}
+} // namespace
+
+bool drawStateOwned()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_NATIVE_DRAW_STATE");
+        if (value && std::strcmp(value, "0") == 0)
+            return false;
+        const char *all = std::getenv("RG_NATIVE_ALL_PACKETS");
+        return (!all || std::strcmp(all, "0") != 0) && rg::nativerenderer::enabled();
+    }();
+    return on;
+}
+
+GSDrawState mirroredDrawState()
+{
+    std::lock_guard lock(g_mirror.mutex);
+    return stateOf(g_mirror, g_mirror.prim);
+}
+
+bool takeOwedRegisters(std::vector<uint8_t> &packet)
+{
+    std::vector<std::pair<uint8_t, uint64_t>> writes;
+    {
+        std::lock_guard lock(g_mirror.mutex);
+        if (g_mirror.owing.none())
+            return false;
+        // PRMODECONT last: it makes the effective PRIM from PRIM and PRMODE,
+        // whatever order they were written in.
+        for (uint8_t reg = 0u; reg < 0x50u; ++reg)
+            if (reg != 0x1Au && g_mirror.owing.test(reg))
+                writes.emplace_back(reg, g_mirror.owed[reg]);
+        if (g_mirror.owing.test(0x1Au))
+            writes.emplace_back(0x1Au, g_mirror.owed[0x1Au]);
+        g_mirror.owing.reset();
+    }
+    packet = adPacket(writes);
+    return true;
+}
+
+void readDrawRegisters(const GS &gs)
+{
+    std::lock_guard lock(g_mirror.mutex);
+    g_mirror.r = gs.drawRegisters();
+    GSPrimReg prim = g_mirror.r.prmodecont ? g_mirror.r.primRegister : g_mirror.r.prmodeRegister;
+    prim.type = g_mirror.r.primRegister.type;
+    g_mirror.prim = prim;
+    g_mirror.owing.reset();
+}
+
 void observe2D(const uint8_t *data, uint32_t size)
 {
     Carried &carried = t_carried;
     thread_local std::vector<rg::gif::GifEvent> events;
+    const bool owned = drawStateOwned();
+    std::unique_lock<std::mutex> lock(g_mirror.mutex, std::defer_lock);
+    if (owned)
+        lock.lock();
     eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
         events.clear();
         rg::gif::decodeGifPacket(data + at, piece, carried.state, events);
@@ -2302,6 +2580,8 @@ void observe2D(const uint8_t *data, uint32_t size)
         {
             if (e.kind == rg::gif::GifEvent::Kind::Register)
             {
+                if (owned)
+                    seen(g_mirror, e.reg, e.value);
                 if (e.reg == 0x1Au)
                     carried.attributesFromPrim = (e.value & 1u) != 0u;
                 else if (e.reg == 0x1Bu)
@@ -2328,6 +2608,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
     std::vector<std::pair<uint8_t, uint64_t>> writes;
     Piece2D mesh;
     uint16_t meshPrim = 0xFFFFu;
+    const bool owned = drawStateOwned();
+    std::unique_lock<std::mutex> mirrorLock(g_mirror.mutex, std::defer_lock);
+    if (owned)
+        mirrorLock.lock();
 
     const auto closeMesh = [&] {
         if (!mesh.mesh.vertices.empty())
@@ -2409,10 +2693,24 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             return;
         closeMesh();
         // The draw state the mesh takes is the GS's PRIM: its attributes,
-        // as a triangle.
-        writes.emplace_back(0x00u, static_cast<uint64_t>((prim & ~7u) | 3u));
-        flushWrites();
+        // as a triangle. Owned (drawStateOwned): the mirror takes the PRIM
+        // and the mesh its state; the front end is owed the PRIM.
+        if (owned)
+        {
+            flushWrites();
+            owe(g_mirror, 0x00u, static_cast<uint64_t>((prim & ~7u) | 3u));
+        }
+        else
+        {
+            writes.emplace_back(0x00u, static_cast<uint64_t>((prim & ~7u) | 3u));
+            flushWrites();
+        }
         mesh.mesh.header = screenHeader();
+        if (owned)
+        {
+            mesh.state = stateOf(g_mirror, g_mirror.prim);
+            mesh.stated = true;
+        }
         if ((prim & 0x110u) == 0x110u)
             mesh.mesh.header.source = kNativeMeshTexelUvs;
         meshPrim = prim;
@@ -2465,6 +2763,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
                 flushWrites();
                 closeMesh();
                 queue.clear();
+                if (owned)
+                    for (const rg::gif::GifEvent &e : events)
+                        if (e.kind == rg::gif::GifEvent::Kind::Register)
+                            seen(g_mirror, e.reg, e.value);
                 Piece2D piece;
                 piece.packet.assign(packet.begin() + at, packet.begin() + at + size);
                 out.push_back(std::move(piece));
@@ -2484,7 +2786,10 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
                         queuePrim = 0xFFFFu;
                     }
                     closeMesh();
-                    writes.emplace_back(e.reg, e.value);
+                    if (owned && !forwarded(e.reg))
+                        owe(g_mirror, e.reg, e.value);
+                    else
+                        writes.emplace_back(e.reg, e.value);
                     continue;
                 }
                 anyVertex = true;
@@ -2601,14 +2906,19 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
         std::memcpy(&sBits, &state.s, sizeof(sBits));
         std::memcpy(&tBits, &state.t, sizeof(tBits));
         closeMesh();
-        writes.emplace_back(0x00u, static_cast<uint64_t>(state.prim));
-        writes.emplace_back(0x01u, static_cast<uint64_t>(state.rgba[0]) | (static_cast<uint64_t>(state.rgba[1]) << 8) |
+        const auto put = [&](uint8_t reg, uint64_t value) {
+            if (owned)
+                owe(g_mirror, reg, value);
+            else
+                writes.emplace_back(reg, value);
+        };
+        put(0x00u, static_cast<uint64_t>(state.prim));
+        put(0x01u, static_cast<uint64_t>(state.rgba[0]) | (static_cast<uint64_t>(state.rgba[1]) << 8) |
                                        (static_cast<uint64_t>(state.rgba[2]) << 16) |
                                        (static_cast<uint64_t>(state.rgba[3]) << 24) | (static_cast<uint64_t>(q) << 32));
-        writes.emplace_back(0x02u, static_cast<uint64_t>(sBits) | (static_cast<uint64_t>(tBits) << 32));
-        writes.emplace_back(0x03u, static_cast<uint64_t>(state.u & 0x3FFFu) |
-                                       (static_cast<uint64_t>(state.v & 0x3FFFu) << 16));
-        writes.emplace_back(0x0Au, static_cast<uint64_t>(state.f) << 56);
+        put(0x02u, static_cast<uint64_t>(sBits) | (static_cast<uint64_t>(tBits) << 32));
+        put(0x03u, static_cast<uint64_t>(state.u & 0x3FFFu) | (static_cast<uint64_t>(state.v & 0x3FFFu) << 16));
+        put(0x0Au, static_cast<uint64_t>(state.f) << 56);
     }
     flushWrites();
     closeMesh();

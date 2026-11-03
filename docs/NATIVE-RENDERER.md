@@ -1118,6 +1118,13 @@ dropped are buried and written to the host writes' memory only when read
 `NameTableNodeSetImage`'s generation: hashing on the feeding thread costs
 ~4% of it and needs no proof that nothing else writes texture RAM.
 
+**Native submit, phases 2 and 3 (2026-11-02).** Native meshes join the
+open batch of their state without submit's full path
+(`DQ8_GFX_NO_NATIVE_SAME_STATE`). The converter owns the draw registers
+(`RG_NATIVE_DRAW_STATE`): meshes carry their own draw state, and converted
+packets send the GS front end only transfers and FINISH-like registers.
+Builds; unverified on screen.
+
 Delete local memory, page ownership, imports and patches, snapshots,
 destination copies, round trips and readbacks from the backend, plus the
 `DQ8_GFX_*` switches that exist only for them. Keep `RG_RENDER=gs` for one
