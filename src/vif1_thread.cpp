@@ -922,8 +922,8 @@ public:
                     const ConverterOutput converted;
                     for (const rg::nativefx::Piece2D &piece : pieces)
                     {
-                        if (!piece.packet.empty())
-                            deliverPacket(m_runtime.gs(), piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                        if (piece.isPacket())
+                            deliverPacket(m_runtime.gs(), piece.bytes(), piece.size());
                         else
                             deliverMesh(m_runtime.gs(), piece.mesh, piece.stated ? &piece.state : nullptr);
                     }
@@ -1150,6 +1150,8 @@ private:
 Vif1Thread *g_thread = nullptr;
 
 void sendPacket(GS &gs, const uint8_t *data, uint32_t size);
+bool convertAll();
+void sendRaw(GS &gs, const uint8_t *data, uint32_t size);
 void payOwed(GS &gs);
 
 // RG_NATIVE_GLARE (src/native_effects.h): the packets of an effect the
@@ -1203,8 +1205,12 @@ void flushEffect()
             const ConverterOutput converted;
             for (const rg::nativefx::Piece2D &piece : pieces)
             {
-                if (!piece.packet.empty())
-                    sendPacket(gs, piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                // Decoded once already: with every packet converted, on as
+                // they are rather than through build2D again.
+                if (piece.isPacket() && convertAll())
+                    sendRaw(gs, piece.bytes(), piece.size());
+                else if (piece.isPacket())
+                    sendPacket(gs, piece.bytes(), piece.size());
                 else if (g_stage)
                     g_stage->mesh(piece.mesh, piece.stated ? &piece.state : nullptr);
                 else if (piece.stated)
@@ -1718,14 +1724,13 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
 {
     if (convertAll() && data && size >= 16u)
     {
-        thread_local std::vector<std::vector<uint8_t>> one(1);
         thread_local std::vector<rg::nativefx::Piece2D> pieces;
-        one[0].assign(data, data + size);
+        const rg::nativefx::Span2D one{data, size};
         std::string why;
-        if (rg::nativefx::build2D(one, pieces, why))
+        if (rg::nativefx::build2D(&one, 1u, pieces, why))
         {
             const bool anyMesh = std::any_of(pieces.begin(), pieces.end(),
-                                             [](const rg::nativefx::Piece2D &p) { return p.packet.empty(); });
+                                             [](const rg::nativefx::Piece2D &p) { return !p.isPacket(); });
             // Owned draw state: the pieces carry only what the front end
             // still needs, so they go even when nothing became a mesh.
             if (!anyMesh && !rg::nativefx::drawStateOwned())
@@ -1737,9 +1742,9 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
             const ConverterOutput converted;
             for (const rg::nativefx::Piece2D &piece : pieces)
             {
-                if (!piece.packet.empty())
+                if (piece.isPacket())
                 {
-                    sendRaw(gs, piece.packet.data(), static_cast<uint32_t>(piece.packet.size()));
+                    sendRaw(gs, piece.bytes(), piece.size());
                     continue;
                 }
                 ++g_meshesFromPackets;

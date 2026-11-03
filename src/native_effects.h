@@ -156,14 +156,28 @@ constexpr uint32_t kNativeMeshTexelUvs = 0x80000000u;
 
 struct Piece2D
 {
-    std::vector<uint8_t> packet; // when not empty
+    std::vector<uint8_t> packet; // a packet build2D made, when not empty
+    // Or a packet of the input as it is (an upload), in place: valid while
+    // the input is.
+    const uint8_t *view = nullptr;
+    uint32_t viewSize = 0u;
     GSNativeMesh mesh;           // otherwise
+    bool isPacket() const { return view != nullptr || !packet.empty(); }
+    const uint8_t *bytes() const { return view ? view : packet.data(); }
+    uint32_t size() const { return view ? viewSize : static_cast<uint32_t>(packet.size()); }
     // The mesh's draw state, from the converter's own copy of the GS's draw
     // registers (`stated`; drawStateOwned()).
     GSDrawState state{};
     bool stated = false;
 };
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why);
+// The same over packets in place (no copy of them first).
+struct Span2D
+{
+    const uint8_t *data;
+    uint32_t size;
+};
+bool build2D(const Span2D *packets, size_t count, std::vector<Piece2D> &out, std::string &why);
 // A packet going to the GS as it is, not through build2D, while a
 // conversion is on: the state build2D mirrors (PRIM, the vertex registers,
 // PRMODECONT, PRMODE) follows it, as the GS's does.

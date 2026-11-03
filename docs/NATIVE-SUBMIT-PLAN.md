@@ -1,6 +1,6 @@
 # Native submit path: plan
 
-Status: in progress (2026-11-02). Phase 1 in (held uploads, kept images, lazy write-backs); phase 3's same-state path for meshes; phase 2 (the converter owns the draw state).
+Status: code in (2026-11-02), unmeasured and unverified on screen: phase 1 (held uploads, kept images, lazy write-backs), phase 2 (the converter owns the draw state), phase 3's same-state path for meshes, phase 4 (packets converted in place, uploads as views, decoded once). Not done: phase 3's hazards by name instead of page sets.
 
 ## Why
 

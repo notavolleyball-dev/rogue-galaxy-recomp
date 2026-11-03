@@ -2599,6 +2599,24 @@ void observe2D(const uint8_t *data, uint32_t size)
 
 bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece2D> &out, std::string &why)
 {
+    thread_local std::vector<Span2D> spans;
+    spans.clear();
+    for (const std::vector<uint8_t> &packet : packets)
+        spans.push_back({packet.data(), static_cast<uint32_t>(packet.size())});
+    return build2D(spans.data(), spans.size(), out, why);
+}
+
+bool build2D(const Span2D *packets, size_t count, std::vector<Piece2D> &out, std::string &why)
+{
+    // The last call's meshes' vertex storage, for this call's meshes: a
+    // packet's meshes would otherwise allocate and free it each time.
+    thread_local std::vector<std::vector<GSNativeMesh::Vertex>> spare;
+    for (Piece2D &old : out)
+        if (old.mesh.vertices.capacity() != 0u && spare.size() < 64u)
+        {
+            old.mesh.vertices.clear();
+            spare.push_back(std::move(old.mesh.vertices));
+        }
     out.clear();
     Carried &carried = t_carried;
     rg::gif::GifState &state = carried.state;
@@ -2647,6 +2665,11 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
             out.push_back(std::move(mesh));
         }
         mesh = Piece2D{};
+        if (!spare.empty())
+        {
+            mesh.mesh.vertices = std::move(spare.back());
+            spare.pop_back();
+        }
         meshPrim = 0xFFFFu;
     };
     const auto flushWrites = [&] {
@@ -2744,15 +2767,15 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
     // up to its EOP, and the GS reads on past an EOP (eachPacket): every one
     // of them, not only the first.
     thread_local std::vector<std::pair<uint32_t, uint32_t>> pieces;
-    for (const std::vector<uint8_t> &packet : packets)
+    for (size_t index = 0; index < count; ++index)
     {
+        const Span2D &packet = packets[index];
         pieces.clear();
-        eachPacket(packet.data(), static_cast<uint32_t>(packet.size()),
-                   [&](uint32_t at, uint32_t size) { pieces.emplace_back(at, size); });
+        eachPacket(packet.data, packet.size, [&](uint32_t at, uint32_t size) { pieces.emplace_back(at, size); });
         for (const auto &[at, size] : pieces)
         {
             events.clear();
-            const rg::gif::GifDecodeStats stats = rg::gif::decodeGifPacket(packet.data() + at, size, state, events);
+            const rg::gif::GifDecodeStats stats = rg::gif::decodeGifPacket(packet.data + at, size, state, events);
             // A tag cut at the packet's end (an IMAGE tag whose data follows
             // through the image callback, a PACKED tag a DIRECT cuts short) is
             // what GS::processGIFPacket takes as far as it goes and then drops:
@@ -2768,7 +2791,8 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
                         if (e.kind == rg::gif::GifEvent::Kind::Register)
                             seen(g_mirror, e.reg, e.value);
                 Piece2D piece;
-                piece.packet.assign(packet.begin() + at, packet.begin() + at + size);
+                piece.view = packet.data + at;
+                piece.viewSize = size;
                 out.push_back(std::move(piece));
                 continue;
             }
