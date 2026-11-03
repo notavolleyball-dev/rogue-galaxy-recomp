@@ -22,6 +22,8 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <unordered_map>
 #include <map>
 #include <memory>
 #include <string>
@@ -100,6 +102,8 @@ struct GsTextureCacheStats {
     uint64_t uploadsUnnamed = 0u;
     uint64_t uploadsSelfNamed = 0u; // no record: named by their own format and size
     uint64_t uploadsPatched = 0u;   // into part of a named image
+    uint64_t uploadsKept = 0u;      // held uploads of an image already kept: no bytes handled
+    uint64_t uploadsAdopted = 0u;   // held uploads of a new image: its buffer taken as it came
     uint64_t namedCopies = 0u;      // local copies made between named images
     uint64_t resolvesBypassed = 0u; // texture reads of targets the bypass did not resolve
     uint64_t unnamedUploadBytes = 0u;
@@ -164,6 +168,10 @@ public:
     // frames) is made between their bytes, and its destination stays named.
     void noteTransferStart(const GSTransferCommand &command);
     void noteUploadData(const uint8_t *data, uint32_t sizeBytes);
+    // A named upload held before the GS queue (gs_named_textures.h, Held),
+    // just after noteUpload: true when it was taken whole, and no payload
+    // need follow (Rogue Galaxy: added).
+    bool noteHeldUpload(namedtextures::Held &held);
     // After a payload of `command` landed in local memory, pixels
     // [copiedBefore, copiedAfter) of its rectangle: the host writes' memory
     // takes the same texels from local memory, for the formats copyRect
@@ -386,9 +394,29 @@ private:
     // Textures by name (Rogue Galaxy: added; gfx/gs/gs_named_textures.h):
     // the bytes of each named upload, by its base, while no other write
     // touched its blocks.
+    // A named image's bytes, shared by the images of one content (the kept
+    // images below); a change makes them its own first.
+    class ImageBytes {
+    public:
+        const uint8_t *data() const { return m_bytes ? m_bytes->data() : nullptr; }
+        size_t size() const { return m_bytes ? m_bytes->size() : 0u; }
+        bool empty() const { return size() == 0u; }
+        uint8_t operator[](size_t i) const { return (*m_bytes)[i]; }
+        std::vector<uint8_t> &edit() {
+            if (!m_bytes)
+                m_bytes = std::make_shared<std::vector<uint8_t>>();
+            else if (m_bytes.use_count() > 1)
+                m_bytes = std::make_shared<std::vector<uint8_t>>(*m_bytes);
+            return *m_bytes;
+        }
+        void adopt(std::shared_ptr<std::vector<uint8_t>> bytes) { m_bytes = std::move(bytes); }
+        void assign(std::vector<uint8_t> &&bytes) { m_bytes = std::make_shared<std::vector<uint8_t>>(std::move(bytes)); }
+    private:
+        std::shared_ptr<std::vector<uint8_t>> m_bytes;
+    };
     struct NamedImage {
         namedtextures::Upload upload;
-        std::vector<uint8_t> bytes; // the texture's texels, linear, in its own format
+        ImageBytes bytes; // the texture's texels, linear, in its own format
         GsBlockSet blocks;
         bool swizzled = false;
         // Under the bypass a named upload's bytes skip the host writes'
@@ -420,6 +448,27 @@ private:
     static uint64_t contentHashOf(const NamedImage &image);
     void writeNamedToShadow(NamedImage &image);
     void settleShadow(const GsBlockSet &blocks);
+    // Under the bypass, owed images dropped with blocks nothing replaced
+    // whole: their bytes reach m_shadow only when a read needs them, in age
+    // order (Rogue Galaxy: added; written at every drop they were most of
+    // the uploads' remaining cost once held uploads skip the copy, for 46
+    // reads on the walk). Each keeps the blocks of it nothing has written
+    // since (`live`); by first block and age (for a range's lookup), and by
+    // age alone. DQ8_GFX_EAGER_WRITE_BACKS=1 writes them at the drop.
+    struct Grave {
+        NamedImage image;
+        GsBlockSet live;
+    };
+    std::map<std::pair<uint32_t, uint64_t>, Grave> m_graves;
+    std::map<uint64_t, uint32_t> m_graveAges; // age -> first block
+    uint64_t m_graveAge = 0u;
+    uint32_t m_graveSpan = 0u; // the longest grave's blocks, for the lookup's lower bound
+    bool m_dropFromDraw = false; // dropNamed is a draw's: its blocks are its target's
+    template <typename Visit> void eachGrave(uint32_t first, uint32_t last, Visit visit);
+    bool buryNamed(NamedImage &image);
+    void flushGraves(const GsBlockSet &blocks, uint32_t first, uint32_t last);
+    void writeGrave(Grave &grave);
+    void writeShadowBytes(NamedImage &image);
     bool namedServes(const GsTextureKey &key);
     bool m_namedSkipShadow = false;    // this upload's bytes go to m_shadow only if needed
     GSTransferCommand m_namedSkipCommand{};
@@ -431,6 +480,15 @@ public:
     bool lastCopyNamed() const { return m_namedCopyKeep != ~0u; } // the transfer begun was a copy between named images
     std::string describeNamed(uint32_t base) const; // the named image at a base, for diagnostics
 private: // expandNamed builds the palette even for an identity // a named image's span meets these blocks
+    // Images by content (Rogue Galaxy: added): every image a held upload
+    // brought, by its bytes' hash and how it was named. The game sends the
+    // same few hundred again and again, often into other places (texture
+    // groups take turns in the same memory); another upload of one becomes
+    // that image again, sharing its bytes (already linear), with no copy,
+    // no hash and no unswizzle. DQ8_GFX_NO_KEPT_IMAGES=1 adopts every one.
+    std::unordered_map<uint64_t, NamedImage> m_kept;
+    size_t m_keptBytes = 0u;
+    void storeNamed(NamedImage &&image);
     void beginNamedUpload(const GSTransferCommand &command);
     void noteUnnamedUpload(const GSTransferCommand &command);
     void finishNamedUpload();

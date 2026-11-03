@@ -1106,6 +1106,18 @@ still leaves: page ownership on draws (it is how a target is found by
 address), local-to-local copies the named images do not cover, and the
 GS frontend's register file. Builds; unverified on screen.
 
+**Native submit, phase 1: held uploads and kept images (2026-11-02,
+`docs/NATIVE-SUBMIT-PLAN.md`).** Named uploads are held before the GS queue
+(`src/held_uploads.cpp`, `RG_HELD_UPLOADS`), hashed on the feeding thread,
+and handed to the backend as a shared buffer. The backend keeps images by
+content (`DQ8_GFX_NO_KEPT_IMAGES`): another upload of one shares its bytes,
+with no copy, hash or unswizzle (measured on the walk: 2.33M kept, 381
+adopted; queue transfer bytes 250 MB → 64 MB per 60 frames). Owed images
+dropped are buried and written to the host writes' memory only when read
+(`DQ8_GFX_EAGER_WRITE_BACKS`). Keyed by content, not by
+`NameTableNodeSetImage`'s generation: hashing on the feeding thread costs
+~4% of it and needs no proof that nothing else writes texture RAM.
+
 Delete local memory, page ownership, imports and patches, snapshots,
 destination copies, round trips and readbacks from the backend, plus the
 `DQ8_GFX_*` switches that exist only for them. Keep `RG_RENDER=gs` for one

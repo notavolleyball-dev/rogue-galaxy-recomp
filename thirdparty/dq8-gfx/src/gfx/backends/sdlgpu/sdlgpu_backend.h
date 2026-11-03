@@ -321,6 +321,7 @@ public:
     void resetStats();
 
 private:
+    void beginTransfer(const GSTransferCommand &command);
     friend std::unique_ptr<SdlGpuBackend> createSdlGpuBackend(std::string &error);
 
     struct Impl;

@@ -302,7 +302,7 @@ void GsTextureCache::noteUpload(const GSTransferCommand &command) {
 void GsTextureCache::noteUploadData(const uint8_t *data, uint32_t sizeBytes) {
     if (m_namedOpen && data && sizeBytes) {
         const size_t room = m_namedExpected - m_namedPending.bytes.size();
-        m_namedPending.bytes.insert(m_namedPending.bytes.end(), data, data + std::min<size_t>(room, sizeBytes));
+        m_namedPending.bytes.edit().insert(m_namedPending.bytes.edit().end(), data, data + std::min<size_t>(room, sizeBytes));
         if (m_namedPending.bytes.size() >= m_namedExpected)
             finishNamedUpload();
     }
@@ -539,7 +539,9 @@ void GsTextureCache::noteDrawnBlocks(uint32_t base, uint32_t bufferWidth, uint32
     if (!m_named.empty() && !region.empty() && namedWithin(base, reach == base ? base : reach - 1u)) {
         GsBlockSet drawn;
         gsMarkBlocks(drawn, base, std::max<uint32_t>(bufferWidth, 1u), psm, region.x1, region.y1);
+        m_dropFromDraw = true;
         dropNamed(drawn);
+        m_dropFromDraw = false;
     }
     if (!m_tracking || region.empty() || gsNativeBypass())
         return;
@@ -1821,7 +1823,7 @@ bool blockSpan(const GsBlockSet &blocks, uint32_t &first, uint32_t &last) {
 } // namespace
 
 void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
-    if (m_named.empty())
+    if (m_named.empty() && m_graves.empty())
         return;
     // Each image's span first: most writes (draws, uploads elsewhere) miss
     // every image without a look at their 16384-bit sets.
@@ -1830,6 +1832,39 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
         return;
     GsBlockSet covered;
     bool coveredMarked = false;
+    // What this write replaces whole is no grave's any more (a draw's
+    // blocks are its target's: nothing reads them from memory), and a grave
+    // with nothing left is gone.
+    if (!m_graves.empty()) {
+        const GsBlockSet *replaced = &blocks;
+        if (m_dropCoveredBy) {
+            const GSTransferCommand &c = *m_dropCoveredBy;
+            gsMarkCoveredBlocks(covered, c.bitbltbuf.dbp, std::max<uint32_t>(c.bitbltbuf.dbw, 1u),
+                                c.bitbltbuf.dpsm & 0x3fu, c.trxreg.rrw, c.trxreg.rrh, c.trxpos.dsax,
+                                c.trxpos.dsay);
+            coveredMarked = true;
+            replaced = &covered;
+        } else if (!m_dropFromDraw) {
+            replaced = nullptr; // a copy's or a canvas's partial write: kept as it is
+        }
+        if (replaced) {
+            thread_local std::vector<std::pair<uint32_t, uint64_t>> dead;
+            dead.clear();
+            eachGrave(first, last, [&](const std::pair<uint32_t, uint64_t> &key, Grave &grave) {
+                grave.live &= ~*replaced;
+                if (grave.live.none())
+                    dead.push_back(key);
+            });
+            for (const auto &key : dead) {
+                m_graves.erase(key);
+                m_graveAges.erase(key.second);
+                if (m_namedOwed)
+                    --m_namedOwed;
+            }
+        }
+    }
+    if (m_named.empty())
+        return;
     for (auto it = m_named.begin(); it != m_named.end();) {
         const NamedImage &image = it->second;
         if (it->first != keep && image.firstBlock <= last && first <= image.lastBlock &&
@@ -1843,9 +1878,10 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
                                         c.trxpos.dsay);
                     coveredMarked = true;
                 }
-                if (!m_dropCoveredBy || (image.blocks & ~covered).any())
-                    writeNamedToShadow(it->second);
-                else
+                if (!m_dropCoveredBy || (image.blocks & ~covered).any()) {
+                    if (!buryNamed(it->second))
+                        writeNamedToShadow(it->second);
+                } else
                     --m_namedOwed;
             }
             it = m_named.erase(it);
@@ -1858,7 +1894,95 @@ void GsTextureCache::dropNamed(const GsBlockSet &blocks, uint32_t keep) {
 // An owed named image into the host writes' memory, as its upload would
 // have written it: the upload as sent, or (pre-swizzled art made linear) the
 // same bytes as a T8 image, which lands in the same place.
+template <typename Visit> void GsTextureCache::eachGrave(uint32_t first, uint32_t last, Visit visit) {
+    const uint32_t from = first > m_graveSpan ? first - m_graveSpan : 0u;
+    for (auto it = m_graves.lower_bound({from, 0u}); it != m_graves.end() && it->first.first <= last; ++it)
+        if (first <= it->second.image.lastBlock)
+            visit(it->first, it->second);
+}
+
+// Under the bypass an owed image dropped is buried, not written (its bytes
+// are shared: no copy); false when it is written now instead.
+bool GsTextureCache::buryNamed(NamedImage &image) {
+    static const bool eager = std::getenv("DQ8_GFX_EAGER_WRITE_BACKS") != nullptr;
+    if (eager || !gsNativeBypass() || !image.owedToShadow)
+        return false;
+    const uint64_t age = ++m_graveAge;
+    const uint32_t first = image.firstBlock;
+    m_graveSpan = std::max(m_graveSpan, image.lastBlock - image.firstBlock);
+    Grave grave;
+    grave.live = image.blocks;
+    grave.image = std::move(image);
+    m_graves.emplace(std::make_pair(first, age), std::move(grave));
+    m_graveAges.emplace(age, first);
+    // A bound on what waits: the oldest has nothing older to wait for.
+    constexpr size_t kMaxGraves = 1024u;
+    if (m_graves.size() > kMaxGraves) {
+        const auto oldest = m_graveAges.begin();
+        const auto key = std::make_pair(oldest->second, oldest->first);
+        writeGrave(m_graves.at(key));
+        m_graves.erase(key);
+        m_graveAges.erase(oldest);
+    }
+    return true;
+}
+
+// A grave's bytes into the host writes' memory, its live blocks only: the
+// others hold what was written after it.
+void GsTextureCache::writeGrave(Grave &grave) {
+    const GsBlockSet stale = grave.image.blocks & ~grave.live;
+    uint8_t *memory = m_shadow.data();
+    thread_local std::vector<std::pair<uint32_t, std::array<uint8_t, 256>>> saved;
+    saved.clear();
+    if (memory && stale.any()) {
+        for (uint32_t block = grave.image.firstBlock; block <= grave.image.lastBlock; ++block)
+            if (stale.test(block)) {
+                saved.emplace_back();
+                saved.back().first = block;
+                std::memcpy(saved.back().second.data(), memory + block * 256u, 256u);
+            }
+    }
+    writeShadowBytes(grave.image);
+    for (const auto &[block, bytes] : saved)
+        std::memcpy(memory + block * 256u, bytes.data(), 256u);
+}
+
+// The graves a write of these blocks has to follow, oldest first: those
+// whose live blocks it overlaps, and those overlapping any of those.
+void GsTextureCache::flushGraves(const GsBlockSet &blocks, uint32_t first, uint32_t last) {
+    if (m_graves.empty())
+        return;
+    GsBlockSet reach = blocks;
+    thread_local std::vector<std::pair<uint32_t, uint64_t>> picked;
+    picked.clear();
+    for (bool grew = true; grew;) {
+        grew = false;
+        eachGrave(first, last, [&](const std::pair<uint32_t, uint64_t> &key, Grave &grave) {
+            if (std::find(picked.begin(), picked.end(), key) != picked.end() || (grave.live & reach).none())
+                return;
+            picked.push_back(key);
+            reach |= grave.image.blocks;
+            first = std::min(first, grave.image.firstBlock);
+            last = std::max(last, grave.image.lastBlock);
+            grew = true;
+        });
+    }
+    std::sort(picked.begin(), picked.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
+    for (const auto &key : picked) {
+        writeGrave(m_graves.at(key));
+        m_graves.erase(key);
+        m_graveAges.erase(key.second);
+    }
+}
+
 void GsTextureCache::writeNamedToShadow(NamedImage &image) {
+    if (!image.owedToShadow)
+        return;
+    flushGraves(image.blocks, image.firstBlock, image.lastBlock);
+    writeShadowBytes(image);
+}
+
+void GsTextureCache::writeShadowBytes(NamedImage &image) {
     if (!image.owedToShadow)
         return;
     image.owedToShadow = false;
@@ -1892,6 +2016,7 @@ void GsTextureCache::settleShadow(const GsBlockSet &blocks) {
     uint32_t first = 0u, last = 0u;
     if (!blockSpan(blocks, first, last))
         return;
+    flushGraves(blocks, first, last);
     for (auto &[base, image] : m_named) {
         (void)base;
         if (image.owedToShadow && image.firstBlock <= last && first <= image.lastBlock && (image.blocks & blocks).any())
@@ -1934,7 +2059,7 @@ GsTextureCache::NamedImage *GsTextureCache::canvasFor(uint32_t dbp, uint32_t dbw
     NamedImage &canvas = found->second;
     if (canvas.upload.textureHeight < height) {
         canvas.upload.height = canvas.upload.textureHeight = height;
-        canvas.bytes.resize(static_cast<size_t>(width) * height * 4u, 0u);
+        canvas.bytes.edit().resize(static_cast<size_t>(width) * height * 4u, 0u);
         canvas.blocks.reset();
         gsMarkBlocks(canvas.blocks, dbp, dbw, GS_PSM_CT32, width, height);
         blockSpan(canvas.blocks, canvas.firstBlock, canvas.lastBlock);
@@ -2072,7 +2197,7 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
                 m_namedPatchFormat = dpsm;
                 m_namedPatching = true;
                 m_namedExpected = (static_cast<size_t>(w) * h * bits + 7u) / 8u;
-                m_namedPending.bytes.reserve(m_namedExpected);
+                m_namedPending.bytes.edit().reserve(m_namedExpected);
                 m_namedOpen = true;
                 ++m_stats.uploadsPatched;
                 return;
@@ -2102,7 +2227,7 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
         m_namedPatchFormat = dpsm;
         m_namedPatching = true;
         m_namedExpected = (static_cast<size_t>(w) * h * bits + 7u) / 8u;
-        m_namedPending.bytes.reserve(m_namedExpected);
+        m_namedPending.bytes.edit().reserve(m_namedExpected);
         m_namedOpen = true;
         ++m_stats.uploadsPatched;
         return;
@@ -2133,7 +2258,7 @@ void GsTextureCache::beginNamedUpload(const GSTransferCommand &command) {
     m_namedExpected = (static_cast<size_t>(upload.width) * upload.height * namedBits(upload.dpsm) + 7u) / 8u;
     if (m_namedExpected == 0u)
         return;
-    m_namedPending.bytes.reserve(m_namedExpected);
+    m_namedPending.bytes.edit().reserve(m_namedExpected);
     gsMarkBlocks(m_namedPending.blocks, upload.dbp, dbw, dpsm, upload.width, upload.height);
     m_namedOpen = true;
     // Under the bypass the bytes go to the named image alone; m_shadow gets
@@ -2212,7 +2337,7 @@ void GsTextureCache::finishNamedUpload() {
                     const size_t at = ((static_cast<size_t>(m_namedPatch[1]) + row) * stride + m_namedPatch[0] + col) * 4u + 3u;
                     if (at >= target.bytes.size())
                         continue;
-                    uint8_t &top = target.bytes[at];
+                    uint8_t &top = target.bytes.edit()[at];
                     if (patchFormat == GS_PSM_T8H)
                         top = image.bytes[i];
                     else {
@@ -2232,7 +2357,7 @@ void GsTextureCache::finishNamedUpload() {
                               static_cast<size_t>(m_namedPatch[0]) * bits / 8u;
             if (to + rowBytes > target.bytes.size())
                 break;
-            std::memcpy(target.bytes.data() + to, image.bytes.data() + row * rowBytes, rowBytes);
+            std::memcpy(target.bytes.edit().data() + to, image.bytes.data() + row * rowBytes, rowBytes);
         }
         target.contentHash = 0u;
         return;
@@ -2257,50 +2382,99 @@ void GsTextureCache::finishNamedUpload() {
     }
     if (!blockSpan(image.blocks, image.firstBlock, image.lastBlock))
         return unkept();
+    storeNamed(std::move(image));
+}
+
+void GsTextureCache::storeNamed(NamedImage &&image) {
+    const uint32_t dbp = image.upload.dbp;
     if (m_namedSkipShadow) {
         image.owedToShadow = true;
         ++m_namedOwed;
     }
-    const auto previous = m_named.find(u.dbp);
+    const auto previous = m_named.find(dbp);
     if (previous != m_named.end() && previous->second.owedToShadow) {
         // Replaced in place: its blocks not this image's keep its bytes.
-        if ((previous->second.blocks & ~image.blocks).any())
-            writeNamedToShadow(previous->second);
-        else
+        if ((previous->second.blocks & ~image.blocks).any()) {
+            if (!buryNamed(previous->second))
+                writeNamedToShadow(previous->second);
+        } else
             --m_namedOwed;
     }
-    m_named[u.dbp] = std::move(image);
+    m_named[dbp] = std::move(image);
 }
 
 namespace {
-// Eight bytes a step, four lanes (one serial chain per texel was most of a
-// named texture's identity check).
-uint64_t hashBytes(const std::vector<uint8_t> &bytes) {
-    constexpr uint64_t k = 0x9E3779B97F4A7C15ull;
-    uint64_t lane[4] = {k, k ^ 1u, k ^ 2u, k ^ 3u};
-    const uint8_t *at = bytes.data();
-    size_t left = bytes.size();
-    while (left >= 32u) {
-        for (int i = 0; i < 4; ++i) {
-            uint64_t word;
-            std::memcpy(&word, at + i * 8, 8);
-            lane[i] = (lane[i] ^ word) * k;
-            lane[i] ^= lane[i] >> 29;
+// How a kept image was named, with its bytes' hash: the same bytes named
+// otherwise (another node, format or shape) are another image.
+uint64_t keptKey(const namedtextures::Upload &u, uint64_t hash) {
+    uint64_t key = hashStep(hashStep(hash, u.node), u.dbw | (u.dpsm << 8u) | (u.psm << 16u) |
+                                                         (u.textureBufferWidth << 24u) |
+                                                         (u.preSwizzled ? 1ull << 40u : 0u) |
+                                                         (u.palette ? 1ull << 41u : 0u));
+    key = hashStep(key, u.width | (static_cast<uint64_t>(u.height) << 16u) |
+                            (static_cast<uint64_t>(u.textureWidth) << 32u) |
+                            (static_cast<uint64_t>(u.textureHeight) << 48u));
+    return key;
+}
+} // namespace
+
+bool GsTextureCache::noteHeldUpload(namedtextures::Held &held) {
+    // Only a whole named upload whose bytes the host writes' memory does not
+    // want now (the bypass owes them); anything else takes its payload.
+    if (!m_namedOpen || m_namedPatching || !held.bytes || held.bytes->size() != m_namedExpected ||
+        (m_tracking && !m_namedSkipShadow))
+        return false;
+    static const bool keepOff = std::getenv("DQ8_GFX_NO_KEPT_IMAGES") != nullptr;
+    const uint64_t key = keptKey(m_namedPending.upload, held.hash);
+    if (!keepOff) {
+        if (auto kept = m_kept.find(key); kept != m_kept.end()) {
+            NamedImage &source = kept->second;
+            linearize(source); // once, for every later upload of it
+            NamedImage image;
+            image.upload = m_namedPending.upload;
+            image.blocks = m_namedPending.blocks;
+            image.bytes = source.bytes;
+            image.swizzled = source.swizzled;
+            image.contentHash = source.contentHash;
+            m_namedOpen = false;
+            m_namedPending = {};
+            if (!blockSpan(image.blocks, image.firstBlock, image.lastBlock))
+                return true; // no blocks: nothing to name, and nothing owed
+            storeNamed(std::move(image));
+            ++m_stats.uploadsKept;
+            return true;
         }
-        at += 32;
-        left -= 32u;
     }
-    uint64_t tail = 0u;
-    std::memcpy(&tail, at, left);
-    uint64_t h = hashStep(hashStep(hashStep(hashStep(lane[0], lane[1]), lane[2]), lane[3]), tail);
-    return hashStep(h, bytes.size()) | 1u; // never 0: 0 is "not made yet"
+    m_namedPending.bytes.adopt(std::move(held.bytes));
+    m_namedPending.contentHash = held.hash;
+    const uint32_t dbp = m_namedPending.upload.dbp;
+    finishNamedUpload();
+    ++m_stats.uploadsAdopted;
+    if (keepOff)
+        return true;
+    const auto stored = m_named.find(dbp);
+    if (stored == m_named.end() || stored->second.contentHash != held.hash)
+        return true; // not kept as a named image (finishNamedUpload's reasons)
+    // A budget well over the walk's few hundred images (~4 MB); past it the
+    // kept ones start again.
+    constexpr size_t kKeptBudget = 64u * 1024u * 1024u;
+    if (m_keptBytes + stored->second.bytes.size() > kKeptBudget) {
+        m_kept.clear();
+        m_keptBytes = 0u;
+    }
+    NamedImage &kept = m_kept[key];
+    kept.upload = stored->second.upload;
+    kept.bytes = stored->second.bytes;
+    kept.swizzled = stored->second.swizzled;
+    kept.contentHash = stored->second.contentHash;
+    m_keptBytes += kept.bytes.size();
+    return true;
 }
 
-} // namespace
 
 uint64_t GsTextureCache::contentHashOf(const NamedImage &image) {
     if (image.contentHash == 0u)
-        image.contentHash = hashBytes(image.bytes);
+        image.contentHash = namedtextures::imageHash(image.bytes.data(), image.bytes.size());
     return image.contentHash;
 }
 
@@ -2318,7 +2492,7 @@ void GsTextureCache::linearize(NamedImage &image) {
     const size_t count = map->size();
     for (size_t i = 0; i < count; ++i)
         to[i] = from[index[i]];
-    image.bytes = std::move(linear); // the same picture: contentHash stands
+    image.bytes.assign(std::move(linear)); // the same picture: contentHash stands
 }
 
 bool GsTextureCache::expandNamed(const GsTextureKey &key, const GsRegion &region, bool hashOnly, uint64_t &hash) {
@@ -2726,8 +2900,8 @@ void GsTextureCache::noteTransferStart(const GSTransferCommand &command) {
     linearize(to->second);
     // Through a copy of the source rows, so an overlapping copy within one
     // image reads what was there before.
-    const std::vector<uint8_t> source = from->second.bytes;
-    std::vector<uint8_t> &dest = to->second.bytes;
+    const std::vector<uint8_t> source(from->second.bytes.data(), from->second.bytes.data() + from->second.bytes.size());
+    std::vector<uint8_t> &dest = to->second.bytes.edit();
     to->second.contentHash = 0u; // written below
     const uint32_t sw = from->second.upload.textureWidth, dw = to->second.upload.textureWidth;
     const auto get = [&](uint32_t x, uint32_t y) -> uint32_t {

@@ -15,6 +15,7 @@
 #include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
+#include "held_uploads.h"
 #include "battle_rates.h"
 #include "button_glyphs.h"
 #include "update_check.h"
@@ -916,8 +917,8 @@ void Setup::install(PS2Runtime &runtime)
         // about 4 MB of textures a frame: at the framework's 4 MiB the VIF1
         // thread spent a sixth of its time waiting for the worker to drain.
         constexpr size_t kQueueBytes = 16u * 1024u * 1024u;
-        backend = std::make_unique<GSThreadedBackend>(debug::timeGsBackend(std::move(backend), "worker"),
-                                                      kQueueBytes);
+        backend = holdNamedUploads(std::make_unique<GSThreadedBackend>(
+            debug::timeGsBackend(std::move(backend), "worker"), kQueueBytes));
     }
     backend = paceOnFlips(serveDepthReadsLocally(
         debug::censusGsBackend(debug::timeGsBackend(std::move(backend), "frontend"))));

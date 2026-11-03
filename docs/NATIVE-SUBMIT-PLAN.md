@@ -1,6 +1,6 @@
 # Native submit path: plan
 
-Status: proposed (2026-11-02), not started. Phase 1 first.
+Status: in progress (2026-11-02). Phase 1 in (held uploads, kept images, lazy write-backs).
 
 ## Why
 

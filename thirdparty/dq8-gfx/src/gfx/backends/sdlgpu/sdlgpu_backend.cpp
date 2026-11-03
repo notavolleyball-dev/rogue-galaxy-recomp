@@ -3303,6 +3303,11 @@ struct SdlGpuBackend::Impl {
     // the full path.
     bool bypassingUpload = false;
     GsPageSet bypassPages;
+    // The transfers BeginTransfer was sent, and the held upload the current
+    // one is (null when it is not one) and whether it was taken.
+    uint64_t transfersSent = 0u;
+    namedtextures::Held *held = nullptr;
+    bool heldTaken = false;
     bool bypassUpload(const GSTransferCommand &command) {
         if (command.direction != 0u || !textures || !gsNativeBypass())
             return false;
@@ -3332,6 +3337,8 @@ struct SdlGpuBackend::Impl {
         }
         ++stats.uploadsBypassed;
         textures->noteUpload(command);
+        if (held)
+            heldTaken = textures->noteHeldUpload(*held);
         textures->invalidate(pages, GsTextureCache::InvalidationSource::HostWrite);
         transferCommand = command;
         transferPagesValid = false;
@@ -5300,7 +5307,7 @@ struct SdlGpuBackend::Impl {
             const GsTextureCacheStats &t = textures->stats();
             std::fprintf(stderr,
                          "[native-memory] expands named %llu (on the GPU %llu), not named: no name %llu, shape %llu, palette %llu | "
-                         "uploads named %llu, self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
+                         "uploads named %llu (held: kept %llu, adopted %llu), self-named %llu, patched %llu, unnamed %llu (%llu KB) | records %llu queued, %llu dropped | "
                          "from targets on the GPU %llu, local-memory reads %llu | copies %llu (%llu between named images), host reads %llu (%llu served from targets) | bypass: uploads %llu, onto targets %llu, resolves skipped %llu | memory uses: %s\n",
                          static_cast<unsigned long long>(t.namedExpands),
                          static_cast<unsigned long long>(t.namedOnGpu),
@@ -5308,6 +5315,8 @@ struct SdlGpuBackend::Impl {
                          static_cast<unsigned long long>(t.namedMissShape),
                          static_cast<unsigned long long>(t.namedMissPalette),
                          static_cast<unsigned long long>(t.uploadsNamed),
+                         static_cast<unsigned long long>(t.uploadsKept),
+                         static_cast<unsigned long long>(t.uploadsAdopted),
                          static_cast<unsigned long long>(t.uploadsSelfNamed),
                          static_cast<unsigned long long>(t.uploadsPatched),
                          static_cast<unsigned long long>(t.uploadsUnnamed),
@@ -6753,6 +6762,21 @@ void SdlGpuBackend::SubmitMany(const GSPrimitiveBatch *const *batches, size_t co
 }
 
 void SdlGpuBackend::BeginTransfer(const GSTransferCommand &command) {
+    // A named upload held before the queue comes with its bytes beside it
+    // (gs_named_textures.h, Held): taken whole by bypassUpload, or sent on
+    // as its payload when that path does not take it.
+    namedtextures::Held held;
+    const uint64_t number = ++m_impl->transfersSent;
+    const bool isHeld = namedtextures::anyHeld() && namedtextures::takeHeld(number, held);
+    m_impl->held = isHeld ? &held : nullptr;
+    m_impl->heldTaken = false;
+    beginTransfer(command);
+    m_impl->held = nullptr;
+    if (isHeld && !m_impl->heldTaken && held.bytes && !held.bytes->empty())
+        UploadImage(held.bytes->data(), static_cast<uint32_t>(held.bytes->size()));
+}
+
+void SdlGpuBackend::beginTransfer(const GSTransferCommand &command) {
     std::lock_guard lock(m_impl->mutex);
     m_impl->last.valid = false;
     if (!m_impl->transfer)

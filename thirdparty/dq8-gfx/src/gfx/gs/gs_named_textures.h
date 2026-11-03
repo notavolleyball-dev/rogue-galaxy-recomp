@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 // Textures the game names as it uploads them (Rogue Galaxy: added).
 //
@@ -49,6 +52,27 @@ bool peek(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t he
 
 bool active();
 void reset();
+
+// Uploads held before the GS queue (Rogue Galaxy: added; the host's
+// held_uploads): a named upload's bytes, whole, and their hash, handed to
+// the backend beside the transfer rather than through the queue. `transfer`
+// counts the transfers the backend is sent (from 1), so the backend knows
+// which of its transfers is held: no payload follows that one.
+struct Held {
+    uint64_t transfer = 0;
+    uint64_t hash = 0; // imageHash of `bytes`
+    std::shared_ptr<std::vector<uint8_t>> bytes;
+};
+// The feeding thread, just before it sends the held transfer on.
+void hold(Held held);
+// The backend, at each transfer it is sent, numbered as the feeding thread
+// numbers them: the held upload it is, if it is one.
+bool takeHeld(uint64_t transfer, Held &out);
+bool anyHeld();
+
+// The identity of an image's bytes, never 0. Shared by the feeding thread
+// and the backend, so an image hashed on either side is the same image.
+uint64_t imageHash(const uint8_t *data, size_t size);
 
 struct Stats {
     uint64_t pushed = 0;
