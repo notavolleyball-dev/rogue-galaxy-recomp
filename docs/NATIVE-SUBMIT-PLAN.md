@@ -1,6 +1,6 @@
 # Native submit path: plan
 
-Status: code in (2026-11-02), unmeasured and unverified on screen: phase 1 (held uploads, kept images, lazy write-backs), phase 2 (the converter owns the draw state), phase 3's same-state path for meshes, phase 4 (packets converted in place, uploads as views, decoded once). Not done: phase 3's hazards by name instead of page sets.
+Status: see docs/NATIVE-SUBMIT-STATUS.md (2026-11-02): the phases below are not met as written, and the backend thread is not the bottleneck.
 
 ## Why
 
