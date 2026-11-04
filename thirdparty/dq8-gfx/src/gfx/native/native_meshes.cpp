@@ -374,10 +374,11 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         if (const auto it = m_cameras.find(d.camera); d.camera != 0u && it != m_cameras.end())
             camera = &it->second;
         const Material &m = d.material;
-        const bool depthUsed = m.depthTest != Compare::Always || m.depthWrite;
         // A 3D draw needs its camera; a window-space one only to map its
-        // depth, when it uses depth.
-        if (d.hasModel ? !camera : (depthUsed && !camera))
+        // depth when it tests it. One that only writes depth (test ALWAYS:
+        // the menus' text, with no 3D drawn yet) writes a constant without
+        // one.
+        if (d.hasModel ? !camera : (m.depthTest != Compare::Always && !camera))
         {
             ++m_meshCounts.noCamera;
             continue;
