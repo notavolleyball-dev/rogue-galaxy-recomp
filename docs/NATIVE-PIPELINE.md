@@ -290,6 +290,42 @@ build that compiles is not "done".
        re-declarations of the same base with another size. Step 4 has to
        decide whether a base with several shapes is one target or several.
 
+   **3b done (2026-11-04).** With the pipeline on, a named upload the
+   producer turned into a record no longer reaches the GS. The VIF1 thread's
+   `sendToGs` walks each packet's GIF tags (`withholdUploads`) and drops:
+   - the transfer's four registers (BITBLTBUF, TRXPOS, TRXREG, TRXDIR, host
+     to local). Every such A+D block in the game also sets another register,
+     so those go on in a block of their own.
+   - its IMAGE data, in the packet and in the image continuations after it.
+
+   It matches against the producer's own queue of uploads it made records
+   of (`takeProduced`, in the game's order, the VIF1 thread its only
+   consumer), not the backend's named queue. The VIF1 thread runs far
+   enough ahead of the GS worker that the shared queue's 64-entry lookahead
+   missed most uploads: the first try withheld 1,667 of about 22,900 a
+   window.
+
+   One walk (`pipeline-step3b`, per 60-frame window on the field):
+   - **Withheld:** 11,361 textures and 11,241 palettes (265 MB), with 0
+     uploads sent on for lack of a record. 22,842 A+D blocks were split.
+   - **G3:** `BeginTransfer` fell from about 21,700 to 540 and
+     `UploadImage` from about 66,000 to 600.
+   - **Same game:** draw counts at windows 30, 45 and 60 match 3a's
+     (302/304, 21,439/21,450, 13,552/13,584, the same jitter as earlier
+     runs). The native grid shows the same textures as 3a. No errors.
+   - **Not yet explained:**
+     - The 540 transfers left. The site is now split by direction
+       (host to local, local to host, local to local), so the next run
+       names them; local-to-local copies from the effects are likely.
+     - About 180 produced texture levels a window that were never taken.
+       They were built but not sent, or sent by a path other than
+       `sendToGs`.
+     - 540 image continuations that arrived as packet starts. They are
+       handled, but the shape is unconfirmed.
+   - **Readbacks:** G4 shows no StoreImage reads on this route. The fade
+     and menu captures, and the depth probe, were not reached, so they are
+     unchecked with withholding on.
+
 4. **VU1 meshes as mesh draws** with camera and model split. Pass: G5's mesh
    share at 0, and R1 and R3 near 100% of scene draws. **This is the step
    that unlocks motion vectors and upscaling.**

@@ -25,13 +25,15 @@ struct TextureLevel
     uint32_t width = 0;      // the texture's size in texels
     uint32_t height = 0;
     uint32_t bufferWidth = 0; // the texture's buffer width, in 64-pixel units
-    // 8-bit art sent as CT32 at half the width and height, laid out so the
-    // GS's memory reads it as T8: `transferWidth` by `transferHeight` CT32
-    // texels at `transferBufferWidth`.
+    // The transfer as the GS gets it: `transferWidth` by `transferHeight`
+    // texels of `transferPsm` at `transferBufferWidth`. 8-bit art can go as
+    // CT32 at half the width and height (`preSwizzled`), laid out so the
+    // GS's memory reads it as T8.
     bool preSwizzled = false;
     uint32_t transferWidth = 0;
     uint32_t transferHeight = 0;
     uint32_t transferBufferWidth = 0;
+    uint32_t transferPsm = 0;
     uint32_t cbp = 0; // the node's palette (TEX0's CBP), for an indexed texture
 };
 void texture(const TextureLevel &level);
@@ -50,6 +52,25 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
 uint32_t textureAt(uint32_t tbp, uint32_t psm);
 uint32_t paletteAt(uint32_t cbp);
 uint32_t targetAt(uint32_t base);
+
+// Step 3b's counts (the VIF1 thread, which withholds named uploads the
+// producer sent from the GS): one withheld (palette or texture), one sent on
+// and why, an A+D block whose other registers went on without the
+// transfer's, and image data that continued in a later packet.
+// The VIF1 thread, for each upload on its way to the GS: whether this
+// producer made a record of it (in the order the game built them; uploads
+// not seen within a short lookahead were never sent and are dropped). Taken
+// when it did: the upload is withheld, and `palette` says which it was.
+bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette);
+
+enum class Passed
+{
+    NotProduced, // no record of it here: not a named upload, or refused
+};
+void noteWithheld(bool palette, uint32_t imageBytes);
+void notePassed(Passed why);
+void noteSplit();
+void noteContinuedInPacket();
 
 // The scene target's id (the frame's).
 constexpr uint32_t kSceneTarget = 1u;

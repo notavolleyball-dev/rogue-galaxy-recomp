@@ -22,6 +22,10 @@
 
 #include "ThreadNaming.h"
 #include "runtime/gs/gs_boundary.h"
+#include "native_producer.h"
+#if defined(RG_HAS_SDLGPU)
+#include "gfx/native/native_pipeline.h"
+#endif
 #include "debug/draw_origins.h"
 #include "debug/vu1_replay.h"
 #include "native_effects.h"
@@ -1922,8 +1926,167 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
     sendToGs(gs, data, size);
 }
 
+#if defined(RG_HAS_SDLGPU)
+// docs/NATIVE-PIPELINE.md step 3b: with the native pipeline on, a named
+// upload the producer already sent as a record is withheld from the GS: the
+// A+D block that sets its transfer registers, and its IMAGE data, in the
+// packet and in the continuations after it (withheldContinuation). Anything
+// else in a packet goes on as it was: an A+D block's other registers go on
+// in a block of their own. A refused texture (no record) goes to the GS as
+// before.
+struct UploadWithhold
+{
+    uint32_t transferBytes = 0; // the withheld transfer's data still to come in IMAGE tags
+    uint32_t imageBytes = 0;    // an IMAGE tag's data still to come outside its packet
+    bool palette = false;
+};
+thread_local UploadWithhold t_upload;
+
+uint32_t transferBits(uint32_t psm)
+{
+    switch (psm & 0x3Fu)
+    {
+    case 0x00u: return 32u; // CT32
+    case 0x01u: return 24u; // CT24
+    case 0x02u: case 0x0Au: return 16u; // CT16, CT16S
+    case 0x13u: return 8u;  // T8
+    case 0x14u: return 4u;  // T4
+    default: return 0u;
+    }
+}
+
+// What of the packet goes to the GS, into `kept`; false: all of it, as it is.
+bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &kept)
+{
+    namespace producer = rg::nativeproducer;
+    if (!dq8::gfx::native::enabled())
+        return false;
+    kept.clear();
+    bool changed = false;
+    uint32_t pos = 0u;
+    if (t_upload.imageBytes > 0u)
+    {
+        // A withheld image's data at the packet's start, not behind a tag.
+        const uint32_t n = std::min(t_upload.imageBytes, size);
+        t_upload.imageBytes -= n;
+        pos = n;
+        changed = true;
+        producer::noteContinuedInPacket();
+    }
+    while (pos + 16u <= size)
+    {
+        uint64_t lo = 0u, hi = 0u;
+        std::memcpy(&lo, data + pos, 8u);
+        std::memcpy(&hi, data + pos + 8u, 8u);
+        const uint32_t nloop = static_cast<uint32_t>(lo & 0x7FFFu);
+        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 3u);
+        uint32_t nreg = static_cast<uint32_t>((lo >> 60) & 0xFu);
+        nreg = nreg ? nreg : 16u;
+        const uint64_t body = flg == 0u   ? uint64_t(nloop) * nreg * 16u
+                              : flg == 1u ? (uint64_t(nloop) * nreg + 1u) / 2u * 16u
+                                          : uint64_t(nloop) * 16u;
+        const uint32_t end = static_cast<uint32_t>(std::min<uint64_t>(size, pos + 16u + body));
+        bool drop = false;
+        if (flg == 0u && nreg == 1u && (hi & 0xFu) == 0xEu)
+        {
+            // A+D: a transfer's registers alone, its TRXDIR host to local?
+            uint64_t bitbltbuf = 0u, trxreg = 0u, trxdir = ~0ull;
+            uint32_t others = 0u;
+            for (uint32_t at = pos + 16u; at + 16u <= end; at += 16u)
+            {
+                uint64_t value = 0u;
+                std::memcpy(&value, data + at, 8u);
+                const uint8_t reg = data[at + 8u];
+                if (reg == 0x50u)
+                    bitbltbuf = value;
+                else if (reg == 0x52u)
+                    trxreg = value;
+                else if (reg == 0x53u)
+                    trxdir = value;
+                else if (reg != 0x51u)
+                    ++others;
+            }
+            if (trxdir != ~0ull)
+            {
+                t_upload.transferBytes = 0u;
+                const uint32_t dbp = static_cast<uint32_t>((bitbltbuf >> 32) & 0x3FFFu);
+                const uint32_t dbw = std::max<uint32_t>(static_cast<uint32_t>((bitbltbuf >> 48) & 0x3Fu), 1u);
+                const uint32_t dpsm = static_cast<uint32_t>((bitbltbuf >> 56) & 0x3Fu);
+                const uint32_t rrw = static_cast<uint32_t>(trxreg & 0xFFFu);
+                const uint32_t rrh = static_cast<uint32_t>((trxreg >> 32) & 0xFFFu);
+                const uint32_t bits = transferBits(dpsm);
+                bool palette = false;
+                if ((trxdir & 3u) != 0u || bits == 0u)
+                    ; // not an upload this takes
+                else if (!producer::takeProduced(dbp, dbw, dpsm, rrw, rrh, palette))
+                    producer::notePassed(producer::Passed::NotProduced);
+                else
+                {
+                    t_upload.transferBytes = (rrw * rrh * bits / 8u + 15u) & ~15u;
+                    t_upload.palette = palette;
+                    drop = true;
+                    if (others != 0u)
+                    {
+                        // The block's other registers, as a block of their own.
+                        const uint64_t tag = (lo & ~uint64_t(0x7FFFu)) | others;
+                        const size_t at = kept.size();
+                        kept.resize(at + 16u);
+                        std::memcpy(kept.data() + at, &tag, 8u);
+                        std::memcpy(kept.data() + at + 8u, &hi, 8u);
+                        for (uint32_t q = pos + 16u; q + 16u <= end; q += 16u)
+                            if (data[q + 8u] < 0x50u || data[q + 8u] > 0x53u)
+                                kept.insert(kept.end(), data + q, data + q + 16u);
+                        producer::noteSplit();
+                    }
+                }
+            }
+        }
+        else if (flg >= 2u && t_upload.transferBytes > 0u)
+        {
+            // The withheld transfer's data, as many IMAGE tags as it takes.
+            drop = true;
+            const uint32_t taken = static_cast<uint32_t>(std::min<uint64_t>(body, t_upload.transferBytes));
+            t_upload.transferBytes -= taken;
+            t_upload.imageBytes = static_cast<uint32_t>(pos + 16u + body - end);
+            if (t_upload.transferBytes == 0u)
+                producer::noteWithheld(t_upload.palette, taken);
+        }
+        if (drop)
+            changed = true;
+        else
+            kept.insert(kept.end(), data + pos, data + end);
+        pos = end;
+    }
+    if (changed && pos < size)
+        kept.insert(kept.end(), data + pos, data + size);
+    return changed;
+}
+
+// An image continuation's bytes that belong to a withheld upload; the rest,
+// if any, goes on.
+uint32_t withheldContinuation(uint32_t size)
+{
+    if (t_upload.imageBytes == 0u)
+        return 0u;
+    const uint32_t n = std::min(t_upload.imageBytes, size);
+    t_upload.imageBytes -= n;
+    return n;
+}
+#else
+bool withholdUploads(const uint8_t *, uint32_t, std::vector<uint8_t> &) { return false; }
+uint32_t withheldContinuation(uint32_t) { return 0u; }
+#endif
+
 void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
 {
+    thread_local std::vector<uint8_t> kept;
+    if (withholdUploads(data, size, kept))
+    {
+        if (kept.empty())
+            return;
+        data = kept.data();
+        size = static_cast<uint32_t>(kept.size());
+    }
     const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (g_stage && t_onVif1Thread)
     {
@@ -2197,6 +2360,14 @@ void install(PS2Runtime &runtime)
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+        // The rest of a named upload withheld from the GS (step 3b).
+        if (const uint32_t withheld = withheldContinuation(size))
+        {
+            data += withheld;
+            size -= withheld;
+            if (size == 0u)
+                return;
+        }
         if (composites() && t_onVif1Thread)
         {
             t_batch.gs = &gs;

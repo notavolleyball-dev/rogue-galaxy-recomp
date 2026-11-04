@@ -1779,6 +1779,7 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 level.transferWidth = upload.width;
                 level.transferHeight = upload.height;
                 level.transferBufferWidth = upload.dbw;
+                level.transferPsm = upload.dpsm;
                 level.cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFu);
                 rg::nativeproducer::texture(level);
             }

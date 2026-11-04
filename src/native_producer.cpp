@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -31,6 +32,8 @@ struct Counts
     uint64_t palettesNew = 0, palettesKnown = 0, palettesRefused = 0;
     uint64_t targetsNew = 0;
     uint64_t bytesHashed = 0;
+    uint64_t withheldTextures = 0, withheldPalettes = 0, withheldBytes = 0;
+    uint64_t passedNotProduced = 0, split = 0, continuedInPacket = 0;
 };
 
 struct State
@@ -45,6 +48,13 @@ struct State
     std::unordered_map<uint32_t, native::Id> paletteAt;                       // cbp -> id
     std::unordered_map<uint32_t, native::Id> targetAt;                        // base -> id
     std::map<uint32_t, native::Target> targets;                               // base -> as declared
+    // Uploads made into records, in the game's order, for takeProduced.
+    struct Produced
+    {
+        uint32_t dbp, dbw, dpsm, width, height;
+        bool palette;
+    };
+    std::deque<Produced> produced;
     Counts counts, reported;
     bool statsSet = false;
 };
@@ -75,9 +85,24 @@ std::string statsLine()
                        " | palettes new " + d(n.palettesNew, r.palettesNew) + ", known " +
                        d(n.palettesKnown, r.palettesKnown) + ", refused " + d(n.palettesRefused, r.palettesRefused) +
                        " | targets new " + d(n.targetsNew, r.targetsNew) + " | hashed " +
-                       std::to_string((n.bytesHashed - r.bytesHashed) >> 10) + " KiB";
+                       std::to_string((n.bytesHashed - r.bytesHashed) >> 10) + " KiB" +
+                       " | withheld from the GS: textures " + d(n.withheldTextures, r.withheldTextures) +
+                       ", palettes " + d(n.withheldPalettes, r.withheldPalettes) + " (" +
+                       std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
+                       d(n.passedNotProduced, r.passedNotProduced) + "; A+D blocks split (other registers kept) " +
+                       d(n.split, r.split) + "; image continued in a packet " +
+                       d(n.continuedInPacket, r.continuedInPacket);
     s.reported = s.counts;
     return line;
+}
+
+// Locked. An upload made into a record (or known as one), for takeProduced.
+void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool palette)
+{
+    // Never sent ones age out; a bound in case the VIF1 thread takes none.
+    if (s.produced.size() >= 8192u)
+        s.produced.pop_front();
+    s.produced.push_back({dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette});
 }
 
 // Locked. The renderer's evictions, forgotten here so they are sent again.
@@ -193,6 +218,7 @@ void texture(const TextureLevel &l)
     {
         ++s.counts.texturesKnown;
         s.textureAt[l.tbp] = {psm, known->second};
+        noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false);
         return;
     }
     auto out = std::make_shared<std::vector<uint8_t>>();
@@ -242,6 +268,7 @@ void texture(const TextureLevel &l)
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
     s.textureAt[l.tbp] = {psm, record.id};
+    noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false);
     ++s.counts.texturesNew;
     native::push(std::move(record));
 }
@@ -268,6 +295,7 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     {
         ++s.counts.palettesKnown;
         s.paletteAt[cbp] = known->second;
+        noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true);
         return;
     }
     auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
@@ -287,6 +315,7 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     s.paletteAt[cbp] = record.id;
+    noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true);
     ++s.counts.palettesNew;
     native::push(std::move(record));
 }
@@ -324,6 +353,58 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
     native::push(native::Target(record));
 }
 
+bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette)
+{
+    if (!native::enabled())
+        return false;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    constexpr size_t kLookahead = 64u;
+    const size_t limit = std::min(s.produced.size(), kLookahead);
+    for (size_t i = 0; i < limit; ++i)
+    {
+        const State::Produced &p = s.produced[i];
+        if (p.dbp == (dbp & 0x3FFFu) && p.dbw == std::max(dbw, 1u) && p.dpsm == (dpsm & 0x3Fu) && p.width == width &&
+            p.height == height)
+        {
+            palette = p.palette;
+            s.produced.erase(s.produced.begin(), s.produced.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+void noteWithheld(bool palette, uint32_t imageBytes)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++(palette ? s.counts.withheldPalettes : s.counts.withheldTextures);
+    s.counts.withheldBytes += imageBytes;
+}
+
+void notePassed(Passed why)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    (void)why;
+    ++s.counts.passedNotProduced;
+}
+
+void noteSplit()
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++s.counts.split;
+}
+
+void noteContinuedInPacket()
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++s.counts.continuedInPacket;
+}
+
 uint32_t textureAt(uint32_t tbp, uint32_t psm)
 {
     State &s = state();
@@ -356,6 +437,11 @@ namespace rg::nativeproducer
 void texture(const TextureLevel &) {}
 void palette(const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void target(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, int) {}
+void noteWithheld(bool, uint32_t) {}
+void notePassed(Passed) {}
+void noteSplit() {}
+bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { return false; }
+void noteContinuedInPacket() {}
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }
 uint32_t targetAt(uint32_t) { return 0u; }
