@@ -1714,6 +1714,18 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
             why |= 16u;
         }
     }
+    // Experiments for the missing text (docs/NATIVE-PIPELINE.md): 2D pieces
+    // without their alpha test (RG_NATIVE_2D_NO_ATEST=1), or without depth
+    // (RG_NATIVE_2D_NO_DEPTH=1).
+    static const bool noAlphaTest = std::getenv("RG_NATIVE_2D_NO_ATEST") != nullptr;
+    static const bool noDepth = std::getenv("RG_NATIVE_2D_NO_DEPTH") != nullptr;
+    if (noAlphaTest)
+        m.alphaTest = native::Compare::Always;
+    if (noDepth)
+    {
+        m.depthTest = native::Compare::Always;
+        m.depthWrite = false;
+    }
     if (m.depthTest != native::Compare::Always || m.depthWrite)
     {
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
