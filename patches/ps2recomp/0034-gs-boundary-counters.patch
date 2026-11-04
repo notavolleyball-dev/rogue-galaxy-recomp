@@ -1,0 +1,490 @@
+diff --git a/ps2xRuntime/include/runtime/gs/gs_boundary.h b/ps2xRuntime/include/runtime/gs/gs_boundary.h
+new file mode 100644
+index 0000000..17257d9
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/gs/gs_boundary.h
+@@ -0,0 +1,170 @@
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
++// The GS boundary (Rogue Galaxy: added; the game's docs/NATIVE-PIPELINE.md).
++//
++// Every way into the GS is a counting site: GIF packets into the frontend
++// (G1), register writes outside packets (G2), uploads into GS memory (G3),
++// reads of it (G4), GS-typed calls into the renderer (G5), the renderer's
++// GS memory model (G6), and the game-side converter decoding GS packets (T,
++// tracked, not gating). With the native renderer on, the renderer is off the
++// GS when every G count reads 0.
++//
++// A site counts per caller: the caller says who it is for the duration of
++// the call (FromScope); a site reached with no caller set counts under "?",
++// which is itself something to find. DQ8_GFX_WARN_GS=1 prints the first hit
++// of each site and caller. Counting is a relaxed atomic add; any thread.
++namespace gs_boundary
++{
++enum Kind : uint8_t
++{
++    kGif,
++    kRegister,
++    kUpload,
++    kRead,
++    kRenderer,
++    kModel,
++    kConverter,
++    kKindCount
++};
++inline constexpr const char *kKindNames[kKindCount] = {"G1 gif", "G2 register", "G3 upload", "G4 read",
++                                                        "G5 renderer", "G6 memory model", "T converter"};
++
++enum From : uint8_t
++{
++    kFromUnknown,
++    kFromPath1,     // the GIF arbiter, PATH1: a VU1 program's XGKICK
++    kFromPath2,     // PATH2: a VIF1 DIRECT
++    kFromPath3,     // PATH3: GIF DMA (the game's 2D packets, uploads)
++    kFromVif1,      // the game's VIF1 thread, sending itself
++    kFromGifStage,  // the game's GIF stage, sending what the VIF1 thread queued
++    kFromKernel,    // a kernel stub (sceGs*)
++    kFromGame,      // a game function hook
++    kFromCount
++};
++inline constexpr const char *kFromNames[kFromCount] = {"?",           "path1",     "path2",       "path3",
++                                                        "vif1 thread", "gif stage", "kernel stub", "game hook"};
++
++inline thread_local From t_from = kFromUnknown;
++
++// Who the calls made in this scope come from. The innermost scope wins: a
++// packet the VIF1 stage hands the GIF arbiter counts as its path.
++struct FromScope
++{
++    From saved;
++    explicit FromScope(From from) : saved(t_from) { t_from = from; }
++    ~FromScope() { t_from = saved; }
++    FromScope(const FromScope &) = delete;
++    FromScope &operator=(const FromScope &) = delete;
++};
++
++struct Site
++{
++    const char *name;
++    Kind kind;
++    std::atomic<uint64_t> counts[kFromCount]{};
++    std::atomic<bool> linked{false};
++    Site *next = nullptr;
++    uint64_t reported[kFromCount]{}; // the reporting thread's last read
++    Site(const char *n, Kind k) : name(n), kind(k) {}
++};
++
++inline std::atomic<Site *> &head()
++{
++    static std::atomic<Site *> first{nullptr};
++    return first;
++}
++
++inline bool warnEnabled()
++{
++    static const bool on = [] {
++        const char *v = std::getenv("DQ8_GFX_WARN_GS");
++        return v && *v && *v != '0';
++    }();
++    return on;
++}
++
++// "ret ns::Class::method(args)" (__PRETTY_FUNCTION__) to "Class::method".
++inline std::string shortName(const char *name)
++{
++    std::string s(name);
++    const size_t open = s.find('(');
++    if (open != std::string::npos)
++    {
++        s.resize(open);
++        const size_t space = s.rfind(' ');
++        if (space != std::string::npos)
++            s.erase(0, space + 1);
++        for (const char *ns : {"dq8::gfx::", "SdlGpuBackend::Impl::"})
++            if (s.compare(0, std::strlen(ns), ns) == 0)
++                s.erase(0, std::strlen(ns));
++    }
++    return s;
++}
++
++inline void add(Site &site, uint64_t n = 1u)
++{
++    if (!site.linked.load(std::memory_order_acquire) && !site.linked.exchange(true, std::memory_order_acq_rel))
++    {
++        Site *expected = head().load(std::memory_order_relaxed);
++        do
++            site.next = expected;
++        while (!head().compare_exchange_weak(expected, &site, std::memory_order_release, std::memory_order_relaxed));
++    }
++    const From from = t_from;
++    if (site.counts[from].fetch_add(n, std::memory_order_relaxed) == 0u && warnEnabled())
++        std::fprintf(stderr, "[gs-boundary] first: %s %s from %s\n", kKindNames[site.kind],
++                     shortName(site.name).c_str(), kFromNames[from]);
++}
++
++// Since the last call (one reporting thread): a summary line of each kind's
++// total (always), then each site hit, by caller.
++inline std::string report()
++{
++    uint64_t totals[kKindCount] = {};
++    std::string sites;
++    for (Site *site = head().load(std::memory_order_acquire); site; site = site->next)
++    {
++        std::string callers;
++        uint64_t siteTotal = 0u;
++        for (int from = 0; from < kFromCount; ++from)
++        {
++            const uint64_t now = site->counts[from].load(std::memory_order_relaxed);
++            const uint64_t delta = now - site->reported[from];
++            site->reported[from] = now;
++            if (delta == 0u)
++                continue;
++            siteTotal += delta;
++            callers += std::string(callers.empty() ? "" : ", ") + kFromNames[from] + " " + std::to_string(delta);
++        }
++        if (siteTotal == 0u)
++            continue;
++        totals[site->kind] += siteTotal;
++        sites += std::string("  ") + kKindNames[site->kind] + " | " + shortName(site->name) + ": " +
++                 std::to_string(siteTotal) + " (" + callers + ")\n";
++    }
++    std::string line = "[gs-boundary]";
++    for (int kind = 0; kind < kKindCount; ++kind)
++        line += std::string(kind ? " | " : " ") + kKindNames[kind] + " " + std::to_string(totals[kind]);
++    return line + "\n" + sites;
++}
++} // namespace gs_boundary
++
++#define GS_BOUNDARY_SITE_(kind, name, n)                                \
++    do                                                                  \
++    {                                                                   \
++        static ::gs_boundary::Site gsBoundarySite_{(name), (kind)};     \
++        ::gs_boundary::add(gsBoundarySite_, static_cast<uint64_t>(n));  \
++    } while (0)
++// One crossing of `kind` at this site, named `name` (a string literal).
++#define GS_BOUNDARY(kind, name) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, 1u)
++// `n` at once (packets decoded, bytes).
++#define GS_BOUNDARY_N(kind, name, n) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, n)
++// Named after the enclosing function.
++#define GS_BOUNDARY_HERE(kind) GS_BOUNDARY_SITE_(::gs_boundary::kind, __PRETTY_FUNCTION__, 1u)
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 9c54919..2930ea4 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -1,6 +1,7 @@
+ #include "Common.h"
+ #include "GS.h"
+ #include "ps2_log.h"
++#include "runtime/gs/gs_boundary.h"
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+ #include "runtime/ee_scheduler.h"
+@@ -109,6 +110,7 @@ namespace ps2_stubs
+ 
+         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
+         {
++            const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
+             if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
+             {
+                 return;
+@@ -745,7 +747,10 @@ namespace ps2_stubs
+         mem.processPendingTransfers();
+ 
+         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
+-        runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
++        {
++            const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
++            runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
++        }
+         runtime->guestFree(pktAddr);
+ 
+         setReturnS32(ctx, 0);
+@@ -1167,7 +1172,10 @@ namespace ps2_stubs
+             if (hasSeededGsClearPacket(db.clear0))
+             {
+                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
+-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
++                {
++                    const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
++                    runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
++                }
+             }
+             applyGsClearPacket(runtime, db.clear0);
+         }
+@@ -1178,7 +1186,10 @@ namespace ps2_stubs
+             if (hasSeededGsClearPacket(db.clear1))
+             {
+                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
+-                runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
++                {
++                    const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
++                    runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
++                }
+             }
+             applyGsClearPacket(runtime, db.clear1);
+         }
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index 89dd728..d317427 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1,4 +1,5 @@
+ #include <algorithm>
++#include "runtime/gs/gs_boundary.h"
+ #include <cctype>
+ 
+ namespace
+@@ -1895,6 +1896,7 @@ namespace
+     {
+         if (!runtime || !pairs || !runtime->syncCoreSubsystems())
+             return;
++        const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
+         for (size_t i = 0; i < pairCount; ++i)
+         {
+             runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 7fa778d..e0fa838 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,5 +1,6 @@
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_cpu_backend.h"
++#include "runtime/gs/gs_boundary.h"
+ #include "ps2_log.h"
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_pad_host.h"
+@@ -211,6 +212,7 @@ void GS::snapshotVRAM()
+     if (!m_backend)
+         return;
+     std::vector<uint8_t> snapshot;
++    GS_BOUNDARY(kRead, "GS::snapshotVRAM");
+     m_backend->Sync(GSSyncReason::DebugReadback);
+     m_backend->SnapshotVram(snapshot);
+     std::lock_guard<std::mutex> lock(m_snapshotMutex);
+@@ -232,6 +234,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
+ 
+ GSDebugSnapshot GS::getDebugSnapshot() const
+ {
++    GS_BOUNDARY(kRead, "GS::getDebugSnapshot (debug)");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+ 
+     GSDebugSnapshot snapshot{};
+@@ -556,6 +559,7 @@ void GS::latchHostPresentationFrame()
+     }
+ 
+     PresentationFrame frame{};
++    GS_BOUNDARY(kRenderer, "GS present (PMODE, DISPFB)");
+     if (ticket)
+         frame = m_backend->DisplayPreparedPresentation(ticket);
+     else
+@@ -769,6 +773,7 @@ std::atomic<uint64_t> g_gsUploadNativeCount{0};
+ 
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    GS_BOUNDARY(kGif, "GS::processGIFPacket");
+     struct PacketTimer
+     {
+         bool timed = g_gsFrontendTiming.load(std::memory_order_relaxed);
+@@ -885,6 +890,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ 
+ void GS::processImageContinuation(const uint8_t *data, uint32_t sizeBytes)
+ {
++    GS_BOUNDARY(kGif, "GS::processImageContinuation");
+     if (!data || sizeBytes == 0u)
+         return;
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+@@ -893,6 +899,7 @@ void GS::processImageContinuation(const uint8_t *data, uint32_t sizeBytes)
+ 
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    GS_BOUNDARY(kGif, "GS::processNativePackedGIFPacket");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16u || !m_backend)
+         return false;
+@@ -938,6 +945,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
+                            const uint8_t *data,
+                            uint32_t sizeBytes)
+ {
++    GS_BOUNDARY(kUpload, "GS::uploadImageNative");
+     const auto start = std::chrono::steady_clock::now();
+     {
+         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+@@ -1225,6 +1233,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
+ 
+ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+ {
++    GS_BOUNDARY(kRegister, "GS::writeRegister");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     writeRegisterUnlocked(regAddr, value);
+ }
+@@ -1553,6 +1562,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+             command.trxpos = m_trxpos;
+             command.trxreg = m_trxreg;
+             command.direction = m_trxdir;
++            GS_BOUNDARY(kUpload, "renderer BeginTransfer (a GS transfer)");
+             m_backend->BeginTransfer(command);
+         }
+         recordTransferDebugEventUnlocked();
+@@ -1575,7 +1585,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+         break;
+     case GS_REG_TEXFLUSH:
+         if (m_backend)
++        {
++            GS_BOUNDARY(kRenderer, "renderer TextureFlush (TEXFLUSH)");
+             m_backend->TextureFlush();
++        }
+         break;
+     case GS_REG_SCANMSK:
+         m_scanmsk = value;
+@@ -1640,6 +1653,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+     {
+         if (m_backend)
+         {
++            GS_BOUNDARY(kRenderer, "renderer Flush+Sync (FINISH)");
+             m_backend->Flush();
+             m_backend->Sync(GSSyncReason::Finish);
+         }
+@@ -1738,6 +1752,7 @@ void GS::vertexKick(bool drawing)
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
+         updatePreferredDisplaySourceForDraw(batch);
++        GS_BOUNDARY(kRenderer, "renderer Submit (a GS primitive)");
+         m_backend->Submit(batch);
+         recordDrawDebugEventUnlocked(needed);
+     }
+@@ -1772,24 +1787,30 @@ void GS::vertexKick(bool drawing)
+ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ {
+     if (m_backend)
++    {
++        GS_BOUNDARY(kUpload, "renderer UploadImage (a transfer's payload)");
+         m_backend->UploadImage(data, sizeBytes);
++    }
+ }
+ 
+ 
+ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+ {
++    GS_BOUNDARY(kRegister, "GS::clearFramebufferContext");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ {
++    GS_BOUNDARY(kRegister, "GS::clearActiveFramebuffer");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+ 
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ {
++    GS_BOUNDARY(kRead, "GS::consumeLocalToHostBytes (StoreImage)");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+ }
+@@ -1825,12 +1846,14 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+ 
+ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+ {
++    GS_BOUNDARY(kRead, "GS::ReadVram");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
+ }
+ 
+ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+ {
++    GS_BOUNDARY(kRead, "GS::WriteVram");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (m_backend)
+         m_backend->WriteVram(psm, base, bw, x, y, value);
+@@ -1878,7 +1901,10 @@ void GS::submitNativeMesh(const GSNativeMesh &mesh)
+     m_vtxCount = 0;
+     m_vtxIndex = 0;
+     if (m_backend && mesh.vertices.size() >= 3u)
++    {
++        GS_BOUNDARY(kRenderer, "renderer SubmitNativeMesh (the frontend's GSDrawState)");
+         m_backend->SubmitNativeMesh(mesh, currentDrawState());
++    }
+ }
+ 
+ void GS::submitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state)
+@@ -1887,11 +1913,15 @@ void GS::submitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state)
+     m_vtxCount = 0;
+     m_vtxIndex = 0;
+     if (m_backend && mesh.vertices.size() >= 3u)
++    {
++        GS_BOUNDARY(kRenderer, "renderer SubmitNativeMesh (a given GSDrawState)");
+         m_backend->SubmitNativeMesh(mesh, state);
++    }
+ }
+ 
+ GS::DrawRegisters GS::drawRegisters() const
+ {
++    GS_BOUNDARY(kRead, "GS::drawRegisters (the register file)");
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     DrawRegisters r;
+     r.ctx[0] = m_ctx[0];
+@@ -1926,6 +1956,7 @@ void GS::submitNativeEffect(const GSNativeEffect &effect)
+     bool fill = false;
+     for (uint32_t n = 0; n < effect.opCount && !fill; ++n)
+         fill = (effect.ops[n].flags & GSNativeEffect::kTexaFromGs) != 0u;
++    GS_BOUNDARY(kRenderer, "renderer SubmitNativeEffect (GS buffers, registers)");
+     if (!fill)
+     {
+         m_backend->SubmitNativeEffect(effect);
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+index c289ba0..01f76f8 100644
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/ps2_gif_arbiter.h"
++#include "runtime/gs/gs_boundary.h"
+ #include <algorithm>
+ #include <cstring>
+ 
+@@ -56,6 +57,10 @@ void GifArbiter::drain()
+         auto &pkt = m_queue[i];
+         if (!pkt.data.empty())
+         {
++            // The GS boundary's caller: the packet's path (Rogue Galaxy: added).
++            const gs_boundary::FromScope from(pkt.pathId == GifPathId::Path1   ? gs_boundary::kFromPath1
++                                              : pkt.pathId == GifPathId::Path2 ? gs_boundary::kFromPath2
++                                                                               : gs_boundary::kFromPath3);
+             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+         }
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index e8c2d6c..03afd7f 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_address.h"
+ #include "runtime/gs/gs_frontend.h"
++#include "runtime/gs/gs_boundary.h"
+ #include "ps2_log.h"
+ #include <array>
+ #include <atomic>
+@@ -2242,6 +2243,7 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
+     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+     m_seenGifCopy = true;
+     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
++    const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromPath3); // GIF DMA, a fast path
+     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
+ 
+     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
+@@ -2317,6 +2319,7 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
+     const uint8_t *payload = nullptr;
+     if (!resolveContiguous(tadr + 16u, payloadBytes, payload))
+         return false;
++    const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromPath3); // GIF DMA, a fast path
+     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
+         return false;
+ 

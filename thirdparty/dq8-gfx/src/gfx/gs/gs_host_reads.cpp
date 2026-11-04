@@ -1,4 +1,5 @@
 #include "gfx/gs/gs_host_reads.h"
+#include "runtime/gs/gs_boundary.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -39,6 +40,7 @@ bool served() {
 }
 
 uint32_t begin(const Request &request) {
+    GS_BOUNDARY(kRead, "hostreads::begin (a target by GS address)");
     Mailbox &m = mailbox();
     std::lock_guard<std::mutex> lock(m.mutex);
     const uint32_t id = m.next;

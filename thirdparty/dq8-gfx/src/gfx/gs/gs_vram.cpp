@@ -878,7 +878,7 @@ void gsMarkPages(GsPageSet &pages,
                  uint32_t height,
                  uint32_t x,
                  uint32_t y) {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     if (width == 0u || height == 0u)
         return;
     const GsPageExtent extent = gsPageExtent(psm);
@@ -970,7 +970,7 @@ void gsMarkCoveredPages(GsPageSet &pages,
                         uint32_t height,
                         uint32_t x,
                         uint32_t y) {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     const GsPageExtent extent = gsPageExtent(psm);
     const uint32_t pixelsPerRow = std::max<uint32_t>(bufferWidth, 1u) * 64u;
     // Only where page cells tile the buffer exactly; anything else covers
@@ -1022,7 +1022,7 @@ void forEachBlockCell(uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, ui
 
 void gsMarkBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm, uint32_t width,
                   uint32_t height, uint32_t x, uint32_t y) {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     if (width == 0u || height == 0u)
         return;
     const GsPageExtent extent = gsPageExtent(psm);
@@ -1066,7 +1066,7 @@ uint64_t gsHashBlocks(const uint8_t *data, uint32_t baseBlock, uint32_t bufferWi
 
 void gsMarkCoveredBlocks(GsBlockSet &blocks, uint32_t baseBlock, uint32_t bufferWidth, uint32_t psm,
                          uint32_t width, uint32_t height, uint32_t x, uint32_t y) {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     const GsPageExtent extent = gsPageExtent(psm);
     const GsBlockExtent block = gsBlockExtent(psm);
     if (!extent.valid() || !block.valid() || width == 0u || height == 0u)

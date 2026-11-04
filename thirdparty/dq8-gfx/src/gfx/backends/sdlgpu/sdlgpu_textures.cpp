@@ -458,7 +458,7 @@ std::string GsTextureCache::auditReport() const {
 }
 
 void GsTextureCache::invalidate(const GsPageSet &pages, InvalidationSource source) {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     // A copy into a named image's blocks makes it something else (uploads
     // and draws drop names at their own extent).
     if (!m_named.empty() && source != InvalidationSource::HostWrite && source != InvalidationSource::Draw) {
@@ -520,7 +520,7 @@ bool GsTextureCache::evictionImminent() const {
 }
 
 GsPageSet GsTextureCache::sourcePagesFor(const GSDrawState &state) const {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     // The pages depend on the key alone, so the memo never goes stale.
     const GsTextureKey key = keyFor(state);
     if (!m_lastSourceValid || !(key == m_lastSourceKey)) {
@@ -579,13 +579,13 @@ GsVram *GsTextureCache::sourceFor(const GsTextureKey &key) {
     // not serve reads the host writes' memory, filled from the named images
     // it reaches (settleShadow), whatever drew there since.
     if (gsNativeBypass()) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         if (m_namedOwed != 0u && !namedServes(key))
             settleShadow(blocks);
         return &m_shadow;
     }
     if ((blocks & m_drawnBlocks).none()) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         ++m_stats.uploadStoreReads;
         if (m_namedOwed != 0u && !namedServes(key))
             settleShadow(blocks);
@@ -1225,7 +1225,7 @@ bool GsTextureCache::resolveSource(const GsTextureKey &key, const GsRegion &regi
 }
 
 void GsTextureCache::markClutReads(const GsTextureKey &key, GsPageSet &pages) const {
-    gsNotePageBookkeeping();
+    GS_NOTE_PAGE_BOOKKEEPING();
     if (!gsIsIndexedPsm(key.psm))
         return;
     if (key.cpsm != GS_PSM_CT32 && key.cpsm != GS_PSM_CT24) {

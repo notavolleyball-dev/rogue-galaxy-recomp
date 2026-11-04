@@ -766,7 +766,7 @@ struct SdlGpuBackend::Impl {
     GsPageSet pendingPages{};
     std::vector<PendingTarget> pendingTargets;
     void notePending(const GsSurface *color, const GsPageSet &pages) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         pendingPages |= pages;
         for (auto &target : pendingTargets) {
             if (target.color == color) {
@@ -781,7 +781,7 @@ struct SdlGpuBackend::Impl {
     // takes. A host write into them has to wait for that flush.
     GsPageSet pendingSourcePages{};
     void noteSampled(const DrawBatch &draw) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         if (draw.source)
             pendingSourcePages |= draw.source->pages;
         if ((draw.feedback || draw.destination) && draw.color)
@@ -888,7 +888,7 @@ struct SdlGpuBackend::Impl {
             GsRegion reach;
             const bool bounded = sampledTexelRect(batch, reach);
             const bool covered = last.reachAll || (bounded && last.reach.contains(reach));
-            gsNotePageBookkeeping();
+            GS_NOTE_PAGE_BOOKKEEPING();
             const bool untouched = (last.sourcePages & pendingPages).none();
             if (!covered || !untouched) {
                 if (!untouched && pendingDrawsTouch(sampledSourcePages(batch, last.sourcePages)))
@@ -976,7 +976,7 @@ struct SdlGpuBackend::Impl {
     // about 350 textures a frame between its draws; flushing at each one
     // submitted that many command buffers a frame.
     bool transferConflicts(const GsPageSet &pages) const {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         if (flushOnTransfer || (pendingPages & pages).any() || (pendingSourcePages & pages).any())
             return true;
         for (const auto &target : pendingTargets)
@@ -1428,7 +1428,7 @@ struct SdlGpuBackend::Impl {
     // draws had not happened yet, and the draws would then be applied on top.
     bool settleFor(const GsPageSet &pages, GsResolveReason reason, bool hostWrite = false,
                    const GsPageSet &covered = {}, bool flush = true) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         if (flush && !flushFor(stats.flushSettle))
             return false;
         std::string error;
@@ -1451,12 +1451,12 @@ struct SdlGpuBackend::Impl {
     // True when a queued batch draws into any of these pages, so their content
     // is not yet in the render target -- let alone in local memory.
     bool pendingDrawsTouch(const GsPageSet &pages) const {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         return (pendingPages & pages).any();
     }
 
     bool pendingDrawsTouchOthers(const GsPageSet &pages, const GsSurface *surface) const {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         for (const auto &target : pendingTargets) {
             if (target.color != surface && (target.pages & pages).any())
                 return true;
@@ -1902,7 +1902,7 @@ struct SdlGpuBackend::Impl {
     // A write to local memory invalidates both caches: a render target holding
     // that region is now stale, and so is any texture built from it.
     void invalidatePages(const GsPageSet &pages) {
-        gsNotePageBookkeeping();
+        GS_NOTE_PAGE_BOOKKEEPING();
         if (!patchingHostWrite)
             targets->invalidate(pages);
         if (textures)
@@ -5370,6 +5370,12 @@ struct SdlGpuBackend::Impl {
                      d(stats.layerComposites, previousReasons.layerComposites),
                      d(stats.layerOverflows, previousReasons.layerOverflows),
                      d(stats.layerLost, previousReasons.layerLost));
+        // docs/NATIVE-PIPELINE.md: every G count must read 0 with the native
+        // renderer on; the GS memory the backend still holds beside them.
+        std::fputs(gs_boundary::report().c_str(), stderr);
+        std::fprintf(stderr, "  G6 memory model | GS memory held: local %zu KiB (%s), host writes %zu KiB\n",
+                     static_cast<size_t>(vram.size()) / 1024u, ownedMemory.empty() ? "the game's" : "own",
+                     textures ? textures->shadowBytes() / 1024u : size_t{0});
         // docs/NATIVE-SUBMIT-STATUS.md: each of a, b, c must read 0.
         std::fprintf(stderr,
                      "[decoupled] converted draws %llu: a) carry a GS address %llu, b) carry a GSDrawState %llu, "

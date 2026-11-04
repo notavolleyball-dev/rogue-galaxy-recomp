@@ -69,7 +69,7 @@ The renderer threads have 20–25% headroom.
    with buffers (`Buffer::base`). (b) counts every mesh. Both are true by
    the interface's types, so they read 0 only once the interface changes.
    (c) counts the draws whose submit entered a function that calls
-   `gsNotePageBookkeeping()` (`gs_vram.h`, a thread-local count): page
+   `GS_NOTE_PAGE_BOOKKEEPING()` (`gs_vram.h`, a thread-local count): page
    and block marking, both caches' `invalidate`, the target cache's page-set
    lookups and resolves, `markReadPages`, `markClutReads`, `sourcePagesFor`,
    texture reads served from `m_shadow`, and the backend's pending-page

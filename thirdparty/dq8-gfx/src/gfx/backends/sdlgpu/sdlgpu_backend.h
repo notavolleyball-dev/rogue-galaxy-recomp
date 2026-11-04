@@ -78,7 +78,7 @@ struct SdlGpuStats {
     // the converted draws (native meshes and effects, host reads not
     // counted), those whose record carries a GS frame or texture address
     // (a), the meshes handed a GSDrawState (b), and those during whose
-    // submit the page bookkeeping was entered (c, gsNotePageBookkeeping).
+    // submit the page bookkeeping was entered (c, GS_NOTE_PAGE_BOOKKEEPING).
     // Each must read 0 for the converted draws to be decoupled.
     uint64_t convertedDraws = 0u;
     uint64_t convertedGsAddress = 0u;

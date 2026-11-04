@@ -21,6 +21,7 @@
 #include <xmmintrin.h>
 
 #include "ThreadNaming.h"
+#include "runtime/gs/gs_boundary.h"
 #include "debug/draw_origins.h"
 #include "debug/vu1_replay.h"
 #include "native_effects.h"
@@ -544,6 +545,7 @@ private:
                 }
                 ps2_gs_detail::t_sourceTag = header.tag;
                 ps2_gs_detail::t_sourceCamera = header.camera;
+                const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromGifStage);
                 try
                 {
                     if (header.kind == Kind::Packet)
@@ -1292,6 +1294,7 @@ uint32_t listAddress(const uint8_t *data)
 
 void flushEffect()
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (t_held.effect == rg::nativefx::Effect::None)
     {
         return;
@@ -1444,6 +1447,7 @@ bool inCompositeTail()
 
 void sendEffect(GS &gs, const GSNativeEffect &effect)
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     payOwed(gs);
     if (g_stage)
         g_stage->effect(effect);
@@ -1743,6 +1747,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
 
 void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (g_drawOrigins)
     {
         rg::debug::drawOriginsPacket(data, size, t_onVif1Thread ? t_vu1Tag : 0u, t_onVif1Thread ? t_vu1Name : nullptr);
@@ -1825,6 +1830,7 @@ std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_meshesFrom
 
 void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (convertAll() && data && size >= 16u)
     {
         thread_local std::vector<rg::nativefx::Piece2D> pieces;
@@ -1918,6 +1924,7 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 
 void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (g_stage && t_onVif1Thread)
     {
         g_stage->packet(data, size);
@@ -1936,6 +1943,7 @@ void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
 
 void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given)
 {
+    const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (composites() && t_onVif1Thread)
     {
         t_batch.gs = &gs;
@@ -2260,6 +2268,7 @@ void shutdown()
 
 void submitEffectFromGame(GS &gs, const GSNativeEffect &effect)
 {
+    const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromGame);
     if (g_stage)
         g_thread->drain();
     payOwed(gs);

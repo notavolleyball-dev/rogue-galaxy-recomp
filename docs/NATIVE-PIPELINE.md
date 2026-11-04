@@ -68,7 +68,7 @@ found in the code on 2026-11-04.
 | G3 | Uploads into GS memory | `GS::uploadImageNative`, the backend's `BeginTransfer` and `UploadImage` | texture and palette uploads (about 350 a frame), named by GS address even when held (`held_uploads.cpp`) |
 | G4 | Reads of GS memory | `GS::consumeLocalToHostBytes`, `ReadVram`, `WriteVram`, `SnapshotVram`, `hostreads` by GS address, the depth probe by GS address | `sceGsExecStoreImage` (fade and menu captures), the lens flare's depth probe, debug tools |
 | G5 | GS-typed renderer calls | `GSRasterBackend::Submit`, `SubmitMany`, `SubmitNativeMesh` (a `GSDrawState`), `SubmitNativeEffect` (GS bases, ALPHA/TEST/ZBUF values), `Present` (PMODE, DISPFB), `Flush`, `TextureFlush`, `Sync` | everything that draws today, converted or not |
-| G6 | The GS memory model entered | `gsNotePageBookkeeping()` anywhere on the renderer thread, not just inside converted draws; GS memory allocated (bytes) | the sdlgpu backend's page sets, target cache by address, invalidation, `m_shadow` |
+| G6 | The GS memory model entered | `GS_NOTE_PAGE_BOOKKEEPING()` anywhere on the renderer thread, not just inside converted draws; GS memory allocated (bytes) | the sdlgpu backend's page sets, target cache by address, invalidation, `m_shadow` |
 
 Notes:
 
@@ -181,6 +181,33 @@ build that compiles is not "done".
 1. **Counters.** G1-G6, T, R1-R5, per source, with `DQ8_GFX_WARN_GS`.
    Pass: builds, and one walk prints a line in which every place listed in
    the table shows up as nonzero, or is explained. This is the baseline.
+   **Built (2026-11-04), not yet run.** The counting is in `runtime/gs/gs_boundary.h` (patch 0034): a static site per
+   crossing, counted per caller. Callers name themselves with a
+   `gs_boundary::FromScope`: the GIF arbiter per packet (path1, path2,
+   path3), the game's VIF1 thread and GIF stage, kernel stubs, and game hooks.
+   A count under `?` came from an unmarked caller. Each stats window prints a
+   `[gs-boundary]` summary line, one line per site hit with its callers, and
+   the GS memory the backend holds (G6). The sites:
+   - G1: `GS::processGIFPacket`, `processImageContinuation`,
+     `processNativePackedGIFPacket`.
+   - G2: `GS::writeRegister`, `clearFramebufferContext`,
+     `clearActiveFramebuffer`.
+   - G3: `GS::uploadImageNative`, and the frontend's `BeginTransfer` and
+     `UploadImage` calls.
+   - G4: `consumeLocalToHostBytes`, `ReadVram`, `WriteVram`, `snapshotVRAM`,
+     `getDebugSnapshot`, `drawRegisters` (the converter's mirror reads the
+     register file), `hostreads::begin`, `depthprobe::read`.
+   - G5: the frontend's `Submit`, both `SubmitNativeMesh`,
+     `SubmitNativeEffect`, the present, `TEXFLUSH`, and `FINISH`'s flush.
+   - G6: every `GS_NOTE_PAGE_BOOKKEEPING()`, which replaces
+     `gsNotePageBookkeeping()`, one site per function.
+   - T: `build2D` and the effect builder, in packets.
+
+   Not counted: `Initialize`, `Reset` and the backend swap (setup, left to
+   the structural check), the debug-history internals, and the
+   `SupportsNativeEffects` query. **Deviation, announced:** R1-R5 move to
+   step 2. Today they are 0 by construction, because the fields they count
+   only exist in step 2's record types.
 2. **The interface and an empty renderer.** Record types, the queue, and the
    renderer class presenting a cleared scene target. Behind its own switch
    inside the native flag, so the current native path keeps working until

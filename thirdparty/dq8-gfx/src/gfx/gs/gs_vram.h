@@ -13,16 +13,23 @@
 #include <cstdint>
 #include <cstring>
 
+#include "runtime/gs/gs_boundary.h"
+
 namespace dq8::gfx {
 
 // Entries into the GS page bookkeeping on this thread: page and block sets
 // built (gsMarkPages, gsMarkBlocks and their covered forms), invalidation
 // by pages (both caches), palette page reads, and reads served from the host
 // writes' memory (m_shadow). A running count the backend reads around a
-// converted draw, for docs/NATIVE-SUBMIT-STATUS.md's decoupled counter (c)
-// (Rogue Galaxy: added).
+// converted draw, for docs/NATIVE-SUBMIT-STATUS.md's decoupled counter (c),
+// and docs/NATIVE-PIPELINE.md's G6, a site per function (Rogue Galaxy: added).
 inline thread_local uint64_t t_gsPageBookkeeping = 0u;
-inline void gsNotePageBookkeeping() { ++t_gsPageBookkeeping; }
+#define GS_NOTE_PAGE_BOOKKEEPING()                \
+    do                                            \
+    {                                             \
+        ++::dq8::gfx::t_gsPageBookkeeping;        \
+        GS_BOUNDARY_HERE(kModel);                 \
+    } while (0)
 
 // 4 MiB in 8 KiB pages. A page is the GS's own allocation granularity and the
 // finest unit at which two resources can be said not to overlap.

@@ -188,6 +188,8 @@ public:
     std::string auditReport() const;
 
     const GsTextureCacheStats &stats() const { return m_stats; }
+    // The host writes' memory held, in bytes (docs/NATIVE-PIPELINE.md's G6).
+    size_t shadowBytes() const { return m_shadowStorage.size(); }
     void resetStats() { m_stats = {}; }
     size_t size() const { return m_entries.size(); }
 

@@ -1,4 +1,5 @@
 #include "gfx/gs/gs_depth_probe.h"
+#include "runtime/gs/gs_boundary.h"
 
 #include <algorithm>
 #include <atomic>
@@ -51,6 +52,7 @@ bool served() {
 }
 
 bool read(const Request &request, std::vector<uint8_t> &out) {
+    GS_BOUNDARY(kRead, "depthprobe::read (depth by GS address)");
     const uint32_t psm = request.psm & 0x3fu;
     const uint32_t pixels = request.width * request.height;
     if (!depthPsm(psm) || pixels == 0u || request.width > kMaxSide || request.height > kMaxSide)

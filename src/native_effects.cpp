@@ -1,4 +1,5 @@
 #include "native_effects.h"
+#include "runtime/gs/gs_boundary.h"
 
 #include <algorithm>
 #include <array>
@@ -2110,6 +2111,8 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit)
 {
+    // docs/NATIVE-PIPELINE.md's T: GS packets the converter decodes.
+    GS_BOUNDARY_N(kConverter, "effect builder (packets)", packets.size());
     out = GSNativeEffect{};
     withheld.clear();
     if (effect == Effect::ColorFilter)
@@ -2654,6 +2657,8 @@ bool build2D(const std::vector<std::vector<uint8_t>> &packets, std::vector<Piece
 
 bool build2D(const Span2D *packets, size_t count, std::vector<Piece2D> &out, std::string &why)
 {
+    // docs/NATIVE-PIPELINE.md's T: GS packets the converter decodes.
+    GS_BOUNDARY_N(kConverter, "build2D (packets)", count);
     // The last call's meshes' vertex storage, for this call's meshes: a
     // packet's meshes would otherwise allocate and free it each time.
     thread_local std::vector<std::vector<GSNativeMesh::Vertex>> spare;
