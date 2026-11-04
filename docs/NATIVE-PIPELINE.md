@@ -728,6 +728,21 @@ build that compiles is not "done".
      TEXA's), overlap between images at different bases is approximate
      (a byte span, not pages), and 3D meshes (`materialOf`) don't look at
      host images yet.
+   - **Menu text missing (since 5b), fixed.** The menus' glyphs are 2D
+     pieces with ZTE on, ZTST ALWAYS and depth written. The renderer skipped
+     window-space draws that use depth when it had no camera to map it,
+     and menus have none (nothing 3D drawn). It now needs a camera only
+     for a depth *test*; a draw that only writes depth writes a constant.
+     Found with the one-frame dump (`touch build/run/dump-now`, see below).
+   - **Diagnostics:** `RG_NATIVE_PIECE_DUMP=N` or `N-M` (2D pieces in GS
+     terms), `touch build/run/dump-now` (the next flip's pieces and the
+     renderer's draws), `RG_NATIVE_TEXTURE_DUMP=tbp,...` (indexed textures
+     read there, to `build/run/texdump`), `RG_NATIVE_UPLOAD_CHECK=1`
+     (withheld uploads against their records' guest memory).
+   - **Stale records:** with `RG_NATIVE_UPLOAD_CHECK` about 3 a frame in
+     the field differ from what is sent (palettes `3f7c`, `3f78`, CT32
+     64x64 at `2a60`): the game writes them after the texture hook. Not
+     fixed.
    - **Local copies (TRXDIR 2), absorbed, not mirrored.** These are the
      shapes seen:
      - `2a20` T8 into `2a00` T4, in tiles with wraparound offsets: a
