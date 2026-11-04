@@ -1,8 +1,13 @@
 #include "gfx/native/native_pipeline.h"
 
+#include "native_view.frag.spv.h"
+#include "native_view.vert.spv.h"
+
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <type_traits>
 
@@ -16,6 +21,8 @@ struct Queue
 {
     std::mutex mutex;
     std::vector<Record> records;
+    std::vector<Id> evicted;
+    std::function<std::string()> producerStats;
 };
 Queue &queue()
 {
@@ -26,6 +33,12 @@ Queue &queue()
 // The scene target until a producer declares one (the game's frame size).
 constexpr uint32_t kDefaultWidth = 640u;
 constexpr uint32_t kDefaultHeight = 448u;
+// The textures held, past which the oldest are let go (and their producers
+// told, takeEvicted).
+constexpr uint64_t kImageBudget = 256ull << 20;
+// The debug view's grid.
+constexpr uint32_t kViewColumns = 8u;
+constexpr uint32_t kViewRows = 6u;
 
 constexpr const char *kRecordNames[] = {"texture", "palette", "target",     "camera",   "mesh",      "sprite",
                                         "effect",  "frame",   "present",    "readback", "depth-query"};
@@ -62,6 +75,22 @@ void push(Record &&record)
     q.records.push_back(std::move(record));
 }
 
+std::vector<Id> takeEvicted()
+{
+    Queue &q = queue();
+    std::lock_guard lock(q.mutex);
+    std::vector<Id> out;
+    out.swap(q.evicted);
+    return out;
+}
+
+void setProducerStats(std::function<std::string()> line)
+{
+    Queue &q = queue();
+    std::lock_guard lock(q.mutex);
+    q.producerStats = std::move(line);
+}
+
 void Renderer::count(const MeshDraw &draw)
 {
     Readiness &r = m_readiness;
@@ -79,11 +108,28 @@ void Renderer::count(const MeshDraw &draw)
         ++r.normals;
 }
 
-void Renderer::apply(Record &record)
+SDL_GPUTexture *Renderer::createTexture(SDL_GPUDevice *device, SDL_GPUTextureFormat format, uint32_t width,
+                                        uint32_t height, std::string &error)
+{
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = format;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &info);
+    if (!texture)
+        error = std::string("SDL_CreateGPUTexture(native texture): ") + SDL_GetError();
+    return texture;
+}
+
+void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
 {
     ++m_records[record.index()];
     std::visit(
-        [this](auto &r) {
+        [&](auto &r) {
             using T = std::decay_t<decltype(r)>;
             if constexpr (std::is_same_v<T, Target>)
             {
@@ -95,9 +141,249 @@ void Renderer::apply(Record &record)
                 m_cameras[r.id] = r;
             else if constexpr (std::is_same_v<T, MeshDraw>)
                 count(r);
-            // The rest is drawn from step 3 on; counted above.
+            else if constexpr (std::is_same_v<T, Texture>)
+            {
+                const uint32_t bpp = r.format == PixelFormat::Rgba8 ? 4u : r.format == PixelFormat::Index8 ? 1u : 0u;
+                const uint64_t bytes = uint64_t(r.width) * r.height * bpp;
+                if (r.id == 0u || bpp == 0u || bytes == 0u || !r.texels || r.texels->size() < bytes)
+                {
+                    ++m_refused;
+                    return;
+                }
+                SDL_GPUTexture *texture = createTexture(
+                    device, bpp == 4u ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM : SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+                    r.width, r.height, error);
+                if (!texture)
+                    return;
+                if (const auto old = m_images.find(r.id); old != m_images.end())
+                {
+                    SDL_ReleaseGPUTexture(device, old->second.texture);
+                    m_imageBytes -= old->second.bytes;
+                    m_imageOrder.erase(std::find(m_imageOrder.begin(), m_imageOrder.end(), r.id));
+                }
+                m_images[r.id] = Image{texture, r.format, r.width, r.height, r.palette, bytes};
+                m_imageOrder.push_back(r.id);
+                m_imageBytes += bytes;
+                m_uploads.push_back({texture, r.width, r.height, r.texels});
+                m_recent.erase(std::remove(m_recent.begin(), m_recent.end(), r.id), m_recent.end());
+                m_recent.push_front(r.id);
+                if (m_recent.size() > kViewColumns * kViewRows)
+                    m_recent.pop_back();
+            }
+            else if constexpr (std::is_same_v<T, Palette>)
+            {
+                if (r.id == 0u || (r.entries != 16u && r.entries != 256u) || !r.colors ||
+                    r.colors->size() < r.entries * 4u)
+                {
+                    ++m_refused;
+                    return;
+                }
+                SDL_GPUTexture *texture =
+                    createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, r.entries, 1u, error);
+                if (!texture)
+                    return;
+                if (const auto old = m_palettes.find(r.id); old != m_palettes.end())
+                    SDL_ReleaseGPUTexture(device, old->second.texture);
+                m_palettes[r.id] = Image{texture, PixelFormat::Rgba8, r.entries, 1u, 0u, r.entries * 4u};
+                m_uploads.push_back({texture, r.entries, 1u, r.colors});
+            }
+            // The rest is drawn from step 4 on; counted above.
         },
         record);
+}
+
+bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
+{
+    if (m_uploads.empty())
+        return true;
+    uint64_t total = 0u;
+    for (const PendingUpload &u : m_uploads)
+        total += u.bytes->size();
+    SDL_GPUTransferBufferCreateInfo info{};
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    info.size = static_cast<uint32_t>(total);
+    SDL_GPUTransferBuffer *buffer = SDL_CreateGPUTransferBuffer(device, &info);
+    if (!buffer)
+    {
+        error = std::string("SDL_CreateGPUTransferBuffer(native textures): ") + SDL_GetError();
+        return false;
+    }
+    auto *mapped = static_cast<uint8_t *>(SDL_MapGPUTransferBuffer(device, buffer, false));
+    if (!mapped)
+    {
+        error = std::string("SDL_MapGPUTransferBuffer(native textures): ") + SDL_GetError();
+        SDL_ReleaseGPUTransferBuffer(device, buffer);
+        return false;
+    }
+    uint32_t offset = 0u;
+    for (const PendingUpload &u : m_uploads)
+    {
+        std::memcpy(mapped + offset, u.bytes->data(), u.bytes->size());
+        offset += static_cast<uint32_t>(u.bytes->size());
+    }
+    SDL_UnmapGPUTransferBuffer(device, buffer);
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+    offset = 0u;
+    for (const PendingUpload &u : m_uploads)
+    {
+        SDL_GPUTextureTransferInfo source{};
+        source.transfer_buffer = buffer;
+        source.offset = offset;
+        source.pixels_per_row = u.width;
+        source.rows_per_layer = u.height;
+        SDL_GPUTextureRegion destination{};
+        destination.texture = u.texture;
+        destination.w = u.width;
+        destination.h = u.height;
+        destination.d = 1u;
+        SDL_UploadToGPUTexture(copy, &source, &destination, false);
+        offset += static_cast<uint32_t>(u.bytes->size());
+    }
+    SDL_EndGPUCopyPass(copy);
+    // Freed once the GPU is done with it.
+    SDL_ReleaseGPUTransferBuffer(device, buffer);
+    m_uploads.clear();
+    return true;
+}
+
+void Renderer::evict(SDL_GPUDevice *device)
+{
+    std::vector<Id> gone;
+    while (m_imageBytes > kImageBudget && !m_imageOrder.empty())
+    {
+        const Id id = m_imageOrder.front();
+        m_imageOrder.pop_front();
+        const auto it = m_images.find(id);
+        if (it == m_images.end())
+            continue;
+        SDL_ReleaseGPUTexture(device, it->second.texture);
+        m_imageBytes -= it->second.bytes;
+        m_images.erase(it);
+        m_recent.erase(std::remove(m_recent.begin(), m_recent.end(), id), m_recent.end());
+        gone.push_back(id);
+        ++m_evicted;
+    }
+    if (gone.empty())
+        return;
+    Queue &q = queue();
+    std::lock_guard lock(q.mutex);
+    q.evicted.insert(q.evicted.end(), gone.begin(), gone.end());
+}
+
+bool Renderer::ensureView(SDL_GPUDevice *device, std::string &error)
+{
+    if (m_viewPipeline)
+        return true;
+    if (m_viewFailed)
+        return false;
+    m_viewFailed = true; // until it is made
+    // SPIR-V only so far (no MSL build of these shaders): no view elsewhere.
+    if (!(SDL_GetGPUShaderFormats(device) & SDL_GPU_SHADERFORMAT_SPIRV))
+        return false;
+    SDL_GPUSamplerCreateInfo samplerInfo{};
+    samplerInfo.min_filter = SDL_GPU_FILTER_NEAREST;
+    samplerInfo.mag_filter = SDL_GPU_FILTER_NEAREST;
+    samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    m_viewSampler = SDL_CreateGPUSampler(device, &samplerInfo);
+    if (!m_viewSampler)
+    {
+        error = std::string("SDL_CreateGPUSampler(native view): ") + SDL_GetError();
+        return false;
+    }
+    SDL_GPUShaderCreateInfo vertexInfo{};
+    vertexInfo.code = reinterpret_cast<const uint8_t *>(kNativeViewVertSpirv);
+    vertexInfo.code_size = sizeof(kNativeViewVertSpirv);
+    vertexInfo.entrypoint = "main";
+    vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    vertexInfo.num_uniform_buffers = 1u;
+    SDL_GPUShaderCreateInfo fragmentInfo{};
+    fragmentInfo.code = reinterpret_cast<const uint8_t *>(kNativeViewFragSpirv);
+    fragmentInfo.code_size = sizeof(kNativeViewFragSpirv);
+    fragmentInfo.entrypoint = "main";
+    fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fragmentInfo.num_samplers = 2u;
+    fragmentInfo.num_uniform_buffers = 1u;
+    SDL_GPUShader *vertex = SDL_CreateGPUShader(device, &vertexInfo);
+    SDL_GPUShader *fragment = vertex ? SDL_CreateGPUShader(device, &fragmentInfo) : nullptr;
+    if (!vertex || !fragment)
+    {
+        error = std::string("SDL_CreateGPUShader(native view): ") + SDL_GetError();
+        if (vertex)
+            SDL_ReleaseGPUShader(device, vertex);
+        return false;
+    }
+    SDL_GPUColorTargetDescription colorTarget{};
+    colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP;
+    info.target_info.color_target_descriptions = &colorTarget;
+    info.target_info.num_color_targets = 1u;
+    m_viewPipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
+    SDL_ReleaseGPUShader(device, vertex);
+    SDL_ReleaseGPUShader(device, fragment);
+    if (!m_viewPipeline)
+    {
+        error = std::string("SDL_CreateGPUGraphicsPipeline(native view): ") + SDL_GetError();
+        return false;
+    }
+    m_viewFailed = false;
+    return true;
+}
+
+// The newest textures, newest first, each fitted into a cell of the grid.
+void Renderer::drawView(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass)
+{
+    SDL_BindGPUGraphicsPipeline(pass, m_viewPipeline);
+    const float cellW = 2.0f / kViewColumns, cellH = 2.0f / kViewRows;
+    const float aspect = float(m_sceneWidth) / float(std::max(m_sceneHeight, 1u));
+    uint32_t cell = 0u;
+    for (const Id id : m_recent)
+    {
+        const auto it = m_images.find(id);
+        if (it == m_images.end())
+            continue;
+        const Image &image = it->second;
+        uint32_t mode[4] = {0u, 0u, 0u, 0u};
+        SDL_GPUTexture *palette = image.texture;
+        if (image.format == PixelFormat::Index8)
+        {
+            const auto p = m_palettes.find(image.palette);
+            if (p != m_palettes.end())
+            {
+                mode[0] = 1u;
+                mode[1] = p->second.width;
+                palette = p->second.texture;
+            }
+            else
+                mode[0] = 2u;
+        }
+        // The cell, less a margin, then the texture's shape inside it (in
+        // clip space, whose x and y units differ by the scene's aspect).
+        const float x0 = -1.0f + (cell % kViewColumns) * cellW, top = 1.0f - (cell / kViewColumns) * cellH;
+        const float margin = 0.08f;
+        float w = cellW * (1.0f - margin), h = cellH * (1.0f - margin);
+        const float shape = float(image.width) / float(std::max(image.height, 1u)); // width over height
+        if (shape * h / aspect > w)
+            h = w * aspect / shape;
+        else
+            w = shape * h / aspect;
+        const float cx = x0 + cellW * 0.5f, cy = top - cellH * 0.5f;
+        const float rect[4] = {cx - w * 0.5f, cy + h * 0.5f, cx + w * 0.5f, cy - h * 0.5f};
+        SDL_PushGPUVertexUniformData(commands, 0, rect, sizeof(rect));
+        SDL_PushGPUFragmentUniformData(commands, 0, mode, sizeof(mode));
+        const SDL_GPUTextureSamplerBinding bindings[2] = {{image.texture, m_viewSampler}, {palette, m_viewSampler}};
+        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+        SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
+        if (++cell == kViewColumns * kViewRows)
+            break;
+    }
 }
 
 bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, Frame &out,
@@ -108,9 +394,27 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         std::lock_guard lock(q.mutex);
         m_drained.swap(q.records);
     }
+    // A texture the GPU refuses is counted and left out, not the frame lost.
+    static bool told = false;
     for (Record &record : m_drained)
-        apply(record);
+    {
+        std::string refused;
+        apply(device, record, refused);
+        if (!refused.empty())
+        {
+            ++m_refused;
+            if (!told)
+                std::fprintf(stderr, "[native-pipeline] refused: %s\n", refused.c_str());
+            told = true;
+        }
+    }
     m_drained.clear();
+    if (std::string failed; !upload(device, commands, failed))
+    {
+        std::fprintf(stderr, "[native-pipeline] uploads lost: %s\n", failed.c_str());
+        m_uploads.clear();
+    }
+    evict(device);
 
     uint32_t width = kDefaultWidth, height = kDefaultHeight;
     if (const auto t = m_targets.find(m_sceneTarget); t != m_targets.end() && t->second.width && t->second.height)
@@ -123,7 +427,8 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
     height *= scale;
     if (!m_scene || m_sceneWidth != width || m_sceneHeight != height)
     {
-        release(device);
+        if (m_scene)
+            SDL_ReleaseGPUTexture(device, m_scene);
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
         info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -142,8 +447,12 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         m_sceneHeight = height;
     }
 
-    // Step 2: the scene cleared, a dark blue that no game frame is, so the
-    // switch is visible on screen.
+    // The scene: cleared to a dark blue no game frame is, then the textures
+    // held, as a grid (step 3a's view).
+    std::string viewError;
+    const bool view = ensureView(device, viewError);
+    if (!viewError.empty())
+        std::fprintf(stderr, "[native-pipeline] no texture view: %s\n", viewError.c_str());
     SDL_GPUColorTargetInfo target{};
     target.texture = m_scene;
     target.load_op = SDL_GPU_LOADOP_CLEAR;
@@ -155,6 +464,8 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         error = std::string("SDL_BeginGPURenderPass(native scene): ") + SDL_GetError();
         return false;
     }
+    if (view)
+        drawView(commands, pass);
     SDL_EndGPURenderPass(pass);
 
     out.texture = m_scene;
@@ -171,21 +482,51 @@ std::string Renderer::statsLine()
         line += std::string(" ") + kRecordNames[i] + " " + std::to_string(m_records[i] - m_reported[i]);
         m_reported[i] = m_records[i];
     }
-    const Readiness &now = m_readiness, &was = m_readinessReported;
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
+    line += " | held: textures " + std::to_string(m_images.size()) + " (" + std::to_string(m_imageBytes >> 20) +
+            " MiB), palettes " + std::to_string(m_palettes.size()) + ", evicted " + d(m_evicted, m_evictedReported) +
+            ", refused " + d(m_refused, m_refusedReported);
+    m_evictedReported = m_evicted;
+    m_refusedReported = m_refused;
+    const Readiness &now = m_readiness, &was = m_readinessReported;
     line += " | readiness of " + d(now.meshDraws, was.meshDraws) + " mesh draws: R1 camera+model " +
             d(now.cameraAndModel, was.cameraAndModel) + ", R2 object " + d(now.objectIdentity, was.objectIdentity) +
             ", R3 scene float depth " + d(now.sceneFloatDepth, was.sceneFloatDepth) + ", R4 material " +
             d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals) + "\n";
     m_readinessReported = m_readiness;
+    std::function<std::string()> producer;
+    {
+        Queue &q = queue();
+        std::lock_guard lock(q.mutex);
+        producer = q.producerStats;
+    }
+    if (producer)
+        line += "  " + producer() + "\n";
     return line;
 }
 
 void Renderer::release(SDL_GPUDevice *device)
 {
-    if (m_scene && device)
+    if (!device)
+        return;
+    if (m_scene)
         SDL_ReleaseGPUTexture(device, m_scene);
+    for (auto &[id, image] : m_images)
+        SDL_ReleaseGPUTexture(device, image.texture);
+    for (auto &[id, image] : m_palettes)
+        SDL_ReleaseGPUTexture(device, image.texture);
+    if (m_viewPipeline)
+        SDL_ReleaseGPUGraphicsPipeline(device, m_viewPipeline);
+    if (m_viewSampler)
+        SDL_ReleaseGPUSampler(device, m_viewSampler);
+    m_images.clear();
+    m_palettes.clear();
+    m_imageOrder.clear();
+    m_recent.clear();
+    m_imageBytes = 0u;
     m_scene = nullptr;
+    m_viewPipeline = nullptr;
+    m_viewSampler = nullptr;
     m_sceneWidth = m_sceneHeight = 0;
 }
 } // namespace dq8::gfx::native

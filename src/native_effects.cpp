@@ -21,6 +21,7 @@
 #include "gif_events.h"
 #include "runtime/gs/gs_frontend.h"
 #include "native_renderer.h"
+#include "native_producer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
@@ -1458,6 +1459,7 @@ void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         target.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
         target.psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
         dq8::gfx::namedtargets::declare(target);
+        rg::nativeproducer::target(target.base, target.bufferWidth, target.width, target.height, target.psm, 0);
     }
     g_setFrameFromDescOriginal(rdram, ctx, runtime);
 }
@@ -1603,6 +1605,8 @@ void declareScreen(uint32_t node, dq8::gfx::namedtargets::Kind kind)
     target.psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
     target.kind = kind;
     dq8::gfx::namedtargets::declare(target);
+    rg::nativeproducer::target(target.base, target.bufferWidth, target.width, target.height, target.psm,
+                               static_cast<int>(kind));
 }
 
 void afterGetFrameTexDesc(uint8_t *, R5900Context *, PS2Runtime *, uint32_t node)
@@ -1712,6 +1716,16 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         if (n > 0u && clut != 0u && !(fn != 0u && mode == 0u) && (nodeBpp == 8 || nodeBpp == 4))
         {
+            // The native pipeline's palettes, from where the node keeps them:
+            // palette i `stride` bytes after the first.
+            const int32_t stride = readAt<int16_t>(tex + 0x30u);
+            const uint32_t entries = nodeBpp == 8 ? 256u : 16u;
+            const uint32_t paletteBytes = entries * ((cpsm & 0x3Fu) == 0u ? 4u : 2u);
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                const uint32_t at = physical(clut + i * static_cast<uint32_t>(stride > 0 ? stride : int32_t(paletteBytes)));
+                rg::nativeproducer::palette(g_rdram + at, PS2_RAM_SIZE - at, (base + i * n) & 0x3FFFu, cpsm, entries);
+            }
             for (uint32_t i = 0u; i < count; ++i)
             {
                 named::Upload upload;
@@ -1750,6 +1764,24 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             upload.preSwizzled = preSwizzled;
             upload.node = tex + i;
             named::push(upload);
+            {
+                // The native pipeline's texture, from the level's bytes.
+                rg::nativeproducer::TextureLevel level;
+                const uint32_t at = physical(mip);
+                level.ram = g_rdram + at;
+                level.ramBytes = PS2_RAM_SIZE - at;
+                level.tbp = upload.dbp;
+                level.psm = texturePsm;
+                level.width = upload.textureWidth;
+                level.height = upload.textureHeight;
+                level.bufferWidth = upload.textureBufferWidth;
+                level.preSwizzled = preSwizzled;
+                level.transferWidth = upload.width;
+                level.transferHeight = upload.height;
+                level.transferBufferWidth = upload.dbw;
+                level.cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFu);
+                rg::nativeproducer::texture(level);
+            }
             const int32_t k = bpp * (w * h) / 256 / 8;
             w >>= 1;
             h >>= 1;

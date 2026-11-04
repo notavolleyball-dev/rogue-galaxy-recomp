@@ -6373,6 +6373,13 @@ struct SdlGpuBackend::Impl {
         frame.displayFbp = 0u;
         frame.sourceFbp = 0u;
         frame.mode = GSPresentationMode::BackendNative;
+        // Screenshots latch host pixels: the slot is read back for them, as
+        // the GPU composition's is.
+        if (gsScreenshotEnabled()) {
+            stage.download = true;
+            frame.mode = GSPresentationMode::HostPixels;
+            frame.rowPitchBytes = out.width * 4u;
+        }
         stage.native = true;
         stage.haveFrame = true;
         return true;

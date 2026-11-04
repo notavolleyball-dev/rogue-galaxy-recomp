@@ -58,6 +58,16 @@ add_library(dq8_gfx_native STATIC
 )
 target_include_directories(dq8_gfx_native PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(dq8_gfx_native PUBLIC SDL3::SDL3-static)
+foreach(shader IN ITEMS
+        "native_view.vert;vert;kNativeViewVertSpirv"
+        "native_view.frag;frag;kNativeViewFragSpirv")
+    list(GET shader 0 file)
+    list(GET shader 1 stage)
+    list(GET shader 2 symbol)
+    dq8_add_shader(dq8_gfx_native
+        SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/native/shaders/${file}"
+        STAGE ${stage} SYMBOL ${symbol})
+endforeach()
 
 add_library(dq8_gfx_sdlgpu STATIC
     src/gfx/backends/sdlgpu/sdlgpu_backend.cpp

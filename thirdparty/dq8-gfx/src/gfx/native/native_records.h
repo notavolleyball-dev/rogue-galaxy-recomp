@@ -21,9 +21,8 @@ using Id = uint32_t; // 0 is none
 
 enum class PixelFormat : uint8_t
 {
-    Rgba8,   // 8 bits a channel, alpha 0-255 as the game means it
-    Index8,  // palette indices, with a Palette
-    Index4,
+    Rgba8,   // 8 bits a channel; alpha as the game stores it, 0x80 is opaque
+    Index8,  // palette indices, one byte each (4-bit art is widened to this)
     Depth32, // a depth target
 };
 
@@ -37,15 +36,15 @@ struct Texture
     uint16_t width = 0;
     uint16_t height = 0;
     uint8_t mips = 1;
-    Id palette = 0; // for Index8 and Index4
+    Id palette = 0; // an Index8 texture's own palette, when the producer knows it
     Bytes texels;   // mip 0 first, rows in order
 };
 
 struct Palette
 {
     Id id = 0;
-    uint16_t entries = 0;
-    Bytes colors; // Rgba8 each
+    uint16_t entries = 0; // 16 or 256, in index order
+    Bytes colors;         // Rgba8 each, alpha as the game stores it
 };
 
 enum class TargetRole : uint8_t
@@ -102,6 +101,7 @@ enum class Compare : uint8_t
 struct Material
 {
     Id texture = 0; // 0: untextured
+    Id palette = 0; // an Index8 texture's, chosen at the draw; 0: the texture's own
     bool linear = false;
     bool clampU = true;
     bool clampV = true;

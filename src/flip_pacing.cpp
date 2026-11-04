@@ -16,6 +16,7 @@
 
 #if defined(RG_HAS_SDLGPU)
 #include "gfx/native/native_pipeline.h"
+#include "native_producer.h"
 #endif
 
 namespace rg::graphics
@@ -167,23 +168,17 @@ PS2Runtime::RecompiledFunction g_originalFlip = nullptr;
 std::atomic<uint64_t> g_flips{0u};
 
 // The native pipeline's producer for the frame's end (docs/NATIVE-PIPELINE.md):
-// the scene target, declared once, and a Present at each flip, in place of
-// the display registers. The game's frame is 640x448.
+// a Present of the scene target at each flip, in place of the display
+// registers. The target itself is the game's frame, declared where the game
+// names it (native_producer.h); the renderer takes 640x448 until then.
 void presentNative(uint64_t frame)
 {
 #if defined(RG_HAS_SDLGPU)
     namespace native = dq8::gfx::native;
     if (!native::enabled())
         return;
-    constexpr native::Id kScene = 1u;
+    constexpr native::Id kScene = rg::nativeproducer::kSceneTarget;
     constexpr uint16_t kWidth = 640u, kHeight = 448u;
-    static bool declared = false; // the game thread's
-    if (!declared)
-    {
-        native::push(native::Target{kScene, native::TargetRole::SceneColor, kWidth, kHeight,
-                                    native::PixelFormat::Rgba8});
-        declared = true;
-    }
     native::Present present;
     present.target = kScene;
     present.rect = {0, 0, kWidth, kHeight};

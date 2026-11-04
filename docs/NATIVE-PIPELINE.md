@@ -260,6 +260,36 @@ build that compiles is not "done".
    - R1-R5 read 0 of 0 until step 4 sends mesh draws.
 3. **Textures, palettes and targets by id.** The producer tables. Pass: G3
    at 0 for named uploads.
+   **3a done (2026-11-04).** Split from 3b (announced): records first, the
+   GS still sent the uploads.
+   - **Producer** (`src/native_producer.{h,cpp}`, game side). It is called
+     from `TexBuildUploadPkt`'s hook for each palette and mip level, and from
+     both target declarations.
+     - Decoding: CT32 as it is, CT16 to RGBA8, T8, T4 (widened to a byte a
+       texel), pre-swizzled 8-bit art through the CT32-to-T8 layout, and
+       palettes in CSM1 order.
+     - Identity: content plus shape. A texture is sent once and named by id
+       afterwards. The renderer's evictions (256 MiB budget) are drained so
+       an evicted texture is sent again.
+     - Tables for step 4: `textureAt(tbp, psm)`, `paletteAt(cbp)`,
+       `targetAt(base)`.
+   - **Renderer:** GPU textures (RGBA8, R8 indices, palette rows). Its first
+     shader (`gfx/native/shaders/native_view.*`, SPIR-V only so far) draws
+     the newest 48 textures as a grid on the scene: the debug view.
+   - **Screenshots** capture the native scene.
+   - **One walk** (`pipeline-step3a`, 110 s): per frame, about 180 texture
+     levels arrive, almost all already known. 193 textures (5 MiB) and 186
+     palettes were held, with none refused for format, size or layout.
+     - The screenshot at frame 6002 shows the game's textures correctly
+       decoded and paletted: character face sheets, the compass, HUD icons,
+       the minimap, fonts and portraits.
+     - **Found:** the producer hashes about 4.2 MB a frame on the game thread
+       to recognize textures. The cost is unmeasured. Keying by
+       `NameTableNodeSetImage`'s generation would avoid it.
+     - **Found:** targets churn. About 46 target records a frame are
+       re-declarations of the same base with another size. Step 4 has to
+       decide whether a base with several shapes is one target or several.
+
 4. **VU1 meshes as mesh draws** with camera and model split. Pass: G5's mesh
    share at 0, and R1 and R3 near 100% of scene draws. **This is the step
    that unlocks motion vectors and upscaling.**
