@@ -6,6 +6,49 @@ over the direction of [NATIVE-SUBMIT-PLAN.md](NATIVE-SUBMIT-PLAN.md) and
 [NATIVE-RENDERER.md](NATIVE-RENDERER.md). The camera and matrix facts are in
 [VU1-RECON.md](VU1-RECON.md).
 
+## Where it stands, and how to resume (2026-11-04)
+
+**Done and checked on runs:** steps 1 to 4, 5a and 5b. The open items are
+in each step's record.
+
+**Built and committed, not yet run.** Test these first:
+
+| Piece | Commit | What to check |
+|---|---|---|
+| 7a: clears and draw environments through the converter (patch 0035) | `81656ea` | no `GS::writeRegister` or `GS::drawRegisters`; the picture is unchanged |
+| 7b: the depth probe from the renderer's depth | `81656ea` | the lens flare hides when something covers the sun; depth reads are answered, none unserved |
+| 5b: CBlur green-to-alpha natively | `95b2ae7` | no `SubmitNativeEffect` on the walk; CBlur looks as before |
+| 7c: colour captures from the renderer | `95b2ae7` | the menu and fades show the right frame; colour reads are served, none failed |
+| 5c: object layers drawn by the producer | `7dc4a97` | no boxes around characters, which still draw whole |
+| `tools/native-check.sh` | `1c52b19` | prints PASS/FAIL per check from a run log |
+
+**To resume:**
+1. Build: `cmake --build build/game -j$(nproc)`.
+2. Run the walk: `RG_GS_VRAM_RESERVE=1 RG_NATIVE_PIPELINE=1
+   tools/vu1/oracle/native-run.sh step7 gpu 110 3000`.
+3. Check it: `tools/native-check.sh step7`. Screenshots are in
+   `build/run/shots/step7`.
+4. The lens flare, the menu and the fades are checked in play. The walk
+   doesn't reach them.
+5. If 5c misbehaves, `RG_NATIVE_COMPOSITE=0` takes it out (the boxes come
+   back) to tell it apart from the rest.
+6. Then fix what fails, and record the results in each piece's entry
+   below.
+
+**Not built yet:**
+- **7d:** the pipeline's own present, driven by the flip hook instead of
+  the GS present (G5). It also replaces 7c's marker on the GS queue.
+- **The structural check:** no `GS` object at all.
+- **Step 6's remainders:** G1 raw packets, TEXFLUSH, 540 G3 transfers, and
+  the 2D pieces whose source is unknown.
+- **Step 8:** features.
+
+**Known limits:**
+- Targets clamp alpha above 0x80. This affects blends that read the
+  destination's alpha.
+- 7b needs a D32_FLOAT depth format.
+- 7c's capture is served from the last frame drawn.
+
 ## The goal
 
 With the native renderer flag on, the GS does not exist as a concept on the
