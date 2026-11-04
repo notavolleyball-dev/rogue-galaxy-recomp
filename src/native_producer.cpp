@@ -63,6 +63,8 @@ struct Counts
     // Step 6: host uploads nobody took, kept as images (hostUpload).
     uint64_t hostUploads = 0, hostRefused = 0, hostBytes = 0, hostTexturesNew = 0, hostTexturesKnown = 0;
     uint64_t hostPalettes = 0, hostReadsRefused = 0;
+    // Narrow views: a buffer drawn or read narrower than its target.
+    uint64_t viewsNew = 0, viewWrites = 0, viewReads = 0;
 };
 
 struct State
@@ -139,6 +141,14 @@ struct State
     };
     std::unordered_map<uint64_t, HostRecord> hostTextures, hostPalettes;
     std::set<uint32_t> copiedTo; // local copies' destinations (logged reads)
+    // A buffer the game also draws into at a narrower buffer width than its
+    // target was declared at (an effect building a 64x64 texture in the
+    // corner of a full-screen buffer, then sampling it at that width): a
+    // target of its own, by base and width (viewKey), so the full-screen
+    // draws do not cover it. Not modelled: a read at one width of what was
+    // drawn at another, which the GS's pages fold.
+    std::unordered_map<uint32_t, native::Target> views;          // viewKey -> as declared
+    std::unordered_map<uint32_t, std::vector<uint32_t>> viewWidths; // base -> widths with a view
     // RG_NATIVE_TEXTURE_DUMP: the records' contents kept, to write out.
     struct Kept
     {
@@ -280,6 +290,8 @@ std::string statsLine()
                        d(n.hostTexturesKnown, r.hostTexturesKnown) + ", palettes " +
                        d(n.hostPalettes, r.hostPalettes) + ", reads refused " +
                        d(n.hostReadsRefused, r.hostReadsRefused) +
+                       " | narrow views new " + d(n.viewsNew, r.viewsNew) + ", draws into them " +
+                       d(n.viewWrites, r.viewWrites) + ", reads of them " + d(n.viewReads, r.viewReads) +
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
                        ", no depth target there " + std::to_string(s.depthNoTarget);
@@ -633,6 +645,42 @@ native::Id targetForUnrouted(State &s, uint32_t base, uint32_t width, uint32_t h
         return 0u;
     ++s.counts.targetsAuto;
     return declare(s, base, width, height, psm, 0);
+}
+uint32_t viewKey(uint32_t base, uint32_t fbw)
+{
+    return 0x80000000u | (std::min(std::max(fbw, 1u), 63u) << 16) | (base & 0xFFFFu);
+}
+
+// Locked. A draw or read at `base` with buffer width `fbw` (64-pixel
+// units) narrower than the base's target: one for a view (State::views).
+bool narrow(State &s, uint32_t base, uint32_t fbw)
+{
+    const auto t = s.targets.find(base);
+    return t != s.targets.end() && t->second.role != native::TargetRole::SceneColor &&
+           std::max(fbw, 1u) * 64u < t->second.width;
+}
+
+// Locked. The view at (base, fbw), declared, or grown to `width` x `height`.
+native::Id viewTarget(State &s, uint32_t base, uint32_t fbw, uint32_t width, uint32_t height)
+{
+    fbw = std::max(fbw, 1u);
+    width = std::min(std::min(width, fbw * 64u), 4096u);
+    height = std::min(std::max(height, 1u), 4096u);
+    native::Target &v = s.views[viewKey(base, fbw)];
+    if (v.id != 0u && width <= v.width && height <= v.height)
+        return v.id;
+    if (v.id == 0u)
+    {
+        v.id = s.nextTarget++;
+        s.viewWidths[base].push_back(fbw);
+        ++s.counts.viewsNew;
+    }
+    v.role = native::TargetRole::Offscreen;
+    v.format = native::PixelFormat::Rgba8;
+    v.width = static_cast<uint16_t>(std::max<uint32_t>(width, v.width));
+    v.height = static_cast<uint16_t>(std::max<uint32_t>(height, v.height));
+    native::push(native::Target(v));
+    return v.id;
 }
 } // namespace
 
@@ -1156,9 +1204,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
 
     bool known = materialOf(s, *drawState, draw.material);
     const uint32_t frameBase = c.frame.fbp * 32u;
-    draw.target = s.targetAt.count(frameBase)
-                      ? targetFor(s, frameBase, c.scissor.x1 + 1u, c.scissor.y1 + 1u, c.frame.psm)
-                      : 0u;
+    uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
+    if (narrow(s, frameBase, c.frame.fbw))
+    {
+        seqKey = viewKey(frameBase, c.frame.fbw);
+        draw.target = viewTarget(s, frameBase, c.frame.fbw, c.scissor.x1 + 1u, c.scissor.y1 + 1u);
+        draw.material.depthTest = native::Compare::Always; // a view has no depth of its own
+        draw.material.depthWrite = false;
+        ++s.counts.viewWrites;
+    }
+    else
+        draw.target = s.targetAt.count(frameBase)
+                          ? targetFor(s, frameBase, c.scissor.x1 + 1u, c.scissor.y1 + 1u, c.frame.psm)
+                          : 0u;
     if (draw.target == 0u)
     {
         ++s.counts.targetMiss;
@@ -1174,7 +1232,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     if (known)
         ++s.counts.materialKnown;
     if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
-        s.drawnSeq[frameBase] = ++s.sequence;
+        s.drawnSeq[seqKey] = ++s.sequence;
     if (const uint64_t dumpFlip = triggeredDumpFlip(); dumpFlip != 0u && rg::graphics::guestFlips() == dumpFlip)
     {
         const GSContext &c = drawState->context;
@@ -1421,6 +1479,47 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
         else
             texture = false;
     }
+    // A narrow read of a buffer with narrow views: the view of its width,
+    // else whichever of the views and the buffer was drawn last.
+    if (const auto widths = s.viewWidths.find(t.tbp0); widths != s.viewWidths.end() && narrow(s, t.tbp0, t.tbw))
+    {
+        const auto seqOf = [&](uint32_t key) {
+            const auto q = s.drawnSeq.find(key);
+            return q == s.drawnSeq.end() ? uint64_t(0) : q->second;
+        };
+        native::Id id = 0u;
+        uint64_t seq = 0u;
+        for (const uint32_t w : widths->second)
+        {
+            const uint32_t key = viewKey(t.tbp0, w);
+            const uint64_t q = seqOf(key);
+            const auto v = s.views.find(key);
+            if (v == s.views.end())
+                continue;
+            if (w == std::max<uint32_t>(t.tbw, 1u))
+            {
+                id = v->second.id;
+                seq = q;
+                break;
+            }
+            if (q > seq)
+            {
+                id = v->second.id;
+                seq = q;
+            }
+        }
+        const auto uploaded = s.uploadedSeq.find(t.tbp0);
+        const bool uploadedLast = uploaded != s.uploadedSeq.end() && uploaded->second > seq;
+        const auto own = s.views.find(viewKey(t.tbp0, t.tbw));
+        const bool ownWidth = own != s.views.end() && own->second.id == id;
+        if (id != 0u && (seq >= seqOf(t.tbp0) || ownWidth) &&
+            !((texture || host) && uploadedLast))
+        {
+            m.sourceTarget = id;
+            ++s.counts.viewReads;
+            return true;
+        }
+    }
     const auto at = s.targetAt.find(t.tbp0);
     if (at != s.targetAt.end())
     {
@@ -1600,9 +1699,18 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
     const GSNativeMesh::Header &h = mesh.header;
     native::MeshDraw draw;
     const uint32_t frameBase = c.frame.fbp * 32u;
-    draw.target = s.targetAt.count(frameBase)
-                      ? targetFor(s, frameBase, c.scissor.x1 + 1u, c.scissor.y1 + 1u, c.frame.psm)
-                      : targetFor(s, frameBase, std::max(c.frame.fbw, 1u) * 64u, c.scissor.y1 + 1u, c.frame.psm);
+    uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
+    const bool view = narrow(s, frameBase, c.frame.fbw);
+    if (view)
+    {
+        seqKey = viewKey(frameBase, c.frame.fbw);
+        draw.target = viewTarget(s, frameBase, c.frame.fbw, c.scissor.x1 + 1u, c.scissor.y1 + 1u);
+        ++s.counts.viewWrites;
+    }
+    else
+        draw.target = s.targetAt.count(frameBase)
+                          ? targetFor(s, frameBase, c.scissor.x1 + 1u, c.scissor.y1 + 1u, c.frame.psm)
+                          : targetFor(s, frameBase, std::max(c.frame.fbw, 1u) * 64u, c.scissor.y1 + 1u, c.frame.psm);
     if (draw.target == 0u)
     {
         ++s.counts.piecesNoTarget;
@@ -1757,6 +1865,11 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
             why |= 16u;
         }
     }
+    if (view)
+    {
+        m.depthTest = native::Compare::Always; // a view has no depth of its own
+        m.depthWrite = false;
+    }
     if (m.depthTest != native::Compare::Always || m.depthWrite)
     {
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
@@ -1874,7 +1987,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
     }
     ++s.counts.piecesMade;
     if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
-        s.drawnSeq[frameBase] = ++s.sequence;
+        s.drawnSeq[seqKey] = ++s.sequence;
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
