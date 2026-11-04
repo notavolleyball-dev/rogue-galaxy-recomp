@@ -36,10 +36,16 @@ in each step's record.
 6. Then fix what fails, and record the results in each piece's entry
    below.
 
+**Step 6 (2026-11-04):** the leftover packets are absorbed, and the GS
+tripwire is in. G1-G4 and G6 read 0 on the walk. What's open is the 2D
+pieces with an unknown source (G5, `SubmitNativeMesh`) and the local copies
+behind them. See step 6's record.
+
 **Not built yet:**
-- **The structural check:** no `GS` object at all.
-- **Step 6's remainders:** G1 raw packets, TEXFLUSH, 540 G3 transfers, and
-  the 2D pieces whose source is unknown.
+- **The structural check proper:** not constructing the `GS` at all. The
+  tripwire stands in for it until the unknown sources are handled.
+- **Local copies and alpha-as-index textures** in the producer (step 6's
+  record).
 - **Step 8:** features.
 
 **Known limits:**
@@ -661,6 +667,58 @@ build that compiles is not "done".
 6. **2D** through the converter as sprite draws, then the remaining VU1
    programs on packets (outlines, shadow volumes, particles). Pass: G1 and
    G5 at 0.
+
+   **6, the remainders (2026-11-04, `step6b` walk).**
+   - **The packets left over are absorbed.** Under the pipeline (and the
+     converter's own draw state), what is left of a packet after the
+     converter and the upload withholding no longer goes to the GS
+     (`absorb` in `src/vif1_thread.cpp`). Nor do image continuations.
+     SIGNAL, FINISH and LABEL are set in the privileged registers (CSR,
+     SIGLBLID) as the GS front end would. The rest is counted on a
+     `[native-absorb]` line by kind. `RG_NATIVE_ABSORB=0` turns it off.
+   - **Result on the walk:** G1, G2, G3, G4 and G6 read 0 in every window.
+     Packets absorbed are about 69k a window, mostly TEXFLUSH (85k). There
+     are about 300 local copies, 2.2 MiB of image continuations and no
+     draw kicks, so nothing drawn was lost. FINISH, SIGNAL and LABEL never
+     came on the walk. The picture is unchanged.
+   - **The tripwire** (`src/gs_tripwire.cpp`, outermost on the GS backend
+     chain) is the structural check in all but name. Under the pipeline any
+     call into the GS backend is logged once per kind with a backtrace.
+     Draws, transfers, flushes and syncs are dropped. Reads and
+     presentation still go through. `RG_NATIVE_GS=abort` stops at the first
+     crossing; `pass` sends everything as before. On the walk the only
+     crossing is `SubmitNativeMesh` from the GIF stage: 96,552 of them,
+     each a 2D piece whose source the producer doesn't know. G5 shows the
+     same.
+   - **What is still open: 2D pieces with an unknown source.** There are
+     two sources:
+     - `TBP0 02a00 PSM CT32 512x512`, one sprite a frame on the boot
+       screens. A texture of another format was last uploaded there.
+     - `TBP0 01c00 PSM T4HH CBP 03fc0 512x512`, with nothing uploaded
+       there. Up to 20k a window on the black stretch before the town
+       (frames ~1700-2300), and 960 a window (16 a frame) in the town.
+       T4HH reads the top nibble of a 32-bit buffer's alpha, so this is
+       most likely a buffer drawn or copied into, then read as an indexed
+       texture. The producer has no model of that.
+   - **Local copies (TRXDIR 2), absorbed, not mirrored.** These are the
+     shapes seen:
+     - `2a20` T8 into `2a00` T4, in tiles with wraparound offsets: a
+       scrolling texture animation, done by copying GS memory between
+       formats.
+     - `3840` T8 into `3800` T8, 127x39.
+
+     Mirroring these needs the producer to model GS memory layout across
+     formats. That is a design decision, not a fix. Until then the
+     textures they make are stale or missing in the native picture.
+   - **Produced levels never taken:** the ones skipped are all `DBP 2aa0
+     DBW 1 CT32 64x64`, inside the `2a00` area above. Its upload never
+     reaches the walker as a transfer of that shape. The queue is bounded
+     (8192, with a lookahead of 64), so nothing grows.
+   - **Target churn** is gone: targets keep their largest size, and
+     `targets new` is 0 in steady windows.
+   - **Hashing** is about 4.4 MB a frame with a 4-lane 64-bit hash, roughly
+     1 ms on the game thread. Cutting it means knowing which guest memory
+     changed. Left as is.
 7. **Present, clears, readbacks, depth probe.** Pass: G2, G4 at 0. Then the
    structural check: no `GS` object.
 

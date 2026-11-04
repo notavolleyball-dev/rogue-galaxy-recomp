@@ -2097,6 +2097,161 @@ bool withholdUploads(const uint8_t *, uint32_t, std::vector<uint8_t> &) { return
 uint32_t withheldContinuation(uint32_t) { return 0u; }
 #endif
 
+// Step 6 of docs/NATIVE-PIPELINE.md: under the pipeline (with the
+// converter's own draw state), what is left of a packet after the converter
+// and the upload withholding no longer goes to the GS. The renderer draws
+// from records, the converter keeps its own mirror of the registers, and
+// the GS draws nothing. What the game still sees of it is SIGNAL, FINISH
+// and LABEL in the privileged registers (CSR, SIGLBLID), set here as the GS
+// would. The rest is counted by kind, so a draw that got here (lost to the
+// picture) shows. RG_NATIVE_ABSORB=0 sends it to the GS as before.
+struct Absorbed
+{
+    std::atomic<uint64_t> packets{0}, texflush{0}, finish{0}, signal{0}, label{0}, localCopies{0},
+        hostUploads{0}, otherRegisters{0}, drawKicks{0}, imageBytes{0}, continuationBytes{0};
+};
+Absorbed g_absorbed;
+
+bool absorbing()
+{
+#if defined(RG_HAS_SDLGPU)
+    static const bool allowed = [] {
+        const char *value = std::getenv("RG_NATIVE_ABSORB");
+        return !(value && std::strcmp(value, "0") == 0);
+    }();
+    return allowed && rg::nativefx::drawStateOwned() && dq8::gfx::native::enabled();
+#else
+    return false;
+#endif
+}
+
+// The BITBLTBUF and TRXREG an absorbed local copy goes with (logged).
+thread_local uint64_t t_bitbltbuf = 0u, t_trxpos = 0u, t_trxreg = 0u;
+
+void absorbRegister(uint8_t reg, uint64_t value)
+{
+    GSRegisters *regs = g_runtime ? &g_runtime->memory().gs() : nullptr;
+    switch (reg)
+    {
+    case 0x3Fu: // TEXFLUSH
+        g_absorbed.texflush.fetch_add(1u, std::memory_order_relaxed);
+        break;
+    case 0x50u: t_bitbltbuf = value; g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); break;
+    case 0x51u: t_trxpos = value; g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); break;
+    case 0x52u: t_trxreg = value; g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); break;
+    case 0x53u: // TRXDIR
+        ((value & 3u) == 2u ? g_absorbed.localCopies : g_absorbed.hostUploads).fetch_add(1u, std::memory_order_relaxed);
+        if ((value & 3u) == 2u)
+        {
+            // The first few of each shape (docs/NATIVE-PIPELINE.md step 6).
+            static std::mutex m;
+            static std::vector<uint64_t> told;
+            std::lock_guard lock(m);
+            const uint64_t key = t_bitbltbuf ^ (t_trxreg * 0x9E3779B97F4A7C15ull);
+            if (told.size() < 16u && std::find(told.begin(), told.end(), key) == told.end())
+            {
+                told.push_back(key);
+                const uint64_t b = t_bitbltbuf;
+                std::fprintf(stderr,
+                             "[native-absorb] a local copy: SBP %04x SBW %u SPSM %02x (%u,%u) -> DBP %04x DBW %u "
+                             "DPSM %02x (%u,%u), %ux%u\n",
+                             unsigned(b & 0x3FFFu), unsigned((b >> 16) & 0x3Fu), unsigned((b >> 24) & 0x3Fu),
+                             unsigned(t_trxpos & 0x7FFu), unsigned((t_trxpos >> 16) & 0x7FFu),
+                             unsigned((b >> 32) & 0x3FFFu), unsigned((b >> 48) & 0x3Fu), unsigned((b >> 56) & 0x3Fu),
+                             unsigned((t_trxpos >> 32) & 0x7FFu), unsigned((t_trxpos >> 48) & 0x7FFu),
+                             unsigned(t_trxreg & 0xFFFu), unsigned((t_trxreg >> 32) & 0xFFFu));
+            }
+        }
+        break;
+    case 0x60u: // SIGNAL
+        g_absorbed.signal.fetch_add(1u, std::memory_order_relaxed);
+        if (regs)
+        {
+            const uint32_t id = static_cast<uint32_t>(value), mask = static_cast<uint32_t>(value >> 32);
+            uint32_t lo = static_cast<uint32_t>(regs->siglblid);
+            lo = (lo & ~mask) | (id & mask);
+            regs->siglblid = (regs->siglblid & 0xFFFFFFFF00000000ull) | lo;
+            regs->csr.fetch_or(0x1u);
+        }
+        break;
+    case 0x61u: // FINISH
+        g_absorbed.finish.fetch_add(1u, std::memory_order_relaxed);
+        if (regs)
+            regs->csr.fetch_or(0x2u);
+        break;
+    case 0x62u: // LABEL
+        g_absorbed.label.fetch_add(1u, std::memory_order_relaxed);
+        if (regs)
+        {
+            const uint32_t id = static_cast<uint32_t>(value), mask = static_cast<uint32_t>(value >> 32);
+            uint32_t hi = static_cast<uint32_t>(regs->siglblid >> 32);
+            hi = (hi & ~mask) | (id & mask);
+            regs->siglblid = (uint64_t(hi) << 32) | (regs->siglblid & 0xFFFFFFFFull);
+        }
+        break;
+    case 0x04u: case 0x05u: // XYZF2, XYZ2: a vertex kick
+        g_absorbed.drawKicks.fetch_add(1u, std::memory_order_relaxed);
+        break;
+    default:
+        g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed);
+        break;
+    }
+}
+
+void absorb(const uint8_t *data, uint32_t size)
+{
+    g_absorbed.packets.fetch_add(1u, std::memory_order_relaxed);
+    uint32_t pos = 0u;
+    while (pos + 16u <= size)
+    {
+        uint64_t lo = 0u, hi = 0u;
+        std::memcpy(&lo, data + pos, 8u);
+        std::memcpy(&hi, data + pos + 8u, 8u);
+        const uint32_t nloop = static_cast<uint32_t>(lo & 0x7FFFu);
+        const bool pre = ((lo >> 46) & 1u) != 0u;
+        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 3u);
+        uint32_t nreg = static_cast<uint32_t>((lo >> 60) & 0xFu);
+        nreg = nreg ? nreg : 16u;
+        pos += 16u;
+        if (pre && flg != 2u)
+            g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); // PRIM
+        if (flg == 0u)
+        {
+            // PACKED: a qword a register.
+            for (uint32_t i = 0; i < nloop * nreg && pos + 16u <= size; ++i, pos += 16u)
+            {
+                const uint32_t desc = static_cast<uint32_t>((hi >> ((i % nreg) * 4u)) & 0xFu);
+                uint64_t value = 0u;
+                std::memcpy(&value, data + pos, 8u);
+                // A descriptor other than A+D and NOP is its register's address.
+                if (desc == 0xEu)
+                    absorbRegister(data[pos + 8u], value);
+                else if (desc != 0xFu)
+                    absorbRegister(static_cast<uint8_t>(desc), value);
+            }
+        }
+        else if (flg == 1u)
+        {
+            // REGLIST: a doubleword a register; A+D does nothing here.
+            const uint32_t words = nloop * nreg;
+            for (uint32_t i = 0; i < words && pos + 8u <= size; ++i, pos += 8u)
+            {
+                const uint32_t desc = static_cast<uint32_t>((hi >> ((i % nreg) * 4u)) & 0xFu);
+                if (desc != 0xEu && desc != 0xFu)
+                    absorbRegister(static_cast<uint8_t>(desc), 0u);
+            }
+            pos = (pos + 15u) & ~15u;
+        }
+        else
+        {
+            // IMAGE: an upload nobody took.
+            const uint32_t bytes = std::min<uint32_t>(nloop * 16u, size - std::min(size, pos));
+            g_absorbed.imageBytes.fetch_add(bytes, std::memory_order_relaxed);
+            pos += bytes;
+        }
+    }
+}
+
 void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
 {
     thread_local std::vector<uint8_t> kept;
@@ -2106,6 +2261,11 @@ void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
             return;
         data = kept.data();
         size = static_cast<uint32_t>(kept.size());
+    }
+    if (absorbing())
+    {
+        absorb(data, size);
+        return;
     }
     const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (g_stage && t_onVif1Thread)
@@ -2437,6 +2597,12 @@ void install(PS2Runtime &runtime)
         {
             flushEffect();
         }
+        // Step 6: an upload's rest nobody took, as the packets' (absorb).
+        if (absorbing())
+        {
+            g_absorbed.continuationBytes.fetch_add(size, std::memory_order_relaxed);
+            return;
+        }
         if (g_stage && t_onVif1Thread)
         {
             g_stage->image(data, size);
@@ -2511,6 +2677,7 @@ std::string busyReport()
     const double wall = std::chrono::duration<double>(now - lastTime).count();
     auto share = [&](uint64_t nanos) { return wall > 0.0 ? (static_cast<double>(nanos) * 1e-9) / wall * 100.0 : 0.0; };
     char text[96];
+    std::string line;
     if (g_stage)
     {
         std::snprintf(text, sizeof(text), "vif1 busy=%.0f%% gif busy=%.0f%% of wall", share(busy - lastBusy),
@@ -2523,6 +2690,7 @@ std::string busyReport()
     lastTime = now;
     lastBusy = busy;
     lastGif = gif;
+    line = text;
     // VU1 pairs run on the interpreter since the last report: a program the
     // build has not compiled (several times slower), e.g. an effect's, shows
     // up here. Read unsynchronised from the VIF1 thread's counters; a stats
@@ -2546,10 +2714,37 @@ std::string busyReport()
                           wall > 0.0 ? static_cast<double>(newInterpreted) / wall / 1000.0 : 0.0,
                           100.0 * static_cast<double>(newInterpreted) /
                               static_cast<double>(newInterpreted + newCompiled));
-            return std::string(text) + more;
+            line += more;
         }
     }
-    return text;
+    if (absorbing())
+    {
+        // Step 6: what the GS no longer gets (absorb), since the last report.
+        static uint64_t last[11] = {};
+        const uint64_t now[11] = {g_absorbed.packets.load(),     g_absorbed.texflush.load(),
+                                  g_absorbed.finish.load(),      g_absorbed.signal.load(),
+                                  g_absorbed.label.load(),       g_absorbed.localCopies.load(),
+                                  g_absorbed.hostUploads.load(), g_absorbed.otherRegisters.load(),
+                                  g_absorbed.drawKicks.load(),   g_absorbed.imageBytes.load(),
+                                  g_absorbed.continuationBytes.load()};
+        uint64_t d[11];
+        for (int i = 0; i < 11; ++i)
+        {
+            d[i] = now[i] - last[i];
+            last[i] = now[i];
+        }
+        char more[384];
+        std::snprintf(more, sizeof(more),
+                      "\n  [native-absorb] packets %llu: texflush %llu, finish %llu, signal %llu, label %llu, "
+                      "local copies %llu, host uploads %llu, other registers %llu, draw kicks %llu, "
+                      "image KiB %llu, continuation KiB %llu",
+                      (unsigned long long)d[0], (unsigned long long)d[1], (unsigned long long)d[2],
+                      (unsigned long long)d[3], (unsigned long long)d[4], (unsigned long long)d[5],
+                      (unsigned long long)d[6], (unsigned long long)d[7], (unsigned long long)d[8],
+                      (unsigned long long)(d[9] / 1024u), (unsigned long long)(d[10] / 1024u));
+        line += more;
+    }
+    return line;
 }
 
 void drainForSnapshot()

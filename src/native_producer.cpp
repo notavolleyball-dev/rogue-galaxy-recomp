@@ -569,6 +569,18 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
                 s.residentTexture[p.key] = {p.psm, p.id};
                 s.uploadedSeq[p.key] = ++s.sequence;
             }
+            // The ones before it were never sent (docs/NATIVE-PIPELINE.md
+            // step 6, "produced levels never taken"): the first few, by shape.
+            static uint32_t told = 0u;
+            for (size_t j = 0; j < i && told < 8u; ++j, ++told)
+            {
+                const State::Produced &q = s.produced[j];
+                std::fprintf(stderr,
+                             "[native-producer] produced, never taken: DBP %04x DBW %u DPSM %02x %ux%u%s; the next "
+                             "taken: DBP %04x DBW %u DPSM %02x %ux%u\n",
+                             q.dbp, q.dbw, q.dpsm, q.width, q.height, q.palette ? " (palette)" : "", p.dbp, p.dbw,
+                             p.dpsm, p.width, p.height);
+            }
             s.produced.erase(s.produced.begin(), s.produced.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             return true;
         }
@@ -1181,6 +1193,21 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
             ++s.counts.piecesNoSource;
             if (s.targetAt.count(c.tex0.tbp0 & ~31u))
                 ++s.counts.piecesSubTarget;
+            // The first few, by what they read (docs/NATIVE-PIPELINE.md step 6).
+            static std::vector<uint64_t> told;
+            const uint64_t what = (uint64_t(c.tex0.tbp0) << 32) | (uint64_t(c.tex0.psm & 0x3Fu) << 24) | c.tex0.cbp;
+            if (told.size() < 12u && std::find(told.begin(), told.end(), what) == told.end())
+            {
+                told.push_back(what);
+                const bool texture = s.residentTexture.count(c.tex0.tbp0) != 0u;
+                std::fprintf(stderr,
+                             "[native-producer] a 2D piece's source is unknown: TBP0 %05x PSM %02x CBP %05x CSA %u "
+                             "%ux%u, %s, %zu vertices\n",
+                             c.tex0.tbp0, c.tex0.psm & 0x3Fu, c.tex0.cbp, c.tex0.csa, 1u << c.tex0.tw,
+                             1u << c.tex0.th,
+                             texture ? "a texture of another format or no palette there" : "nothing uploaded there",
+                             mesh.vertices.size());
+            }
             return false;
         }
         if (m.sourceTarget)

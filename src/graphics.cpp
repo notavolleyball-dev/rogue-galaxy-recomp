@@ -15,6 +15,7 @@
 #include "debug/stall_watch.h"
 #include "depth_reads.h"
 #include "flip_pacing.h"
+#include "gs_tripwire.h"
 #include "held_uploads.h"
 #include "battle_rates.h"
 #include "button_glyphs.h"
@@ -1001,6 +1002,9 @@ void Setup::install(PS2Runtime &runtime)
     }
     backend = paceOnFlips(serveDepthReadsLocally(
         debug::censusGsBackend(debug::timeGsBackend(std::move(backend), "frontend"))));
+    // Under the native pipeline, outermost: any call that still reaches the
+    // GS backend names itself (gs_tripwire.h).
+    backend = tripOnGs(std::move(backend));
     runtime.gs().setRasterBackend(std::move(backend));
     std::printf("[rg] GS backend: %s%s\n", m_name, env("RG_GS_WORKER", "1") != "0" ? " on its own thread" : "");
 }
