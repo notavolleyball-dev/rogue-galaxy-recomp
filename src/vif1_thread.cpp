@@ -2139,10 +2139,11 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given, con
         state = *given;
     else if (owned)
         state = rg::nativefx::mirroredDrawState();
-    // Step 4a (docs/NATIVE-PIPELINE.md): the mesh as a native mesh draw too,
-    // under the state the GS gets with it. The GS still draws it.
-    if (vu1Data)
-        rg::nativeproducer::mesh(mesh, given || owned ? &state : nullptr, vu1Data, mesh.header.source);
+    // Steps 4a and 4c (docs/NATIVE-PIPELINE.md): the mesh as a native mesh
+    // draw, under the state the GS would get with it; made one, it does not
+    // go to the GS at all.
+    if (vu1Data && rg::nativeproducer::mesh(mesh, given || owned ? &state : nullptr, vu1Data, mesh.header.source))
+        return;
     if (g_stage && t_onVif1Thread)
     {
         g_stage->mesh(mesh, owned ? &state : nullptr);

@@ -427,6 +427,26 @@ build that compiles is not "done".
    - **4c. Withheld from the GS.** A mesh made a record no longer reaches
      the GS. **Pass:** G5's VU1 mesh share at 0, same draw counts as 4a.
      The depth probe reads GS depth, so it goes wrong here until step 7.
+
+     **4c done (2026-11-04).** `rg::nativeproducer::mesh` returns whether it
+     made the record, and `deliverMesh` returns right after when it did.
+     One walk (`pipeline-step4c`): the same 64,466 mesh records a window as
+     4a, all made, so all withheld. G5's `SubmitNativeMesh` fell from about
+     120k to 56k a window, and what's left is the converter's 2D pieces
+     (step 6).
+
+     Found: with composite batching on (`RG_NATIVE_COMPOSITE`), a
+     character's head is routed to a layer and its tail's programs send GS
+     packets instead of meshes (`inCompositeTail`). The native renderer
+     never sees the tail, so characters were drawn in part, in 4b too. One
+     walk with batching off (`pipeline-step4c-nocomp`) drew them whole, so
+     batching is now off under the pipeline (`compositesBatched`;
+     `RG_NATIVE_COMPOSITE=1` still forces it on).
+
+     **Left for step 5:** where the game draws characters into its own
+     object layer and composites it (frame 6001 of each walk), only their
+     directly drawn parts show. Those draws are the "offscreen" count,
+     about 190 a frame.
 5. **Effects by purpose**, as the profile ranks them. Pass: G5's effect
    share at 0.
 6. **2D** through the converter as sprite draws, then the remaining VU1

@@ -724,10 +724,10 @@ native::Id cameraOf(State &s, const float view[16], const float projection[16], 
 }
 } // namespace
 
-void mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
+bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
 {
     if (!native::enabled() || !vu1Data)
-        return;
+        return false;
     const GSNativeMesh::Header &h = mesh.header;
     const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
 
@@ -813,7 +813,7 @@ void mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     if (!drawState)
     {
         ++s.counts.meshesNoState;
-        return;
+        return false;
     }
     const GSContext &c = drawState->context;
     const float ofx = static_cast<float>(c.xyoffset.ofx) / 16.0f;
@@ -856,6 +856,12 @@ void mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     if (known)
         ++s.counts.materialKnown;
     native::push(native::MeshDraw(std::move(draw)));
+    return true;
+}
+
+bool pipelineOn()
+{
+    return native::enabled();
 }
 
 uint32_t textureAt(uint32_t tbp, uint32_t psm)
@@ -895,7 +901,8 @@ void notePassed(Passed) {}
 void noteSplit() {}
 bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { return false; }
 void noteContinuedInPacket() {}
-void mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) {}
+bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
+bool pipelineOn() { return false; }
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }
 uint32_t targetAt(uint32_t) { return 0u; }

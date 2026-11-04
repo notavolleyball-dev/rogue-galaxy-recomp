@@ -16,6 +16,10 @@ struct GSDrawState;
 // (RG_NATIVE_PIPELINE=1 under the native renderer flag).
 namespace rg::nativeproducer
 {
+// Whether the native pipeline is on (for the game's other switches that
+// only make sense with the GS).
+bool pipelineOn();
+
 // One mip level of an image node, as TexBuildUploadPkt sends it (game
 // thread). `ram` is the level's bytes in EE memory, `ramBytes` how many
 // are readable there.
@@ -61,8 +65,9 @@ uint32_t targetAt(uint32_t base);
 // mesh was built from: the camera (quads 4-11, 24-27) and the model (60-63)
 // are read from it. `state` is the converter's mirror of the draw registers
 // the mesh is drawn under; null when it has none (the mesh is counted, not
-// made). `source` names what drew it, for profiles.
-void mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
+// made). `source` names what drew it, for profiles. True when the record
+// was made: the mesh is then not sent to the GS (step 4c).
+bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
 
 // Step 3b's counts (the VIF1 thread, which withholds named uploads the
 // producer sent from the GS): one withheld (palette or texture), one sent on

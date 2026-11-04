@@ -1225,7 +1225,14 @@ const char *name(Effect effect)
 
 bool compositesBatched()
 {
-    return enabled() && g_composites;
+    // Not under the native pipeline: a composite's tail goes to the GS as
+    // packets, where the native renderer never sees it (characters drawn in
+    // part, docs/NATIVE-PIPELINE.md 4c). RG_NATIVE_COMPOSITE=1 still asks.
+    static const bool pipeline = [] {
+        const char *asked = std::getenv("RG_NATIVE_COMPOSITE");
+        return rg::nativeproducer::pipelineOn() && !(asked && std::strcmp(asked, "0") != 0);
+    }();
+    return enabled() && g_composites && !pipeline;
 }
 
 bool enabled()
