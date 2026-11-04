@@ -989,6 +989,20 @@ void Setup::install(PS2Runtime &runtime)
     {
         backend = std::make_unique<GSCpuBackend>();
     }
+#if defined(RG_HAS_SDLGPU)
+    // Step 7's structural check (docs/NATIVE-PIPELINE.md): under the native
+    // pipeline nothing reaches the GS backend, so there is no GS around it:
+    // no worker thread or queue, no held uploads, census, timing, depth
+    // serving or flip pacing, and the backend makes no GS memory or caches
+    // of its own. It stays as the window and the native renderer's host.
+    if (dq8::gfx::native::enabled())
+    {
+        runtime.gs().setRasterBackend(tripOnGs(std::move(backend), true));
+        std::printf("[rg] GS backend: none under the native pipeline (%s as window and native renderer only)\n",
+                    m_name);
+        return;
+    }
+#endif
     // In 3D scenes the software rasterizer was more than half of the game
     // thread's time; behind the queue it runs beside the game instead.
     if (env("RG_GS_WORKER", "1") != "0")

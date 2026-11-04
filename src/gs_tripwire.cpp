@@ -110,7 +110,7 @@ bool cross(Call call, bool read)
 class TripwireBackend final : public GSRasterBackend
 {
 public:
-    explicit TripwireBackend(std::unique_ptr<GSRasterBackend> inner) : m_inner(std::move(inner)) {}
+    TripwireBackend(std::unique_ptr<GSRasterBackend> inner, bool bare) : m_inner(std::move(inner)), m_bare(bare) {}
     ~TripwireBackend() override
     {
         if (!pipelineOn())
@@ -126,8 +126,16 @@ public:
         std::fprintf(stderr, "%s\n", any ? "" : " none");
     }
 
-    void Initialize(uint8_t *vram, uint32_t vramSize) override { m_inner->Initialize(vram, vramSize); }
-    void Reset() override { m_inner->Reset(); }
+    void Initialize(uint8_t *vram, uint32_t vramSize) override
+    {
+        if (!bare())
+            m_inner->Initialize(vram, vramSize);
+    }
+    void Reset() override
+    {
+        if (!bare())
+            m_inner->Reset();
+    }
     void Submit(const GSPrimitiveBatch &batch) override
     {
         if (cross(kSubmit, false))
@@ -222,14 +230,24 @@ public:
     void CancelPreparedPresentations() noexcept override { m_inner->CancelPreparedPresentations(); }
 
 private:
+    bool bare() const
+    {
+        static const bool init = [] {
+            const char *v = std::getenv("RG_NATIVE_GS_INIT");
+            return v && std::strcmp(v, "0") != 0;
+        }();
+        return m_bare && pipelineOn() && !init;
+    }
+
     std::unique_ptr<GSRasterBackend> m_inner;
+    bool m_bare = false;
 };
 
 } // namespace
 
-std::unique_ptr<GSRasterBackend> tripOnGs(std::unique_ptr<GSRasterBackend> backend)
+std::unique_ptr<GSRasterBackend> tripOnGs(std::unique_ptr<GSRasterBackend> backend, bool bare)
 {
-    return std::make_unique<TripwireBackend>(std::move(backend));
+    return std::make_unique<TripwireBackend>(std::move(backend), bare);
 }
 
 } // namespace rg::graphics

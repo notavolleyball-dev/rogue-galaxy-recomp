@@ -885,6 +885,26 @@ build that compiles is not "done".
      G5 `SubmitNativeEffect`.
    - The hook writes the screenshots itself, in the GS latch's format and
      naming.
+   **Local copies mirrored (built 2026-11-04, not yet run).** A copy
+   between one format (`3840`/`3b00`/`3ba0`/`3c20`/`3c80` T8 into `3800`
+   T8) is done on what the producer holds: from the host image or resident
+   texture at the source into the one at the destination, the
+   destination's texture made again (every live record's texels are kept
+   for this). Copies between formats (`2a20` T8 into `2a00` T4) are
+   counted, not done. The stats line: `local copies mirrored N, other
+   format N, no source N, no destination N`.
+
+   **7e, no GS (built 2026-11-04, not yet run).** Under the pipeline the
+   backend is installed bare inside the tripwire: no GS worker thread or
+   queue, no held uploads, census, timing, depth serving or flip pacing,
+   and the backend's `Initialize` is not passed on, so it makes no GS local
+   memory, transfer engine or target/texture caches. It is the window and
+   the native renderer's host only. The log says `GS backend: none under
+   the native pipeline`. `RG_NATIVE_GS_INIT=1` makes the backend's GS
+   state as before (for telling a crash apart). Still there: the runtime's
+   `GS` front end object (`PS2Runtime::m_gs`, a value member VU1 and the
+   GIF paths take by reference), with its local memory only reserved
+   address space. Taking it out is a runtime patch of its own.
 8. **Features**: TAA/upscaling first, then shadows, then RT, each on the R
    counters it needs.
 

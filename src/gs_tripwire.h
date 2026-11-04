@@ -19,6 +19,12 @@ namespace rg::graphics
 //   pass  everything reaches the backend as before, logged
 //
 // With the pipeline off it is a plain pass-through.
-std::unique_ptr<GSRasterBackend> tripOnGs(std::unique_ptr<GSRasterBackend> backend);
+//
+// `bare` (step 7's structural check, the pipeline on): the backend is only
+// the window and the native renderer's host, with no GS of its own: its GS
+// local memory, transfer engine and target and texture caches are never
+// made (Initialize is not passed on). RG_NATIVE_GS_INIT=1 makes them as
+// before.
+std::unique_ptr<GSRasterBackend> tripOnGs(std::unique_ptr<GSRasterBackend> backend, bool bare = false);
 
 } // namespace rg::graphics
