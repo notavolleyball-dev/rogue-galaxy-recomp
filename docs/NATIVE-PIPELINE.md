@@ -568,28 +568,22 @@ build that compiles is not "done".
        piece's material is unknown, with its raw registers. Left now: FBA
        on draws into the layers, which writes alpha 0x80 anyway.
 
-     **Open: boxes around characters drawn through layers.** They were
-     dark, and have been light since fog. The layer target (target 4 in
-     the dumps) is also the shadow-volume buffer: cleared at the frame's
-     start to (128,128,128) with alpha 0, then drawn into by the shadow
-     quads. The scene reads a layer as CT24 with AEM, where only pure black
-     is transparent, so whatever non-black is left in the character's box
-     shows. On the GS the box must be black when the composite reads it:
-     either a clear of the box is missing here, or a draw in between acts
-     differently. Next: the GS's pixels of that buffer at the same frame
-     (a GS-path run with `RG_NATIVE_COMPOSITE=0`, its VRAM dump through
-     `tools/bench/vram2png.py` at the layer's base), against the draws
-     into it.
-     - The minimap has a dark panel behind it.
-     - Fog on 2D pieces is dropped (1,038 a window): its F is per vertex.
-     - CBlur's green-to-alpha is still on the GS.
-6. **2D** through the converter as sprite draws, then the remaining VU1
-   programs on packets (outlines, shadow volumes, particles). Pass: G1 and
-   G5 at 0.
-7. **Present, clears, readbacks, depth probe.** Pass: G2, G4 at 0. Then the
-   structural check: no `GS` object.
-8. **Features**: TAA/upscaling first, then shadows, then RT, each on the R
-   counters it needs.
+     **Boxes around characters drawn through layers: cause found, fix
+     deferred (2026-11-04).** The GS path shows the same boxes with
+     composite batching off (`RG_NATIVE_COMPOSITE=0`, run `gs-layers`) and
+     none with it on (`gs-layers-batched`): the scene at frame 3000 of each,
+     decoded from their VRAM dumps. So the native renderer reproduces the
+     GS. The boxes come from running the game's object layers unbatched,
+     which 4c chose because batching sends each object's tail to the GS as
+     packets. Unbatched, the layer buffer (02a00) is memory the shadow
+     volumes and texture uploads also use, and what's left in an object's
+     box isn't the black the CT24 + AEM composite needs.
+
+     **The fix** is batching done natively: each object drawn into a layer
+     of the renderer's own, cleared to transparent, with its tail
+     composited from it (`kRouteLayer`, `kObjectTail` and `kComposite` as
+     records: the plan's `EffectKind::ObjectLayer`). It's a piece of its
+     own: **5c**.
 
 Steps 3 to 7 can be split differently once step 1's numbers show where the
 crossings really are.
