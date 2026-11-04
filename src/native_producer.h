@@ -109,6 +109,13 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
 // producer holds at its source and destination (the first few).
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
                    uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height);
+// A withheld upload whose data as sent differs from the guest memory its
+// record was made from (the game wrote it after the texture hook): the
+// record made again from `data` and resident in its place (VIF1 thread, in
+// the stream's order). Palettes of 16 or 256 entries; textures uploaded as
+// the format they are read in.
+void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, uint32_t height, const uint8_t *data,
+                   uint32_t bytes);
 void noteWithheld(bool palette, uint32_t imageBytes);
 void notePassed(Passed why);
 void noteSplit();

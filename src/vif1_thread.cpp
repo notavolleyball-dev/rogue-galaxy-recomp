@@ -1969,11 +1969,13 @@ struct UploadWithhold
 };
 std::atomic<uint64_t> g_uploadsChecked{0}, g_uploadsStale{0};
 
+// On under the pipeline (RG_NATIVE_UPLOAD_CHECK=0 off): a stale record is
+// made again from what was sent (rg::nativeproducer::replaceUpload).
 bool checkingUploads()
 {
     static const bool on = [] {
         const char *v = std::getenv("RG_NATIVE_UPLOAD_CHECK");
-        return v && *v && *v != '0';
+        return !(v && *v == '0');
     }();
     return on;
 }
@@ -1993,11 +1995,13 @@ void seeWithheld(const uint8_t *data, uint32_t size)
     if (dq8::gfx::namedtextures::imageHash(u.seen.data(), u.expectBytes) != u.expectHash)
     {
         const uint64_t stale = g_uploadsStale.fetch_add(1u, std::memory_order_relaxed);
-        if (stale < 24u)
+        if (stale < 8u)
             std::fprintf(stderr,
                          "[native-upload] stale record: DBP %04x DPSM %02x %ux%u%s, %u bytes (sent differs from the "
-                         "record's guest memory)\n",
+                         "record's guest memory): made again from what was sent\n",
                          u.dbp, u.dpsm, u.width, u.height, u.palette ? " (palette)" : "", u.expectBytes);
+        rg::nativeproducer::replaceUpload(u.palette, u.dbp, u.dpsm, u.width, u.height, u.seen.data(),
+                                          u.expectBytes);
     }
     u.expectBytes = 0u;
 }

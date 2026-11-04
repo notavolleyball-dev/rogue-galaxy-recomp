@@ -65,6 +65,8 @@ struct Counts
     uint64_t hostPalettes = 0, hostReadsRefused = 0;
     // Narrow views: a buffer drawn or read narrower than its target.
     uint64_t viewsNew = 0, viewWrites = 0, viewReads = 0;
+    // Stale records made again from what was sent (replaceUpload).
+    uint64_t palettesReplaced = 0, texturesReplaced = 0;
 };
 
 struct State
@@ -291,7 +293,8 @@ std::string statsLine()
                        d(n.hostTexturesKnown, r.hostTexturesKnown) + ", palettes " +
                        d(n.hostPalettes, r.hostPalettes) + ", reads refused " +
                        d(n.hostReadsRefused, r.hostReadsRefused) +
-                       " | narrow views new " + d(n.viewsNew, r.viewsNew) + ", draws into them " +
+                       " | stale records made again: palettes " + d(n.palettesReplaced, r.palettesReplaced) +
+                       ", textures " + d(n.texturesReplaced, r.texturesReplaced) + " | narrow views new " + d(n.viewsNew, r.viewsNew) + ", draws into them " +
                        d(n.viewWrites, r.viewWrites) + ", reads of them " + d(n.viewReads, r.viewReads) +
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
@@ -740,6 +743,106 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
         }
     }
     return false;
+}
+
+void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, uint32_t height, const uint8_t *data,
+                   uint32_t bytes)
+{
+    if (!native::enabled() || !data)
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    forgetEvicted(s);
+    dpsm &= 0x3Fu;
+    const uint64_t hash = dq8::gfx::namedtextures::imageHash(data, bytes);
+    if (palette)
+    {
+        const uint32_t entries = width * height;
+        const bool is16 = dpsm == kCT16 || dpsm == kCT16S;
+        if ((entries != 16u && entries != 256u) || (dpsm != kCT32 && !is16) || bytes < entries * (is16 ? 2u : 4u))
+            return;
+        const uint64_t key = keyOf(hash, dpsm, entries, 0u);
+        native::Id id = 0u;
+        if (const auto known = s.paletteIds.find(key); known != s.paletteIds.end())
+            id = known->second;
+        else
+        {
+            auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
+            for (uint32_t i = 0; i < entries; ++i)
+            {
+                const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
+                if (is16)
+                    ct16(uint16_t(data[at * 2u] | (data[at * 2u + 1u] << 8)), colors->data() + i * 4u);
+                else
+                    std::copy_n(data + at * 4u, 4u, colors->data() + i * 4u);
+            }
+            native::Palette record;
+            record.id = id = s.nextPalette++;
+            record.entries = static_cast<uint16_t>(entries);
+            if (dumpingTextures())
+                s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
+            record.colors = std::move(colors);
+            s.paletteIds[key] = record.id;
+            native::push(std::move(record));
+        }
+        s.residentPalette[dbp] = id;
+        s.takenPaletteSeq[dbp] = ++s.sequence;
+        ++s.counts.palettesReplaced;
+        return;
+    }
+    // A texture: only one sent as the format it is read in (not pre-swizzled).
+    const auto resident = s.residentTexture.find(dbp);
+    if (resident == s.residentTexture.end() || resident->second.first != dpsm)
+        return;
+    const size_t texels = size_t(width) * height;
+    native::Texture record;
+    auto out = std::make_shared<std::vector<uint8_t>>();
+    if (dpsm == kCT32 && bytes >= texels * 4u)
+    {
+        record.format = native::PixelFormat::Rgba8;
+        out->assign(data, data + texels * 4u);
+    }
+    else if ((dpsm == kCT16 || dpsm == kCT16S) && bytes >= texels * 2u)
+    {
+        record.format = native::PixelFormat::Rgba8;
+        out->resize(texels * 4u);
+        for (size_t i = 0; i < texels; ++i)
+            ct16(uint16_t(data[i * 2u] | (data[i * 2u + 1u] << 8)), out->data() + i * 4u);
+    }
+    else if (dpsm == kT8 && bytes >= texels)
+    {
+        record.format = native::PixelFormat::Index8;
+        out->assign(data, data + texels);
+    }
+    else if (dpsm == kT4 && bytes >= (texels + 1u) / 2u)
+    {
+        record.format = native::PixelFormat::Index8;
+        out->resize(texels);
+        for (size_t i = 0; i < texels; ++i)
+            (*out)[i] = (data[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
+    }
+    else
+        return;
+    const uint64_t key = keyOf(hash, dpsm, width, height);
+    native::Id id = 0u;
+    if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
+        id = known->second;
+    else
+    {
+        record.width = static_cast<uint16_t>(width);
+        record.height = static_cast<uint16_t>(height);
+        record.id = id = s.nextTexture++;
+        if (dumpingTextures())
+            s.keptTextures[record.id] = {out, record.width, record.height,
+                                         record.format == native::PixelFormat::Index8};
+        record.texels = std::move(out);
+        s.textureIds[key] = record.id;
+        s.textureKeys[record.id] = key;
+        native::push(std::move(record));
+    }
+    resident->second.second = id;
+    s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
+    ++s.counts.texturesReplaced;
 }
 
 void noteWithheld(bool palette, uint32_t imageBytes)
@@ -2420,6 +2523,7 @@ uint32_t captureTarget(uint32_t) { return 0u; }
 bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &) { return false; }
 void noteEffect(const GSNativeEffect &) {}
 bool piece(const GSNativeMesh &, const GSDrawState *) { return false; }
+void replaceUpload(bool, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void noteLocalCopy(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                    uint32_t, uint32_t) {}
