@@ -1979,6 +1979,19 @@ bool checkingUploads()
     }();
     return on;
 }
+
+// The largest upload checked (RG_NATIVE_UPLOAD_CHECK=all: every one). The
+// stale records seen were all palettes (1 KiB) and 64x64 CT32 textures
+// (16 KiB); at the boss, checking every upload was about a twentieth of
+// this thread and found none.
+uint32_t checkedUploadLimit()
+{
+    static const uint32_t limit = [] {
+        const char *v = std::getenv("RG_NATIVE_UPLOAD_CHECK");
+        return v && std::strcmp(v, "all") == 0 ? ~0u : 16u * 1024u;
+    }();
+    return limit;
+}
 thread_local UploadWithhold t_upload;
 
 // Withheld bytes, for the check; compared when all have come.
@@ -2093,7 +2106,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     t_upload.palette = palette;
                     t_upload.seen.clear();
                     t_upload.expectHash = hash;
-                    t_upload.expectBytes = hashedBytes;
+                    t_upload.expectBytes = hashedBytes <= checkedUploadLimit() ? hashedBytes : 0u;
                     t_upload.dbp = dbp;
                     t_upload.dpsm = dpsm;
                     t_upload.width = rrw;

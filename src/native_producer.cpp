@@ -1241,9 +1241,34 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     thread_local std::vector<GSNativeMeshPoint> points;
     if (culls)
     {
+        // Only what the skip rule reads (px, py, outside), by the same
+        // operations as gsNativeMeshPoint, so the same bits.
         points.resize(count);
+        const auto &m = h.matrix;
         for (uint32_t k = 0; k < count; ++k)
-            points[k] = gsNativeMeshPoint(h, mesh.vertices[k]);
+        {
+#if defined(__clang__)
+#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
+#endif
+            const GSNativeMesh::Vertex &v = mesh.vertices[k];
+            float clip[4];
+            for (int i = 0; i < 4; ++i)
+                clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+            GSNativeMeshPoint &p = points[k];
+            p.q = gsNativeReciprocal(clip[3]);
+            p.px = clip[0] * p.q;
+            p.py = clip[1] * p.q;
+            p.outside = false;
+            if (h.guardBand)
+            {
+                const float projected[3] = {p.px, p.py, clip[2] * p.q};
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float g = projected[i] * h.bandScale[i] + h.bandOffset[i] * h.bandScale[i];
+                    p.outside = p.outside || g > 1.0f || g < -1.0f;
+                }
+            }
+        }
     }
     const bool lists = h.triangleList != 0u;
     const bool listCull = lists && h.backface;
