@@ -7215,7 +7215,8 @@ PresentationFrame SdlGpuBackend::presentNativeFrame() {
 }
 
 void SdlGpuBackend::serveNativeReads() {
-    if (!native::colorReadsWaiting())
+    // (Or the triggered dump's targets, which ride along: a diagnostic.)
+    if (!native::colorReadsWaiting() && !m_impl->nativeRenderer.dumpPending())
         return;
     std::lock_guard lock(m_impl->mutex);
     if (!native::enabled() || !m_impl->device.valid())

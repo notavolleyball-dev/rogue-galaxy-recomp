@@ -175,6 +175,7 @@ bool dumpingTextures()
 // The flip after `touch build/run/dump-now` (0: none yet), whose 2D pieces
 // and meshes are logged; it also asks the renderer for its side of that
 // frame (build/run/dump-gpu). Checked once a flip.
+State &state();
 uint64_t triggeredDumpFlip()
 {
     static uint64_t checked = 0u, triggered = 0u;
@@ -188,6 +189,9 @@ uint64_t triggeredDumpFlip()
             if (FILE *f = std::fopen("build/run/dump-gpu", "w"))
                 std::fclose(f);
             std::fprintf(stderr, "[piece-dump] dumping flip %llu\n", (unsigned long long)triggered);
+            for (const auto &[base, t] : state().targets)
+                std::fprintf(stderr, "[target-map] base %04x -> target %u %ux%u role %d\n", base, t.id, t.width,
+                             t.height, int(t.role));
         }
     }
     return triggered;

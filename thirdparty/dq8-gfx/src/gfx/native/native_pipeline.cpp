@@ -4,6 +4,8 @@
 #include "native_view.vert.spv.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <tuple>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -829,8 +831,87 @@ void Renderer::serveDepth(SDL_GPUDevice *device)
     m_depthCounts.copied += m_depthCopied.size();
 }
 
+void Renderer::dumpTargets(SDL_GPUDevice *device)
+{
+    m_dumpTargets = false;
+    std::vector<std::tuple<Id, SDL_GPUTexture *, uint32_t, uint32_t>> all;
+    all.emplace_back(m_sceneTarget, m_scene, m_sceneWidth, m_sceneHeight);
+    for (const auto &[id, t] : m_gpuTargets)
+    {
+        const auto declared = m_targets.find(id);
+        if (!t.texture || declared == m_targets.end() || declared->second.format == PixelFormat::Depth32 ||
+            id == m_sceneTarget)
+            continue;
+        all.emplace_back(id, t.texture, t.width, t.height);
+    }
+    std::error_code ec;
+    std::filesystem::create_directories("build/run/targets", ec);
+    for (const auto &[id, texture, w, h] : all)
+    {
+        if (!texture || w == 0u || h == 0u)
+            continue;
+        const uint32_t bytes = w * h * 4u;
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+        info.size = bytes;
+        SDL_GPUTransferBuffer *download = SDL_CreateGPUTransferBuffer(device, &info);
+        SDL_GPUCommandBuffer *commands = download ? SDL_AcquireGPUCommandBuffer(device) : nullptr;
+        SDL_GPUCopyPass *pass = commands ? SDL_BeginGPUCopyPass(commands) : nullptr;
+        SDL_GPUFence *fence = nullptr;
+        if (pass)
+        {
+            SDL_GPUTextureRegion region{};
+            region.texture = texture;
+            region.w = w;
+            region.h = h;
+            region.d = 1u;
+            SDL_GPUTextureTransferInfo destination{};
+            destination.transfer_buffer = download;
+            destination.pixels_per_row = w;
+            destination.rows_per_layer = h;
+            SDL_DownloadFromGPUTexture(pass, &region, &destination);
+            SDL_EndGPUCopyPass(pass);
+            fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+        }
+        else if (commands)
+            SDL_CancelGPUCommandBuffer(commands);
+        if (fence)
+        {
+            SDL_WaitForGPUFences(device, true, &fence, 1u);
+            SDL_ReleaseGPUFence(device, fence);
+            if (const auto *p = static_cast<const uint8_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
+            {
+                char name[96];
+                std::snprintf(name, sizeof(name), "build/run/targets/target%u_%ux%u.ppm", id, w, h);
+                if (FILE *f = std::fopen(name, "wb"))
+                {
+                    std::fprintf(f, "P6\n%u %u\n255\n", w * 2u, h);
+                    std::vector<uint8_t> row(size_t(w) * 6u);
+                    for (uint32_t y = 0; y < h; ++y)
+                    {
+                        for (uint32_t x = 0; x < w; ++x)
+                        {
+                            const uint8_t *px = p + (size_t(y) * w + x) * 4u;
+                            std::memcpy(row.data() + x * 3u, px, 3u);
+                            row[(w + x) * 3u] = row[(w + x) * 3u + 1u] = row[(w + x) * 3u + 2u] = px[3];
+                        }
+                        std::fwrite(row.data(), 1, row.size(), f);
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "[target-dump] %s\n", name);
+                }
+                SDL_UnmapGPUTransferBuffer(device, download);
+            }
+        }
+        if (download)
+            SDL_ReleaseGPUTransferBuffer(device, download);
+    }
+}
+
 void Renderer::serveColorReads(SDL_GPUDevice *device)
 {
+    if (m_dumpTargets)
+        dumpTargets(device);
     std::vector<std::pair<uint32_t, ColorRead>> waiting;
     ColorMailbox &m = colorMailbox();
     {

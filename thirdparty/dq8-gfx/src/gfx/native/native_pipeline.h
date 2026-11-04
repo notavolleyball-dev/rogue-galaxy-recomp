@@ -98,6 +98,10 @@ public:
     // last frame drawn left them; waits for the GPU. Anything the owner has
     // pending must be submitted first.
     void serveColorReads(SDL_GPUDevice *device);
+    // The triggered dump's colour targets, as PPM in build/run/targets
+    // (colour, and alpha beside it), the frame after drawFrame asked.
+    void dumpTargets(SDL_GPUDevice *device);
+    bool dumpPending() const { return m_dumpTargets; }
 
     // What the presenter shows: the scene target, recorded into `commands`.
     // False with `error` set when the GPU refused.
@@ -206,6 +210,7 @@ private:
     std::vector<MeshDraw> m_meshes;      // drawn since the last Present record, any target
     std::vector<MeshDraw> m_frameMeshes; // the frame a Present record closed
     bool m_frameReady = false;
+    bool m_dumpTargets = false; // the triggered dump: write the targets out
     SDL_GPUShader *m_meshVertex = nullptr;
     SDL_GPUShader *m_meshFragment = nullptr;
     bool m_meshFailed = false;
