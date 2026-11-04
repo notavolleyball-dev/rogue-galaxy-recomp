@@ -16,6 +16,10 @@
 #include "gfx/native/native_pipeline.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
+#include "runtime/gs/gs_types.h"
+
+#include <cmath>
+#include <cstring>
 
 namespace rg::nativeproducer
 {
@@ -34,6 +38,11 @@ struct Counts
     uint64_t bytesHashed = 0;
     uint64_t withheldTextures = 0, withheldPalettes = 0, withheldBytes = 0;
     uint64_t passedNotProduced = 0, split = 0, continuedInPacket = 0;
+    // Step 4a: VU1 meshes made mesh draws.
+    uint64_t meshes = 0, meshesNoState = 0, meshesSplit = 0, meshesWhole = 0, camerasNew = 0;
+    uint64_t materialKnown = 0, textureMiss = 0, paletteMiss = 0, targetMiss = 0;
+    uint64_t unknownBlend = 0, unknownClamp = 0, unknownWriteMask = 0, unknownOther = 0;
+    uint64_t triangles = 0, trianglesSkipped = 0;
 };
 
 struct State
@@ -48,6 +57,9 @@ struct State
     std::unordered_map<uint32_t, native::Id> paletteAt;                       // cbp -> id
     std::unordered_map<uint32_t, native::Id> targetAt;                        // base -> id
     std::map<uint32_t, native::Target> targets;                               // base -> as declared
+    std::unordered_map<uint32_t, native::Id> depthAt;                         // ZBUF base -> id
+    std::unordered_map<uint64_t, native::Id> cameraIds;                       // matrices' hash -> id
+    native::Id nextCamera = 1u;
     // Uploads made into records, in the game's order, for takeProduced.
     struct Produced
     {
@@ -86,6 +98,16 @@ std::string statsLine()
                        d(n.palettesKnown, r.palettesKnown) + ", refused " + d(n.palettesRefused, r.palettesRefused) +
                        " | targets new " + d(n.targetsNew, r.targetsNew) + " | hashed " +
                        std::to_string((n.bytesHashed - r.bytesHashed) >> 10) + " KiB" +
+                       " | meshes " + d(n.meshes, r.meshes) + ": no draw state " +
+                       d(n.meshesNoState, r.meshesNoState) + ", camera and model " + d(n.meshesSplit, r.meshesSplit) +
+                       ", whole matrix (model check failed) " + d(n.meshesWhole, r.meshesWhole) + ", cameras new " +
+                       d(n.camerasNew, r.camerasNew) + ", material known " + d(n.materialKnown, r.materialKnown) +
+                       " (misses: texture " + d(n.textureMiss, r.textureMiss) + ", palette " +
+                       d(n.paletteMiss, r.paletteMiss) + ", target " + d(n.targetMiss, r.targetMiss) +
+                       "; unknown: blend " + d(n.unknownBlend, r.unknownBlend) + ", clamp " +
+                       d(n.unknownClamp, r.unknownClamp) + ", write mask " + d(n.unknownWriteMask, r.unknownWriteMask) +
+                       ", other " + d(n.unknownOther, r.unknownOther) + "), triangles " +
+                       d(n.triangles, r.triangles) + " (skipped " + d(n.trianglesSkipped, r.trianglesSkipped) + ")" +
                        " | withheld from the GS: textures " + d(n.withheldTextures, r.withheldTextures) +
                        ", palettes " + d(n.withheldPalettes, r.withheldPalettes) + " (" +
                        std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
@@ -405,6 +427,359 @@ void noteContinuedInPacket()
     ++s.counts.continuedInPacket;
 }
 
+namespace
+{
+// A 4x4 of row vectors from VU1 data memory, quads `first` to `first + 3`.
+void quadsMatrix(const uint8_t *vu1, uint32_t first, float out[16])
+{
+    std::memcpy(out, vu1 + first * 16u, 16u * sizeof(float));
+}
+
+void multiply(const float a[16], const float b[16], float out[16])
+{
+    float r[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] + a[i * 4 + 2] * b[2 * 4 + j] +
+                           a[i * 4 + 3] * b[3 * 4 + j];
+    std::memcpy(out, r, sizeof(r));
+}
+
+// `m` followed by the window's offset: x - ofx and y - ofy after the divide.
+void foldOffset(float m[16], float ofx, float ofy)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        m[i * 4 + 0] -= m[i * 4 + 3] * ofx;
+        m[i * 4 + 1] -= m[i * 4 + 3] * ofy;
+    }
+}
+
+// Whether model x view x projection x viewport is the program's own matrix
+// (68-71), column by column within 2e-3 of the column's largest entry.
+bool sameMatrix(const float a[16], const float (&b)[4][4])
+{
+    for (int j = 0; j < 4; ++j)
+    {
+        float scale = 0.0f, error = 0.0f;
+        for (int i = 0; i < 4; ++i)
+        {
+            scale = std::max(scale, std::fabs(b[i][j]));
+            error = std::max(error, std::fabs(a[i * 4 + j] - b[i][j]));
+        }
+        if (!(error <= 2e-3f * scale + 1e-6f))
+            return false;
+    }
+    return true;
+}
+
+native::Compare alphaCompare(uint32_t atst)
+{
+    static constexpr native::Compare table[8] = {
+        native::Compare::Never,        native::Compare::Always,  native::Compare::Less,
+        native::Compare::LessEqual,    native::Compare::Equal,   native::Compare::GreaterEqual,
+        native::Compare::Greater,      native::Compare::NotEqual};
+    return table[atst & 7u];
+}
+
+bool indexedPsm(uint32_t psm)
+{
+    return psm == kT8 || psm == kT4 || psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu;
+}
+
+// Locked. The material the draw state means; false where some part of it
+// has no exact meaning here (counted by reason).
+bool materialOf(State &s, const GSDrawState &state, native::Material &m)
+{
+    const GSContext &c = state.context;
+    bool known = true;
+    if (state.prim.tme)
+    {
+        const GSTex0Reg &t = c.tex0;
+        const auto at = s.textureAt.find(t.tbp0);
+        m.texture = at != s.textureAt.end() && at->second.first == (t.psm & 0x3Fu) ? at->second.second : 0u;
+        if (m.texture == 0u)
+        {
+            ++s.counts.textureMiss;
+            known = false;
+        }
+        if (indexedPsm(t.psm))
+        {
+            const auto p = s.paletteAt.find(t.cbp);
+            m.palette = p != s.paletteAt.end() && t.csa == 0u ? p->second : 0u;
+            if (m.palette == 0u)
+            {
+                ++s.counts.paletteMiss;
+                known = false;
+            }
+        }
+        m.linear = state.linearFilter;
+        const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
+        m.clampU = wms != 0u;
+        m.clampV = wmt != 0u;
+        if (wms > 1u || wmt > 1u)
+        {
+            ++s.counts.unknownClamp;
+            known = false;
+        }
+        static constexpr native::TextureFunction functions[4] = {
+            native::TextureFunction::Modulate, native::TextureFunction::Decal, native::TextureFunction::Highlight,
+            native::TextureFunction::Highlight2};
+        m.function = functions[t.tfx & 3u];
+        m.textureAlpha = t.tcc != 0u;
+    }
+
+    if (state.prim.abe)
+    {
+        // (A - B) * C + D; A, B, D: 0 Cs, 1 Cd, 2 zero; C: 0 As, 1 Ad, 2 FIX.
+        const uint32_t a = c.alpha & 3u, b = (c.alpha >> 2) & 3u, cc = (c.alpha >> 4) & 3u, d = (c.alpha >> 6) & 3u;
+        const uint32_t abcd = (a << 6) | (b << 4) | (cc << 2) | d;
+        m.blend = native::Blend::Alpha;
+        if (abcd == ((0u << 6) | (1u << 4) | (0u << 2) | 1u))
+            m.blend = native::Blend::Alpha;
+        else if (abcd == ((0u << 6) | (2u << 4) | (0u << 2) | 1u))
+            m.blend = native::Blend::Add;
+        else if (abcd == ((2u << 6) | (0u << 4) | (0u << 2) | 1u))
+            m.blend = native::Blend::Subtract;
+        else if (abcd == ((0u << 6) | (1u << 4) | (2u << 2) | 1u))
+        {
+            m.blend = native::Blend::FixedAlpha;
+            m.blendFactor = static_cast<uint8_t>((c.alpha >> 32) & 0xFFu);
+        }
+        else
+        {
+            ++s.counts.unknownBlend;
+            known = false;
+        }
+    }
+
+    const uint64_t test = c.test;
+    if (test & 1u)
+    {
+        m.alphaTest = alphaCompare(static_cast<uint32_t>(test >> 1));
+        m.alphaRef = static_cast<uint8_t>((test >> 4) & 0xFFu);
+        static constexpr native::AlphaFail fails[4] = {native::AlphaFail::Nothing, native::AlphaFail::ColorOnly,
+                                                      native::AlphaFail::DepthOnly, native::AlphaFail::RgbOnly};
+        m.alphaFail = fails[(test >> 12) & 3u];
+    }
+    const bool zte = ((test >> 16) & 1u) != 0u;
+    static constexpr native::Compare depths[4] = {native::Compare::Never, native::Compare::Always,
+                                                  native::Compare::GreaterEqual, native::Compare::Greater};
+    m.depthTest = zte ? depths[(test >> 17) & 3u] : native::Compare::Always;
+    m.depthWrite = !c.zbuf.zmask && m.depthTest != native::Compare::Never;
+    // Destination alpha test, and FBA (alpha forced high as it is written):
+    // nothing here yet means either.
+    if (((test >> 14) & 1u) || (c.fba & 1u))
+    {
+        ++s.counts.unknownOther;
+        known = false;
+    }
+
+    // FBMSK: a channel is written when none of its bits are masked.
+    const uint32_t mask = c.frame.fbmsk;
+    m.colorWrite = 0u;
+    bool partial = false;
+    for (uint32_t ch = 0; ch < 4u; ++ch)
+    {
+        const uint32_t bits = (mask >> (ch * 8u)) & 0xFFu;
+        if (bits == 0u)
+            m.colorWrite |= static_cast<uint8_t>(1u << ch);
+        else if (bits != 0xFFu)
+            partial = true;
+    }
+    if (partial)
+    {
+        ++s.counts.unknownWriteMask;
+        known = false;
+    }
+    m.fog = state.prim.fge;
+    m.cullBack = false; // the producer's indices already leave out what the program culls
+    return known;
+}
+
+// Locked. The id of the depth buffer at `base`, declared like the color
+// target it is drawn with.
+native::Id depthTarget(State &s, uint32_t base, uint32_t colorBase, native::Id color)
+{
+    const auto at = s.depthAt.find(base);
+    if (at != s.depthAt.end())
+        return at->second;
+    native::Target record;
+    record.id = s.nextTarget++;
+    record.role = color == kSceneTarget ? native::TargetRole::SceneDepth : native::TargetRole::Offscreen;
+    record.format = native::PixelFormat::Depth32;
+    record.width = 640u;
+    record.height = 448u;
+    if (const auto declared = s.targets.find(colorBase); declared != s.targets.end())
+    {
+        record.width = declared->second.width;
+        record.height = declared->second.height;
+    }
+    s.depthAt.emplace(base, record.id);
+    ++s.counts.targetsNew;
+    native::push(native::Target(record));
+    return record.id;
+}
+
+// Locked. The camera's id, a record sent when it is new.
+native::Id cameraOf(State &s, const float view[16], const float projection[16], const float viewport[16])
+{
+    uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](const float *m) {
+        for (int i = 0; i < 16; ++i)
+        {
+            uint32_t bits;
+            std::memcpy(&bits, &m[i], 4u);
+            hash = (hash ^ bits) * 1099511628211ull;
+        }
+    };
+    mix(view);
+    mix(projection);
+    mix(viewport);
+    const auto at = s.cameraIds.find(hash);
+    if (at != s.cameraIds.end())
+        return at->second;
+    if (s.cameraIds.size() >= 4096u)
+        s.cameraIds.clear();
+    native::Camera record;
+    record.id = s.nextCamera++;
+    std::memcpy(record.view, view, sizeof(record.view));
+    std::memcpy(record.projection, projection, sizeof(record.projection));
+    std::memcpy(record.viewport, viewport, sizeof(record.viewport));
+    s.cameraIds.emplace(hash, record.id);
+    ++s.counts.camerasNew;
+    native::push(native::Camera(record));
+    return record.id;
+}
+} // namespace
+
+void mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
+{
+    if (!native::enabled() || !vu1Data)
+        return;
+    const GSNativeMesh::Header &h = mesh.header;
+    const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
+
+    native::MeshDraw draw;
+    draw.source = source;
+
+    // The triangles the program draws: a strip's every vertex from the
+    // third on, a list's every third, less those the program culls (the
+    // GS front end's rule for this mesh, gsNativeMeshSkips).
+    const bool culls = h.guardBand || h.backface;
+    thread_local std::vector<GSNativeMeshPoint> points;
+    if (culls)
+    {
+        points.resize(count);
+        for (uint32_t k = 0; k < count; ++k)
+            points[k] = gsNativeMeshPoint(h, mesh.vertices[k]);
+    }
+    const bool lists = h.triangleList != 0u;
+    const bool listCull = lists && h.backface;
+    float winding = listCull ? -h.winding : h.winding;
+    uint64_t skipped = 0u;
+    draw.indices.reserve(count >= 2u ? (count - 2u) * 3u : 0u);
+    for (uint32_t k = 1; k < count; ++k)
+    {
+        const bool judged = !listCull || k % 3u == 2u;
+        const bool skip = culls && judged && gsNativeMeshSkips(h, points.data(), k, winding);
+        if (culls && !listCull)
+            winding = -winding;
+        const bool drawn = k >= 2u && (lists ? k % 3u == 2u : true);
+        if (!drawn)
+            continue;
+        if (skip)
+        {
+            ++skipped;
+            continue;
+        }
+        draw.indices.push_back(k - 2u);
+        draw.indices.push_back(k - 1u);
+        draw.indices.push_back(k);
+    }
+
+    draw.vertices.resize(count);
+    for (uint32_t k = 0; k < count; ++k)
+    {
+        const GSNativeMesh::Vertex &in = mesh.vertices[k];
+        native::Vertex &out = draw.vertices[k];
+        out.position[0] = in.x;
+        out.position[1] = in.y;
+        out.position[2] = in.z;
+        out.uv[0] = in.u;
+        out.uv[1] = in.v;
+        out.color[0] = std::fmin(in.r, h.colorMax[0]);
+        out.color[1] = std::fmin(in.g, h.colorMax[1]);
+        out.color[2] = std::fmin(in.b, h.colorMax[2]);
+        out.color[3] = std::fmin(in.a, h.colorMax[3]);
+    }
+    std::memcpy(draw.fog, h.fog, sizeof(draw.fog));
+
+    // The camera and the model, as the game keeps them in VU1 data memory.
+    float model[16], view[16], projection[16], viewport[16], whole[16];
+    quadsMatrix(vu1Data, 60u, model);
+    quadsMatrix(vu1Data, 24u, view);
+    quadsMatrix(vu1Data, 8u, projection);
+    quadsMatrix(vu1Data, 4u, viewport);
+    multiply(model, view, whole);
+    multiply(whole, projection, whole);
+    multiply(whole, viewport, whole);
+    const bool split = sameMatrix(whole, h.matrix);
+
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    forgetEvicted(s);
+    ++s.counts.meshes;
+    s.counts.triangles += draw.indices.size() / 3u;
+    s.counts.trianglesSkipped += skipped;
+    if (!drawState)
+    {
+        ++s.counts.meshesNoState;
+        return;
+    }
+    const GSContext &c = drawState->context;
+    const float ofx = static_cast<float>(c.xyoffset.ofx) / 16.0f;
+    const float ofy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
+    if (split)
+    {
+        foldOffset(viewport, ofx, ofy);
+        draw.camera = cameraOf(s, view, projection, viewport);
+        draw.hasModel = true;
+        std::memcpy(draw.model, model, sizeof(draw.model));
+        draw.floatDepth = true;
+        ++s.counts.meshesSplit;
+    }
+    else
+    {
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                draw.model[i * 4 + j] = h.matrix[i][j];
+        foldOffset(draw.model, ofx, ofy);
+        draw.hasModel = true;
+        ++s.counts.meshesWhole;
+    }
+
+    bool known = materialOf(s, *drawState, draw.material);
+    const uint32_t frameBase = c.frame.fbp * 32u;
+    const auto target = s.targetAt.find(frameBase);
+    draw.target = target != s.targetAt.end() ? target->second : 0u;
+    if (draw.target == 0u)
+    {
+        ++s.counts.targetMiss;
+        known = false;
+    }
+    if (draw.material.depthTest != native::Compare::Always || draw.material.depthWrite)
+        draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
+    draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
+    draw.fogColor[0] = drawState->fogR;
+    draw.fogColor[1] = drawState->fogG;
+    draw.fogColor[2] = drawState->fogB;
+    draw.material.known = known;
+    if (known)
+        ++s.counts.materialKnown;
+    native::push(native::MeshDraw(std::move(draw)));
+}
+
 uint32_t textureAt(uint32_t tbp, uint32_t psm)
 {
     State &s = state();
@@ -442,6 +817,7 @@ void notePassed(Passed) {}
 void noteSplit() {}
 bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { return false; }
 void noteContinuedInPacket() {}
+void mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) {}
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }
 uint32_t targetAt(uint32_t) { return 0u; }

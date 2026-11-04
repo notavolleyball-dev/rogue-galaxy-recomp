@@ -657,7 +657,10 @@ bool anyConversion();
 // RG_NATIVE_COMPOSITE: sends on the composites' tails it holds.
 void flushComposites();
 // A native strip likewise, in order with the packets.
-void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given = nullptr);
+// `vu1Data`: the VU1 data memory a program's mesh was built from, for the
+// native pipeline's mesh draw (rg::nativeproducer::mesh); null for others.
+void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given = nullptr,
+                 const uint8_t *vu1Data = nullptr);
 // For busyReport's VU1 pair counts.
 PS2Runtime *g_runtime = nullptr;
 
@@ -1002,7 +1005,7 @@ public:
                 }
                 if (nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
                 {
-                    deliverMesh(m_runtime.gs(), m_nativeMesh);
+                    deliverMesh(m_runtime.gs(), m_nativeMesh, nullptr, memory.getVU1Data());
                 }
                 // What the VU1 would have left in its memory, where it did not run.
                 if (nativeMode() != rg::vu1native::Mode::Replace)
@@ -2104,7 +2107,7 @@ void sendToGs(GS &gs, const uint8_t *data, uint32_t size)
     gs.processGIFPacket(data, size);
 }
 
-void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given)
+void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given, const uint8_t *vu1Data)
 {
     const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     if (composites() && t_onVif1Thread)
@@ -2136,6 +2139,10 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given)
         state = *given;
     else if (owned)
         state = rg::nativefx::mirroredDrawState();
+    // Step 4a (docs/NATIVE-PIPELINE.md): the mesh as a native mesh draw too,
+    // under the state the GS gets with it. The GS still draws it.
+    if (vu1Data)
+        rg::nativeproducer::mesh(mesh, given || owned ? &state : nullptr, vu1Data, mesh.header.source);
     if (g_stage && t_onVif1Thread)
     {
         g_stage->mesh(mesh, owned ? &state : nullptr);

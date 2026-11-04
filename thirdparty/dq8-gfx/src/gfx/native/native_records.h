@@ -98,6 +98,25 @@ enum class Compare : uint8_t
     NotEqual,
 };
 
+// How the texel and the vertex color combine (Cf the vertex's, Ct the
+// texel's, 0x80 is 1.0 in both).
+enum class TextureFunction : uint8_t
+{
+    Modulate,   // Cf * Ct
+    Decal,      // Ct
+    Highlight,  // Cf * Ct + Af, alpha Af + At
+    Highlight2, // Cf * Ct + Af, alpha At
+};
+
+// What a pixel that fails the alpha test still writes.
+enum class AlphaFail : uint8_t
+{
+    Nothing,
+    ColorOnly, // color and alpha, not depth
+    DepthOnly,
+    RgbOnly,   // color without alpha, not depth
+};
+
 struct Material
 {
     Id texture = 0; // 0: untextured
@@ -105,12 +124,17 @@ struct Material
     bool linear = false;
     bool clampU = true;
     bool clampV = true;
+    TextureFunction function = TextureFunction::Modulate;
+    bool textureAlpha = true; // the texel's alpha is used; false: the vertex's
     Blend blend = Blend::Opaque;
     uint8_t blendFactor = 0x80; // FixedAlpha's, 0x80 is 1.0
     Compare alphaTest = Compare::Always;
     uint8_t alphaRef = 0;
+    AlphaFail alphaFail = AlphaFail::Nothing;
+    // Depth grows toward the camera (reversed): Greater passes a nearer pixel.
     Compare depthTest = Compare::Always;
     bool depthWrite = false;
+    uint8_t colorWrite = 0xF; // bits R, G, B, A
     bool cullBack = false;
     bool fog = false;
     // The producer resolved every field from what the game meant, with no
@@ -137,7 +161,9 @@ struct MeshDraw
     Id depthTarget = 0;
     Id camera = 0;      // 0: no camera (a screen-space draw)
     bool hasModel = false;
-    float model[16] = {}; // object to world, row vectors, when hasModel
+    // Object to world, row vectors, when hasModel. With no camera, object
+    // straight to the target's pixels, homogeneous (divide by w).
+    float model[16] = {};
     uint64_t object = 0;  // stable across frames for the same object; 0 unknown
     Material material;
     Rect scissor;
@@ -145,6 +171,11 @@ struct MeshDraw
     std::vector<uint32_t> indices; // triangles; empty: vertices are a strip
     bool hasNormals = false;
     bool floatDepth = false; // depth written as float (linear or reversed), not the game's integers
+    // With material.fog: the fog factor F = clamp(fog[0] + fog[3] * w, at
+    // most fog[1], at least fog[2]), w the clip-space w; 255 is no fog,
+    // toward fogColor as F falls.
+    float fog[4] = {};
+    uint8_t fogColor[3] = {};
     uint32_t pass = 0;   // the game's pass, for grouping
     uint32_t source = 0; // what made it (a VU1 program, a hook), for profiles
 };

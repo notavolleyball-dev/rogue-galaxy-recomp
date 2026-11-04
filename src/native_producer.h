@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <string>
 
+struct GSNativeMesh;
+struct GSDrawState;
+
 // The game side of the native pipeline (docs/NATIVE-PIPELINE.md): what turns
 // the game's GS-shaped data into the renderer's records. The renderer sees
 // ids only; the tables from the game's GS addresses to those ids are kept
@@ -52,6 +55,14 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
 uint32_t textureAt(uint32_t tbp, uint32_t psm);
 uint32_t paletteAt(uint32_t cbp);
 uint32_t targetAt(uint32_t base);
+
+// Step 4a: a VU1 program's mesh as the renderer's mesh draw (the VIF1
+// thread, as the mesh goes to the GS). `vu1Data` is the VU1 data memory the
+// mesh was built from: the camera (quads 4-11, 24-27) and the model (60-63)
+// are read from it. `state` is the converter's mirror of the draw registers
+// the mesh is drawn under; null when it has none (the mesh is counted, not
+// made). `source` names what drew it, for profiles.
+void mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
 
 // Step 3b's counts (the VIF1 thread, which withholds named uploads the
 // producer sent from the GS): one withheld (palette or texture), one sent on

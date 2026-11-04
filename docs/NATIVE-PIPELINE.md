@@ -329,6 +329,49 @@ build that compiles is not "done".
 4. **VU1 meshes as mesh draws** with camera and model split. Pass: G5's mesh
    share at 0, and R1 and R3 near 100% of scene draws. **This is the step
    that unlocks motion vectors and upscaling.**
+
+   Split (2026-11-04), each part with its own pass:
+   - **4a. Records alongside the GS.** Each VU1 program mesh that goes to
+     the GS (`deliverMesh` with the program's VU1 data) also becomes a
+     `MeshDraw`. It carries:
+     - the camera (view 24-27, projection 8-11, viewport 4-7 with XYOFFSET
+       folded in) as its own record;
+     - the model (60-63), checked against the program's own matrix (68-71):
+       on a mismatch the draw keeps the whole matrix with no camera;
+     - the material from the converter's mirrored draw state, textures and
+       palettes by the producer's tables;
+     - indices with the program's guard band and backface skips applied, so
+       the renderer needs no GS rule.
+
+     The GS still draws everything. **Pass:** mesh records about equal to
+     the VU1 share of G5's `SubmitNativeMesh`; R1 near 100% of them (the
+     model check holds); texture and target misses named and counted.
+
+     **4a built (2026-11-04), not yet run.**
+     - `rg::nativeproducer::mesh` (`src/native_producer.cpp`) is called from
+       `deliverMesh` for the meshes `buildMesh` makes. It builds the record
+       under the producer's lock, then pushes it.
+     - The model check compares model x view x projection x viewport with
+       68-71, per column, within 2e-3 of the column's largest entry.
+     - Records gained what the material needs: `TextureFunction`,
+       `textureAlpha`, `AlphaFail`, `colorWrite`, and the fog's parameters
+       and color on the mesh. Depth compares are reversed (Greater is
+       nearer), as the game's are.
+     - Material unknowns are counted by reason: blend equations outside the
+       five, region clamps, partial write masks, and DATE or FBA. A CLUT
+       offset (CSA) counts as a palette miss.
+     - Depth buffers get ids of their own, by ZBUF base, sized like the
+       color target they're first drawn with.
+     - The `[native-producer]` line now has a `meshes` part with all of the
+       above.
+   - **4b. The renderer draws them.** One pipeline: model x view x
+     projection, float depth (reversed), texture and palette sampled, the
+     game's texture function, blend, alpha test, fog. The debug grid goes.
+     **Pass:** a screenshot shows the field's world and characters in
+     place; R3 at 100% of scene draws.
+   - **4c. Withheld from the GS.** A mesh made a record no longer reaches
+     the GS. **Pass:** G5's VU1 mesh share at 0, same draw counts as 4a.
+     The depth probe reads GS depth, so it goes wrong here until step 7.
 5. **Effects by purpose**, as the profile ranks them. Pass: G5's effect
    share at 0.
 6. **2D** through the converter as sprite draws, then the remaining VU1
