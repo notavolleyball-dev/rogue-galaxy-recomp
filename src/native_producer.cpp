@@ -172,6 +172,26 @@ bool dumpingTextures()
 {
     return !dumpBases().empty();
 }
+// The flip after `touch build/run/dump-now` (0: none yet), whose 2D pieces
+// and meshes are logged; it also asks the renderer for its side of that
+// frame (build/run/dump-gpu). Checked once a flip.
+uint64_t triggeredDumpFlip()
+{
+    static uint64_t checked = 0u, triggered = 0u;
+    const uint64_t flip = rg::graphics::guestFlips();
+    if (flip != checked)
+    {
+        checked = flip;
+        if (std::remove("build/run/dump-now") == 0)
+        {
+            triggered = flip + 1u;
+            if (FILE *f = std::fopen("build/run/dump-gpu", "w"))
+                std::fclose(f);
+            std::fprintf(stderr, "[piece-dump] dumping flip %llu\n", (unsigned long long)triggered);
+        }
+    }
+    return triggered;
+}
 State &state()
 {
     static State instance;
@@ -871,6 +891,10 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
 
 // Locked. The material the draw state means; false where some part of it
 // has no exact meaning here (counted by reason).
+} // namespace
+bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
+namespace
+{
 bool materialOf(State &s, const GSDrawState &state, native::Material &m)
 {
     const GSContext &c = state.context;
@@ -878,12 +902,13 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
     if (state.prim.tme)
     {
         const GSTex0Reg &t = c.tex0;
-        const auto at = s.residentTexture.find(t.tbp0);
-        m.texture = at != s.residentTexture.end() && at->second.first == (t.psm & 0x3Fu) ? at->second.second : 0u;
-        if (m.texture == 0u)
+        // As a 2D piece's: a target drawn there, a produced texture, or a
+        // host upload's image, whichever was written last (sourceOf).
+        if (!sourceOf(s, t, m))
         {
             ++s.counts.textureMiss;
-            if (at != s.residentTexture.end())
+            const auto at = s.residentTexture.find(t.tbp0);
+            if (at != s.residentTexture.end() && at->second.first != (t.psm & 0x3Fu))
             {
                 ++s.counts.textureMissPsm;
                 static uint64_t seen[64] = {};
@@ -895,20 +920,12 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
                                  pair, t.psm, t.tw, t.th);
                 }
             }
-            else if (s.targetAt.count(t.tbp0 & ~31u))
-                ++s.counts.textureMissTarget;
+            else if (indexedPsm(t.psm) && at != s.residentTexture.end())
+                ++s.counts.paletteMiss;
             known = false;
         }
-        if (indexedPsm(t.psm))
-        {
-            const auto p = s.residentPalette.find(t.cbp);
-            m.palette = p != s.residentPalette.end() && t.csa == 0u ? p->second : 0u;
-            if (m.palette == 0u)
-            {
-                ++s.counts.paletteMiss;
-                known = false;
-            }
-        }
+        else if (m.sourceTarget && (t.psm & 0x3Fu) != 0x00u)
+            known = false; // a target read in another format: not modelled
         m.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(t.tw, 10u));
         m.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(t.th, 10u));
         m.linear = state.linearFilter;
@@ -1154,6 +1171,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         ++s.counts.materialKnown;
     if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
         s.drawnSeq[frameBase] = ++s.sequence;
+    if (const uint64_t dumpFlip = triggeredDumpFlip(); dumpFlip != 0u && rg::graphics::guestFlips() == dumpFlip)
+    {
+        const GSContext &c = drawState->context;
+        const native::Material &m = draw.material;
+        std::fprintf(stderr,
+                     "[mesh-dump] fbp %04x -> target %u depth %u cam %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp "
+                     "%05x csa %u tfx %u tcc %u -> %s %u palette %u | alpha %llx test %llx | %zu vertices%s\n",
+                     c.frame.fbp * 32u, draw.target, draw.depthTarget, draw.camera, int(drawState->prim.tme),
+                     c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu, 1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp,
+                     c.tex0.csa, c.tex0.tfx, c.tex0.tcc, m.sourceTarget ? "target" : "texture",
+                     m.sourceTarget ? m.sourceTarget : m.texture, m.palette, (unsigned long long)c.alpha,
+                     (unsigned long long)c.test, draw.vertices.size(), m.known ? "" : " (unknown)");
+    }
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
@@ -1790,20 +1820,8 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
     const uint64_t flip = rg::graphics::guestFlips();
     static uint64_t dumpedFlip = 0u;
     static std::set<uint64_t> dumpedReads;
-    // Or the flip after `touch build/run/dump-now` (which also asks the
-    // renderer for its side of that frame: build/run/dump-gpu).
-    static uint64_t triggerChecked = 0u, triggeredFlip = 0u;
-    if (flip != triggerChecked)
-    {
-        triggerChecked = flip;
-        if (std::remove("build/run/dump-now") == 0)
-        {
-            triggeredFlip = flip + 1u;
-            if (FILE *f = std::fopen("build/run/dump-gpu", "w"))
-                std::fclose(f);
-            std::fprintf(stderr, "[piece-dump] dumping flip %llu\n", (unsigned long long)triggeredFlip);
-        }
-    }
+    // Or the flip after `touch build/run/dump-now`.
+    const uint64_t triggeredFlip = triggeredDumpFlip();
     bool dumpThis = (dumpFlips.first != 0u && flip >= dumpFlips.first && flip <= dumpFlips.second) ||
                     (triggeredFlip != 0u && flip == triggeredFlip);
     if (dumpThis && flip != triggeredFlip && dumpFlips.first != dumpFlips.second)
