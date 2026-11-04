@@ -1217,7 +1217,18 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
 {
     if (!native::enabled() || !vu1Data)
         return false;
-    const GSNativeMesh::Header &h = mesh.header;
+    // A chunk the program clips (h.clips: its slot E clips at z = -w and
+    // z = w) keeps the triangles crossing the guard band: the GS backend
+    // draws them clipped by the planes, and here the GPU clips them in clip
+    // space. Skipping them left holes in floors near the camera.
+    // RG_NATIVE_GUARD_CLIPPED=1 skips them as before (for comparing).
+    static const bool guardClipped = [] {
+        const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
+        return v && std::strcmp(v, "0") != 0;
+    }();
+    GSNativeMesh::Header h = mesh.header;
+    if (h.clips && !guardClipped)
+        h.guardBand = 0u;
     const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
 
     native::MeshDraw draw;
