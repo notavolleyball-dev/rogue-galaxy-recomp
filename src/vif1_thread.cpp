@@ -2141,20 +2141,25 @@ void absorbRegister(uint8_t reg, uint64_t value)
     case 0x52u: t_trxreg = value; g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); break;
     case 0x53u: // TRXDIR
         ((value & 3u) == 2u ? g_absorbed.localCopies : g_absorbed.hostUploads).fetch_add(1u, std::memory_order_relaxed);
-        if ((value & 3u) == 2u)
+        if ((value & 3u) == 2u || (value & 3u) == 0u)
         {
-            // The first few of each shape (docs/NATIVE-PIPELINE.md step 6).
+            // The first few of each shape (docs/NATIVE-PIPELINE.md step 6);
+            // host uploads by destination and size, positions aside.
+            const bool copy = (value & 3u) == 2u;
             static std::mutex m;
-            static std::vector<uint64_t> told;
+            static std::vector<uint64_t> toldCopies, toldUploads;
             std::lock_guard lock(m);
-            const uint64_t key = t_bitbltbuf ^ (t_trxreg * 0x9E3779B97F4A7C15ull);
-            if (told.size() < 16u && std::find(told.begin(), told.end(), key) == told.end())
+            std::vector<uint64_t> &told = copy ? toldCopies : toldUploads;
+            const uint64_t key = copy ? t_bitbltbuf ^ (t_trxreg * 0x9E3779B97F4A7C15ull)
+                                      : (t_bitbltbuf >> 32) ^ (t_trxreg * 0x9E3779B97F4A7C15ull);
+            if (told.size() < (copy ? 16u : 24u) && std::find(told.begin(), told.end(), key) == told.end())
             {
                 told.push_back(key);
                 const uint64_t b = t_bitbltbuf;
                 std::fprintf(stderr,
-                             "[native-absorb] a local copy: SBP %04x SBW %u SPSM %02x (%u,%u) -> DBP %04x DBW %u "
+                             "[native-absorb] a %s: SBP %04x SBW %u SPSM %02x (%u,%u) -> DBP %04x DBW %u "
                              "DPSM %02x (%u,%u), %ux%u\n",
+                             copy ? "local copy" : "host upload nobody took",
                              unsigned(b & 0x3FFFu), unsigned((b >> 16) & 0x3Fu), unsigned((b >> 24) & 0x3Fu),
                              unsigned(t_trxpos & 0x7FFu), unsigned((t_trxpos >> 16) & 0x7FFu),
                              unsigned((b >> 32) & 0x3FFFu), unsigned((b >> 48) & 0x3Fu), unsigned((b >> 56) & 0x3Fu),
