@@ -67,6 +67,7 @@ struct Counts
     uint64_t viewsNew = 0, viewWrites = 0, viewReads = 0;
     // Stale records made again from what was sent (replaceUpload).
     uint64_t palettesReplaced = 0, texturesReplaced = 0;
+    uint64_t copiesMirrored = 0, copiesOtherFormat = 0, copiesNoSource = 0, copiesNoDestination = 0;
 };
 
 struct State
@@ -159,6 +160,9 @@ struct State
         bool indexed = false;
     };
     std::unordered_map<native::Id, Kept> keptTextures, keptPalettes;
+    // Every live texture record's texels (a byte a texel, or RGBA8), for
+    // local copies (mirrorCopy); forgotten with the renderer's evictions.
+    std::unordered_map<native::Id, Kept> texels;
     std::set<uint64_t> dumped;
     Counts counts, reported;
     bool statsSet = false;
@@ -294,7 +298,10 @@ std::string statsLine()
                        d(n.hostPalettes, r.hostPalettes) + ", reads refused " +
                        d(n.hostReadsRefused, r.hostReadsRefused) +
                        " | stale records made again: palettes " + d(n.palettesReplaced, r.palettesReplaced) +
-                       ", textures " + d(n.texturesReplaced, r.texturesReplaced) + " | narrow views new " + d(n.viewsNew, r.viewsNew) + ", draws into them " +
+                       ", textures " + d(n.texturesReplaced, r.texturesReplaced) + " | local copies mirrored " +
+                       d(n.copiesMirrored, r.copiesMirrored) + ", other format " + d(n.copiesOtherFormat, r.copiesOtherFormat) +
+                       ", no source " + d(n.copiesNoSource, r.copiesNoSource) + ", no destination " +
+                       d(n.copiesNoDestination, r.copiesNoDestination) + " | narrow views new " + d(n.viewsNew, r.viewsNew) + ", draws into them " +
                        d(n.viewWrites, r.viewWrites) + ", reads of them " + d(n.viewReads, r.viewReads) +
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
@@ -324,6 +331,7 @@ void forgetEvicted(State &s)
             continue;
         s.textureIds.erase(key->second);
         s.textureKeys.erase(key);
+        s.texels.erase(id);
     }
     if (!s.statsSet)
     {
@@ -477,6 +485,7 @@ void texture(const TextureLevel &l)
     if (dumpingTextures())
         s.keptTextures[record.id] = {out, record.width, record.height,
                                      record.format == native::PixelFormat::Index8};
+    s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
@@ -835,6 +844,7 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
         if (dumpingTextures())
             s.keptTextures[record.id] = {out, record.width, record.height,
                                          record.format == native::PixelFormat::Index8};
+        s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8};
         record.texels = std::move(out);
         s.textureIds[key] = record.id;
         s.textureKeys[record.id] = key;
@@ -1520,6 +1530,7 @@ native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg 
     if (dumpingTextures())
         s.keptTextures[record.id] = {out, record.width, record.height,
                                      record.format == native::PixelFormat::Index8};
+    s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
@@ -1719,6 +1730,150 @@ std::string holdingAt(State &s, uint32_t base)
     }
     return out.empty() ? " nothing" : out;
 }
+
+// Locked. Texels of GS memory at a base as one format, in buffer rows:
+// the host image there or the resident texture, whichever was written
+// last (as sourceOf). Bytes a texel as the record keeps them (RGBA8 for
+// the 16-bit formats' textures, raw for their host images).
+struct Plane
+{
+    std::vector<uint8_t> *pixels = nullptr; // host image: written in place
+    const State::Kept *kept = nullptr;      // texture record: remade
+    State::HostImage *host = nullptr;
+    uint32_t stride = 0u, height = 0u, bytesPer = 0u;
+};
+Plane planeAt(State &s, uint32_t base, uint32_t psm, uint32_t bufferWidth)
+{
+    Plane p;
+    State::HostImage *host = nullptr;
+    if (const auto at = s.hostImages.find({base, psm});
+        at != s.hostImages.end() && at->second.dbw == std::max(bufferWidth, 1u))
+        host = &at->second;
+    const auto resident = s.residentTexture.find(base);
+    const State::Kept *kept = nullptr;
+    if (resident != s.residentTexture.end() && resident->second.first == psm)
+        if (const auto k = s.texels.find(resident->second.second); k != s.texels.end() && k->second.data)
+            kept = &k->second;
+    if (host && kept)
+    {
+        const auto taken = s.takenSeq.find(base);
+        if (taken != s.takenSeq.end() && taken->second > host->seq)
+            host = nullptr;
+    }
+    if (host)
+    {
+        p.host = host;
+        p.pixels = &host->pixels;
+        p.stride = host->dbw * 64u;
+        p.height = host->height;
+        p.bytesPer = psm == kCT32 ? 4u : (psm == kCT16 || psm == kCT16S) ? 2u : 1u;
+    }
+    else if (kept)
+    {
+        p.kept = kept;
+        p.stride = kept->width;
+        p.height = kept->height;
+        p.bytesPer = kept->indexed ? 1u : 4u;
+    }
+    return p;
+}
+
+// Locked. A local copy (TRXDIR 2) done on what the producer holds: between
+// the same format, from a host image or texture into one, the
+// destination's texture made again with the rectangle written (clipped to
+// both). Copies between formats reinterpret GS memory's layout and are
+// counted, not done (docs/NATIVE-PIPELINE.md step 6).
+void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp,
+                uint32_t dbw, uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height)
+{
+    spsm &= 0x3Fu;
+    dpsm &= 0x3Fu;
+    if (spsm != dpsm)
+    {
+        ++s.counts.copiesOtherFormat;
+        return;
+    }
+    const Plane from = planeAt(s, sbp, spsm, sbw);
+    if (!from.pixels && !from.kept)
+    {
+        ++s.counts.copiesNoSource;
+        return;
+    }
+    Plane to = planeAt(s, dbp, dpsm, dbw);
+    if ((!to.pixels && !to.kept) || to.bytesPer != from.bytesPer)
+    {
+        ++s.counts.copiesNoDestination;
+        return;
+    }
+    const uint8_t *src = from.pixels ? from.pixels->data() : from.kept->data->data();
+    const size_t srcSize = from.pixels ? from.pixels->size() : from.kept->data->size();
+    // A copy of the source's rows first: source and destination may be one.
+    const uint32_t w = std::min({width, sx < from.stride ? from.stride - sx : 0u, dx < to.stride ? to.stride - dx : 0u});
+    const uint32_t h = std::min({height, sy < from.height ? from.height - sy : 0u,
+                                 dy < (to.pixels ? 2048u : to.height) ? (to.pixels ? 2048u : to.height) - dy : 0u});
+    if (w == 0u || h == 0u)
+    {
+        ++s.counts.copiesNoSource;
+        return;
+    }
+    const uint32_t bpp = from.bytesPer;
+    std::vector<uint8_t> rect(size_t(w) * h * bpp);
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        const size_t at = (size_t(sy + y) * from.stride + sx) * bpp;
+        if (at + size_t(w) * bpp <= srcSize)
+            std::memcpy(rect.data() + size_t(y) * w * bpp, src + at, size_t(w) * bpp);
+    }
+    if (to.pixels)
+    {
+        State::HostImage &image = *to.host;
+        if (dy + h > image.height)
+        {
+            image.height = dy + h;
+            image.pixels.resize(size_t(image.height) * to.stride * bpp, uint8_t(0));
+        }
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(image.pixels.data() + (size_t(dy + y) * to.stride + dx) * bpp,
+                        rect.data() + size_t(y) * w * bpp, size_t(w) * bpp);
+        ++image.version;
+        image.seq = s.uploadedSeq[dbp] = ++s.sequence;
+        ++s.counts.copiesMirrored;
+        return;
+    }
+    auto out = std::make_shared<std::vector<uint8_t>>(*to.kept->data);
+    for (uint32_t y = 0; y < h; ++y)
+    {
+        const size_t at = (size_t(dy + y) * to.stride + dx) * bpp;
+        if (at + size_t(w) * bpp <= out->size())
+            std::memcpy(out->data() + at, rect.data() + size_t(y) * w * bpp, size_t(w) * bpp);
+    }
+    const uint32_t texW = to.kept->width, texH = to.kept->height;
+    const bool indexed = to.kept->indexed;
+    auto resident = s.residentTexture.find(dbp);
+    const uint64_t hash = dq8::gfx::namedtextures::imageHash(out->data(), out->size());
+    const uint64_t key = keyOf(hash, dpsm | 0x400u, texW, texH);
+    native::Id id = 0u;
+    if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
+        id = known->second;
+    else
+    {
+        native::Texture record;
+        record.width = static_cast<uint16_t>(texW);
+        record.height = static_cast<uint16_t>(texH);
+        record.format = indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
+        record.id = id = s.nextTexture++;
+        if (dumpingTextures())
+            s.keptTextures[record.id] = {out, record.width, record.height, indexed};
+        s.texels[record.id] = {out, record.width, record.height, indexed};
+        record.texels = std::move(out);
+        s.textureIds[key] = record.id;
+        s.textureKeys[record.id] = key;
+        native::push(std::move(record));
+    }
+    resident->second.second = id;
+    s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
+    ++s.counts.copiesMirrored;
+}
 } // namespace
 
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
@@ -1729,15 +1884,17 @@ void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint3
     State &s = state();
     std::lock_guard lock(s.mutex);
     static uint32_t told = 0u;
-    if (told >= 48u)
-        return;
-    ++told;
-    std::fprintf(stderr,
+    if (told < 8u)
+    {
+        ++told;
+        std::fprintf(stderr,
                  "[native-copy] SBP %04x SBW %u SPSM %02x (%u,%u) -> DBP %04x DBW %u DPSM %02x (%u,%u) %ux%u, seq "
                  "%llu\n  source:%s\n  destination:%s\n",
                  sbp, sbw, spsm, sx, sy, dbp, dbw, dpsm, dx, dy, width, height, (unsigned long long)s.sequence,
                  holdingAt(s, sbp).c_str(), holdingAt(s, dbp).c_str());
+    }
     s.copiedTo.insert(dbp);
+    mirrorCopy(s, sbp, sbw, spsm, sx, sy, dbp, dbw, dpsm, dx, dy, width, height);
 }
 
 void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
