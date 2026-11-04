@@ -743,6 +743,24 @@ build that compiles is not "done".
      the field differ from what is sent (palettes `3f7c`, `3f78`, CT32
      64x64 at `2a60`): the game writes them after the texture hook. Not
      fixed.
+   - **Effects white or wrong (fixed, 2026-11-04):** meshes now find their
+     texture as 2D pieces do (targets, host images); narrow views (a buffer
+     drawn at a narrower FBW than its target gets a target of its own); a
+     CT24 read takes a CT32 texture (alpha from TEXA); a 2D CT16 self-copy
+     is green-to-alpha (the shadow map's blur: boss shadows); the GS's
+     region clamp/repeat; stale records (palettes 3f7c/3f78, 2a60) made
+     again from the bytes sent (`RG_NATIVE_UPLOAD_CHECK=0` turns it off).
+   - **OPEN, parked: the Flash Sword trail** (desert boss fight) draws as a
+     checkered, stair-stepped band of hard-edged squares from the player
+     up-left; on the GS path it is soft smoke. Ruled out: the boss's shadow
+     chain (2a00/2a40 at FBW 1, now correct), region clamp (its draws use
+     CLAMP 5), stale palettes (replaced, no change), the scene's 2D pieces.
+     Suspects left: the ~128 effect meshes marked unknown (TEST 5000b,
+     textures at 2a00 T8 256x256 and 2b00 T8 512x256, palettes 3f7c/3f78).
+     Next step planned: a switch hiding draws by texture TBP
+     (e.g. `RG_NATIVE_HIDE=2a00,2b00`) and a few runs to see which draws
+     the band is, then why their material is unknown (the mesh dump does
+     not print the reason).
    - **Local copies (TRXDIR 2), absorbed, not mirrored.** These are the
      shapes seen:
      - `2a20` T8 into `2a00` T4, in tiles with wraparound offsets: a
