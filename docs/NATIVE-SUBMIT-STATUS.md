@@ -1,5 +1,10 @@
 # Native submit: honest status and where to resume (2026-11-02 night)
 
+**Superseded as the direction (2026-11-04):** the goal and plan are now
+[NATIVE-PIPELINE.md](NATIVE-PIPELINE.md): no GS at all with the native flag
+on, with boundary counters as the definition of done. This file stays as
+the record of the 2026-11-02 work.
+
 Read this before `docs/NATIVE-SUBMIT-PLAN.md`. The plan's status line
 overstates what was done; this file is the correction.
 
