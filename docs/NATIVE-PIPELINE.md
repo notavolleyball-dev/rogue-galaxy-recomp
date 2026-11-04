@@ -553,15 +553,33 @@ build that compiles is not "done".
      at its pixel from a copy taken just before it, as draws reading their
      own target do. 60 a window.
 
-     **Open:**
-     - **Dark boxes around characters**, and Jaster still partly
-       translucent in some frames. Just before each composite, a sprite
-       covers the layer's box with texture 72, color (16,16,16), alpha
-       test GEQUAL 40 and a depth test. It's flagged unknown for a reason
-       not yet named, and it isn't DATE. Next: name its unknown reason (its
-       raw FRAME, TEST and FBA) and compare the layer's pixels against the
-       GS's at the same frame (`tools/bench/vram2png.py` decodes CT32 at a
-       base).
+     **Also fixed (2026-11-04):**
+     - **Textures uploaded over targets.** The game uploads textures into
+       memory some buffers also use (02a00, 02a40). A draw sampling there
+       read the target even when a texture had been uploaded since. The
+       producer now tracks which wrote each address last, in stream order
+       (`uploadedSeq`, `drawnSeq`), and samples that: 13,530 samples a
+       window. This fixed the minimap's dark panel and gave the compass
+       its N/E/S/W letters.
+     - **Fog on 2D pieces.** Decoded from build2D's form (w = 1 + (F +
+       0.25) / 255) into a per-vertex `Vertex::fog`. The vertex shader uses
+       it for window-space draws.
+     - `RG_NATIVE_UNKNOWN_LOG=1` prints, once per combination, why a 2D
+       piece's material is unknown, with its raw registers. Left now: FBA
+       on draws into the layers, which writes alpha 0x80 anyway.
+
+     **Open: boxes around characters drawn through layers.** They were
+     dark, and have been light since fog. The layer target (target 4 in
+     the dumps) is also the shadow-volume buffer: cleared at the frame's
+     start to (128,128,128) with alpha 0, then drawn into by the shadow
+     quads. The scene reads a layer as CT24 with AEM, where only pure black
+     is transparent, so whatever non-black is left in the character's box
+     shows. On the GS the box must be black when the composite reads it:
+     either a clear of the box is missing here, or a draw in between acts
+     differently. Next: the GS's pixels of that buffer at the same frame
+     (a GS-path run with `RG_NATIVE_COMPOSITE=0`, its VRAM dump through
+     `tools/bench/vram2png.py` at the layer's base), against the draws
+     into it.
      - The minimap has a dark panel behind it.
      - Fog on 2D pieces is dropped (1,038 a window): its F is per vertex.
      - CBlur's green-to-alpha is still on the GS.

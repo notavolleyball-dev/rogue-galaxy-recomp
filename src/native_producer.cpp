@@ -37,7 +37,7 @@ struct Counts
     uint64_t levels = 0, texturesNew = 0, texturesKnown = 0;
     uint64_t refusedFormat = 0, refusedBytes = 0, refusedLayout = 0;
     uint64_t palettesNew = 0, palettesKnown = 0, palettesRefused = 0;
-    uint64_t targetsNew = 0, targetsAuto = 0, targetsGrown = 0;
+    uint64_t targetsNew = 0, targetsAuto = 0, targetsGrown = 0, texturesOverTargets = 0;
     uint64_t bytesHashed = 0;
     uint64_t withheldTextures = 0, withheldPalettes = 0, withheldBytes = 0;
     uint64_t passedNotProduced = 0, split = 0, continuedInPacket = 0;
@@ -88,6 +88,10 @@ struct State
     // uploads ahead, and the game reuses its texture addresses within one.
     std::unordered_map<uint32_t, std::pair<uint32_t, native::Id>> residentTexture; // tbp -> (psm, id)
     std::unordered_map<uint32_t, native::Id> residentPalette;                       // cbp -> id
+    // When each address was last written, in the stream's order: uploaded
+    // (a texture's TBP) or drawn into (a target's base).
+    uint64_t sequence = 0u;
+    std::unordered_map<uint32_t, uint64_t> uploadedSeq, drawnSeq;
     std::deque<Produced> produced;
     Counts counts, reported;
     bool statsSet = false;
@@ -144,9 +148,10 @@ std::string statsLine()
                        d(n.opsFromNothing, r.opsFromNothing) + " / a target " + d(n.opsFromTarget, r.opsFromTarget) +
                        " / a texture " + d(n.opsFromTexture, r.opsFromTexture) + " / a layer " +
                        d(n.opsFromLayer, r.opsFromLayer) + " / unknown " + d(n.opsFromUnknown, r.opsFromUnknown) +
-                       " | 2D pieces " + d(n.pieces, r.pieces) + ": made " + d(n.piecesMade, r.piecesMade) +
+                       " | sampled a texture uploaded over a target " +
+                       d(n.texturesOverTargets, r.texturesOverTargets) + " | 2D pieces " + d(n.pieces, r.pieces) + ": made " + d(n.piecesMade, r.piecesMade) +
                        " (from a target " + d(n.piecesFromTarget, r.piecesFromTarget) + ", as CT24 " +
-                       d(n.piecesCt24, r.piecesCt24) + ", fog dropped " +
+                       d(n.piecesCt24, r.piecesCt24) + ", fogged " +
                        d(n.piecesFogged, r.piecesFogged) + "), to the GS: no state " +
                        d(n.piecesNoState, r.piecesNoState) + ", target not declared " +
                        d(n.piecesNoTarget, r.piecesNoTarget) + ", source unknown " +
@@ -505,7 +510,10 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
             if (p.palette)
                 s.residentPalette[p.key] = p.id;
             else
+            {
                 s.residentTexture[p.key] = {p.psm, p.id};
+                s.uploadedSeq[p.key] = ++s.sequence;
+            }
             s.produced.erase(s.produced.begin(), s.produced.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             return true;
         }
@@ -994,6 +1002,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     draw.material.known = known;
     if (known)
         ++s.counts.materialKnown;
+    s.drawnSeq[frameBase] = ++s.sequence;
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
@@ -1048,13 +1057,25 @@ void noteEffect(const GSNativeEffect &e)
 // False when neither.
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
 {
-    if (const auto at = s.targetAt.find(t.tbp0); at != s.targetAt.end())
-    {
-        m.sourceTarget = at->second;
-        return true;
-    }
+    // The game uploads textures into the same memory some of its buffers
+    // use (02a00, 02a40): whichever wrote there last, in the stream's
+    // order, is what the GS would read.
     const auto tex = s.residentTexture.find(t.tbp0);
-    if (tex == s.residentTexture.end() || tex->second.first != (t.psm & 0x3Fu))
+    const bool texture = tex != s.residentTexture.end() && tex->second.first == (t.psm & 0x3Fu);
+    const auto at = s.targetAt.find(t.tbp0);
+    if (at != s.targetAt.end())
+    {
+        const auto drawn = s.drawnSeq.find(t.tbp0), uploaded = s.uploadedSeq.find(t.tbp0);
+        const bool uploadedLast = uploaded != s.uploadedSeq.end() &&
+                                  (drawn == s.drawnSeq.end() || uploaded->second > drawn->second);
+        if (!texture || !uploadedLast)
+        {
+            m.sourceTarget = at->second;
+            return true;
+        }
+        ++s.counts.texturesOverTargets;
+    }
+    if (!texture)
         return false;
     m.texture = tex->second.second;
     if (indexedPsm(t.psm))
@@ -1094,6 +1115,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
     }
     native::Material &m = draw.material;
     bool known = true;
+    uint32_t why = 0u; // RG_NATIVE_UNKNOWN_LOG: 1 source psm, 2 clamp, 4 blend, 8 FBA, 16 write mask, 32 fog
     if (drawState->prim.tme)
     {
         if (!sourceOf(s, c.tex0, m))
@@ -1116,7 +1138,10 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
             ++s.counts.piecesCt24;
         }
         else if (m.sourceTarget && (c.tex0.psm & 0x3Fu) != 0x00u)
+        {
             known = false;
+            why |= 1u;
+        }
         // build2D's texel UVs (FST) carry the flag in the source's top bit.
         const bool texels = (h.source & 0x80000000u) != 0u;
         m.textureWidth = texels ? 1u : static_cast<uint16_t>(1u << std::min<uint32_t>(c.tex0.tw, 10u));
@@ -1125,7 +1150,11 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
         m.clampU = wms != 0u;
         m.clampV = wmt != 0u;
-        known = known && wms <= 1u && wmt <= 1u;
+        if (wms > 1u || wmt > 1u)
+        {
+            known = false;
+            why |= 2u;
+        }
         static constexpr native::TextureFunction functions[4] = {
             native::TextureFunction::Modulate, native::TextureFunction::Decal, native::TextureFunction::Highlight,
             native::TextureFunction::Highlight2};
@@ -1133,8 +1162,17 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         m.textureAlpha = c.tex0.tcc != 0u;
     }
     if (drawState->prim.abe)
-        known = blendOf(c.alpha, m) && known;
-    known = testOf(c.test, c.zbuf.zmask, m) && !(c.fba & 1u) && known;
+        if (!blendOf(c.alpha, m))
+        {
+            known = false;
+            why |= 4u;
+        }
+    testOf(c.test, c.zbuf.zmask, m);
+    if (c.fba & 1u)
+    {
+        known = false;
+        why |= 8u;
+    }
     const uint32_t mask = c.frame.fbmsk;
     m.colorWrite = 0u;
     for (uint32_t ch = 0; ch < 4u; ++ch)
@@ -1143,7 +1181,10 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         if (bits == 0u)
             m.colorWrite |= static_cast<uint8_t>(1u << ch);
         else if (bits != 0xFFu)
+        {
             known = false;
+            why |= 16u;
+        }
     }
     if (m.depthTest != native::Compare::Always || m.depthWrite)
     {
@@ -1157,8 +1198,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
     const bool texels = (h.source & 0x80000000u) != 0u;
     if (fogged)
     {
-        ++s.counts.piecesFogged; // the fog itself is not drawn yet: its F is per vertex
-        known = false;
+        ++s.counts.piecesFogged; // its F per vertex (Vertex::fog)
     }
     const float ofx = static_cast<float>(c.xyoffset.ofx) / 16.0f;
     const float ofy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
@@ -1177,15 +1217,38 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         out.color[1] = in.g;
         out.color[2] = in.b;
         out.color[3] = in.a;
+        // build2D's fogged form: w = 1 + (F + 0.25) / 255.
+        if (fogged)
+            out.fog = std::clamp((w - 1.0f) * 255.0f - 0.25f, 0.0f, 255.0f);
     }
     const uint32_t count = static_cast<uint32_t>(draw.vertices.size()) / 3u * 3u;
     draw.indices.resize(count);
     for (uint32_t k = 0; k < count; ++k)
         draw.indices[k] = k;
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
-    draw.fog[0] = draw.fog[1] = 255.0f; // F = 255: none
+    draw.fog[0] = draw.fog[1] = 255.0f; // a model's F: none (the vertices carry theirs)
+    m.fog = fogged;
+    draw.fogColor[0] = drawState->fogR;
+    draw.fogColor[1] = drawState->fogG;
+    draw.fogColor[2] = drawState->fogB;
     m.known = known;
+    if (why && std::getenv("RG_NATIVE_UNKNOWN_LOG"))
+    {
+        static uint64_t seen = 0u;
+        if (!(seen & (1ull << why)))
+        {
+            seen |= 1ull << why;
+            std::fprintf(stderr,
+                         "[unknown] why %x: frame fbp %x psm %x fbmsk %08x fba %llx tex0 tbp %x psm %x tfx %u tcc %u "
+                         "clamp %llx alpha %llx test %llx texa %u/%d\n",
+                         why, c.frame.fbp, c.frame.psm, c.frame.fbmsk, (unsigned long long)c.fba, c.tex0.tbp0,
+                         c.tex0.psm, c.tex0.tfx, c.tex0.tcc, (unsigned long long)c.clamp,
+                         (unsigned long long)c.alpha, (unsigned long long)c.test, drawState->texa.ta0,
+                         int(drawState->texa.aem));
+        }
+    }
     ++s.counts.piecesMade;
+    s.drawnSeq[frameBase] = ++s.sequence;
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
@@ -1217,7 +1280,9 @@ bool effect(const GSNativeEffect &e)
     // renderer's or the GS's, never split between them.
     const uint32_t ops = std::min<uint32_t>(e.opCount, GSNativeEffect::kMaxOps);
     thread_local std::vector<native::MeshDraw> made;
+    thread_local std::vector<uint32_t> bases;
     made.clear();
+    bases.clear();
     for (uint32_t k = 0; k < ops; ++k)
     {
         const GSNativeEffect::Op &op = e.ops[k];
@@ -1299,9 +1364,13 @@ bool effect(const GSNativeEffect &e)
         draw.fog[0] = draw.fog[1] = 255.0f;
         m.known = known;
         made.push_back(std::move(draw));
+        bases.push_back(into.base);
     }
-    for (native::MeshDraw &draw : made)
-        native::push(native::MeshDraw(std::move(draw)));
+    for (size_t k = 0; k < made.size(); ++k)
+    {
+        s.drawnSeq[bases[k]] = ++s.sequence;
+        native::push(native::MeshDraw(std::move(made[k])));
+    }
     ++s.counts.effectsMade;
     s.counts.opsMade += made.size();
     return true;

@@ -183,6 +183,9 @@ struct Vertex
     float uv[2] = {};
     float color[4] = {};    // 0-255, before any clamp
     float normal[3] = {};   // when MeshDraw::hasNormals
+    // A window-space draw's fog factor, per vertex (255 none, toward
+    // fogColor as it falls); a draw with a model has MeshDraw::fog instead.
+    float fog = 255.0f;
 };
 
 // With hasModel, vertices are in object space, through the model and the

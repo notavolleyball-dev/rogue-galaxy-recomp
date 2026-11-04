@@ -24,8 +24,9 @@ struct GpuVertex
     float position[3];
     float uv[2];
     float color[4];
+    float fog;
 };
-static_assert(sizeof(GpuVertex) == 36u, "tightly packed");
+static_assert(sizeof(GpuVertex) == 40u, "tightly packed");
 
 struct DrawUniforms
 {
@@ -247,10 +248,11 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     buffer.slot = 0u;
     buffer.pitch = sizeof(GpuVertex);
     buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-    SDL_GPUVertexAttribute attributes[3]{};
+    SDL_GPUVertexAttribute attributes[4]{};
     attributes[0] = {0u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuVertex, position)};
     attributes[1] = {1u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuVertex, uv)};
     attributes[2] = {2u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuVertex, color)};
+    attributes[3] = {3u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(GpuVertex, fog)};
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = m_meshVertex;
@@ -258,7 +260,7 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     info.vertex_input_state.vertex_buffer_descriptions = &buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 3u;
+    info.vertex_input_state.num_vertex_attributes = 4u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; // the producer's indices are already culled
@@ -334,6 +336,7 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
             std::memcpy(v->position, in.position, sizeof(v->position));
             std::memcpy(v->uv, in.uv, sizeof(v->uv));
             std::memcpy(v->color, in.color, sizeof(v->color));
+            v->fog = in.fog;
             ++v;
         }
         std::memcpy(ix, d.indices.data(), d.indices.size() * sizeof(uint32_t));
@@ -517,6 +520,7 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         }
         du.target[0] = targetW;
         du.target[1] = targetH;
+        du.target[2] = d.hasModel ? 0.0f : 1.0f; // fog per vertex
         std::memcpy(du.fog, d.fog, sizeof(du.fog));
 
         if (m.blending && (m.srcFactor == BlendFactor::Fixed || m.srcFactor == BlendFactor::InvFixed ||
@@ -588,13 +592,14 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             const float *c = d.vertices.empty() ? nullptr : d.vertices[0].color;
             std::fprintf(stderr,
                          "[frame-dump] %4zu target %u depth %u %s src %s%u fn %d tcc %d blend %d/%d/%d fix %u write %x "
-                         "atest %d/%u ztest %d zw %d tris %zu box %.0f,%.0f-%.0f,%.0f rgba %.0f,%.0f,%.0f,%.0f%s\n",
+                         "atest %d/%u ztest %d zw %d tris %zu box %.0f,%.0f-%.0f,%.0f rgba %.0f,%.0f,%.0f,%.0f z %.0f fog %.0f cam %u%s\n",
                          n, d.target, d.depthTarget, d.hasModel ? "3d" : "2d", m.sourceTarget ? "target " : "tex ",
                          m.sourceTarget ? m.sourceTarget : m.texture, int(m.function), int(m.textureAlpha),
                          m.blending ? int(m.srcFactor) : -1, int(m.dstFactor), int(m.blendOp), m.blendFactor, m.colorWrite, int(m.alphaTest), m.alphaRef, int(m.depthTest),
                          int(m.depthWrite), d.indices.size() / 3, d.hasModel ? 0.f : x0, d.hasModel ? 0.f : y0,
                          d.hasModel ? 0.f : x1, d.hasModel ? 0.f : y1, c ? c[0] : 0.f, c ? c[1] : 0.f,
-                         c ? c[2] : 0.f, c ? c[3] : 0.f, m.known ? "" : " (unknown)");
+                         c ? c[2] : 0.f, c ? c[3] : 0.f, d.vertices.empty() ? 0.f : d.vertices[0].position[2],
+                         d.vertices.empty() ? 0.f : d.vertices[0].fog, d.camera, m.known ? "" : " (unknown)");
         }
     }
     std::vector<Id> depthsCleared;
