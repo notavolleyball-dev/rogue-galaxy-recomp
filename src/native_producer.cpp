@@ -1175,10 +1175,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     {
         const GSContext &c = drawState->context;
         const native::Material &m = draw.material;
+        uint32_t declaredW = 0u, declaredH = 0u;
+        if (m.sourceTarget)
+            for (const auto &[base, t] : s.targets)
+                if (t.id == m.sourceTarget)
+                {
+                    declaredW = t.width;
+                    declaredH = t.height;
+                }
         std::fprintf(stderr,
-                     "[mesh-dump] fbp %04x -> target %u depth %u cam %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp "
+                     "[mesh-dump] source declared %ux%u | fbp %04x -> target %u depth %u cam %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp "
                      "%05x csa %u tfx %u tcc %u -> %s %u palette %u | alpha %llx test %llx | %zu vertices%s\n",
-                     c.frame.fbp * 32u, draw.target, draw.depthTarget, draw.camera, int(drawState->prim.tme),
+                     declaredW, declaredH, c.frame.fbp * 32u, draw.target, draw.depthTarget, draw.camera,
+                     int(drawState->prim.tme),
                      c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu, 1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp,
                      c.tex0.csa, c.tex0.tfx, c.tex0.tcc, m.sourceTarget ? "target" : "texture",
                      m.sourceTarget ? m.sourceTarget : m.texture, m.palette, (unsigned long long)c.alpha,
@@ -1848,10 +1857,11 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         }
         const native::Vertex *v0 = draw.vertices.empty() ? nullptr : &draw.vertices[0];
         std::fprintf(stderr,
-                     "[piece-dump] flip %llu fbp %04x -> target %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x csa "
+                     "[piece-dump] flip %llu fbw %u scissor %u,%u-%u,%u fbp %04x -> target %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x csa "
                      "%u tfx %u tcc %u -> %s %u palette %u | box %.0f,%.0f-%.0f,%.0f uv %.1f,%.1f rgba %.0f,%.0f,%.0f,%.0f "
                      "alpha %llx test %llx fbmsk %08x%s\n",
-                     (unsigned long long)flip, frameBase, draw.target, int(drawState->prim.tme), c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu,
+                     (unsigned long long)flip, c.frame.fbw, c.scissor.x0, c.scissor.y0, c.scissor.x1, c.scissor.y1,
+                     frameBase, draw.target, int(drawState->prim.tme), c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu,
                      1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp, c.tex0.cpsm, c.tex0.csa, c.tex0.tfx, c.tex0.tcc,
                      m.sourceTarget ? "target" : "texture", m.sourceTarget ? m.sourceTarget : m.texture, m.palette, x0,
                      y0, x1, y1, v0 ? v0->uv[0] : 0.f, v0 ? v0->uv[1] : 0.f, v0 ? v0->color[0] : 0.f,
