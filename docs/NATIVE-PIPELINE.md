@@ -37,9 +37,9 @@ in each step's record.
    below.
 
 **Step 6 (2026-11-04):** the leftover packets are absorbed, and the GS
-tripwire is in. G1-G4 and G6 read 0 on the walk. What's open is the 2D
-pieces with an unknown source (G5, `SubmitNativeMesh`) and the local copies
-behind them. See step 6's record.
+tripwire is in. G1-G4 and G6 read 0 on the walk. The 2D pieces with an
+unknown source (G5) are handled by host images; what's open is the local
+copies. See step 6's record.
 
 **Not built yet:**
 - **The structural check proper:** not constructing the `GS` at all. The
@@ -690,20 +690,44 @@ build that compiles is not "done".
      crossing is `SubmitNativeMesh` from the GIF stage: 96,552 of them,
      each a 2D piece whose source the producer doesn't know. G5 shows the
      same.
-   - **What is still open: 2D pieces with an unknown source.** There are
-     two sources:
-     - `TBP0 02a00 PSM CT32 512x512`, one sprite a frame on the boot
-       screens. A texture of another format was last uploaded there.
-     - `TBP0 01c00 PSM T4HH CBP 03fc0 512x512`, with nothing uploaded
-       there. Up to 20k a window on the title screen (frames ~1700-2300),
-       and 960 a window (16 a frame) in the town. **The title screen is
-       black under the pipeline:** the logo, the menu and the copyright
-       text are all missing. The GS path shows them (`refgs`, frame 1835).
-       The 7d run before step 6 (`step7`) was black there too, so this
-       isn't the absorber's doing.
-       T4HH reads the top nibble of a 32-bit buffer's alpha, so this is
-       most likely a buffer drawn or copied into, then read as an indexed
-       texture. The producer has no model of that.
+   - **2D pieces with an unknown source: handled (host images).** Both
+     sources were host uploads (TRXDIR 0) that skip the texture hook, so
+     the producer never made a record and the absorber dropped them:
+     - `02a00` CT32 is the boot movie (JAPAN Studio logo and the rest).
+       Each decoded frame arrives as about 880 16x16 uploads into a
+       512-wide buffer, about 53 MiB a second.
+     - The title screen is four 16-colour images uploaded once (frame
+       ~1700, and once at boot), two to each 32-bit buffer: `1c00` T4HL
+       512x416 and T4HH 512x384, `0e00` T4HL and T4HH 512x384. Their
+       palettes are 8x2 CT32 uploads at `3fc0`, `3fd0`, `3fe0`, `3ff0`.
+       (The PSM `0x24` first noted as T4HH is T4HL.)
+
+     The absorber now gathers each such upload's pixels, including image
+     data that continues past its packet, and gives them to the producer
+     (`hostUpload`). The producer keeps one linear image per base and
+     format, written rectangle by rectangle. An upload erases images of
+     another format whose memory and bits it overlaps; T4HL and T4HH share
+     words but not bits, so they coexist. A 2D piece that reads an image
+     in its own format and buffer width samples it (`sourceOf`): the GS
+     reads back what it was written with, so no address swizzle is
+     needed. A changed image becomes one texture record when a draw reads
+     it, deduplicated by hash; the movie costs one 1 MiB record a frame.
+     Palettes come from host images at the CBP the same way (8x2 for 16
+     entries, 16x16 with the CSM1 swap for 256). A host image and a
+     produced texture at the same base: the later one in the stream wins,
+     and likewise against a target drawn there.
+
+     On the walk (`hostimg`) pieces with an unknown source went from
+     96,552 to 0, the tripwire is never entered, and every check passes.
+     The boot logo and the title screen (logo, swirl) show. At frame 1802
+     the menu and copyright text were not up yet; the reference has them
+     at 1835, so the shot may be before their fade. Check it in game.
+
+     Not handled: a read in another format or buffer width than the
+     upload's (counted as `reads refused`), CT24 host images (alpha is
+     TEXA's), overlap between images at different bases is approximate
+     (a byte span, not pages), and 3D meshes (`materialOf`) don't look at
+     host images yet.
    - **Local copies (TRXDIR 2), absorbed, not mirrored.** These are the
      shapes seen:
      - `2a20` T8 into `2a00` T4, in tiles with wraparound offsets: a

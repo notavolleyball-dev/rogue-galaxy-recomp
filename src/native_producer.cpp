@@ -57,6 +57,9 @@ struct Counts
     uint64_t opsGreenToAlpha = 0, opsFeedback = 0, opsDepth = 0;
     // Step 5c: object layers.
     uint64_t layersRouted = 0, drawsRouted = 0, tailsMade = 0, tailsBack = 0, tailsEmpty = 0;
+    // Step 6: host uploads nobody took, kept as images (hostUpload).
+    uint64_t hostUploads = 0, hostRefused = 0, hostBytes = 0, hostTexturesNew = 0, hostTexturesKnown = 0;
+    uint64_t hostPalettes = 0, hostReadsRefused = 0;
 };
 
 struct State
@@ -107,6 +110,29 @@ struct State
     uint64_t sequence = 0u;
     std::unordered_map<uint32_t, uint64_t> uploadedSeq, drawnSeq;
     std::deque<Produced> produced;
+    // When the VIF1 thread last took a produced texture (by TBP) or palette
+    // (by CBP), against a host image's (step 6).
+    std::unordered_map<uint32_t, uint64_t> takenSeq, takenPaletteSeq;
+    // Step 6: what host uploads nobody took left in GS memory, one linear
+    // image per base and format (the upload's pixels, rows of the buffer
+    // width; a byte a texel for the 8- and 4-bit formats), read back by
+    // draws of that format and buffer width: as the GS reads what it was
+    // written with, no address swizzle is needed.
+    struct HostImage
+    {
+        uint32_t dbw = 1u, psm = 0u, height = 0u;
+        std::vector<uint8_t> pixels;
+        uint64_t seq = 0u, version = 0u;
+    };
+    std::map<std::pair<uint32_t, uint32_t>, HostImage> hostImages; // (base, psm)
+    // The record last made of an image, by its read (TBP, PSM, TW, TH; or
+    // CBP, CPSM, entries), and the image's version then.
+    struct HostRecord
+    {
+        uint64_t version = 0u;
+        native::Id id = 0u;
+    };
+    std::unordered_map<uint64_t, HostRecord> hostTextures, hostPalettes;
     Counts counts, reported;
     bool statsSet = false;
 };
@@ -187,6 +213,13 @@ std::string statsLine()
                        d(n.layersRouted, r.layersRouted) + " (" + d(n.drawsRouted, r.drawsRouted) +
                        " draws), tails made " + d(n.tailsMade, r.tailsMade) + ", put back for packets " +
                        d(n.tailsBack, r.tailsBack) + ", empty " + d(n.tailsEmpty, r.tailsEmpty) +
+                       " | host uploads nobody took " + d(n.hostUploads, r.hostUploads) + " (" +
+                       std::to_string((n.hostBytes - r.hostBytes) >> 10) + " KiB, refused " +
+                       d(n.hostRefused, r.hostRefused) + "): textures made " +
+                       d(n.hostTexturesNew, r.hostTexturesNew) + ", known " +
+                       d(n.hostTexturesKnown, r.hostTexturesKnown) + ", palettes " +
+                       d(n.hostPalettes, r.hostPalettes) + ", reads refused " +
+                       d(n.hostReadsRefused, r.hostReadsRefused) +
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
                        ", no depth target there " + std::to_string(s.depthNoTarget);
@@ -563,11 +596,14 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
         {
             palette = p.palette;
             if (p.palette)
+            {
                 s.residentPalette[p.key] = p.id;
+                s.takenPaletteSeq[p.key] = ++s.sequence;
+            }
             else
             {
                 s.residentTexture[p.key] = {p.psm, p.id};
-                s.uploadedSeq[p.key] = ++s.sequence;
+                s.uploadedSeq[p.key] = s.takenSeq[p.key] = ++s.sequence;
             }
             // The ones before it were never sent (docs/NATIVE-PIPELINE.md
             // step 6, "produced levels never taken"): the first few, by shape.
@@ -1122,40 +1158,283 @@ void noteEffect(const GSNativeEffect &e)
     }
 }
 
+namespace
+{
+// Bits a host upload sends a pixel of, by DPSM; 0: not one kept.
+uint32_t hostBits(uint32_t psm)
+{
+    switch (psm)
+    {
+    case kCT32: return 32u;
+    case kCT16: case kCT16S: return 16u;
+    case kT8: case 0x1Bu: return 8u;               // T8, T8H
+    case kT4: case 0x24u: case 0x2Cu: return 4u;   // T4, T4HL, T4HH
+    default: return 0u;
+    }
+}
+
+// The bits of each 32-bit word a format in a 32-bit word holds; the others
+// (CT16, T8, T4) lay memory out their own way: all of it.
+uint32_t wordBits(uint32_t psm)
+{
+    switch (psm)
+    {
+    case kCT32: return 0xFFFFFFFFu;
+    case 0x1Bu: return 0xFF000000u;
+    case 0x24u: return 0x0F000000u;
+    case 0x2Cu: return 0xF0000000u;
+    default: return 0u;
+    }
+}
+
+// The bytes of GS memory an image covers, roughly (rows of whole pages
+// aside), from its base.
+uint64_t hostSpan(uint32_t psm, uint32_t dbw, uint32_t height)
+{
+    const uint64_t texels = uint64_t(dbw) * 64u * height;
+    if (wordBits(psm))
+        return texels * 4u;
+    return texels * hostBits(psm) / 8u;
+}
+
+// Locked. The host image a texturing read names: its format, at its base,
+// at the buffer width it was written with (a palette's: any). Null when
+// none.
+State::HostImage *hostImageFor(State &s, uint32_t base, uint32_t psm, uint32_t bufferWidth, bool anyWidth = false)
+{
+    const auto at = s.hostImages.find({base, psm});
+    if (at == s.hostImages.end())
+        return nullptr;
+    if (!anyWidth && at->second.dbw != std::max(bufferWidth, 1u))
+    {
+        ++s.counts.hostReadsRefused;
+        return nullptr;
+    }
+    return &at->second;
+}
+
+// Locked. A record of a host image as a texture of the read's size (texels
+// past what was written are 0): the one made before while unchanged.
+native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg &t)
+{
+    const uint32_t psm = t.psm & 0x3Fu;
+    const uint32_t width = 1u << std::min<uint32_t>(t.tw, 10u), height = 1u << std::min<uint32_t>(t.th, 10u);
+    const uint64_t read = (uint64_t(t.tbp0) << 24) | (uint64_t(psm) << 8) | (uint64_t(t.tw & 15u) << 4) | (t.th & 15u);
+    State::HostRecord &made = s.hostTextures[read];
+    if (made.id != 0u && made.version == image.version && s.textureKeys.count(made.id))
+        return made.id;
+    const uint32_t stride = image.dbw * 64u;
+    const uint32_t bytesPer = psm == kCT32 ? 4u : (psm == kCT16 || psm == kCT16S) ? 2u : 1u;
+    const bool rgba = bytesPer > 1u;
+    auto out = std::make_shared<std::vector<uint8_t>>(size_t(width) * height * (rgba ? 4u : 1u), uint8_t(0));
+    for (uint32_t y = 0; y < height && y < image.height; ++y)
+    {
+        const uint8_t *row = image.pixels.data() + size_t(y) * stride * bytesPer;
+        uint8_t *dst = out->data() + size_t(y) * width * (rgba ? 4u : 1u);
+        const uint32_t n = std::min(width, stride);
+        if (bytesPer == 2u)
+            for (uint32_t x = 0; x < n; ++x)
+                ct16(uint16_t(row[x * 2u] | (row[x * 2u + 1u] << 8)), dst + x * 4u);
+        else
+            std::memcpy(dst, row, size_t(n) * bytesPer);
+    }
+    const uint64_t hash = dq8::gfx::namedtextures::imageHash(out->data(), out->size());
+    s.counts.bytesHashed += out->size();
+    made.version = image.version;
+    const uint64_t key = keyOf(hash, psm | 0x200u, width, height);
+    if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
+    {
+        ++s.counts.hostTexturesKnown;
+        made.id = known->second;
+        return made.id;
+    }
+    native::Texture record;
+    record.width = static_cast<uint16_t>(width);
+    record.height = static_cast<uint16_t>(height);
+    record.format = rgba ? native::PixelFormat::Rgba8 : native::PixelFormat::Index8;
+    record.id = s.nextTexture++;
+    record.texels = std::move(out);
+    s.textureIds[key] = record.id;
+    s.textureKeys[record.id] = key;
+    made.id = record.id;
+    ++s.counts.hostTexturesNew;
+    native::push(std::move(record));
+    return made.id;
+}
+
+// Locked. A host image read as a palette (CSM1, CSA 0): 16 entries from
+// an 8x2 rectangle, 256 from 16x16 (entries 8-15 and 16-23 of each 32
+// swapped). 0 when it holds less.
+native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, uint32_t entries)
+{
+    const uint32_t columns = entries == 256u ? 16u : 8u, rows = entries == 256u ? 16u : 2u;
+    const uint32_t stride = image.dbw * 64u;
+    const bool is16 = image.psm != kCT32;
+    if (image.height < rows || stride < columns)
+        return 0u;
+    const uint64_t read = (uint64_t(cbp) << 24) | (uint64_t(image.psm) << 12) | entries;
+    State::HostRecord &made = s.hostPalettes[read];
+    if (made.id != 0u && made.version == image.version)
+        return made.id;
+    auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
+    for (uint32_t i = 0; i < entries; ++i)
+    {
+        const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
+        const size_t texel = size_t(at / columns) * stride + at % columns;
+        const uint8_t *src = image.pixels.data() + texel * (is16 ? 2u : 4u);
+        if (is16)
+            ct16(uint16_t(src[0] | (src[1] << 8)), colors->data() + i * 4u);
+        else
+            std::copy_n(src, 4u, colors->data() + i * 4u);
+    }
+    const uint64_t hash = dq8::gfx::namedtextures::imageHash(colors->data(), colors->size());
+    made.version = image.version;
+    const uint64_t key = keyOf(hash, image.psm | 0x200u, entries, 0u);
+    if (const auto known = s.paletteIds.find(key); known != s.paletteIds.end())
+    {
+        made.id = known->second;
+        return made.id;
+    }
+    native::Palette record;
+    record.id = s.nextPalette++;
+    record.entries = static_cast<uint16_t>(entries);
+    record.colors = std::move(colors);
+    s.paletteIds[key] = record.id;
+    made.id = record.id;
+    ++s.counts.hostPalettes;
+    native::push(std::move(record));
+    return made.id;
+}
+
+} // namespace
+
 // Locked. The source a texturing draw state names: a target (whose base
-// TBP0 is), or a texture the VIF1 thread last sent there (and its palette).
-// False when neither.
+// TBP0 is), a texture the VIF1 thread last sent there (and its palette), or
+// what a host upload nobody took left there (step 6). False when none.
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
 {
+    const uint32_t psm = t.psm & 0x3Fu;
     // The game uploads textures into the same memory some of its buffers
     // use (02a00, 02a40): whichever wrote there last, in the stream's
     // order, is what the GS would read.
     const auto tex = s.residentTexture.find(t.tbp0);
-    const bool texture = tex != s.residentTexture.end() && tex->second.first == (t.psm & 0x3Fu);
+    bool texture = tex != s.residentTexture.end() && tex->second.first == psm;
+    State::HostImage *host = hostImageFor(s, t.tbp0, psm, t.tbw);
+    if (host && texture)
+    {
+        const auto taken = s.takenSeq.find(t.tbp0);
+        if (taken != s.takenSeq.end() && taken->second > host->seq)
+            host = nullptr;
+        else
+            texture = false;
+    }
     const auto at = s.targetAt.find(t.tbp0);
     if (at != s.targetAt.end())
     {
         const auto drawn = s.drawnSeq.find(t.tbp0), uploaded = s.uploadedSeq.find(t.tbp0);
         const bool uploadedLast = uploaded != s.uploadedSeq.end() &&
                                   (drawn == s.drawnSeq.end() || uploaded->second > drawn->second);
-        if (!texture || !uploadedLast)
+        if (!(texture || host) || !uploadedLast)
         {
             m.sourceTarget = at->second;
             return true;
         }
         ++s.counts.texturesOverTargets;
     }
-    if (!texture)
-        return false;
-    m.texture = tex->second.second;
-    if (indexedPsm(t.psm))
+    if (host)
     {
-        const auto p = s.residentPalette.find(t.cbp);
-        if (p == s.residentPalette.end() || t.csa != 0u)
+        if (psm == 0x01u) // CT24: its alpha is TEXA's, not kept here
             return false;
-        m.palette = p->second;
+        m.texture = hostTexture(s, *host, t);
     }
-    return true;
+    else if (texture)
+        m.texture = tex->second.second;
+    else
+        return false;
+    if (indexedPsm(psm))
+    {
+        if (t.csa != 0u)
+            return false;
+        const uint32_t entries = (psm == kT8 || psm == 0x1Bu) ? 256u : 16u;
+        const auto p = s.residentPalette.find(t.cbp);
+        State::HostImage *hostClut = hostImageFor(s, t.cbp, t.cpsm & 0x3Fu, 0u, true);
+        if (hostClut && p != s.residentPalette.end())
+        {
+            const auto taken = s.takenPaletteSeq.find(t.cbp);
+            if (taken != s.takenPaletteSeq.end() && taken->second > hostClut->seq)
+                hostClut = nullptr;
+        }
+        if (hostClut)
+            m.palette = hostPalette(s, *hostClut, t.cbp, entries);
+        else if (p != s.residentPalette.end())
+            m.palette = p->second;
+        if (m.palette == 0u)
+            return false;
+    }
+    return m.texture != 0u;
+}
+
+void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                const uint8_t *data, uint32_t bytes)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    const uint32_t psm = dpsm & 0x3Fu, bits = hostBits(psm);
+    dbw = std::max(dbw, 1u);
+    const uint32_t stride = dbw * 64u;
+    const uint64_t need = (uint64_t(width) * height * bits + 7u) / 8u;
+    ++s.counts.hostUploads;
+    if (bits == 0u || width == 0u || height == 0u || x + width > stride || y + height > 2048u || !data ||
+        bytes < need)
+    {
+        ++s.counts.hostRefused;
+        return;
+    }
+    s.counts.hostBytes += need;
+    // What it overwrites: an image of another format whose memory and bits
+    // it shares is gone (T4HL and T4HH share a word, not its bits).
+    const uint64_t from = uint64_t(dbp) * 256u, to = from + hostSpan(psm, dbw, y + height);
+    for (auto it = s.hostImages.begin(); it != s.hostImages.end();)
+    {
+        const State::HostImage &other = it->second;
+        const uint64_t otherFrom = uint64_t(it->first.first) * 256u;
+        const uint64_t otherTo = otherFrom + hostSpan(other.psm, other.dbw, other.height);
+        const uint32_t a = wordBits(psm), b = wordBits(other.psm);
+        const bool shares = otherFrom < to && from < otherTo && (a == 0u || b == 0u || (a & b) != 0u);
+        if (shares && !(it->first.first == dbp && other.psm == psm))
+            it = s.hostImages.erase(it);
+        else
+            ++it;
+    }
+    State::HostImage &image = s.hostImages[{dbp, psm}];
+    if (image.dbw != dbw || image.psm != psm)
+    {
+        image = {};
+        image.dbw = dbw;
+        image.psm = psm;
+    }
+    const uint32_t bytesPer = bits >= 16u ? bits / 8u : 1u;
+    if (y + height > image.height)
+    {
+        image.height = y + height;
+        image.pixels.resize(size_t(stride) * image.height * bytesPer, 0u);
+    }
+    for (uint32_t row = 0; row < height; ++row)
+    {
+        uint8_t *dst = image.pixels.data() + (size_t(y + row) * stride + x) * bytesPer;
+        if (bits >= 8u)
+            std::memcpy(dst, data + size_t(row) * width * bytesPer, size_t(width) * bytesPer);
+        else
+            for (uint32_t col = 0; col < width; ++col)
+            {
+                const size_t i = size_t(row) * width + col; // low nibble first
+                dst[col] = (data[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
+            }
+    }
+    ++image.version;
+    image.seq = s.uploadedSeq[dbp] = ++s.sequence;
 }
 
 bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
@@ -1706,6 +1985,7 @@ uint32_t captureTarget(uint32_t) { return 0u; }
 bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &) { return false; }
 void noteEffect(const GSNativeEffect &) {}
 bool piece(const GSNativeMesh &, const GSDrawState *) { return false; }
+void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 bool effect(const GSNativeEffect &) { return false; }
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }

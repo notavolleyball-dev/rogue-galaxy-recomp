@@ -96,6 +96,12 @@ enum class Passed
 {
     NotProduced, // no record of it here: not a named upload, or refused
 };
+// Step 6: a host upload nobody took (the absorber's, docs/NATIVE-PIPELINE.md
+// "host uploads nobody took"), its pixels as sent (rows in order; 4-bit
+// formats low nibble first). Kept as a linear image per base and format,
+// which draws reading that format at that buffer width sample (sourceOf).
+void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                const uint8_t *data, uint32_t bytes);
 void noteWithheld(bool palette, uint32_t imageBytes);
 void notePassed(Passed why);
 void noteSplit();

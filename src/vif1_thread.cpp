@@ -2128,6 +2128,67 @@ bool absorbing()
 // The BITBLTBUF and TRXREG an absorbed local copy goes with (logged).
 thread_local uint64_t t_bitbltbuf = 0u, t_trxpos = 0u, t_trxreg = 0u;
 
+// A host upload nobody took, its pixels gathered from the IMAGE data that
+// follows (in the packet or continuing past it) for the producer, which
+// keeps what it leaves in GS memory (rg::nativeproducer::hostUpload).
+struct HostCapture
+{
+    bool active = false;
+    uint64_t bitbltbuf = 0u, trxpos = 0u, trxreg = 0u;
+    uint32_t need = 0u;
+    std::vector<uint8_t> data;
+};
+thread_local HostCapture t_capture;
+
+uint32_t captureBits(uint32_t psm)
+{
+    switch (psm & 0x3Fu)
+    {
+    case 0x00u: return 32u;                     // CT32
+    case 0x02u: case 0x0Au: return 16u;         // CT16, CT16S
+    case 0x13u: case 0x1Bu: return 8u;          // T8, T8H
+    case 0x14u: case 0x24u: case 0x2Cu: return 4u; // T4, T4HL, T4HH
+    default: return 0u;
+    }
+}
+
+void startCapture()
+{
+    HostCapture &c = t_capture;
+    c.active = false;
+    c.data.clear();
+    const uint32_t bits = captureBits(static_cast<uint32_t>(t_bitbltbuf >> 56));
+    const uint64_t need = (uint64_t(t_trxreg & 0xFFFu) * ((t_trxreg >> 32) & 0xFFFu) * bits + 7u) / 8u;
+    if (bits == 0u || need == 0u || need > (16u << 20))
+        return;
+    c.active = true;
+    c.bitbltbuf = t_bitbltbuf;
+    c.trxpos = t_trxpos;
+    c.trxreg = t_trxreg;
+    c.need = static_cast<uint32_t>(need);
+    c.data.reserve(c.need);
+}
+
+// IMAGE bytes of the upload being captured; whatever is past it is not.
+void feedCapture(const uint8_t *data, uint32_t size)
+{
+    HostCapture &c = t_capture;
+    if (!c.active)
+        return;
+    const uint32_t n = std::min<uint32_t>(size, c.need - static_cast<uint32_t>(c.data.size()));
+    c.data.insert(c.data.end(), data, data + n);
+    if (c.data.size() < c.need)
+        return;
+    c.active = false;
+    const uint64_t b = c.bitbltbuf;
+    rg::nativeproducer::hostUpload(
+        static_cast<uint32_t>((b >> 32) & 0x3FFFu), static_cast<uint32_t>((b >> 48) & 0x3Fu),
+        static_cast<uint32_t>((b >> 56) & 0x3Fu), static_cast<uint32_t>((c.trxpos >> 32) & 0x7FFu),
+        static_cast<uint32_t>((c.trxpos >> 48) & 0x7FFu), static_cast<uint32_t>(c.trxreg & 0xFFFu),
+        static_cast<uint32_t>((c.trxreg >> 32) & 0xFFFu), c.data.data(), static_cast<uint32_t>(c.data.size()));
+    c.data.clear();
+}
+
 void absorbRegister(uint8_t reg, uint64_t value)
 {
     GSRegisters *regs = g_runtime ? &g_runtime->memory().gs() : nullptr;
@@ -2141,6 +2202,10 @@ void absorbRegister(uint8_t reg, uint64_t value)
     case 0x52u: t_trxreg = value; g_absorbed.otherRegisters.fetch_add(1u, std::memory_order_relaxed); break;
     case 0x53u: // TRXDIR
         ((value & 3u) == 2u ? g_absorbed.localCopies : g_absorbed.hostUploads).fetch_add(1u, std::memory_order_relaxed);
+        if ((value & 3u) == 0u)
+            startCapture();
+        else
+            t_capture.active = false;
         if ((value & 3u) == 2u || (value & 3u) == 0u)
         {
             // The first few of each shape (docs/NATIVE-PIPELINE.md step 6);
@@ -2252,6 +2317,7 @@ void absorb(const uint8_t *data, uint32_t size)
             // IMAGE: an upload nobody took.
             const uint32_t bytes = std::min<uint32_t>(nloop * 16u, size - std::min(size, pos));
             g_absorbed.imageBytes.fetch_add(bytes, std::memory_order_relaxed);
+            feedCapture(data + pos, bytes);
             pos += bytes;
         }
     }
@@ -2606,6 +2672,7 @@ void install(PS2Runtime &runtime)
         if (absorbing())
         {
             g_absorbed.continuationBytes.fetch_add(size, std::memory_order_relaxed);
+            feedCapture(data, size);
             return;
         }
         if (g_stage && t_onVif1Thread)
