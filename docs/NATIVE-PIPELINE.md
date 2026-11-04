@@ -79,7 +79,7 @@ Notes:
   backend. The game then either runs or faults on the first GS call, which
   is the most complete test there is. At that point the counters have done
   their job.
-- **T, tracked but not gating:** packets decoded by the converter
+- **T, tracked but not gating (decided, see Open 1):** packets decoded by the converter
   (`build2D` and the effect builder), by source. These are producers reading
   GS packets. T at 0 means every 2D family is a function hook. That's the
   later horizon, and it's an open question below.
@@ -205,11 +205,18 @@ crossings really are.
 
 ## Open questions
 
-1. **Does T have to reach 0?** That is, should every `GsPkt*` 2D family be
-   a function hook, or is a converter that decodes the game's packets into
-   sprite records acceptable as a producer? My recommendation: gate on G
-   now, and treat T as later work, ranked by what the UI-at-output-resolution
-   work needs.
+1. ~~Does T have to reach 0?~~ **Decided (user, 2026-11-04):** the
+   converter is an acceptable producer, as long as it stays easy to replace
+   if it turns out to be a bottleneck. What that requires:
+   - The converter emits the same sprite and mesh records a function hook
+     would. Nothing downstream knows which producer made a record.
+   - Its packet decoding stays inside the converter. No GS state leaks into
+     the records or the producer tables, beyond the address-to-id lookups
+     every producer shares.
+   - Replacement works one family at a time, by source tag. A `GsPkt*`
+     family hooked natively stops sending packets, and the converter simply
+     never sees them. T by source shows which families are left and what
+     each one costs.
 2. **Lighting for R5.** The VU1 programs light vertices themselves; the
    meshes arrive with lit colours and no normals. For RT, either the programs'
    inputs (normals, light slots in VU1 memory) go into the mesh draw, or the
