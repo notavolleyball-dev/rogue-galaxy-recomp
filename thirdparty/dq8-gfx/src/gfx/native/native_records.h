@@ -121,6 +121,9 @@ struct Material
 {
     Id texture = 0; // 0: untextured
     Id palette = 0; // an Index8 texture's, chosen at the draw; 0: the texture's own
+    // The size the uvs are normalized to; 0: the texture's own.
+    uint16_t textureWidth = 0;
+    uint16_t textureHeight = 0;
     bool linear = false;
     bool clampU = true;
     bool clampV = true;

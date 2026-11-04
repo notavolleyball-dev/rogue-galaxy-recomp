@@ -6,9 +6,9 @@
 // the game built them; the renderer drains them on the thread that owns the
 // GPU device. So far (step 3a of the plan) the renderer keeps the targets,
 // cameras, textures and palettes it is sent, counts how ready the draws are
-// for the features (R1-R5), and presents its scene target: cleared, with
-// the textures it holds drawn over it as a grid (the debug view, until it
-// draws the game). Nothing of the GS here.
+// for the features (R1-R5), and presents its scene target with the mesh
+// draws of the last frame a Present record closed (step 4b). Nothing of the
+// GS here.
 
 #include "gfx/native/native_records.h"
 
@@ -99,6 +99,21 @@ private:
     void drawView(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass);
     void evict(SDL_GPUDevice *device);
 
+    // Step 4b's mesh draws (native_meshes.cpp): the frame's draws into the
+    // scene target, with a depth target of its own.
+    bool ensureMeshes(SDL_GPUDevice *device, std::string &error);
+    bool ensureDepth(SDL_GPUDevice *device, std::string &error);
+    SDL_GPUGraphicsPipeline *meshPipeline(SDL_GPUDevice *device, uint32_t key);
+    SDL_GPUSampler *meshSampler(SDL_GPUDevice *device, uint32_t key);
+    bool uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error);
+    void drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass,
+                    uint32_t scale);
+    void releaseMeshes(SDL_GPUDevice *device);
+    struct MeshCounts
+    {
+        uint64_t drawn = 0, offscreen = 0, noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
+    };
+
     std::vector<Record> m_drained;
     std::unordered_map<Id, Target> m_targets;
     std::unordered_map<Id, Camera> m_cameras;
@@ -121,5 +136,27 @@ private:
     SDL_GPUGraphicsPipeline *m_viewPipeline = nullptr;
     SDL_GPUSampler *m_viewSampler = nullptr;
     bool m_viewFailed = false;
+    bool m_textureGrid = false; // RG_NATIVE_TEXTURE_GRID=1: step 3a's view over the scene
+
+    std::vector<MeshDraw> m_meshes;      // drawn since the last Present record
+    std::vector<MeshDraw> m_frameMeshes; // the frame a Present record closed
+    bool m_frameReady = false;
+    SDL_GPUShader *m_meshVertex = nullptr;
+    SDL_GPUShader *m_meshFragment = nullptr;
+    bool m_meshFailed = false;
+    SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUTexture *m_depth = nullptr;
+    uint32_t m_depthWidth = 0, m_depthHeight = 0;
+    SDL_GPUTexture *m_white = nullptr;
+    std::unordered_map<uint32_t, SDL_GPUGraphicsPipeline *> m_meshPipelines;
+    SDL_GPUSampler *m_meshSamplers[8] = {};
+    SDL_GPUBuffer *m_vertexBuffer = nullptr;
+    SDL_GPUBuffer *m_indexBuffer = nullptr;
+    uint32_t m_vertexCapacity = 0, m_indexCapacity = 0;
+    SDL_GPUTransferBuffer *m_meshTransfer = nullptr;
+    uint32_t m_transferCapacity = 0;
+    std::vector<uint32_t> m_firstIndex; // per frame mesh, into the index buffer
+    std::vector<int32_t> m_vertexOffset;
+    MeshCounts m_meshCounts, m_meshReported;
 };
 } // namespace dq8::gfx::native

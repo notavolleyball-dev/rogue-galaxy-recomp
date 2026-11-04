@@ -55,12 +55,15 @@ target_link_libraries(dq8_gfx_gs PUBLIC dq8_host_simd ps2_runtime)
 # not on its include path. Keep it that way; that is the guarantee.
 add_library(dq8_gfx_native STATIC
     src/gfx/native/native_pipeline.cpp
+    src/gfx/native/native_meshes.cpp
 )
 target_include_directories(dq8_gfx_native PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(dq8_gfx_native PUBLIC SDL3::SDL3-static)
 foreach(shader IN ITEMS
         "native_view.vert;vert;kNativeViewVertSpirv"
-        "native_view.frag;frag;kNativeViewFragSpirv")
+        "native_view.frag;frag;kNativeViewFragSpirv"
+        "native_mesh.vert;vert;kNativeMeshVertSpirv"
+        "native_mesh.frag;frag;kNativeMeshFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)
     list(GET shader 2 symbol)

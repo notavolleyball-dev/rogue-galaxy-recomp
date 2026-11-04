@@ -582,6 +582,8 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
                 known = false;
             }
         }
+        m.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(t.tw, 10u));
+        m.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(t.th, 10u));
         m.linear = state.linearFilter;
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
         m.clampU = wms != 0u;

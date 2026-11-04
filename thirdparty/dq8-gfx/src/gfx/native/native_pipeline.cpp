@@ -140,7 +140,23 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             else if constexpr (std::is_same_v<T, Camera>)
                 m_cameras[r.id] = r;
             else if constexpr (std::is_same_v<T, MeshDraw>)
+            {
                 count(r);
+                // Into other targets: the effects' buffers, step 5.
+                if (r.target != 0u && r.target == m_sceneTarget)
+                    m_meshes.push_back(std::move(r));
+                else
+                    ++m_meshCounts.offscreen;
+            }
+            else if constexpr (std::is_same_v<T, Present>)
+            {
+                // The draws since the last one are a frame; a frame not yet
+                // drawn when the next closes is dropped (the newest shows).
+                m_frameMeshes.swap(m_meshes);
+                m_meshes.clear();
+                m_frameReady = true;
+                ++m_meshCounts.frames;
+            }
             else if constexpr (std::is_same_v<T, Texture>)
             {
                 const uint32_t bpp = r.format == PixelFormat::Rgba8 ? 4u : r.format == PixelFormat::Index8 ? 1u : 0u;
@@ -409,6 +425,14 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         }
     }
     m_drained.clear();
+    std::string meshError;
+    const bool meshes = ensureMeshes(device, meshError);
+    static bool toldMeshes = false;
+    if (!meshes && !toldMeshes)
+    {
+        std::fprintf(stderr, "[native-pipeline] no mesh draws: %s\n", meshError.c_str());
+        toldMeshes = true;
+    }
     if (std::string failed; !upload(device, commands, failed))
     {
         std::fprintf(stderr, "[native-pipeline] uploads lost: %s\n", failed.c_str());
@@ -425,8 +449,10 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
     scale = scale ? scale : 1u;
     width *= scale;
     height *= scale;
+    bool fresh = false; // the scene target holds nothing yet
     if (!m_scene || m_sceneWidth != width || m_sceneHeight != height)
     {
+        fresh = true;
         if (m_scene)
             SDL_ReleaseGPUTexture(device, m_scene);
         SDL_GPUTextureCreateInfo info{};
@@ -447,23 +473,54 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         m_sceneHeight = height;
     }
 
-    // The scene: cleared to a dark blue no game frame is, then the textures
-    // held, as a grid (step 3a's view).
+    // The scene: the meshes of the last frame a Present record closed, over
+    // black, with a reversed depth target of its own. Kept as it is until
+    // the next frame closes (the host presents more often than the game).
+    static const bool grid = [] {
+        const char *v = std::getenv("RG_NATIVE_TEXTURE_GRID");
+        return v && *v && *v != '0';
+    }();
+    const bool draw = meshes && m_frameReady;
+    if (!draw && !fresh && !grid)
+    {
+        out.texture = m_scene;
+        out.width = m_sceneWidth;
+        out.height = m_sceneHeight;
+        return true;
+    }
+    bool depth = false;
+    if (draw)
+    {
+        std::string failed;
+        depth = ensureDepth(device, failed) && uploadMeshes(device, commands, failed);
+        if (!failed.empty())
+            std::fprintf(stderr, "[native-pipeline] meshes lost: %s\n", failed.c_str());
+    }
     std::string viewError;
-    const bool view = ensureView(device, viewError);
+    const bool view = grid && ensureView(device, viewError);
     if (!viewError.empty())
         std::fprintf(stderr, "[native-pipeline] no texture view: %s\n", viewError.c_str());
     SDL_GPUColorTargetInfo target{};
     target.texture = m_scene;
     target.load_op = SDL_GPU_LOADOP_CLEAR;
     target.store_op = SDL_GPU_STOREOP_STORE;
-    target.clear_color = SDL_FColor{0.05f, 0.08f, 0.20f, 1.0f};
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, nullptr);
+    target.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
+    SDL_GPUDepthStencilTargetInfo depthTarget{};
+    depthTarget.texture = m_depth;
+    depthTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+    depthTarget.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depthTarget.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depthTarget.clear_depth = 0.0f;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, depth ? &depthTarget : nullptr);
     if (!pass)
     {
         error = std::string("SDL_BeginGPURenderPass(native scene): ") + SDL_GetError();
         return false;
     }
+    if (depth)
+        drawMeshes(device, commands, pass, scale);
+    m_frameReady = false;
     if (view)
         drawView(commands, pass);
     SDL_EndGPURenderPass(pass);
@@ -492,7 +549,13 @@ std::string Renderer::statsLine()
     line += " | readiness of " + d(now.meshDraws, was.meshDraws) + " mesh draws: R1 camera+model " +
             d(now.cameraAndModel, was.cameraAndModel) + ", R2 object " + d(now.objectIdentity, was.objectIdentity) +
             ", R3 scene float depth " + d(now.sceneFloatDepth, was.sceneFloatDepth) + ", R4 material " +
-            d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals) + "\n";
+            d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals);
+    const MeshCounts &mc = m_meshCounts, &mr = m_meshReported;
+    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " over " + d(mc.frames, mr.frames) +
+            " frames; not drawn: offscreen " + d(mc.offscreen, mr.offscreen) + ", no camera " +
+            d(mc.noCamera, mr.noCamera) + ", texture not held " + d(mc.noTexture, mr.noTexture) + ", no pipeline " +
+            d(mc.noPipeline, mr.noPipeline) + "\n";
+    m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;
     std::function<std::string()> producer;
     {
@@ -509,6 +572,9 @@ void Renderer::release(SDL_GPUDevice *device)
 {
     if (!device)
         return;
+    releaseMeshes(device);
+    m_meshes.clear();
+    m_frameMeshes.clear();
     if (m_scene)
         SDL_ReleaseGPUTexture(device, m_scene);
     for (auto &[id, image] : m_images)

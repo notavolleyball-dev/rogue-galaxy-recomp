@@ -396,6 +396,34 @@ build that compiles is not "done".
      game's texture function, blend, alpha test, fog. The debug grid goes.
      **Pass:** a screenshot shows the field's world and characters in
      place; R3 at 100% of scene draws.
+
+     **4b done (2026-11-04).** `native_meshes.cpp` in `dq8_gfx_native`, and
+     the `native_mesh` shaders.
+     - **Frames:** the draws between two Present records are one frame. The
+       scene keeps the last frame until the next one closes, because the
+       host presents more often than the game.
+     - **Per frame:** one vertex buffer and one index buffer, and a pipeline
+       per blend, depth and write-mask state.
+     - **Depth:** a D32 float target, reversed (cleared to 0). Depth is
+       clamped rather than clipped at the far plane, because the sky sits
+       past it.
+     - **Fragment shader:** the game's four texture functions in its units
+       (0x80 is 1.0). Index8 textures are fetched and looked up in their
+       palette, not filtered.
+     - **Not drawn here:** draws into other targets (the effects' buffers)
+       are counted and skipped, for step 5. `RG_NATIVE_TEXTURE_GRID=1`
+       keeps 3a's grid over the scene.
+     - **Known approximations:** the blend's alpha is written as As / 0x80,
+       clamped, so a source alpha over 0x80 doesn't amplify and the stored
+       alpha isn't the game's. A failing alpha test with a fail mode other
+       than "nothing" passes. Indexed textures are never filtered.
+
+     One walk (`pipeline-step4b`): about 870 mesh draws a frame into the
+     scene, about 150 a frame offscreen, with none refused (no camera,
+     texture or pipeline missing). The screenshots show the field's world,
+     the character, the beam and the compass from the native renderer.
+     Where a character is drawn through an object layer (frame 6001), only
+     its directly drawn parts (weapon, hair) show, as expected until step 5.
    - **4c. Withheld from the GS.** A mesh made a record no longer reaches
      the GS. **Pass:** G5's VU1 mesh share at 0, same draw counts as 4a.
      The depth probe reads GS depth, so it goes wrong here until step 7.
