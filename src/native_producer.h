@@ -70,11 +70,16 @@ uint32_t targetAt(uint32_t base);
 // was made: the mesh is then not sent to the GS (step 4c).
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
 
-// Step 5a's survey (counts only, for 5b): an effect going to the GS (by
-// command; a sprite effect's ops by what they draw into and from), and a
-// converter 2D piece going to the GS as a mesh (by its target).
+// Step 5a's survey (counts only): an effect going to the GS (by command; a
+// sprite effect's ops by what they draw into and from).
 void noteEffect(const GSNativeEffect &effect);
-void note2D(const GSDrawState *state);
+
+// Step 5b: a converter 2D piece (a mesh in the GS's window coordinates,
+// build2D's) under its draw state, and an effect's sprites, as the
+// renderer's window-space mesh draws. True when made: the GS does not get
+// it then. False leaves it to the GS (counted by why).
+bool piece(const GSNativeMesh &mesh, const GSDrawState *state);
+bool effect(const GSNativeEffect &effect);
 
 // Step 3b's counts (the VIF1 thread, which withholds named uploads the
 // producer sent from the GS): one withheld (palette or texture), one sent on

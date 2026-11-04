@@ -496,6 +496,61 @@ build that compiles is not "done".
      (and the 2D pieces the effects' buffers need, such as their clears)
      become sprite draws, naming targets as sources. **Pass:** G5's effect
      share at 0; characters drawn through object layers show whole.
+
+     **5b in progress (2026-11-04), paused for review.**
+
+     Built:
+     - **Window-space mesh draws.** A MeshDraw without a model is in the
+       target's pixels. When it uses depth, its GS Z is mapped to the
+       renderer's depth through the newest camera: Zgs is linear in the
+       projection's z / w.
+     - **2D pieces.** Every converter 2D piece becomes one
+       (`rg::nativeproducer::piece`) on all three paths: `deliverMesh`,
+       GsPkt blocks, and whole converted packets. Game-thread pieces wait
+       for the VIF1 lists in flight first.
+     - **Effects.** An effect's sprite ops become one window-space draw
+       each (`rg::nativeproducer::effect`), all or nothing per effect.
+     - **Targets as sources.** `Material::sourceTarget` names a target to
+       sample. A draw reading its own target reads a copy, taken just
+       before it in a pass of its own.
+     - **Blending in general.** The GS's (A - B) * C + D is Cs * Fs + Cd * Fd
+       with factors 0, 1, C, 1 - C or -C. The records now carry a GPU-style
+       blend (`BlendFactor`, `BlendOp`) instead of five named ones, and a
+       fixed factor goes through the blend constant.
+     - **CT24 reads** take TEXA from the converter's mirror when the effect
+       left it to the GS.
+     - **Targets:** the scene is the first buffer named as the frame;
+       another named so (CBlur's 02a40) gets its own id. A target that isn't
+       the scene never shrinks, and grows to the scissor of what draws into
+       it. One the game never names is declared from its draws.
+     - `RG_NATIVE_FRAME_DUMP=N` prints flip N's draws, one line each.
+
+     One walk (`pipeline-step5b`, per window):
+     - **2D pieces:** all 58,900 made.
+     - **Effects:** 360 of 480 made. The 120 left are CBlur's green-to-alpha
+       (the GS's 16-bit view of a 32-bit buffer), the only effect left on
+       the GS.
+     - **G5:** `SubmitNativeMesh` doesn't appear; `SubmitNativeEffect` is at
+       120.
+     - **Renderer:** 124,175 draws (73,842 offscreen) in about 93 passes a
+       frame, 20 of them for copies. None refused.
+
+     Bugs found on the way, each one blacked out the picture:
+     - CBlur's buffer aliased to the scene, so its copy replaced the scene.
+     - The glare's blend wasn't one of the five, and fell back to alpha, so
+       laying the glare over the scene replaced it.
+     - Layers were drawn past their declared height, so composites read
+       nothing.
+
+     **Open:**
+     - **Characters are half transparent.** Their layers are composited
+       with vertex alpha about 64 times the layer's alpha. The GS shows them
+       solid, so either the layer's alpha goes above 0x80 there (our 8-bit
+       targets store A / 0x80 and clamp it), or another draw gives the
+       rest. Not yet known which.
+     - The minimap has a dark panel behind it.
+     - Fog on 2D pieces is dropped (1,038 a window): its F is per vertex.
+     - CBlur's green-to-alpha is still on the GS.
 6. **2D** through the converter as sprite draws, then the remaining VU1
    programs on packets (outlines, shadow volumes, particles). Pass: G1 and
    G5 at 0.

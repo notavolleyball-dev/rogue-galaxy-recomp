@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 namespace dq8::gfx::native
 {
@@ -40,6 +42,7 @@ struct MaterialUniforms
     float size[4];
     float blend[4];
     float fogColor[4];
+    float texa[4];
 };
 
 void multiply(const float a[16], const float b[16], float out[16])
@@ -52,15 +55,35 @@ void multiply(const float a[16], const float b[16], float out[16])
     std::memcpy(out, r, sizeof(r));
 }
 
-// The pipeline's state as one key: blend (3 bits), depth compare (3), depth
-// write (1), depth used at all (1), color write mask (4), a depth target
-// attached to the pass (1).
+// The pipeline's state as one key: depth compare (3 bits), depth write (1),
+// depth used at all (1), color write mask (4), a depth target attached to
+// the pass (1), blending (1), its source and destination factors (3 each)
+// and op (2).
 uint32_t pipelineKey(const Material &m, bool attached)
 {
     const bool depth = m.depthTest != Compare::Always || m.depthWrite;
-    return static_cast<uint32_t>(m.blend) | (static_cast<uint32_t>(m.depthTest) << 3) |
-           (m.depthWrite ? 1u << 6 : 0u) | (depth ? 1u << 7 : 0u) |
-           (static_cast<uint32_t>(m.colorWrite & 0xFu) << 8) | (attached ? 1u << 12 : 0u);
+    uint32_t key = static_cast<uint32_t>(m.depthTest) | (m.depthWrite ? 1u << 3 : 0u) | (depth ? 1u << 4 : 0u) |
+                   (static_cast<uint32_t>(m.colorWrite & 0xFu) << 5) | (attached ? 1u << 9 : 0u);
+    if (m.blending)
+        key |= (1u << 10) | (static_cast<uint32_t>(m.srcFactor) << 11) | (static_cast<uint32_t>(m.dstFactor) << 14) |
+               (static_cast<uint32_t>(m.blendOp) << 17);
+    return key;
+}
+
+SDL_GPUBlendFactor blendFactor(BlendFactor f)
+{
+    switch (f)
+    {
+    case BlendFactor::Zero: return SDL_GPU_BLENDFACTOR_ZERO;
+    case BlendFactor::One: return SDL_GPU_BLENDFACTOR_ONE;
+    case BlendFactor::SrcAlpha: return SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    case BlendFactor::InvSrcAlpha: return SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    case BlendFactor::DstAlpha: return SDL_GPU_BLENDFACTOR_DST_ALPHA;
+    case BlendFactor::InvDstAlpha: return SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_ALPHA;
+    case BlendFactor::Fixed: return SDL_GPU_BLENDFACTOR_CONSTANT_COLOR;
+    case BlendFactor::InvFixed: return SDL_GPU_BLENDFACTOR_ONE_MINUS_CONSTANT_COLOR;
+    }
+    return SDL_GPU_BLENDFACTOR_ONE;
 }
 
 SDL_GPUCompareOp compareOp(Compare c)
@@ -198,47 +221,27 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
 {
     if (const auto it = m_meshPipelines.find(key); it != m_meshPipelines.end())
         return it->second;
-    const Blend blend = static_cast<Blend>(key & 7u);
-    const Compare depthTest = static_cast<Compare>((key >> 3) & 7u);
-    const bool depthWrite = (key >> 6) & 1u;
-    const bool attached = (key >> 12) & 1u;
-    const bool depth = ((key >> 7) & 1u) && attached;
+    const Compare depthTest = static_cast<Compare>(key & 7u);
+    const bool depthWrite = (key >> 3) & 1u;
+    const bool attached = (key >> 9) & 1u;
+    const bool depth = ((key >> 4) & 1u) && attached;
 
     SDL_GPUColorTargetDescription color{};
     color.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     SDL_GPUColorTargetBlendState &b = color.blend_state;
     b.enable_color_write_mask = true;
-    b.color_write_mask = static_cast<SDL_GPUColorComponentFlags>((key >> 8) & 0xFu);
+    b.color_write_mask = static_cast<SDL_GPUColorComponentFlags>((key >> 5) & 0xFu);
+    b.enable_blend = (key >> 10) & 1u;
+    b.src_color_blendfactor = blendFactor(static_cast<BlendFactor>((key >> 11) & 7u));
+    b.dst_color_blendfactor = blendFactor(static_cast<BlendFactor>((key >> 14) & 7u));
+    const BlendOp op = static_cast<BlendOp>((key >> 17) & 3u);
+    b.color_blend_op = op == BlendOp::Subtract          ? SDL_GPU_BLENDOP_SUBTRACT
+                       : op == BlendOp::ReverseSubtract ? SDL_GPU_BLENDOP_REVERSE_SUBTRACT
+                                                        : SDL_GPU_BLENDOP_ADD;
     // The stored alpha is the source's, as the game's blend leaves it.
     b.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
     b.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
     b.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-    b.color_blend_op = SDL_GPU_BLENDOP_ADD;
-    b.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-    switch (blend)
-    {
-    case Blend::Opaque:
-        break;
-    case Blend::Alpha:
-    case Blend::FixedAlpha:
-        b.enable_blend = true;
-        b.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
-        break;
-    case Blend::Add:
-        b.enable_blend = true;
-        b.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        break;
-    case Blend::Subtract:
-        b.enable_blend = true;
-        b.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-        b.color_blend_op = SDL_GPU_BLENDOP_REVERSE_SUBTRACT;
-        break;
-    case Blend::Multiply:
-        b.enable_blend = true;
-        b.src_color_blendfactor = SDL_GPU_BLENDFACTOR_DST_COLOR;
-        b.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
-        break;
-    }
 
     SDL_GPUVertexBufferDescription buffer{};
     buffer.slot = 0u;
@@ -349,8 +352,8 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
 }
 
 void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass,
-                          size_t first, size_t last, bool depthAttached, float targetW, float targetH,
-                          uint32_t scale)
+                          size_t first, size_t last, Id target, bool depthAttached, float targetW, float targetH,
+                          uint32_t scale, SDL_GPUTexture *copy, uint32_t copyW, uint32_t copyH)
 {
     if (!m_vertexBuffer || !m_indexBuffer)
         return;
@@ -364,17 +367,65 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         const MeshDraw &d = m_frameMeshes[n];
         if (d.indices.empty())
             continue;
-        const auto camera = m_cameras.find(d.camera);
-        if (d.camera == 0u || camera == m_cameras.end() || !d.hasModel)
+        const Camera *camera = nullptr;
+        if (const auto it = m_cameras.find(d.camera); d.camera != 0u && it != m_cameras.end())
+            camera = &it->second;
+        const Material &m = d.material;
+        const bool depthUsed = m.depthTest != Compare::Always || m.depthWrite;
+        // A 3D draw needs its camera; a window-space one only to map its
+        // depth, when it uses depth.
+        if (d.hasModel ? !camera : (depthUsed && !camera))
         {
             ++m_meshCounts.noCamera;
             continue;
         }
-        const Material &m = d.material;
         MaterialUniforms mu{};
+        mu.texa[0] = m.fixedTextureAlpha;
+        mu.texa[1] = m.alphaZeroOnBlack ? 1.0f : 0.0f;
         SDL_GPUTexture *image = m_white, *palette = m_white;
         float ownW = 1.0f, ownH = 1.0f;
-        if (m.texture != 0u)
+        if (m.sourceTarget != 0u)
+        {
+            // A target drawn earlier this frame (or kept from before), read
+            // in game pixels: its texture may be larger and is upscaled.
+            const float s = float(std::max(scale, 1u));
+            if (m.sourceTarget == target)
+            {
+                // The copy drawFrame took just before (only the run's
+                // first draw is given one).
+                if (!copy || n != first)
+                {
+                    ++m_meshCounts.feedback;
+                    continue;
+                }
+                image = palette = copy;
+                ownW = float(copyW) / s;
+                ownH = float(copyH) / s;
+            }
+            else if (m.sourceTarget == m_sceneTarget)
+            {
+                image = palette = m_scene;
+                ownW = float(m_sceneWidth) / s;
+                ownH = float(m_sceneHeight) / s;
+            }
+            else
+            {
+                const auto it = m_gpuTargets.find(m.sourceTarget);
+                if (it == m_gpuTargets.end() || !it->second.texture)
+                {
+                    ++m_meshCounts.sourceNotDrawn;
+                    continue;
+                }
+                image = palette = it->second.texture;
+                ownW = float(it->second.width) / s;
+                ownH = float(it->second.height) / s;
+            }
+            mu.mode[0] = 3u;
+            mu.mode[1] = static_cast<uint32_t>(m.function);
+            mu.mode[2] = m.textureAlpha ? 1u : 0u;
+            ++m_meshCounts.fromTarget;
+        }
+        else if (m.texture != 0u)
         {
             const auto it = m_images.find(m.texture);
             if (it == m_images.end())
@@ -421,22 +472,46 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         mu.size[1] = m.textureHeight ? float(m.textureHeight) : ownH;
         mu.size[2] = ownW;
         mu.size[3] = ownH;
-        mu.blend[0] = float(m.blendFactor) / 128.0f;
-        mu.blend[1] = m.blend == Blend::FixedAlpha ? 1.0f : 0.0f;
         mu.blend[2] = m.clampU ? 1.0f : 0.0f;
         mu.blend[3] = m.clampV ? 1.0f : 0.0f;
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = float(d.fogColor[i]) / 255.0f;
 
         DrawUniforms du{};
-        float modelView[16];
-        multiply(d.model, camera->second.view, modelView);
-        multiply(modelView, camera->second.projection, du.clip);
-        std::memcpy(du.viewport, camera->second.viewport, sizeof(du.viewport));
+        if (d.hasModel)
+        {
+            float modelView[16];
+            multiply(d.model, camera->view, modelView);
+            multiply(modelView, camera->projection, du.clip);
+            std::memcpy(du.viewport, camera->viewport, sizeof(du.viewport));
+        }
+        else
+        {
+            // Window space: x and y are the target's pixels, w is 1. The
+            // game's window depth is linear in the projection's z / w
+            // (Zgs = V22 * z / w + V32, V the camera's viewport), so the
+            // clip z the vertex shader turns into reversed depth is
+            // (Zgs - V32) / V22. With no camera, depth is unused.
+            for (int i = 0; i < 4; ++i)
+                du.clip[i * 5] = du.viewport[i * 5] = 1.0f;
+            du.clip[10] = 0.0f;
+            if (camera && camera->viewport[10] != 0.0f)
+            {
+                du.clip[10] = 1.0f / camera->viewport[10];
+                du.clip[14] = -camera->viewport[14] / camera->viewport[10];
+            }
+            ++m_meshCounts.window;
+        }
         du.target[0] = targetW;
         du.target[1] = targetH;
         std::memcpy(du.fog, d.fog, sizeof(du.fog));
 
+        if (m.blending && (m.srcFactor == BlendFactor::Fixed || m.srcFactor == BlendFactor::InvFixed ||
+                           m.dstFactor == BlendFactor::Fixed || m.dstFactor == BlendFactor::InvFixed))
+        {
+            const float f = std::min(float(m.blendFactor) / 128.0f, 1.0f);
+            SDL_SetGPUBlendConstants(pass, SDL_FColor{f, f, f, f});
+        }
         SDL_PushGPUVertexUniformData(commands, 0, &du, sizeof(du));
         SDL_PushGPUFragmentUniformData(commands, 0, &mu, sizeof(mu));
         const uint32_t samplerKey = (m.linear ? 1u : 0u) | (m.clampU ? 2u : 0u) | (m.clampV ? 4u : 0u);
@@ -478,6 +553,37 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     }
     if (!uploadMeshes(device, commands, error))
         return false;
+    // RG_NATIVE_FRAME_DUMP=N: the N-th frame's draws, one line each.
+    static const uint64_t dumpFrame = [] {
+        const char *v = std::getenv("RG_NATIVE_FRAME_DUMP");
+        return v ? std::strtoull(v, nullptr, 10) : 0ull;
+    }();
+    if (dumpFrame != 0u && m_meshCounts.frames == dumpFrame)
+    {
+        for (size_t n = 0; n < m_frameMeshes.size(); ++n)
+        {
+            const MeshDraw &d = m_frameMeshes[n];
+            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            for (const Vertex &v : d.vertices)
+            {
+                x0 = std::min(x0, v.position[0]);
+                y0 = std::min(y0, v.position[1]);
+                x1 = std::max(x1, v.position[0]);
+                y1 = std::max(y1, v.position[1]);
+            }
+            const Material &m = d.material;
+            const float *c = d.vertices.empty() ? nullptr : d.vertices[0].color;
+            std::fprintf(stderr,
+                         "[frame-dump] %4zu target %u depth %u %s src %s%u fn %d tcc %d blend %d/%d/%d fix %u write %x "
+                         "atest %d/%u ztest %d zw %d tris %zu box %.0f,%.0f-%.0f,%.0f rgba %.0f,%.0f,%.0f,%.0f%s\n",
+                         n, d.target, d.depthTarget, d.hasModel ? "3d" : "2d", m.sourceTarget ? "target " : "tex ",
+                         m.sourceTarget ? m.sourceTarget : m.texture, int(m.function), int(m.textureAlpha),
+                         m.blending ? int(m.srcFactor) : -1, int(m.dstFactor), int(m.blendOp), m.blendFactor, m.colorWrite, int(m.alphaTest), m.alphaRef, int(m.depthTest),
+                         int(m.depthWrite), d.indices.size() / 3, d.hasModel ? 0.f : x0, d.hasModel ? 0.f : y0,
+                         d.hasModel ? 0.f : x1, d.hasModel ? 0.f : y1, c ? c[0] : 0.f, c ? c[1] : 0.f,
+                         c ? c[2] : 0.f, c ? c[3] : 0.f, m.known ? "" : " (unknown)");
+        }
+    }
     std::vector<Id> depthsCleared;
     const size_t count = m_frameMeshes.size();
     size_t i = 0;
@@ -544,17 +650,48 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
             depthInfo.clear_depth = 0.0f;
         }
-        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &colorInfo, 1, depthId ? &depthInfo : nullptr);
-        if (!pass)
+        // A draw that reads the target it draws into reads a copy taken
+        // just before it: the pass ends there, and the next one loads.
+        size_t a = first;
+        while (a < j)
         {
-            error = std::string("SDL_BeginGPURenderPass(native target): ") + SDL_GetError();
-            return false;
+            const bool reads = m_frameMeshes[a].material.sourceTarget == target;
+            size_t b = a + 1;
+            while (b < j && m_frameMeshes[b].material.sourceTarget != target)
+                ++b;
+            SDL_GPUTexture *copy = nullptr;
+            if (reads)
+            {
+                bool copyFresh = false;
+                copy = targetTexture(device, kFeedbackCopy, false, colorW, colorH, copyFresh, error);
+                if (!copy)
+                    return false;
+                SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands);
+                SDL_GPUTextureLocation from{}, to{};
+                from.texture = color;
+                to.texture = copy;
+                SDL_CopyGPUTextureToTexture(pass, &from, &to, colorW, colorH, 1, false);
+                SDL_EndGPUCopyPass(pass);
+                ++m_meshCounts.copies;
+            }
+            SDL_GPURenderPass *pass =
+                SDL_BeginGPURenderPass(commands, &colorInfo, 1, depthId ? &depthInfo : nullptr);
+            if (!pass)
+            {
+                error = std::string("SDL_BeginGPURenderPass(native target): ") + SDL_GetError();
+                return false;
+            }
+            ++m_meshCounts.passes;
+            const SDL_GPUViewport viewport{0.0f, 0.0f, float(gameW * scale), float(gameH * scale), 0.0f, 1.0f};
+            SDL_SetGPUViewport(pass, &viewport);
+            const GpuTarget &copied = m_gpuTargets[kFeedbackCopy]; // its texture may be the larger
+            drawMeshes(device, commands, pass, a, b, target, depthId != 0u, float(gameW), float(gameH), scale,
+                       copy, copied.width, copied.height);
+            SDL_EndGPURenderPass(pass);
+            colorInfo.load_op = SDL_GPU_LOADOP_LOAD;
+            depthInfo.load_op = SDL_GPU_LOADOP_LOAD;
+            a = b;
         }
-        ++m_meshCounts.passes;
-        const SDL_GPUViewport viewport{0.0f, 0.0f, float(gameW * scale), float(gameH * scale), 0.0f, 1.0f};
-        SDL_SetGPUViewport(pass, &viewport);
-        drawMeshes(device, commands, pass, first, j, depthId != 0u, float(gameW), float(gameH), scale);
-        SDL_EndGPURenderPass(pass);
     }
     return true;
 }

@@ -1324,6 +1324,9 @@ void flushEffect()
                     sendRaw(gs, piece.bytes(), piece.size());
                 else if (piece.isPacket())
                     sendPacket(gs, piece.bytes(), piece.size());
+                else if ((g_stage && !t_onVif1Thread ? (g_thread->drain(), true) : true) &&
+                         rg::nativeproducer::piece(piece.mesh, piece.stated ? &piece.state : nullptr))
+                    continue; // step 5b: the renderer's, after the lists in flight
                 else if (g_stage)
                     g_stage->mesh(piece.mesh, piece.stated ? &piece.state : nullptr);
                 else if (piece.stated)
@@ -1366,14 +1369,17 @@ void flushEffect()
             sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
         }
         rg::nativeproducer::noteEffect(effect);
-        payOwed(gs); // an effect may read the front end's TEXA
-        if (g_stage)
+        if (!rg::nativeproducer::effect(effect)) // step 5b: the renderer's then, not the GS's
         {
-            g_stage->effect(effect);
-        }
-        else
-        {
-            gs.submitNativeEffect(effect);
+            payOwed(gs); // an effect may read the front end's TEXA
+            if (g_stage)
+            {
+                g_stage->effect(effect);
+            }
+            else
+            {
+                gs.submitNativeEffect(effect);
+            }
         }
         const uint64_t count = ++g_effectsNative;
         if (count == 1u || count % 3600u == 0u)
@@ -1457,6 +1463,8 @@ void sendEffect(GS &gs, const GSNativeEffect &effect)
 {
     const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
     rg::nativeproducer::noteEffect(effect);
+    if (rg::nativeproducer::effect(effect))
+        return;
     payOwed(gs);
     if (g_stage)
         g_stage->effect(effect);
@@ -1803,6 +1811,8 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
                 sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
             }
             rg::nativeproducer::noteEffect(effect);
+            if (rg::nativeproducer::effect(effect))
+                return;
             payOwed(gs);
             gs.submitNativeEffect(effect);
             return;
@@ -1867,6 +1877,10 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
                     continue;
                 }
                 ++g_meshesFromPackets;
+                if (g_stage && !t_onVif1Thread)
+                    g_thread->drain(); // the lists in flight first, as for the GS
+                if (rg::nativeproducer::piece(piece.mesh, piece.stated ? &piece.state : nullptr))
+                    continue; // step 5b: the renderer's
                 if (g_stage && t_onVif1Thread)
                 {
                     g_stage->mesh(piece.mesh, piece.stated ? &piece.state : nullptr);
@@ -2147,8 +2161,12 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given, con
     // go to the GS at all.
     if (vu1Data && rg::nativeproducer::mesh(mesh, given || owned ? &state : nullptr, vu1Data, mesh.header.source))
         return;
-    if (!vu1Data)
-        rg::nativeproducer::note2D(given || owned ? &state : nullptr);
+    // Step 5b: a converter 2D piece as a window-space mesh draw (after the
+    // lists in flight, from another thread, as for the GS).
+    if (!vu1Data && g_stage && !t_onVif1Thread)
+        g_thread->drain();
+    if (!vu1Data && rg::nativeproducer::piece(mesh, given || owned ? &state : nullptr))
+        return;
     if (g_stage && t_onVif1Thread)
     {
         g_stage->mesh(mesh, owned ? &state : nullptr);
@@ -2456,6 +2474,8 @@ void submitEffectFromGame(GS &gs, const GSNativeEffect &effect)
     rg::nativeproducer::noteEffect(effect);
     if (g_stage)
         g_thread->drain();
+    if (rg::nativeproducer::effect(effect))
+        return;
     payOwed(gs);
     gs.submitNativeEffect(effect);
 }

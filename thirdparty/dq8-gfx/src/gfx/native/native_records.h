@@ -76,14 +76,27 @@ struct Camera
     float jitter[2] = {};    // in output pixels, for a temporal pass
 };
 
-enum class Blend : uint8_t
+// Blending: color = Cs * src + Cd * dst (or their difference, by op). The
+// alphas are the game's, 0x80 being 1.0: the source's as drawn, the
+// target's as stored; Fixed is Material::blendFactor. A target's stored
+// alpha is the source's, unblended.
+enum class BlendFactor : uint8_t
 {
-    Opaque,
-    Alpha,      // Cs*As + Cd*(1-As)
-    Add,        // Cs*As + Cd
-    Subtract,   // Cd - Cs*As
-    Multiply,   // Cs*Cd
-    FixedAlpha, // Cs*F + Cd*(1-F), F in Material::blendFactor
+    Zero,
+    One,
+    SrcAlpha,
+    InvSrcAlpha,
+    DstAlpha,
+    InvDstAlpha,
+    Fixed,
+    InvFixed,
+};
+
+enum class BlendOp : uint8_t
+{
+    Add,             // Cs * src + Cd * dst
+    Subtract,        // Cs * src - Cd * dst
+    ReverseSubtract, // Cd * dst - Cs * src
 };
 
 enum class Compare : uint8_t
@@ -121,6 +134,14 @@ struct Material
 {
     Id texture = 0; // 0: untextured
     Id palette = 0; // an Index8 texture's, chosen at the draw; 0: the texture's own
+    // Instead of a texture: a target's color as drawn so far this frame (an
+    // effect reading a buffer back). Its alpha is the game's, 0x80 opaque.
+    Id sourceTarget = 0;
+    // The texel's alpha replaced by this (0-255) when not -1: a buffer read
+    // without its alpha (the GS's CT24 view, TEXA's TA0), and 0 where the
+    // texel is black when alphaZeroOnBlack (TEXA's AEM).
+    int16_t fixedTextureAlpha = -1;
+    bool alphaZeroOnBlack = false;
     // The size the uvs are normalized to; 0: the texture's own.
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
@@ -129,8 +150,11 @@ struct Material
     bool clampV = true;
     TextureFunction function = TextureFunction::Modulate;
     bool textureAlpha = true; // the texel's alpha is used; false: the vertex's
-    Blend blend = Blend::Opaque;
-    uint8_t blendFactor = 0x80; // FixedAlpha's, 0x80 is 1.0
+    bool blending = false;
+    BlendFactor srcFactor = BlendFactor::One;
+    BlendFactor dstFactor = BlendFactor::Zero;
+    BlendOp blendOp = BlendOp::Add;
+    uint8_t blendFactor = 0x80; // Fixed's, 0x80 is 1.0
     Compare alphaTest = Compare::Always;
     uint8_t alphaRef = 0;
     AlphaFail alphaFail = AlphaFail::Nothing;
@@ -158,6 +182,10 @@ struct Vertex
     float normal[3] = {};   // when MeshDraw::hasNormals
 };
 
+// With hasModel, vertices are in object space, through the model and the
+// camera. Without it, they are the target's pixels (x, y) and the game's
+// window depth (z), which the camera, when there is one, maps to the
+// renderer's depth: a 2D draw that tests against the scene's 3D draws.
 struct MeshDraw
 {
     Id target = 0;

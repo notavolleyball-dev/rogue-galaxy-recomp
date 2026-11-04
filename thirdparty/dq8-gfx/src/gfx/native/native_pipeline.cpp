@@ -549,7 +549,11 @@ std::string Renderer::statsLine()
             " passes; not drawn: target not declared " + d(mc.noTarget, mr.noTarget) + ", a depth buffer as color " +
             d(mc.depthAsColor, mr.depthAsColor) + ", no camera " + d(mc.noCamera, mr.noCamera) +
             ", texture not held " + d(mc.noTexture, mr.noTexture) + ", no pipeline " +
-            d(mc.noPipeline, mr.noPipeline) + "; a second depth target in a pass " +
+            d(mc.noPipeline, mr.noPipeline) + ", source target never drawn " +
+            d(mc.sourceNotDrawn, mr.sourceNotDrawn) + ", reading its own target uncopied " + d(mc.feedback, mr.feedback) + ", copies for those that do " +
+            d(mc.copies, mr.copies) +
+            "; window space " + d(mc.window, mr.window) + ", from a target " + d(mc.fromTarget, mr.fromTarget) +
+            "; a second depth target in a pass " +
             d(mc.depthMismatch, mr.depthMismatch) + "\n";
     m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;

@@ -109,7 +109,10 @@ private:
     // target (step 5a).
     bool drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, std::string &error);
     void drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, size_t first,
-                    size_t last, bool depthAttached, float targetW, float targetH, uint32_t scale);
+                    size_t last, Id target, bool depthAttached, float targetW, float targetH, uint32_t scale,
+                    SDL_GPUTexture *copy, uint32_t copyW, uint32_t copyH);
+    // m_gpuTargets' key for the copy a draw reading its own target reads.
+    static constexpr Id kFeedbackCopy = 0xFFFFFFFFu;
     // A target's GPU texture (color, or depth), at least `minW` by `minH`
     // pixels: kept across frames, grown (and so cleared) when too small.
     SDL_GPUTexture *targetTexture(SDL_GPUDevice *device, Id id, bool depth, uint32_t minW, uint32_t minH,
@@ -119,6 +122,7 @@ private:
     {
         uint64_t drawn = 0, offscreen = 0, noTarget = 0, depthAsColor = 0, depthMismatch = 0, passes = 0;
         uint64_t noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
+        uint64_t window = 0, fromTarget = 0, sourceNotDrawn = 0, feedback = 0, copies = 0;
     };
     struct GpuTarget
     {

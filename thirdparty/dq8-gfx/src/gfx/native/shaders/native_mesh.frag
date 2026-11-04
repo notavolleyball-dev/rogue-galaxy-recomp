@@ -2,12 +2,13 @@
 
 // The native pipeline's mesh draw (Rogue Galaxy: added): the game's texture
 // function, alpha test and fog, in its own units (0x80 is 1.0 for colors
-// and alphas). Blending is the pipeline's: the alpha written out is the
-// blend's factor, As / 0x80 (or the fixed factor's), not the stored alpha.
+// and alphas). Blending is the pipeline's: the alpha written out is As /
+// 0x80, the blend's source alpha and what a target stores (clamped at 1).
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
 layout(set = 3, binding = 0) uniform Material {
-    // x: 0 untextured, 1 RGBA, 2 Index8 through the palette
+    // x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
+    //    (its alpha stored as A / 0x80, the blend's factor)
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries
@@ -18,9 +19,12 @@ layout(set = 3, binding = 0) uniform Material {
     // x, y: the size the uvs are normalized to (the game's 2^TW, 2^TH);
     // z, w: the texture's own, which an upload may leave smaller
     vec4 size;
-    // x: the fixed blend factor / 0x80, used when y is 1; z: clamp u, w: clamp v
+    // z: clamp u, w: clamp v (x, y unused)
     vec4 blend;
     vec4 fogColor; // 0-1
+    // x: the texel's alpha replaced by this (0-255) when not negative (a
+    // CT24 read); y: then 0 where the texel is black (AEM)
+    vec4 texa;
 } material;
 
 layout(location = 0) in vec2 inUv;
@@ -59,7 +63,10 @@ void main() {
         } else {
             t = texture(image, texel / material.size.zw);
         }
-        t = floor(t * 255.0 + 0.5);
+        bool target = material.mode.x == 3u;
+        t = vec4(floor(t.rgb * 255.0 + 0.5), floor(t.a * (target ? 128.0 : 255.0) + 0.5));
+        if (material.texa.x >= 0.0)
+            t.a = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.texa.x;
         bool tcc = material.mode.z != 0u;
         uint fn = material.mode.y;
         if (fn == 1u) {
@@ -84,6 +91,5 @@ void main() {
         float k = clamp(floor(inFog), 0.0, 255.0) / 255.0;
         c.rgb = mix(material.fogColor.rgb * 255.0, c.rgb, k);
     }
-    float alpha = material.blend.y != 0.0 ? material.blend.x : c.a / 128.0;
-    outColor = vec4(c.rgb / 255.0, alpha);
+    outColor = vec4(c.rgb / 255.0, c.a / 128.0);
 }
