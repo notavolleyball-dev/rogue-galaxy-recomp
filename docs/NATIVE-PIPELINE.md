@@ -235,6 +235,29 @@ build that compiles is not "done".
    renderer class presenting a cleared scene target. Behind its own switch
    inside the native flag, so the current native path keeps working until
    the new one draws the scene.
+   **Built (2026-11-04), not yet run.**
+   - The records are in `gfx/native/native_records.h`, and the queue,
+     switch and renderer in `gfx/native/native_pipeline.{h,cpp}`. They form
+     the library `dq8_gfx_native`, which links SDL3 alone.
+   - **Checked at build level:** under that library's own compile flags, a
+     GS header fails (`runtime/gs/gs_boundary.h` not found), so the renderer
+     cannot see a GS type.
+   - `RG_NATIVE_PIPELINE=1` takes effect only under the native renderer
+     flag. It is decided once, at first use, through
+     `native::setOuterSwitch(&rg::nativerenderer::enabled)` in
+     `graphics.cpp`.
+   - The first producer is the flip hook (`flip_pacing.cpp`). It declares
+     the scene target once (640x448, `SceneColor`) and pushes a `Present`
+     at each flip.
+   - The backend's presenter (`acquirePresentation`) hands the frame to
+     `Renderer::render` in place of the display registers. The renderer
+     drains the queue, keeps targets and cameras, counts R1-R5 over mesh
+     draws, and clears the scene into the backend's pending command buffer,
+     which the present copy submits first.
+   - The old backend still draws everything the GS path sends, unseen.
+   - With a hidden-less, windowless run, or with screenshots, the GS
+     present path is kept.
+   - R1-R5 read 0 of 0 until step 4 sends mesh draws.
 3. **Textures, palettes and targets by id.** The producer tables. Pass: G3
    at 0 for named uploads.
 4. **VU1 meshes as mesh draws** with camera and model split. Pass: G5's mesh
