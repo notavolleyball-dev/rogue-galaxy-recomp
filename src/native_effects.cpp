@@ -1226,14 +1226,14 @@ const char *name(Effect effect)
 
 bool compositesBatched()
 {
-    // Not under the native pipeline: a composite's tail goes to the GS as
-    // packets, where the native renderer never sees it (characters drawn in
-    // part, docs/NATIVE-PIPELINE.md 4c). RG_NATIVE_COMPOSITE=1 still asks.
-    static const bool pipeline = [] {
+    // Under the native pipeline the producer draws the layers itself (step
+    // 5c, docs/NATIVE-PIPELINE.md): batched by default; RG_NATIVE_COMPOSITE=0
+    // turns it off (the boxes 5b found come back).
+    static const bool off = [] {
         const char *asked = std::getenv("RG_NATIVE_COMPOSITE");
-        return rg::nativeproducer::pipelineOn() && !(asked && std::strcmp(asked, "0") != 0);
+        return rg::nativeproducer::pipelineOn() && asked && std::strcmp(asked, "0") == 0;
     }();
-    return enabled() && g_composites && !pipeline;
+    return enabled() && g_composites && !off;
 }
 
 bool enabled()

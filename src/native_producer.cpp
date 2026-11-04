@@ -55,6 +55,8 @@ struct Counts
     uint64_t piecesFogged = 0, piecesFromTarget = 0, piecesSubTarget = 0, piecesCt24 = 0;
     uint64_t effectsMade = 0, effectsRefused = 0, opsMade = 0, opsNoTarget = 0, opsNoSource = 0, opsLayer = 0;
     uint64_t opsGreenToAlpha = 0, opsFeedback = 0, opsDepth = 0;
+    // Step 5c: object layers.
+    uint64_t layersRouted = 0, drawsRouted = 0, tailsMade = 0, tailsBack = 0, tailsEmpty = 0;
 };
 
 struct State
@@ -73,6 +75,14 @@ struct State
     std::unordered_map<uint64_t, native::Id> cameraIds;                       // matrices' hash -> id
     native::Id nextCamera = 1u;
     native::Id lastCamera = 0u; // the newest 3D draw's, for 2D draws that test depth
+    // Step 5c: while an object is routed, the draws into `routeBase` go to
+    // the layer of its own (`layer`, one target reused: each object's tail
+    // is drawn from it, in order, before the next is routed).
+    bool routing = false;
+    uint32_t routeBase = 0u;
+    native::Id layer = 0u;
+    uint16_t layerWidth = 0u, layerHeight = 0u;
+    int32_t layerBox[4] = {}; // the routed object's, x1 and y1 exclusive
     // Its viewport's depth row (z' = v22 z + v32 w), for depth read back
     // (step 7b).
     float lastDepthScale = 0.0f, lastDepthOffset = 0.0f;
@@ -173,7 +183,11 @@ std::string statsLine()
                        std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
                        d(n.passedNotProduced, r.passedNotProduced) + "; A+D blocks split (other registers kept) " +
                        d(n.split, r.split) + "; image continued in a packet " +
-                       d(n.continuedInPacket, r.continuedInPacket) + " | depth reads (all so far) " +
+                       d(n.continuedInPacket, r.continuedInPacket) + " | object layers: routed " +
+                       d(n.layersRouted, r.layersRouted) + " (" + d(n.drawsRouted, r.drawsRouted) +
+                       " draws), tails made " + d(n.tailsMade, r.tailsMade) + ", put back for packets " +
+                       d(n.tailsBack, r.tailsBack) + ", empty " + d(n.tailsEmpty, r.tailsEmpty) +
+                       " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
                        ", no depth target there " + std::to_string(s.depthNoTarget);
     s.reported = s.counts;
@@ -466,7 +480,42 @@ native::Id declare(State &s, uint32_t base, uint32_t width, uint32_t height, uin
 
 // Locked. The target at `base`; one the game never named is declared from
 // what draws into it (counted), and one drawn past its size grows to it.
+native::Id targetForUnrouted(State &s, uint32_t base, uint32_t width, uint32_t height, uint32_t psm);
+
+// Locked. The layer target, declared at least as large as the routed buffer.
+native::Id layerTarget(State &s, uint32_t width, uint32_t height)
+{
+    if (s.layer == 0u)
+        s.layer = s.nextTarget++;
+    if (width > s.layerWidth || height > s.layerHeight)
+    {
+        s.layerWidth = static_cast<uint16_t>(std::min<uint32_t>(std::max<uint32_t>(width, s.layerWidth), 4096u));
+        s.layerHeight = static_cast<uint16_t>(std::min<uint32_t>(std::max<uint32_t>(height, s.layerHeight), 4096u));
+        native::Target record;
+        record.id = s.layer;
+        record.role = native::TargetRole::Offscreen;
+        record.width = s.layerWidth;
+        record.height = s.layerHeight;
+        native::push(native::Target(record));
+        ++s.counts.targetsNew;
+    }
+    return s.layer;
+}
+
+// Locked. A draw into the buffer at `base`: its target, or the object's
+// layer while one is routed there.
 native::Id targetFor(State &s, uint32_t base, uint32_t width, uint32_t height, uint32_t psm)
+{
+    const native::Id id = targetForUnrouted(s, base, width, height, psm);
+    if (!s.routing || base != s.routeBase || id == 0u)
+        return id;
+    ++s.counts.drawsRouted;
+    const auto declared = s.targets.find(base);
+    return layerTarget(s, declared != s.targets.end() ? declared->second.width : width,
+                       declared != s.targets.end() ? declared->second.height : height);
+}
+
+native::Id targetForUnrouted(State &s, uint32_t base, uint32_t width, uint32_t height, uint32_t psm)
 {
     if (const auto at = s.targetAt.find(base); at != s.targetAt.end())
     {
@@ -1010,7 +1059,8 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     draw.material.known = known;
     if (known)
         ++s.counts.materialKnown;
-    s.drawnSeq[frameBase] = ++s.sequence;
+    if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
+        s.drawnSeq[frameBase] = ++s.sequence;
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
@@ -1256,15 +1306,118 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         }
     }
     ++s.counts.piecesMade;
-    s.drawnSeq[frameBase] = ++s.sequence;
+    if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
+        s.drawnSeq[frameBase] = ++s.sequence;
     native::push(native::MeshDraw(std::move(draw)));
     return true;
 }
 
+namespace
+{
+// Locked. A window-space rectangle into `target` (x1, y1 exclusive): a clear
+// to transparent black, or, with `source`, that target's same pixels copied.
+native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id source)
+{
+    native::MeshDraw draw;
+    draw.target = target;
+    native::Material &m = draw.material;
+    if (source != 0u)
+    {
+        m.sourceTarget = source;
+        m.textureWidth = m.textureHeight = 1u; // texel UVs
+        m.function = native::TextureFunction::Decal;
+        m.textureAlpha = true;
+    }
+    m.colorWrite = 0xFu;
+    m.known = true;
+    const float x0 = float(box[0]), y0 = float(box[1]), x1 = float(box[2]), y1 = float(box[3]);
+    const float corners[4][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y1}};
+    draw.vertices.resize(4);
+    for (int v = 0; v < 4; ++v)
+    {
+        native::Vertex &out = draw.vertices[v];
+        out.position[0] = out.uv[0] = corners[v][0];
+        out.position[1] = out.uv[1] = corners[v][1];
+        for (float &c : out.color)
+            c = source != 0u ? 128.0f : 0.0f;
+    }
+    draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
+    draw.scissor = {box[0], box[1], box[2], box[3]};
+    draw.fog[0] = draw.fog[1] = 255.0f;
+    return draw;
+}
+
+// Locked. Step 5c: the object layer commands (gs_types.h's kRouteLayer ...):
+// an object's draws into the buffer go to the layer, cleared over its box
+// when it is routed; its tail's sprites read the layer (effect() below).
+// Tails are drawn in order, so kComposite has nothing left to do.
+bool layerCommand(State &s, const GSNativeEffect &e)
+{
+    switch (e.command)
+    {
+    case GSNativeEffect::kRouteLayer:
+    {
+        if (e.bufferCount == 0u)
+            return true;
+        const uint32_t base = e.buffers[0].base;
+        const uint32_t width = std::max(e.buffers[0].fbw, 1u) * 64u;
+        const auto declared = s.targets.find(base);
+        const uint32_t height = declared != s.targets.end() ? declared->second.height : 448u;
+        s.routing = false; // the buffer itself, for its size
+        targetForUnrouted(s, base, width, height, 0u);
+        const native::Id layer = layerTarget(s, declared != s.targets.end() ? declared->second.width : width, height);
+        s.layerBox[0] = std::max<int32_t>(e.box[0], 0);
+        s.layerBox[1] = std::max<int32_t>(e.box[1], 0);
+        s.layerBox[2] = std::min<int32_t>(e.box[2], s.layerWidth);
+        s.layerBox[3] = std::min<int32_t>(e.box[3], s.layerHeight);
+        if (s.layerBox[2] > s.layerBox[0] && s.layerBox[3] > s.layerBox[1])
+            native::push(native::MeshDraw(rectDraw(layer, s.layerBox, 0u)));
+        s.routing = true;
+        s.routeBase = base;
+        ++s.counts.layersRouted;
+        return true;
+    }
+    case GSNativeEffect::kRouteEnd:
+        s.routing = false;
+        return true;
+    case GSNativeEffect::kComposite:
+        return true;
+    case GSNativeEffect::kObjectTail:
+        // Without sprites: an object with nothing to lay over, or one whose
+        // tail stays packets, which read the buffer: the layer goes back
+        // into it first.
+        if (e.bufferCount != 0u && s.layer != 0u && s.layerBox[2] > s.layerBox[0] && s.layerBox[3] > s.layerBox[1])
+        {
+            const uint32_t base = e.buffers[0].base;
+            const native::Id into = targetForUnrouted(s, base, s.layerWidth, s.layerHeight, 0u);
+            if (into == 0u)
+                return false;
+            native::push(native::MeshDraw(rectDraw(into, s.layerBox, s.layer)));
+            s.drawnSeq[base] = ++s.sequence;
+            ++s.counts.tailsBack;
+        }
+        else
+            ++s.counts.tailsEmpty;
+        return true;
+    default:
+        return false;
+    }
+}
+} // namespace
+
 bool effect(const GSNativeEffect &e)
 {
-    if (!native::enabled() || e.command != GSNativeEffect::kSprites)
+    if (!native::enabled())
         return false;
+    const bool tail = e.command == GSNativeEffect::kObjectTail && e.opCount != 0u;
+    if (e.command != GSNativeEffect::kSprites && !tail)
+    {
+        if (e.command < GSNativeEffect::kRouteLayer || e.command > GSNativeEffect::kComposite)
+            return false;
+        State &s = state();
+        std::lock_guard lock(s.mutex);
+        return layerCommand(s, e);
+    }
     // A CT24 read left for the GS to give TEXA (kTexaFromGs) takes the
     // converter's copy of it, the GS's at this point; read before this
     // file's lock, which the converter's own calls here take inside its.
@@ -1323,14 +1476,21 @@ bool effect(const GSNativeEffect &e)
             const uint32_t source = static_cast<uint32_t>(op.source);
             if (source >= e.bufferCount)
                 return refuse(s.counts.opsNoSource);
-            if (e.buffers[source].layer)
+            // A tail's sprite from the object's layer (step 5c).
+            const bool fromLayer = e.buffers[source].layer != 0u;
+            if (fromLayer && (!tail || s.layer == 0u))
                 return refuse(s.counts.opsLayer);
-            const auto from = s.targetAt.find(e.buffers[source].base);
-            if (from == s.targetAt.end())
+            const auto from = fromLayer ? s.targetAt.end() : s.targetAt.find(e.buffers[source].base);
+            if (fromLayer)
+                m.sourceTarget = s.layer;
+            else if (from == s.targetAt.end())
                 return refuse(s.counts.opsNoSource);
-            if (from->second == draw.target)
-                ++s.counts.opsFeedback; // the renderer reads a copy
-            m.sourceTarget = from->second;
+            if (!fromLayer)
+            {
+                if (from->second == draw.target)
+                    ++s.counts.opsFeedback; // the renderer reads a copy
+                m.sourceTarget = from->second;
+            }
             m.textureWidth = m.textureHeight = 1u; // the op's UVs are texels
             m.linear = (op.flags & GSNativeEffect::kLinear) != 0u;
             m.function = (op.flags & GSNativeEffect::kDecal)        ? native::TextureFunction::Decal
@@ -1393,10 +1553,13 @@ bool effect(const GSNativeEffect &e)
     }
     for (size_t k = 0; k < made.size(); ++k)
     {
-        s.drawnSeq[bases[k]] = ++s.sequence;
+        if (made[k].target != s.layer || s.layer == 0u)
+            s.drawnSeq[bases[k]] = ++s.sequence;
         native::push(native::MeshDraw(std::move(made[k])));
     }
     ++s.counts.effectsMade;
+    if (tail)
+        ++s.counts.tailsMade;
     s.counts.opsMade += made.size();
     return true;
 }

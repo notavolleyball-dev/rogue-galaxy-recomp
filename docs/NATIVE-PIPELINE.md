@@ -594,6 +594,28 @@ build that compiles is not "done".
      records: the plan's `EffectKind::ObjectLayer`). It's a piece of its
      own: **5c**.
 
+     **5c, built (2026-11-04), not yet run.** Composite batching is back on
+     under the pipeline (`RG_NATIVE_COMPOSITE=0` turns it off). The producer
+     handles the layer commands itself:
+     - **`kRouteLayer`:** the object's draws into the routed buffer (02a00)
+       go to one layer target of the producer's own. That target is
+       cleared to transparent black over the object's box when routing
+       starts. `kRouteEnd` stops the routing.
+     - **`kObjectTail` with sprites:** the tail's ops that read the layer
+       buffer read the layer target. They're drawn in stream order, so
+       `kComposite` has nothing left to do and one layer target serves
+       every object.
+     - **`kObjectTail` without sprites, naming the buffer:** the tail stays
+       packets, which read the buffer, so the layer's box is first copied
+       back into it.
+     - Routed draws don't count as writes to the buffer in the last-writer
+       rule.
+
+     **Pass:** no boxes around characters on the walk. The producer's
+     `object layers` count goes up with `tails made`, G5 has no
+     `SubmitNativeEffect` for route, tail or composite, and characters
+     still draw whole. That last one was 4c's failure.
+
 6. **2D** through the converter as sprite draws, then the remaining VU1
    programs on packets (outlines, shadow volumes, particles). Pass: G1 and
    G5 at 0.
