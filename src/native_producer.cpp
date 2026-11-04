@@ -186,6 +186,7 @@ bool dumpingTextures()
 // and meshes are logged; it also asks the renderer for its side of that
 // frame (build/run/dump-gpu). Checked once a flip.
 State &state();
+std::string holdingAt(State &s, uint32_t base);
 uint64_t triggeredDumpFlip()
 {
     static uint64_t checked = 0u, triggered = 0u;
@@ -200,8 +201,8 @@ uint64_t triggeredDumpFlip()
                 std::fclose(f);
             std::fprintf(stderr, "[piece-dump] dumping flip %llu\n", (unsigned long long)triggered);
             for (const auto &[base, t] : state().targets)
-                std::fprintf(stderr, "[target-map] base %04x -> target %u %ux%u role %d\n", base, t.id, t.width,
-                             t.height, int(t.role));
+                std::fprintf(stderr, "[target-map] base %04x -> target %u %ux%u role %d; holds:%s\n", base, t.id,
+                             t.width, t.height, int(t.role), holdingAt(state(), base).c_str());
         }
     }
     return triggered;
@@ -976,6 +977,12 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
                 ++s.counts.paletteMiss;
             known = false;
         }
+        else if ((t.psm & 0x3Fu) == 0x01u)
+        {
+            // CT24, a target or a CT32 texture: alpha from TEXA (as piece()).
+            m.fixedTextureAlpha = state.texa.ta0;
+            m.alphaZeroOnBlack = state.texa.aem;
+        }
         else if (m.sourceTarget && (t.psm & 0x3Fu) != 0x00u)
             known = false; // a target read in another format: not modelled
         m.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(t.tw, 10u));
@@ -1469,7 +1476,10 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
     // use (02a00, 02a40): whichever wrote there last, in the stream's
     // order, is what the GS would read.
     const auto tex = s.residentTexture.find(t.tbp0);
-    bool texture = tex != s.residentTexture.end() && tex->second.first == psm;
+    // A CT24 read of a CT32 texture is the same texels, its alpha TEXA's
+    // (the caller's): an effect's 64x64 upload read so.
+    bool texture = tex != s.residentTexture.end() &&
+                   (tex->second.first == psm || (psm == 0x01u && tex->second.first == kCT32));
     State::HostImage *host = hostImageFor(s, t.tbp0, psm, t.tbw);
     if (host && texture)
     {
@@ -1810,7 +1820,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         // the GS takes its alpha from TEXA, not the buffer, 0 for black
         // texels with AEM. A 16-bit view of a 32-bit buffer has no meaning
         // here yet.
-        if (m.sourceTarget && (c.tex0.psm & 0x3Fu) == 0x01u)
+        if ((m.sourceTarget || m.texture) && (c.tex0.psm & 0x3Fu) == 0x01u)
         {
             m.fixedTextureAlpha = drawState->texa.ta0;
             m.alphaZeroOnBlack = drawState->texa.aem;
