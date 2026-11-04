@@ -1726,6 +1726,42 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         ++s.counts.piecesNoTarget;
         return false;
     }
+    // A CT16 copy of a 32-bit buffer onto itself (shifted 8 pixels: on the
+    // GS's memory a pixel's RG half lands on its BA half): green into alpha,
+    // as the colour filter's kGreenToAlpha op. The shadow map's blur ends so
+    // (2a00 at FBW 1): the decal that projects it reads that alpha.
+    if (drawState->prim.tme && (c.tex0.psm & 0x3Fu) == kCT16 && (c.frame.psm & 0x3Fu) == kCT16 &&
+        c.tex0.tbp0 == frameBase && c.tex0.tbw == c.frame.fbw)
+    {
+        native::Material &g = draw.material;
+        g.sourceTarget = draw.target;
+        g.textureWidth = g.textureHeight = 1u;
+        g.function = native::TextureFunction::Decal;
+        g.textureAlpha = true;
+        g.shuffle = native::ChannelShuffle::GreenToAlpha;
+        g.colorWrite = 0x8u;
+        g.known = true;
+        const float x1 = float(std::min<uint32_t>(std::max(c.frame.fbw, 1u) * 64u, c.scissor.x1 + 1u));
+        const float y1 = float((c.scissor.y1 + 1u) / 2u); // the CT16 view is twice the 32-bit rows
+        const float corners[4][2] = {{0.0f, 0.0f}, {x1, 0.0f}, {0.0f, y1}, {x1, y1}};
+        draw.vertices.resize(4);
+        for (int v = 0; v < 4; ++v)
+        {
+            native::Vertex &out = draw.vertices[v];
+            out.position[0] = out.uv[0] = corners[v][0];
+            out.position[1] = out.uv[1] = corners[v][1];
+            for (int ch = 0; ch < 4; ++ch)
+                out.color[ch] = 128.0f;
+        }
+        draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
+        draw.scissor = {0, 0, int32_t(x1), int32_t(y1)};
+        draw.fog[0] = draw.fog[1] = 255.0f;
+        ++s.counts.piecesMade;
+        ++s.counts.opsGreenToAlpha;
+        s.drawnSeq[seqKey] = ++s.sequence;
+        native::push(native::MeshDraw(std::move(draw)));
+        return true;
+    }
     native::Material &m = draw.material;
     bool known = true;
     uint32_t why = 0u; // RG_NATIVE_UNKNOWN_LOG: 1 source psm, 2 clamp, 4 blend, 8 FBA, 16 write mask, 32 fog
