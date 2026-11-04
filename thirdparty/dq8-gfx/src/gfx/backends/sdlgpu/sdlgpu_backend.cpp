@@ -3488,6 +3488,17 @@ struct SdlGpuBackend::Impl {
     bool submitEffect(const GSNativeEffect &effect) {
         if ((effect.command & dq8::gfx::hostreads::kCommandMask) == dq8::gfx::hostreads::kCommand)
             return serveHostRead(effect.command & 0xFFFFu);
+        // The native pipeline's colour reads (step 7c), in the order drawn:
+        // what is pending goes to the GPU first.
+        if (effect.command == native::kServeCommand) {
+            if (native::enabled() && device.valid()) {
+                std::string error;
+                if (!device.submitPending(error))
+                    std::fprintf(stderr, "[native-pipeline] before colour reads: %s\n", error.c_str());
+                nativeRenderer.serveColorReads(device.handle());
+            }
+            return true;
+        }
         if (effect.command != GSNativeEffect::kSprites) {
             resolveDeferredFlip(false);
             return device.valid() && layerCommand(effect);
@@ -6900,7 +6911,7 @@ void SdlGpuBackend::SubmitNativeEffect(const GSNativeEffect &effect) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
     // A host read rides the effect queue but draws nothing: not counted.
-    if ((effect.command & hostreads::kCommandMask) == hostreads::kCommand) {
+    if ((effect.command & hostreads::kCommandMask) == hostreads::kCommand || effect.command == native::kServeCommand) {
         m_impl->submitEffect(effect);
         return;
     }

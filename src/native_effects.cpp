@@ -22,6 +22,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "native_renderer.h"
 #include "native_producer.h"
+#include "gfx/native/native_pipeline.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
@@ -1565,6 +1566,53 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // frame captures): the GPU target's region straight into buf, in GS
     // order, through the GS queue as a command (gfx/gs/gs_host_reads.h).
     const bool colour = psm == 0x00u || psm == 0x01u || psm == 0x02u || psm == 0x0Au;
+    // Step 7c: under the native pipeline, from the renderer's targets as the
+    // last frame drawn left them.
+    if (g_rdram && runtime && si == t_storeImage.si && colour && rg::nativeproducer::pipelineOn())
+    {
+        namespace native = dq8::gfx::native;
+        const dq8::gfx::depthprobe::Request &q = t_storeImage.request;
+        native::ColorRead read;
+        read.target = rg::nativeproducer::captureTarget(q.base);
+        read.rect = {static_cast<int32_t>(q.x), static_cast<int32_t>(q.y), static_cast<int32_t>(q.x + q.width),
+                     static_cast<int32_t>(q.y + q.height)};
+        const uint32_t id = native::beginColorRead(read);
+        GSNativeEffect marker{};
+        marker.command = native::kServeCommand;
+        rg::vif1::submitEffectFromGame(runtime->gs(), marker);
+        thread_local std::vector<uint8_t> rgba;
+        if (native::waitColorRead(id, rgba, 2000u))
+        {
+            const size_t pixels = static_cast<size_t>(q.width) * q.height;
+            if (psm == 0x00u)
+                bytes = rgba;
+            else if (psm == 0x01u)
+            {
+                bytes.resize(pixels * 3u);
+                for (size_t i = 0; i < pixels; ++i)
+                    std::memcpy(bytes.data() + i * 3u, rgba.data() + i * 4u, 3u);
+            }
+            else
+            {
+                bytes.resize(pixels * 2u);
+                for (size_t i = 0; i < pixels; ++i)
+                {
+                    const uint8_t *c = rgba.data() + i * 4u;
+                    const uint16_t v = static_cast<uint16_t>((c[0] >> 3) | ((c[1] >> 3) << 5) | ((c[2] >> 3) << 10) |
+                                                             (c[3] >= 0x80u ? 0x8000u : 0u));
+                    bytes[i * 2u] = static_cast<uint8_t>(v);
+                    bytes[i * 2u + 1u] = static_cast<uint8_t>(v >> 8);
+                }
+            }
+            std::memcpy(g_rdram + physical(buffer), bytes.data(), bytes.size());
+            t_storeImage.si = 0u;
+            t_skipSync = true;
+            setReturnS32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        std::fprintf(stderr, "[native-pipeline] a colour read was not served; it goes to the GS\n");
+    }
     namespace reads = dq8::gfx::hostreads;
     if (g_rdram && runtime && si == t_storeImage.si && colour && reads::served())
     {

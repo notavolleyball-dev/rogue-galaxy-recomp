@@ -19,7 +19,8 @@ layout(set = 3, binding = 0) uniform Material {
     // x, y: the size the uvs are normalized to (the game's 2^TW, 2^TH);
     // z, w: the texture's own, which an upload may leave smaller
     vec4 size;
-    // z: clamp u, w: clamp v (x, y unused)
+    // x: a channel shuffle (1: alpha's bits 2-7 from green's), z: clamp u,
+    // w: clamp v (y unused)
     vec4 blend;
     vec4 fogColor; // 0-1
     // x: the texel's alpha replaced by this (0-255) when not negative (a
@@ -75,6 +76,8 @@ void main() {
         t = vec4(floor(t.rgb * 255.0 + 0.5), floor(t.a * (target ? 128.0 : 255.0) + 0.5));
         if (material.texa.x >= 0.0)
             t.a = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.texa.x;
+        if (material.blend.x == 1.0)
+            t.a = float((uint(t.g) & 0xFCu) | (uint(t.a) & 3u));
         bool tcc = material.mode.z != 0u;
         uint fn = material.mode.y;
         if (fn == 1u) {

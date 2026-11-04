@@ -165,8 +165,8 @@ std::string statsLine()
                        d(n.opsDepth, r.opsDepth) + " depth tested), to the GS " +
                        d(n.effectsRefused, r.effectsRefused) + ": an op into an undeclared buffer " +
                        d(n.opsNoTarget, r.opsNoTarget) + ", from an unknown one " + d(n.opsNoSource, r.opsNoSource) +
-                       ", from an object layer " + d(n.opsLayer, r.opsLayer) + ", green to alpha " +
-                       d(n.opsGreenToAlpha, r.opsGreenToAlpha) + "; made reading their own target " +
+                       ", from an object layer " + d(n.opsLayer, r.opsLayer) + "; made green to alpha " +
+                       d(n.opsGreenToAlpha, r.opsGreenToAlpha) + ", made reading their own target " +
                        d(n.opsFeedback, r.opsFeedback) +
                        " | withheld from the GS: textures " + d(n.withheldTextures, r.withheldTextures) +
                        ", palettes " + d(n.withheldPalettes, r.withheldPalettes) + " (" +
@@ -1301,13 +1301,24 @@ bool effect(const GSNativeEffect &e)
                                             into.height, into.psm);
         if (target == 0u)
             return refuse(s.counts.opsNoTarget);
-        if (op.flags & GSNativeEffect::kGreenToAlpha)
-            return refuse(s.counts.opsGreenToAlpha);
+        const bool greenToAlpha = (op.flags & GSNativeEffect::kGreenToAlpha) != 0u;
         native::MeshDraw draw;
         draw.target = target;
         native::Material &m = draw.material;
         bool known = true;
-        if (op.source >= 0)
+        if (greenToAlpha)
+        {
+            // The target's own pixels (the renderer reads a copy), alpha's
+            // bits 2-7 from green's, only alpha written.
+            ++s.counts.opsGreenToAlpha;
+            ++s.counts.opsFeedback;
+            m.sourceTarget = target;
+            m.textureWidth = m.textureHeight = 1u;
+            m.function = native::TextureFunction::Decal;
+            m.textureAlpha = true;
+            m.shuffle = native::ChannelShuffle::GreenToAlpha;
+        }
+        else if (op.source >= 0)
         {
             const uint32_t source = static_cast<uint32_t>(op.source);
             if (source >= e.bufferCount)
@@ -1341,6 +1352,8 @@ bool effect(const GSNativeEffect &e)
         m.colorWrite = (op.flags & GSNativeEffect::kKeepAlpha)   ? 0x7u
                        : (op.flags & GSNativeEffect::kKeepColor) ? 0x8u
                                                                  : 0xFu;
+        if (greenToAlpha)
+            m.colorWrite = 0x8u;
         if (m.depthTest != native::Compare::Always)
         {
             ++s.counts.opsDepth;
@@ -1350,10 +1363,14 @@ bool effect(const GSNativeEffect &e)
         }
         const float x0 = op.rect[0], y0 = op.rect[1], x1 = op.rect[2], y1 = op.rect[3];
         const float z0 = static_cast<float>(op.z[0]), z1 = static_cast<float>(op.z[1]);
-        const float corners[4][5] = {{x0, y0, z0, op.uv[0], op.uv[1]},
-                                     {x1, y0, z1, op.uv[2], op.uv[1]},
-                                     {x0, y1, z0, op.uv[0], op.uv[3]},
-                                     {x1, y1, z1, op.uv[2], op.uv[3]}};
+        // A green-to-alpha op reads each pixel of its own rect (the colour
+        // filter's carries no UVs).
+        const float u0 = greenToAlpha ? x0 : op.uv[0], v0 = greenToAlpha ? y0 : op.uv[1];
+        const float u1 = greenToAlpha ? x1 : op.uv[2], v1 = greenToAlpha ? y1 : op.uv[3];
+        const float corners[4][5] = {{x0, y0, z0, u0, v0},
+                                     {x1, y0, z1, u1, v0},
+                                     {x0, y1, z0, u0, v1},
+                                     {x1, y1, z1, u1, v1}};
         draw.vertices.resize(4);
         for (int v = 0; v < 4; ++v)
         {
@@ -1411,6 +1428,19 @@ uint32_t targetAt(uint32_t base)
     std::lock_guard lock(s.mutex);
     const auto it = s.targetAt.find(base);
     return it != s.targetAt.end() ? it->second : 0u;
+}
+
+uint32_t captureTarget(uint32_t base)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    const auto at = s.targetAt.find(base);
+    const auto declared = s.targets.find(base);
+    // The display buffer is the frame shown: natively, the scene as last drawn.
+    if (at == s.targetAt.end() ||
+        (declared != s.targets.end() && declared->second.role == native::TargetRole::Display))
+        return kSceneTarget;
+    return at->second;
 }
 
 bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
@@ -1482,6 +1512,7 @@ bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { re
 void noteContinuedInPacket() {}
 bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
 bool pipelineOn() { return false; }
+uint32_t captureTarget(uint32_t) { return 0u; }
 bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &) { return false; }
 void noteEffect(const GSNativeEffect &) {}
 bool piece(const GSNativeMesh &, const GSDrawState *) { return false; }

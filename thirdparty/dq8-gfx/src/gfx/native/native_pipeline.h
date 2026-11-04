@@ -59,6 +59,23 @@ constexpr uint32_t kMaxDepthSide = 64u;
 // False when there is no answer for it yet.
 bool readDepth(const DepthBlock &block, std::vector<float> &out);
 
+// Step 7c: the game's colour reads (the fade's and the menu's frame
+// captures), from what the renderer drew last, each game pixel the mean of
+// the pixels it covers. The caller opens a read and waits; the renderer's
+// owner, on its GPU thread, calls Renderer::serveColorReads when it reaches
+// the caller's marker (kServeCommand, in the order of what was drawn: until
+// the pipeline drives its own present, it rides the old backend's queue).
+struct ColorRead
+{
+    Id target = 0;
+    Rect rect; // in the target's game pixels
+};
+constexpr uint32_t kServeCommand = 0x4E520000u; // the marker, distinct from any other command
+uint32_t beginColorRead(const ColorRead &read);
+// RGBA8, rows in order, alpha as the game's (0x80 is 1.0). False when the
+// renderer could not serve it, or did not within `timeoutMs`.
+bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs);
+
 // A line of the producers' own counts, printed with the renderer's.
 void setProducerStats(std::function<std::string()> line);
 
@@ -77,6 +94,11 @@ struct Readiness
 class Renderer
 {
 public:
+    // Step 7c: answers every colour read waiting, from the targets as the
+    // last frame drawn left them; waits for the GPU. Anything the owner has
+    // pending must be submitted first.
+    void serveColorReads(SDL_GPUDevice *device);
+
     // What the presenter shows: the scene target, recorded into `commands`.
     // False with `error` set when the GPU refused.
     struct Frame
@@ -213,5 +235,6 @@ private:
         uint64_t asked = 0, copied = 0, published = 0, noTarget = 0, waiting = 0, unserved = 0;
     };
     DepthCounts m_depthCounts, m_depthReported;
+    uint64_t m_colorReads = 0, m_colorReadsFailed = 0, m_colorReadsReported = 0, m_colorFailedReported = 0;
 };
 } // namespace dq8::gfx::native

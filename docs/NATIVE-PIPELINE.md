@@ -535,6 +535,15 @@ build that compiles is not "done".
      - **Renderer:** 124,175 draws (73,842 offscreen) in about 93 passes a
        frame, 20 of them for copies. None refused.
 
+     **Green-to-alpha (built 2026-11-04, not yet run):** CBlur's op, and
+     the colour filter's, is now a native draw. It reads a copy of its own
+     target and writes only alpha: alpha = (g & 0xFC) | (a & 3), the same as
+     the GS backend's effect shader (`Material::shuffle`,
+     `ChannelShuffle::GreenToAlpha`). **Pass:** the producer's "made green
+     to alpha" counts 120 a window, G5 `SubmitNativeEffect` reaches 0 on the
+     walk, and CBlur looks as before. Alpha above 0x80 is still clamped in
+     targets.
+
      Bugs found on the way, each one blacked out the picture:
      - CBlur's buffer aliased to the scene, so its copy replaced the scene.
      - The glare's blend wasn't one of the five, and fell back to alpha, so
@@ -635,7 +644,28 @@ build that compiles is not "done".
    - Only a D32_FLOAT depth is served. On D24 the reads count as
      unserved.
 
-   **7c, colour captures (open, not built).** The fade's and the menu's
+   **7c, colour captures (built 2026-11-04, not yet run).**
+   - **Pass:** opening the menu and a screen fade under the pipeline show
+     the right frame behind them. The renderer's line counts `colour
+     reads: served` with none failed, and there's no "a colour read was not
+     served" line.
+   - The approach is option 1, answering from the last frame drawn. The
+     native library has a GS-free mailbox (`beginColorRead` and
+     `waitColorRead`, by target id, in game pixels).
+   - The game thread opens a read, then sends a marker
+     (`native::kServeCommand`) down the old backend's effect queue. The
+     backend's worker reaches the marker in stream order, submits whatever
+     is pending, and calls `Renderer::serveColorReads`.
+   - That copies the region out of the scene, or out of an offscreen
+     target, waits for the GPU, and averages each game pixel's
+     scale × scale block. Alpha goes back to the game's units.
+   - The producer maps the read's base to a target (`captureTarget`). The
+     display buffer, or a buffer never drawn, maps to the scene. The hook
+     packs the result as CT32, CT24 or CT16.
+   - The marker still rides the GS backend's queue (G5). It goes away with
+     7d.
+
+   The analysis this was built from: The fade's and the menu's
    frame captures (`sceGsExecStoreImage` of colour) still take the GS's
    host-read path. Under the pipeline the GS targets hold nothing, so these
    captures are wrong there.

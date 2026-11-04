@@ -130,6 +130,17 @@ enum class AlphaFail : uint8_t
     RgbOnly,   // color without alpha, not depth
 };
 
+// A channel moved within the texel before the texture function (an effect
+// reading its own target).
+enum class ChannelShuffle : uint8_t
+{
+    None,
+    // Alpha's bits 2-7 from green's, its bits 0-1 kept (the game's CBlur:
+    // the GS's 16-bit view of a 32-bit buffer copying each pixel's RG half
+    // onto its BA half with R and G masked).
+    GreenToAlpha,
+};
+
 struct Material
 {
     Id texture = 0; // 0: untextured
@@ -149,6 +160,7 @@ struct Material
     bool clampU = true;
     bool clampV = true;
     TextureFunction function = TextureFunction::Modulate;
+    ChannelShuffle shuffle = ChannelShuffle::None;
     bool textureAlpha = true; // the texel's alpha is used; false: the vertex's
     bool blending = false;
     BlendFactor srcFactor = BlendFactor::One;

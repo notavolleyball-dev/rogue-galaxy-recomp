@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <unordered_map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -85,7 +88,55 @@ void publishDepth(uint32_t index, const DepthBlock &block, std::vector<float> &&
     m.answers[index].values = std::move(values);
     m.answers[index].valid = true;
 }
+// Step 7c's colour reads, by id.
+struct ColorMailbox
+{
+    std::mutex mutex;
+    std::condition_variable done;
+    uint32_t next = 1;
+    struct Entry
+    {
+        ColorRead read;
+        bool finished = false, ok = false;
+        std::vector<uint8_t> rgba;
+    };
+    std::unordered_map<uint32_t, Entry> entries;
+};
+ColorMailbox &colorMailbox()
+{
+    static ColorMailbox instance;
+    return instance;
+}
 } // namespace
+
+uint32_t beginColorRead(const ColorRead &read)
+{
+    ColorMailbox &m = colorMailbox();
+    std::lock_guard lock(m.mutex);
+    uint32_t id = m.next++;
+    if (id == 0u) // wrapped: 0 is none
+        id = m.next++;
+    m.entries[id].read = read;
+    return id;
+}
+
+bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs)
+{
+    ColorMailbox &m = colorMailbox();
+    std::unique_lock lock(m.mutex);
+    const bool finished = m.done.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+        const auto e = m.entries.find(id);
+        return e == m.entries.end() || e->second.finished;
+    });
+    const auto e = m.entries.find(id);
+    if (e == m.entries.end())
+        return false;
+    const bool ok = finished && e->second.finished && e->second.ok;
+    if (ok)
+        rgba = std::move(e->second.rgba);
+    m.entries.erase(e); // a late answer finds nothing to fill
+    return ok;
+}
 
 bool readDepth(const DepthBlock &block, std::vector<float> &out)
 {
@@ -629,6 +680,11 @@ std::string Renderer::statsLine()
                 d(dc.noTarget, dr.noTarget) + ", left for a copy in flight " + d(dc.waiting, dr.waiting) +
                 ", unserved " + d(dc.unserved, dr.unserved) + "\n";
     m_depthReported = m_depthCounts;
+    if (m_colorReads != m_colorReadsReported || m_colorReadsFailed != m_colorFailedReported)
+        line += "  [native-pipeline] colour reads: served " + d(m_colorReads, m_colorReadsReported) + ", failed " +
+                d(m_colorReadsFailed, m_colorFailedReported) + "\n";
+    m_colorReadsReported = m_colorReads;
+    m_colorFailedReported = m_colorReadsFailed;
     m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;
     std::function<std::string()> producer;
@@ -761,6 +817,118 @@ void Renderer::serveDepth(SDL_GPUDevice *device)
     m_depthCopied = std::move(copies);
     m_depthCopyScale = s;
     m_depthCounts.copied += m_depthCopied.size();
+}
+
+void Renderer::serveColorReads(SDL_GPUDevice *device)
+{
+    std::vector<std::pair<uint32_t, ColorRead>> waiting;
+    ColorMailbox &m = colorMailbox();
+    {
+        std::lock_guard lock(m.mutex);
+        for (const auto &[id, e] : m.entries)
+            if (!e.finished)
+                waiting.emplace_back(id, e.read);
+    }
+    if (waiting.empty())
+        return;
+    const auto finish = [&](uint32_t id, std::vector<uint8_t> &&rgba, bool ok) {
+        ++(ok ? m_colorReads : m_colorReadsFailed);
+        std::lock_guard lock(m.mutex);
+        const auto e = m.entries.find(id);
+        if (e == m.entries.end())
+            return;
+        e->second.finished = true;
+        e->second.ok = ok;
+        e->second.rgba = std::move(rgba);
+    };
+    const uint32_t s = std::max<uint32_t>(m_frameScale, 1u);
+    for (const auto &[id, read] : waiting)
+    {
+        // The scene, or an offscreen target, as the last frame left it.
+        SDL_GPUTexture *texture = nullptr;
+        uint32_t texW = 0, texH = 0;
+        if (read.target == m_sceneTarget || read.target == 0u)
+        {
+            texture = m_scene;
+            texW = m_sceneWidth;
+            texH = m_sceneHeight;
+        }
+        else if (const auto t = m_gpuTargets.find(read.target); t != m_gpuTargets.end())
+        {
+            texture = t->second.texture;
+            texW = t->second.width;
+            texH = t->second.height;
+        }
+        const Rect &r = read.rect;
+        const uint32_t w = uint32_t(std::max(r.x1 - r.x0, 0)), h = uint32_t(std::max(r.y1 - r.y0, 0));
+        if (!texture || m_frameScale == 0u || w == 0u || h == 0u || r.x0 < 0 || r.y0 < 0 ||
+            uint32_t(r.x1) * s > texW || uint32_t(r.y1) * s > texH)
+        {
+            finish(id, {}, false);
+            continue;
+        }
+        const uint32_t hostW = w * s, hostH = h * s, bytes = hostW * hostH * 4u;
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+        info.size = bytes;
+        SDL_GPUTransferBuffer *download = SDL_CreateGPUTransferBuffer(device, &info);
+        SDL_GPUCommandBuffer *commands = download ? SDL_AcquireGPUCommandBuffer(device) : nullptr;
+        SDL_GPUCopyPass *pass = commands ? SDL_BeginGPUCopyPass(commands) : nullptr;
+        SDL_GPUFence *fence = nullptr;
+        if (pass)
+        {
+            SDL_GPUTextureRegion region{};
+            region.texture = texture;
+            region.x = uint32_t(r.x0) * s;
+            region.y = uint32_t(r.y0) * s;
+            region.w = hostW;
+            region.h = hostH;
+            region.d = 1u;
+            SDL_GPUTextureTransferInfo destination{};
+            destination.transfer_buffer = download;
+            destination.pixels_per_row = hostW;
+            destination.rows_per_layer = hostH;
+            SDL_DownloadFromGPUTexture(pass, &region, &destination);
+            SDL_EndGPUCopyPass(pass);
+            fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+        }
+        else if (commands)
+            SDL_CancelGPUCommandBuffer(commands);
+        std::vector<uint8_t> rgba;
+        bool ok = false;
+        if (fence)
+        {
+            SDL_WaitForGPUFences(device, true, &fence, 1u);
+            SDL_ReleaseGPUFence(device, fence);
+            if (const auto *p = static_cast<const uint8_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
+            {
+                // Each game pixel the mean of the s x s it covers; alpha
+                // from the stored A / 0x80 back to the game's.
+                rgba.resize(size_t(w) * h * 4u);
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < w; ++x)
+                        for (uint32_t c = 0; c < 4u; ++c)
+                        {
+                            uint32_t sum = 0;
+                            for (uint32_t dy = 0; dy < s; ++dy)
+                                for (uint32_t dx = 0; dx < s; ++dx)
+                                    sum += p[(size_t(y * s + dy) * hostW + x * s + dx) * 4u + c];
+                            float v = float(sum) / float(s * s);
+                            if (c == 3u)
+                                v = v * 128.0f / 255.0f;
+                            rgba[(size_t(y) * w + x) * 4u + c] = uint8_t(std::min(v + 0.5f, 255.0f));
+                        }
+                SDL_UnmapGPUTransferBuffer(device, download);
+                ok = true;
+            }
+        }
+        if (download)
+            SDL_ReleaseGPUTransferBuffer(device, download);
+        if (!ok)
+            std::fprintf(stderr, "[native-pipeline] colour read %u failed: %s\n", id, SDL_GetError());
+        finish(id, std::move(rgba), ok);
+    }
+    m.done.notify_all();
 }
 
 void Renderer::releaseDepth(SDL_GPUDevice *device)

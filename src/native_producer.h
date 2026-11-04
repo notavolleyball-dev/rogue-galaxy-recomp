@@ -110,6 +110,11 @@ void noteContinuedInPacket();
 bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                std::vector<uint8_t> &out);
 
+// Step 7c: the target a colour read of the GS buffer at `base` reads: the
+// one drawn there, or the scene (for the display buffer, or a buffer never
+// drawn).
+uint32_t captureTarget(uint32_t base);
+
 // The scene target's id (the frame's).
 constexpr uint32_t kSceneTarget = 1u;
 } // namespace rg::nativeproducer
