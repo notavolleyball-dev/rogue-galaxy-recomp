@@ -1,7 +1,8 @@
 // The native pipeline's mesh draws (Rogue Galaxy: added; the game's
-// docs/NATIVE-PIPELINE.md step 4b): the frame's MeshDraw records into the
-// scene target. Depth is a float target of its own, reversed (cleared to 0,
-// nearer is greater, as the game compares). Nothing of the GS here.
+// docs/NATIVE-PIPELINE.md steps 4b and 5a): the frame's MeshDraw records,
+// in order, into the targets they name. Depth targets are float, reversed
+// (cleared to 0 at their first use in a frame, nearer is greater, as the
+// game compares). Nothing of the GS here.
 
 #include "gfx/native/native_pipeline.h"
 
@@ -52,12 +53,14 @@ void multiply(const float a[16], const float b[16], float out[16])
 }
 
 // The pipeline's state as one key: blend (3 bits), depth compare (3), depth
-// write (1), depth used at all (1), color write mask (4).
-uint32_t pipelineKey(const Material &m)
+// write (1), depth used at all (1), color write mask (4), a depth target
+// attached to the pass (1).
+uint32_t pipelineKey(const Material &m, bool attached)
 {
     const bool depth = m.depthTest != Compare::Always || m.depthWrite;
     return static_cast<uint32_t>(m.blend) | (static_cast<uint32_t>(m.depthTest) << 3) |
-           (m.depthWrite ? 1u << 6 : 0u) | (depth ? 1u << 7 : 0u) | (static_cast<uint32_t>(m.colorWrite & 0xFu) << 8);
+           (m.depthWrite ? 1u << 6 : 0u) | (depth ? 1u << 7 : 0u) |
+           (static_cast<uint32_t>(m.colorWrite & 0xFu) << 8) | (attached ? 1u << 12 : 0u);
 }
 
 SDL_GPUCompareOp compareOp(Compare c)
@@ -146,30 +149,32 @@ bool Renderer::ensureMeshes(SDL_GPUDevice *device, std::string &error)
     return true;
 }
 
-bool Renderer::ensureDepth(SDL_GPUDevice *device, std::string &error)
+SDL_GPUTexture *Renderer::targetTexture(SDL_GPUDevice *device, Id id, bool depth, uint32_t minW, uint32_t minH,
+                                        bool &fresh, std::string &error)
 {
-    if (m_depth && m_depthWidth == m_sceneWidth && m_depthHeight == m_sceneHeight)
-        return true;
-    if (m_depth)
-        SDL_ReleaseGPUTexture(device, m_depth);
+    GpuTarget &t = m_gpuTargets[id];
+    fresh = false;
+    if (t.texture && t.width >= minW && t.height >= minH)
+        return t.texture;
+    const uint32_t width = std::max(t.width, minW), height = std::max(t.height, minH);
+    if (t.texture)
+        SDL_ReleaseGPUTexture(device, t.texture);
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
-    info.format = m_depthFormat;
-    info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    info.width = m_sceneWidth;
-    info.height = m_sceneHeight;
+    info.format = depth ? m_depthFormat : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage = depth ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET
+                       : (SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    info.width = width;
+    info.height = height;
     info.layer_count_or_depth = 1;
     info.num_levels = 1;
-    m_depth = SDL_CreateGPUTexture(device, &info);
-    if (!m_depth)
-    {
-        error = std::string("SDL_CreateGPUTexture(native depth): ") + SDL_GetError();
-        m_depthWidth = m_depthHeight = 0;
-        return false;
-    }
-    m_depthWidth = m_sceneWidth;
-    m_depthHeight = m_sceneHeight;
-    return true;
+    t.texture = SDL_CreateGPUTexture(device, &info);
+    t.width = t.texture ? width : 0u;
+    t.height = t.texture ? height : 0u;
+    if (!t.texture)
+        error = std::string("SDL_CreateGPUTexture(native target): ") + SDL_GetError();
+    fresh = t.texture != nullptr;
+    return t.texture;
 }
 
 SDL_GPUSampler *Renderer::meshSampler(SDL_GPUDevice *device, uint32_t key)
@@ -196,7 +201,8 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     const Blend blend = static_cast<Blend>(key & 7u);
     const Compare depthTest = static_cast<Compare>((key >> 3) & 7u);
     const bool depthWrite = (key >> 6) & 1u;
-    const bool depth = (key >> 7) & 1u;
+    const bool attached = (key >> 12) & 1u;
+    const bool depth = ((key >> 7) & 1u) && attached;
 
     SDL_GPUColorTargetDescription color{};
     color.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -260,8 +266,8 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     info.depth_stencil_state.compare_op = compareOp(depthTest);
     info.target_info.color_target_descriptions = &color;
     info.target_info.num_color_targets = 1u;
-    info.target_info.has_depth_stencil_target = true;
-    info.target_info.depth_stencil_format = m_depthFormat;
+    info.target_info.has_depth_stencil_target = attached;
+    info.target_info.depth_stencil_format = attached ? m_depthFormat : SDL_GPU_TEXTUREFORMAT_INVALID;
     SDL_GPUGraphicsPipeline *pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
     if (!pipeline)
         std::fprintf(stderr, "[native-pipeline] mesh pipeline %x refused: %s\n", key, SDL_GetError());
@@ -343,6 +349,7 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
 }
 
 void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass,
+                          size_t first, size_t last, bool depthAttached, float targetW, float targetH,
                           uint32_t scale)
 {
     if (!m_vertexBuffer || !m_indexBuffer)
@@ -351,10 +358,8 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
     SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
     const SDL_GPUBufferBinding indexBinding{m_indexBuffer, 0u};
     SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-    const float targetW = float(m_sceneWidth / std::max(scale, 1u));
-    const float targetH = float(m_sceneHeight / std::max(scale, 1u));
     SDL_GPUGraphicsPipeline *bound = nullptr;
-    for (size_t n = 0; n < m_frameMeshes.size(); ++n)
+    for (size_t n = first; n < last; ++n)
     {
         const MeshDraw &d = m_frameMeshes[n];
         if (d.indices.empty())
@@ -397,7 +402,7 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
             mu.mode[1] = static_cast<uint32_t>(m.function);
             mu.mode[2] = m.textureAlpha ? 1u : 0u;
         }
-        SDL_GPUGraphicsPipeline *pipeline = meshPipeline(device, pipelineKey(m));
+        SDL_GPUGraphicsPipeline *pipeline = meshPipeline(device, pipelineKey(m, depthAttached));
         if (!pipeline)
         {
             ++m_meshCounts.noPipeline;
@@ -452,6 +457,108 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
     }
 }
 
+bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, std::string &error)
+{
+    scale = std::max(scale, 1u);
+    // The scene starts each frame cleared (the game's own clears are not
+    // records yet); every other target keeps what it holds.
+    {
+        SDL_GPUColorTargetInfo clear{};
+        clear.texture = m_scene;
+        clear.load_op = SDL_GPU_LOADOP_CLEAR;
+        clear.store_op = SDL_GPU_STOREOP_STORE;
+        clear.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &clear, 1, nullptr);
+        if (!pass)
+        {
+            error = std::string("SDL_BeginGPURenderPass(native scene clear): ") + SDL_GetError();
+            return false;
+        }
+        SDL_EndGPURenderPass(pass);
+    }
+    if (!uploadMeshes(device, commands, error))
+        return false;
+    std::vector<Id> depthsCleared;
+    const size_t count = m_frameMeshes.size();
+    size_t i = 0;
+    while (i < count)
+    {
+        const Id target = m_frameMeshes[i].target;
+        size_t j = i;
+        Id depthId = 0u;
+        while (j < count && m_frameMeshes[j].target == target)
+        {
+            const Id d = m_frameMeshes[j].depthTarget;
+            if (d != 0u && depthId == 0u)
+                depthId = d;
+            else if (d != 0u && d != depthId)
+                ++m_meshCounts.depthMismatch;
+            ++j;
+        }
+        const size_t first = i;
+        i = j;
+        const auto declared = m_targets.find(target);
+        if (declared == m_targets.end() || declared->second.width == 0u || declared->second.height == 0u)
+        {
+            m_meshCounts.noTarget += j - first;
+            continue;
+        }
+        if (declared->second.format == PixelFormat::Depth32)
+        {
+            m_meshCounts.depthAsColor += j - first;
+            continue;
+        }
+        const uint32_t gameW = declared->second.width, gameH = declared->second.height;
+        const bool scene = target == m_sceneTarget;
+        if (!scene)
+            m_meshCounts.offscreen += j - first;
+        SDL_GPUTexture *color = m_scene;
+        uint32_t colorW = m_sceneWidth, colorH = m_sceneHeight;
+        bool fresh = false;
+        if (!scene)
+        {
+            color = targetTexture(device, target, false, gameW * scale, gameH * scale, fresh, error);
+            if (!color)
+                return false;
+            colorW = m_gpuTargets[target].width;
+            colorH = m_gpuTargets[target].height;
+        }
+        SDL_GPUColorTargetInfo colorInfo{};
+        colorInfo.texture = color;
+        colorInfo.load_op = fresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+        colorInfo.store_op = SDL_GPU_STOREOP_STORE;
+        colorInfo.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
+        SDL_GPUDepthStencilTargetInfo depthInfo{};
+        if (depthId != 0u)
+        {
+            bool depthFresh = false;
+            depthInfo.texture = targetTexture(device, depthId, true, colorW, colorH, depthFresh, error);
+            if (!depthInfo.texture)
+                return false;
+            const bool firstUse = std::find(depthsCleared.begin(), depthsCleared.end(), depthId) == depthsCleared.end();
+            if (firstUse)
+                depthsCleared.push_back(depthId);
+            depthInfo.load_op = firstUse || depthFresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            depthInfo.store_op = SDL_GPU_STOREOP_STORE;
+            depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+            depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+            depthInfo.clear_depth = 0.0f;
+        }
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &colorInfo, 1, depthId ? &depthInfo : nullptr);
+        if (!pass)
+        {
+            error = std::string("SDL_BeginGPURenderPass(native target): ") + SDL_GetError();
+            return false;
+        }
+        ++m_meshCounts.passes;
+        const SDL_GPUViewport viewport{0.0f, 0.0f, float(gameW * scale), float(gameH * scale), 0.0f, 1.0f};
+        SDL_SetGPUViewport(pass, &viewport);
+        drawMeshes(device, commands, pass, first, j, depthId != 0u, float(gameW), float(gameH), scale);
+        SDL_EndGPURenderPass(pass);
+    }
+    return true;
+}
+
 void Renderer::releaseMeshes(SDL_GPUDevice *device)
 {
     for (auto &[key, pipeline] : m_meshPipelines)
@@ -468,8 +575,10 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
         SDL_ReleaseGPUShader(device, m_meshVertex);
     if (m_meshFragment)
         SDL_ReleaseGPUShader(device, m_meshFragment);
-    if (m_depth)
-        SDL_ReleaseGPUTexture(device, m_depth);
+    for (auto &[id, target] : m_gpuTargets)
+        if (target.texture)
+            SDL_ReleaseGPUTexture(device, target.texture);
+    m_gpuTargets.clear();
     if (m_white)
         SDL_ReleaseGPUTexture(device, m_white);
     if (m_vertexBuffer)
@@ -479,11 +588,10 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
     if (m_meshTransfer)
         SDL_ReleaseGPUTransferBuffer(device, m_meshTransfer);
     m_meshVertex = m_meshFragment = nullptr;
-    m_depth = m_white = nullptr;
+    m_white = nullptr;
     m_vertexBuffer = m_indexBuffer = nullptr;
     m_meshTransfer = nullptr;
     m_vertexCapacity = m_indexCapacity = m_transferCapacity = 0u;
-    m_depthWidth = m_depthHeight = 0u;
     m_meshFailed = false;
 }
 } // namespace dq8::gfx::native

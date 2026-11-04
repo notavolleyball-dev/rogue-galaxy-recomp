@@ -1365,6 +1365,7 @@ void flushEffect()
         {
             sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
         }
+        rg::nativeproducer::noteEffect(effect);
         payOwed(gs); // an effect may read the front end's TEXA
         if (g_stage)
         {
@@ -1455,6 +1456,7 @@ bool inCompositeTail()
 void sendEffect(GS &gs, const GSNativeEffect &effect)
 {
     const gs_boundary::FromScope boundaryFrom(t_onVif1Thread ? gs_boundary::kFromVif1 : gs_boundary::kFromGame);
+    rg::nativeproducer::noteEffect(effect);
     payOwed(gs);
     if (g_stage)
         g_stage->effect(effect);
@@ -1800,6 +1802,7 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
             {
                 sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
             }
+            rg::nativeproducer::noteEffect(effect);
             payOwed(gs);
             gs.submitNativeEffect(effect);
             return;
@@ -2144,6 +2147,8 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const GSDrawState *given, con
     // go to the GS at all.
     if (vu1Data && rg::nativeproducer::mesh(mesh, given || owned ? &state : nullptr, vu1Data, mesh.header.source))
         return;
+    if (!vu1Data)
+        rg::nativeproducer::note2D(given || owned ? &state : nullptr);
     if (g_stage && t_onVif1Thread)
     {
         g_stage->mesh(mesh, owned ? &state : nullptr);
@@ -2448,6 +2453,7 @@ void shutdown()
 void submitEffectFromGame(GS &gs, const GSNativeEffect &effect)
 {
     const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromGame);
+    rg::nativeproducer::noteEffect(effect);
     if (g_stage)
         g_thread->drain();
     payOwed(gs);

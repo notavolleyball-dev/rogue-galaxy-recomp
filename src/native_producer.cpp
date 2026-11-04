@@ -45,6 +45,12 @@ struct Counts
     uint64_t materialKnown = 0, textureMiss = 0, textureMissPsm = 0, textureMissTarget = 0, paletteMiss = 0, targetMiss = 0;
     uint64_t unknownBlend = 0, unknownClamp = 0, unknownWriteMask = 0, unknownOther = 0;
     uint64_t triangles = 0, trianglesSkipped = 0;
+    // Step 5a's survey.
+    uint64_t effects[8] = {}; // by command (kSprites ... kComposite, the rest last)
+    uint64_t effectOps = 0, opsIntoScene = 0, opsIntoDeclared = 0, opsIntoUndeclared = 0;
+    uint64_t opsFromNothing = 0, opsFromTarget = 0, opsFromTexture = 0, opsFromUnknown = 0, opsFromLayer = 0;
+    uint64_t pieces = 0, piecesNoState = 0, piecesIntoScene = 0, piecesIntoDeclared = 0, piecesIntoUndeclared = 0;
+    uint64_t piecesFromTarget = 0, piecesFromTexture = 0, piecesFromUnknown = 0;
 };
 
 struct State
@@ -119,6 +125,23 @@ std::string statsLine()
                        d(n.unknownClamp, r.unknownClamp) + ", write mask " + d(n.unknownWriteMask, r.unknownWriteMask) +
                        ", other " + d(n.unknownOther, r.unknownOther) + "), triangles " +
                        d(n.triangles, r.triangles) + " (skipped " + d(n.trianglesSkipped, r.trianglesSkipped) + ")" +
+                       " | to the GS: effects " + d(n.effects[0], r.effects[0]) + " sprites, " +
+                       d(n.effects[1], r.effects[1]) + " route, " + d(n.effects[2], r.effects[2]) + " route end, " +
+                       d(n.effects[3], r.effects[3]) + " object tail, " + d(n.effects[4], r.effects[4]) +
+                       " composite, " + d(n.effects[7], r.effects[7]) + " other; ops " + d(n.effectOps, r.effectOps) +
+                       " into scene " + d(n.opsIntoScene, r.opsIntoScene) + " / declared " +
+                       d(n.opsIntoDeclared, r.opsIntoDeclared) + " / undeclared " +
+                       d(n.opsIntoUndeclared, r.opsIntoUndeclared) + ", from nothing " +
+                       d(n.opsFromNothing, r.opsFromNothing) + " / a target " + d(n.opsFromTarget, r.opsFromTarget) +
+                       " / a texture " + d(n.opsFromTexture, r.opsFromTexture) + " / a layer " +
+                       d(n.opsFromLayer, r.opsFromLayer) + " / unknown " + d(n.opsFromUnknown, r.opsFromUnknown) +
+                       "; 2D pieces " + d(n.pieces, r.pieces) + " (no state " + d(n.piecesNoState, r.piecesNoState) +
+                       ") into scene " + d(n.piecesIntoScene, r.piecesIntoScene) + " / declared " +
+                       d(n.piecesIntoDeclared, r.piecesIntoDeclared) + " / undeclared " +
+                       d(n.piecesIntoUndeclared, r.piecesIntoUndeclared) + ", textured from a target " +
+                       d(n.piecesFromTarget, r.piecesFromTarget) + " / a texture " +
+                       d(n.piecesFromTexture, r.piecesFromTexture) + " / unknown " +
+                       d(n.piecesFromUnknown, r.piecesFromUnknown) +
                        " | withheld from the GS: textures " + d(n.withheldTextures, r.withheldTextures) +
                        ", palettes " + d(n.withheldPalettes, r.withheldPalettes) + " (" +
                        std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
@@ -859,6 +882,78 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     return true;
 }
 
+void noteEffect(const GSNativeEffect &e)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++s.counts.effects[e.command < 5u ? e.command : 7u];
+    if (e.command != GSNativeEffect::kSprites && e.command != GSNativeEffect::kObjectTail)
+        return;
+    const auto bufferIs = [&](uint32_t index, bool &scene, bool &declared) {
+        scene = declared = false;
+        if (index >= e.bufferCount)
+            return;
+        const auto at = s.targetAt.find(e.buffers[index].base);
+        declared = at != s.targetAt.end();
+        scene = declared && at->second == kSceneTarget;
+    };
+    for (uint32_t k = 0; k < e.opCount && k < GSNativeEffect::kMaxOps; ++k)
+    {
+        const GSNativeEffect::Op &op = e.ops[k];
+        ++s.counts.effectOps;
+        bool scene, declared;
+        bufferIs(op.target, scene, declared);
+        ++(scene ? s.counts.opsIntoScene : declared ? s.counts.opsIntoDeclared : s.counts.opsIntoUndeclared);
+        if (op.source < 0)
+        {
+            ++s.counts.opsFromNothing;
+            continue;
+        }
+        const uint32_t source = static_cast<uint32_t>(op.source);
+        if (source < e.bufferCount && e.buffers[source].layer)
+        {
+            ++s.counts.opsFromLayer;
+            continue;
+        }
+        bufferIs(source, scene, declared);
+        if (declared)
+            ++s.counts.opsFromTarget;
+        else if (source < e.bufferCount && s.residentTexture.count(e.buffers[source].base))
+            ++s.counts.opsFromTexture;
+        else
+            ++s.counts.opsFromUnknown;
+    }
+}
+
+void note2D(const GSDrawState *drawState)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++s.counts.pieces;
+    if (!drawState)
+    {
+        ++s.counts.piecesNoState;
+        return;
+    }
+    const GSContext &c = drawState->context;
+    const auto at = s.targetAt.find(c.frame.fbp * 32u);
+    ++(at == s.targetAt.end()        ? s.counts.piecesIntoUndeclared
+       : at->second == kSceneTarget ? s.counts.piecesIntoScene
+                                    : s.counts.piecesIntoDeclared);
+    if (!drawState->prim.tme)
+        return;
+    if (s.targetAt.count(c.tex0.tbp0 & ~31u))
+        ++s.counts.piecesFromTarget;
+    else if (s.residentTexture.count(c.tex0.tbp0))
+        ++s.counts.piecesFromTexture;
+    else
+        ++s.counts.piecesFromUnknown;
+}
+
 bool pipelineOn()
 {
     return native::enabled();
@@ -903,6 +998,8 @@ bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { re
 void noteContinuedInPacket() {}
 bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
 bool pipelineOn() { return false; }
+void noteEffect(const GSNativeEffect &) {}
+void note2D(const GSDrawState *) {}
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }
 uint32_t targetAt(uint32_t) { return 0u; }

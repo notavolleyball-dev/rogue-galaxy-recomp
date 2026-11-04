@@ -449,6 +449,53 @@ build that compiles is not "done".
      about 190 a frame.
 5. **Effects by purpose**, as the profile ranks them. Pass: G5's effect
    share at 0.
+
+   Split (2026-11-04). With composite batching off, the effects that reach
+   G5 are about 8 a frame, each a list of sprite ops between GS buffers.
+   The object layers' models are already mesh draws into offscreen targets
+   (4b's "offscreen" count). So the renderer first draws into any target,
+   and then the effects become sprite records between targets: the
+   converter as a producer, as decided in open question 1.
+   - **5a. Every target drawn.** The frame's mesh draws run in the game's
+     order into the targets they name. Offscreen targets keep their
+     contents across frames (the game accumulates into some), only grow,
+     and are drawn at the target's current size. Depth targets are
+     cleared on their first use in a frame. Also counted: where the
+     effects and the converter's 2D pieces that still go to the GS draw.
+     **Pass:** no mesh draw refused for its target; the scene unchanged.
+
+     **5a done (2026-11-04).** `Renderer::drawFrame` runs the frame's mesh
+     draws in order, one render pass per run of draws into one target.
+     - **Targets:** offscreen targets are GPU textures kept by id
+       (`m_gpuTargets`), sized only upward and drawn at the target's
+       current size through the viewport, so the ~46 re-declarations a
+       frame cost nothing.
+     - **Depth:** each depth target is cleared at its first use in a frame.
+     - **Pipelines:** whether a depth target is attached is part of the key.
+
+     One walk (`pipeline-step5a`, per window): 61,389 mesh draws drawn,
+     10,601 of them offscreen, in about 20 passes a frame. None refused
+     (target not declared, depth as color, camera, texture, pipeline: all
+     0). The scene is the same as 4c's.
+
+     The survey for 5b, per window:
+     - **Effects:** 480 effects, all sprite lists (8 a frame), with 4,800
+       ops. Into: the scene 1,353, declared offscreen targets 3,387,
+       undeclared 60. From: nothing (fills) 720, a declared target 4,080.
+       Every op names targets the producer already has ids for, except
+       the 60 into an undeclared buffer.
+     - **2D pieces:** the converter's 2D pieces still going to the GS as
+       meshes are 39,299 (655 a frame). Into: the scene 3,781, offscreen
+       targets 35,518. Textured from a target 2,137, from a texture 858,
+       the rest untextured.
+
+     So the offscreen targets' contents come mostly from 2D pieces, and the
+     effects read them back. 5b needs both, which brings part of step 6
+     forward.
+   - **5b. Effects as sprite records.** The converter's effect sprites
+     (and the 2D pieces the effects' buffers need, such as their clears)
+     become sprite draws, naming targets as sources. **Pass:** G5's effect
+     share at 0; characters drawn through object layers show whole.
 6. **2D** through the converter as sprite draws, then the remaining VU1
    programs on packets (outlines, shadow volumes, particles). Pass: G1 and
    G5 at 0.

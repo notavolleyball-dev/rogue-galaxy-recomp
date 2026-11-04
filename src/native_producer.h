@@ -5,6 +5,7 @@
 
 struct GSNativeMesh;
 struct GSDrawState;
+struct GSNativeEffect;
 
 // The game side of the native pipeline (docs/NATIVE-PIPELINE.md): what turns
 // the game's GS-shaped data into the renderer's records. The renderer sees
@@ -68,6 +69,12 @@ uint32_t targetAt(uint32_t base);
 // made). `source` names what drew it, for profiles. True when the record
 // was made: the mesh is then not sent to the GS (step 4c).
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
+
+// Step 5a's survey (counts only, for 5b): an effect going to the GS (by
+// command; a sprite effect's ops by what they draw into and from), and a
+// converter 2D piece going to the GS as a mesh (by its target).
+void noteEffect(const GSNativeEffect &effect);
+void note2D(const GSDrawState *state);
 
 // Step 3b's counts (the VIF1 thread, which withholds named uploads the
 // producer sent from the GS): one withheld (palette or texture), one sent on

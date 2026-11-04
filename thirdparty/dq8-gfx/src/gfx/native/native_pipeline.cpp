@@ -142,11 +142,8 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             else if constexpr (std::is_same_v<T, MeshDraw>)
             {
                 count(r);
-                // Into other targets: the effects' buffers, step 5.
-                if (r.target != 0u && r.target == m_sceneTarget)
-                    m_meshes.push_back(std::move(r));
-                else
-                    ++m_meshCounts.offscreen;
+                // Any target (step 5a); one not declared is counted when drawn.
+                m_meshes.push_back(std::move(r));
             }
             else if constexpr (std::is_same_v<T, Present>)
             {
@@ -488,42 +485,38 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         out.height = m_sceneHeight;
         return true;
     }
-    bool depth = false;
+    bool drawn = false;
     if (draw)
     {
         std::string failed;
-        depth = ensureDepth(device, failed) && uploadMeshes(device, commands, failed);
-        if (!failed.empty())
-            std::fprintf(stderr, "[native-pipeline] meshes lost: %s\n", failed.c_str());
+        drawn = drawFrame(device, commands, scale, failed);
+        if (!drawn)
+            std::fprintf(stderr, "[native-pipeline] frame lost: %s\n", failed.c_str());
     }
+    m_frameReady = false;
     std::string viewError;
     const bool view = grid && ensureView(device, viewError);
     if (!viewError.empty())
         std::fprintf(stderr, "[native-pipeline] no texture view: %s\n", viewError.c_str());
-    SDL_GPUColorTargetInfo target{};
-    target.texture = m_scene;
-    target.load_op = SDL_GPU_LOADOP_CLEAR;
-    target.store_op = SDL_GPU_STOREOP_STORE;
-    target.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
-    SDL_GPUDepthStencilTargetInfo depthTarget{};
-    depthTarget.texture = m_depth;
-    depthTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-    depthTarget.store_op = SDL_GPU_STOREOP_DONT_CARE;
-    depthTarget.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-    depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    depthTarget.clear_depth = 0.0f;
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, depth ? &depthTarget : nullptr);
-    if (!pass)
+    if (!drawn || view)
     {
-        error = std::string("SDL_BeginGPURenderPass(native scene): ") + SDL_GetError();
-        return false;
+        // A new scene target with no frame for it yet is cleared; the grid
+        // goes over whatever the scene holds.
+        SDL_GPUColorTargetInfo target{};
+        target.texture = m_scene;
+        target.load_op = drawn ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+        target.store_op = SDL_GPU_STOREOP_STORE;
+        target.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, nullptr);
+        if (!pass)
+        {
+            error = std::string("SDL_BeginGPURenderPass(native scene): ") + SDL_GetError();
+            return false;
+        }
+        if (view)
+            drawView(commands, pass);
+        SDL_EndGPURenderPass(pass);
     }
-    if (depth)
-        drawMeshes(device, commands, pass, scale);
-    m_frameReady = false;
-    if (view)
-        drawView(commands, pass);
-    SDL_EndGPURenderPass(pass);
 
     out.texture = m_scene;
     out.width = m_sceneWidth;
@@ -551,10 +544,13 @@ std::string Renderer::statsLine()
             ", R3 scene float depth " + d(now.sceneFloatDepth, was.sceneFloatDepth) + ", R4 material " +
             d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals);
     const MeshCounts &mc = m_meshCounts, &mr = m_meshReported;
-    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " over " + d(mc.frames, mr.frames) +
-            " frames; not drawn: offscreen " + d(mc.offscreen, mr.offscreen) + ", no camera " +
-            d(mc.noCamera, mr.noCamera) + ", texture not held " + d(mc.noTexture, mr.noTexture) + ", no pipeline " +
-            d(mc.noPipeline, mr.noPipeline) + "\n";
+    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " (offscreen " + d(mc.offscreen, mr.offscreen) + ") over " +
+            d(mc.frames, mr.frames) + " frames in " + d(mc.passes, mr.passes) +
+            " passes; not drawn: target not declared " + d(mc.noTarget, mr.noTarget) + ", a depth buffer as color " +
+            d(mc.depthAsColor, mr.depthAsColor) + ", no camera " + d(mc.noCamera, mr.noCamera) +
+            ", texture not held " + d(mc.noTexture, mr.noTexture) + ", no pipeline " +
+            d(mc.noPipeline, mr.noPipeline) + "; a second depth target in a pass " +
+            d(mc.depthMismatch, mr.depthMismatch) + "\n";
     m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;
     std::function<std::string()> producer;

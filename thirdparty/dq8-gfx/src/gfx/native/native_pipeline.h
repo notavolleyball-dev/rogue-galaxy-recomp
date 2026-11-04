@@ -102,16 +102,29 @@ private:
     // Step 4b's mesh draws (native_meshes.cpp): the frame's draws into the
     // scene target, with a depth target of its own.
     bool ensureMeshes(SDL_GPUDevice *device, std::string &error);
-    bool ensureDepth(SDL_GPUDevice *device, std::string &error);
     SDL_GPUGraphicsPipeline *meshPipeline(SDL_GPUDevice *device, uint32_t key);
     SDL_GPUSampler *meshSampler(SDL_GPUDevice *device, uint32_t key);
     bool uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error);
-    void drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass,
-                    uint32_t scale);
+    // The frame's draws in order, a render pass per run of draws into one
+    // target (step 5a).
+    bool drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, std::string &error);
+    void drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, size_t first,
+                    size_t last, bool depthAttached, float targetW, float targetH, uint32_t scale);
+    // A target's GPU texture (color, or depth), at least `minW` by `minH`
+    // pixels: kept across frames, grown (and so cleared) when too small.
+    SDL_GPUTexture *targetTexture(SDL_GPUDevice *device, Id id, bool depth, uint32_t minW, uint32_t minH,
+                                  bool &fresh, std::string &error);
     void releaseMeshes(SDL_GPUDevice *device);
     struct MeshCounts
     {
-        uint64_t drawn = 0, offscreen = 0, noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
+        uint64_t drawn = 0, offscreen = 0, noTarget = 0, depthAsColor = 0, depthMismatch = 0, passes = 0;
+        uint64_t noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
+    };
+    struct GpuTarget
+    {
+        SDL_GPUTexture *texture = nullptr;
+        uint32_t width = 0, height = 0; // allocated, in host pixels
+        uint32_t scale = 0;
     };
 
     std::vector<Record> m_drained;
@@ -138,15 +151,14 @@ private:
     bool m_viewFailed = false;
     bool m_textureGrid = false; // RG_NATIVE_TEXTURE_GRID=1: step 3a's view over the scene
 
-    std::vector<MeshDraw> m_meshes;      // drawn since the last Present record
+    std::vector<MeshDraw> m_meshes;      // drawn since the last Present record, any target
     std::vector<MeshDraw> m_frameMeshes; // the frame a Present record closed
     bool m_frameReady = false;
     SDL_GPUShader *m_meshVertex = nullptr;
     SDL_GPUShader *m_meshFragment = nullptr;
     bool m_meshFailed = false;
     SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
-    SDL_GPUTexture *m_depth = nullptr;
-    uint32_t m_depthWidth = 0, m_depthHeight = 0;
+    std::unordered_map<Id, GpuTarget> m_gpuTargets; // offscreen colors, and every depth (by its id)
     SDL_GPUTexture *m_white = nullptr;
     std::unordered_map<uint32_t, SDL_GPUGraphicsPipeline *> m_meshPipelines;
     SDL_GPUSampler *m_meshSamplers[8] = {};
