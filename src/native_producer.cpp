@@ -20,6 +20,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 namespace rg::nativeproducer
 {
@@ -40,7 +42,7 @@ struct Counts
     uint64_t passedNotProduced = 0, split = 0, continuedInPacket = 0;
     // Step 4a: VU1 meshes made mesh draws.
     uint64_t meshes = 0, meshesNoState = 0, meshesSplit = 0, meshesWhole = 0, camerasNew = 0;
-    uint64_t materialKnown = 0, textureMiss = 0, paletteMiss = 0, targetMiss = 0;
+    uint64_t materialKnown = 0, textureMiss = 0, textureMissPsm = 0, textureMissTarget = 0, paletteMiss = 0, targetMiss = 0;
     uint64_t unknownBlend = 0, unknownClamp = 0, unknownWriteMask = 0, unknownOther = 0;
     uint64_t triangles = 0, trianglesSkipped = 0;
 };
@@ -65,7 +67,14 @@ struct State
     {
         uint32_t dbp, dbw, dpsm, width, height;
         bool palette;
+        uint32_t key, psm; // the texture's TBP and format, or the palette's CBP
+        native::Id id;
     };
+    // What GS memory holds as the VIF1 thread sends it on, in the stream's
+    // order (takeProduced): the game thread's tables above run a frame of
+    // uploads ahead, and the game reuses its texture addresses within one.
+    std::unordered_map<uint32_t, std::pair<uint32_t, native::Id>> residentTexture; // tbp -> (psm, id)
+    std::unordered_map<uint32_t, native::Id> residentPalette;                       // cbp -> id
     std::deque<Produced> produced;
     Counts counts, reported;
     bool statsSet = false;
@@ -102,7 +111,9 @@ std::string statsLine()
                        d(n.meshesNoState, r.meshesNoState) + ", camera and model " + d(n.meshesSplit, r.meshesSplit) +
                        ", whole matrix (model check failed) " + d(n.meshesWhole, r.meshesWhole) + ", cameras new " +
                        d(n.camerasNew, r.camerasNew) + ", material known " + d(n.materialKnown, r.materialKnown) +
-                       " (misses: texture " + d(n.textureMiss, r.textureMiss) + ", palette " +
+                       " (misses: texture " + d(n.textureMiss, r.textureMiss) + " [another format there " +
+                       d(n.textureMissPsm, r.textureMissPsm) + ", a render target there " +
+                       d(n.textureMissTarget, r.textureMissTarget) + "], palette " +
                        d(n.paletteMiss, r.paletteMiss) + ", target " + d(n.targetMiss, r.targetMiss) +
                        "; unknown: blend " + d(n.unknownBlend, r.unknownBlend) + ", clamp " +
                        d(n.unknownClamp, r.unknownClamp) + ", write mask " + d(n.unknownWriteMask, r.unknownWriteMask) +
@@ -119,12 +130,13 @@ std::string statsLine()
 }
 
 // Locked. An upload made into a record (or known as one), for takeProduced.
-void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool palette)
+void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool palette,
+                  uint32_t key, uint32_t psm, native::Id id)
 {
     // Never sent ones age out; a bound in case the VIF1 thread takes none.
     if (s.produced.size() >= 8192u)
         s.produced.pop_front();
-    s.produced.push_back({dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette});
+    s.produced.push_back({dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette, key, psm, id});
 }
 
 // Locked. The renderer's evictions, forgotten here so they are sent again.
@@ -240,7 +252,8 @@ void texture(const TextureLevel &l)
     {
         ++s.counts.texturesKnown;
         s.textureAt[l.tbp] = {psm, known->second};
-        noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false);
+        noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp,
+                     psm, known->second);
         return;
     }
     auto out = std::make_shared<std::vector<uint8_t>>();
@@ -290,7 +303,8 @@ void texture(const TextureLevel &l)
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
     s.textureAt[l.tbp] = {psm, record.id};
-    noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false);
+    noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp, psm,
+                 record.id);
     ++s.counts.texturesNew;
     native::push(std::move(record));
 }
@@ -317,7 +331,8 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     {
         ++s.counts.palettesKnown;
         s.paletteAt[cbp] = known->second;
-        noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true);
+        noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
+                     known->second);
         return;
     }
     auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
@@ -337,7 +352,8 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     s.paletteAt[cbp] = record.id;
-    noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true);
+    noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
+                 record.id);
     ++s.counts.palettesNew;
     native::push(std::move(record));
 }
@@ -390,6 +406,10 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
             p.height == height)
         {
             palette = p.palette;
+            if (p.palette)
+                s.residentPalette[p.key] = p.id;
+            else
+                s.residentTexture[p.key] = {p.psm, p.id};
             s.produced.erase(s.produced.begin(), s.produced.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             return true;
         }
@@ -445,6 +465,41 @@ void multiply(const float a[16], const float b[16], float out[16])
     std::memcpy(out, r, sizeof(r));
 }
 
+// Gauss-Jordan with partial pivoting; false when `m` is singular.
+bool invert(const float m[16], float out[16])
+{
+    double a[4][8];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 8; ++j)
+            a[i][j] = j < 4 ? m[i * 4 + j] : (j - 4 == i ? 1.0 : 0.0);
+    for (int c = 0; c < 4; ++c)
+    {
+        int pivot = c;
+        for (int r = c + 1; r < 4; ++r)
+            if (std::fabs(a[r][c]) > std::fabs(a[pivot][c]))
+                pivot = r;
+        if (std::fabs(a[pivot][c]) < 1e-12)
+            return false;
+        if (pivot != c)
+            for (int j = 0; j < 8; ++j)
+                std::swap(a[c][j], a[pivot][j]);
+        const double d = a[c][c];
+        for (int j = 0; j < 8; ++j)
+            a[c][j] /= d;
+        for (int r = 0; r < 4; ++r)
+            if (r != c && a[r][c] != 0.0)
+            {
+                const double f = a[r][c];
+                for (int j = 0; j < 8; ++j)
+                    a[r][j] -= f * a[c][j];
+            }
+    }
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            out[i * 4 + j] = static_cast<float>(a[i][j + 4]);
+    return true;
+}
+
 // `m` followed by the window's offset: x - ofx and y - ofy after the divide.
 void foldOffset(float m[16], float ofx, float ofy)
 {
@@ -496,17 +551,31 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
     if (state.prim.tme)
     {
         const GSTex0Reg &t = c.tex0;
-        const auto at = s.textureAt.find(t.tbp0);
-        m.texture = at != s.textureAt.end() && at->second.first == (t.psm & 0x3Fu) ? at->second.second : 0u;
+        const auto at = s.residentTexture.find(t.tbp0);
+        m.texture = at != s.residentTexture.end() && at->second.first == (t.psm & 0x3Fu) ? at->second.second : 0u;
         if (m.texture == 0u)
         {
             ++s.counts.textureMiss;
+            if (at != s.residentTexture.end())
+            {
+                ++s.counts.textureMissPsm;
+                static uint64_t seen[64] = {};
+                const uint32_t pair = at->second.first & 0x3Fu;
+                if (std::getenv("RG_NATIVE_MESH_DUMP") && !(seen[pair] & (1ull << (t.psm & 0x3Fu))))
+                {
+                    seen[pair] |= 1ull << (t.psm & 0x3Fu);
+                    std::fprintf(stderr, "[mesh-miss] tbp %x recorded psm %x, sampled psm %x tw %u th %u\n", t.tbp0,
+                                 pair, t.psm, t.tw, t.th);
+                }
+            }
+            else if (s.targetAt.count(t.tbp0 & ~31u))
+                ++s.counts.textureMissTarget;
             known = false;
         }
         if (indexedPsm(t.psm))
         {
-            const auto p = s.paletteAt.find(t.cbp);
-            m.palette = p != s.paletteAt.end() && t.csa == 0u ? p->second : 0u;
+            const auto p = s.residentPalette.find(t.cbp);
+            m.palette = p != s.residentPalette.end() && t.csa == 0u ? p->second : 0u;
             if (m.palette == 0u)
             {
                 ++s.counts.paletteMiss;
@@ -721,10 +790,17 @@ void mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     quadsMatrix(vu1Data, 24u, view);
     quadsMatrix(vu1Data, 8u, projection);
     quadsMatrix(vu1Data, 4u, viewport);
+    // Quads 4-7 are the projection all the way to the window (8-11 times
+    // the screen's scale and offset), not a viewport after 8-11: the
+    // program's matrix is model x view x (4-7). The camera keeps 8-11 as
+    // its clip space and the rest, inverse(8-11) x (4-7), as its viewport.
+    float toWindow[16], inverse[16];
+    std::memcpy(toWindow, viewport, sizeof(toWindow));
     multiply(model, view, whole);
-    multiply(whole, projection, whole);
-    multiply(whole, viewport, whole);
-    const bool split = sameMatrix(whole, h.matrix);
+    multiply(whole, toWindow, whole);
+    const bool split = sameMatrix(whole, h.matrix) && invert(projection, inverse);
+    if (split)
+        multiply(inverse, toWindow, viewport);
 
     State &s = state();
     std::lock_guard lock(s.mutex);

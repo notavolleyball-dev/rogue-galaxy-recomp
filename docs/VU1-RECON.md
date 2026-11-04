@@ -33,7 +33,7 @@ Quadwords of 16 bytes, matrices as four row quads, row-vector convention
 
 | Quads | Contents | Changes |
 |---|---|---|
-| 4-7 | Viewport transform (clip to GS coordinates) | per camera |
+| 4-7 | Projection to GS window coordinates: 8-11 times the screen scale and 2048 offset (corrected 2026-11-04, docs/NATIVE-PIPELINE.md 4a) | per camera |
 | 8-11 | Projection | per camera |
 | 24-27 | View (rotation rows, camera translation in 27) | per frame |
 | 60-63 | Model to world | per object |

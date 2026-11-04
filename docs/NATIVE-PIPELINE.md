@@ -347,7 +347,7 @@ build that compiles is not "done".
      the VU1 share of G5's `SubmitNativeMesh`; R1 near 100% of them (the
      model check holds); texture and target misses named and counted.
 
-     **4a built (2026-11-04), not yet run.**
+     **4a done (2026-11-04).**
      - `rg::nativeproducer::mesh` (`src/native_producer.cpp`) is called from
        `deliverMesh` for the meshes `buildMesh` makes. It builds the record
        under the producer's lock, then pushes it.
@@ -364,6 +364,33 @@ build that compiles is not "done".
        color target they're first drawn with.
      - The `[native-producer]` line now has a `meshes` part with all of the
        above.
+
+     Found on the way, both fixed:
+     - **Quads 4-7 are not a viewport.** They are the projection straight to
+       the window: 8-11 times the screen's scale (256, -224) and offset
+       (2048). The program's matrix is model x view x (4-7), so the camera
+       keeps 8-11 as its clip space, and its viewport is inverse(8-11) x
+       (4-7). VU1-RECON's table had it as a viewport after 8-11.
+     - **Textures resolved in stream order.** The game thread's tables run
+       a frame of uploads ahead, and the game reuses its texture addresses
+       within a frame: 38% of meshes found the wrong format there, and the
+       hits could have been the wrong texture. Meshes now look up what the
+       VIF1 thread last sent to each address (`residentTexture` and
+       `residentPalette`, set in `takeProduced`).
+
+     One walk (`pipeline-step4a`, per 60-frame window on the field):
+     - 64,466 mesh records (about 1,070 a frame), all from VU1 program
+       meshes. G5's `SubmitNativeMesh` shows 120,311; the rest are the
+       converter's 2D pieces (`build2D`), which are step 6.
+     - **R1** 100%, with one camera a frame. The model check never failed.
+     - **R3** 85%. The rest draw to offscreen targets.
+     - **R4** 95%. Of the misses: 2,340 a window are one texture (0x2a60,
+       sampled as a 64x64 CT32 where an 8-bit texture was uploaded,
+       probably one the GPU writes), and 2,580 use DATE or FBA.
+     - About 25,000 triangles a frame are drawn, and 5,400 are culled by
+       the program's rules.
+     - The renderer has no evictions at 5 MiB, so a resident entry pointing
+       at an evicted id isn't handled yet.
    - **4b. The renderer draws them.** One pipeline: model x view x
      projection, float depth (reversed), texture and palette sampled, the
      game's texture function, blend, alpha test, fog. The debug grid goes.
