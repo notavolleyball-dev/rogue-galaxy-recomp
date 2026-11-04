@@ -44,6 +44,8 @@ struct MaterialUniforms
     float blend[4];
     float fogColor[4];
     float texa[4];
+    uint32_t region[4]; // min u, max u, min v, max v (the GS's CLAMP)
+    uint32_t wrap[4];   // u, v: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
 };
 
 void multiply(const float a[16], const float b[16], float out[16])
@@ -492,6 +494,12 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         mu.blend[0] = m.shuffle == ChannelShuffle::GreenToAlpha ? 1.0f : 0.0f;
         mu.blend[2] = m.clampU ? 1.0f : 0.0f;
         mu.blend[3] = m.clampV ? 1.0f : 0.0f;
+        mu.wrap[0] = m.wrapU;
+        mu.wrap[1] = m.wrapV;
+        mu.region[0] = m.regionU[0];
+        mu.region[1] = m.regionU[1];
+        mu.region[2] = m.regionV[0];
+        mu.region[3] = m.regionV[1];
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = float(d.fogColor[i]) / 255.0f;
 

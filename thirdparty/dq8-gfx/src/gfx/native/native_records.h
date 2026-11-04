@@ -159,6 +159,12 @@ struct Material
     bool linear = false;
     bool clampU = true;
     bool clampV = true;
+    // The GS's CLAMP per axis: 0 repeat, 1 clamp, 2 region clamp (to
+    // [region[0], region[1]]), 3 region repeat ((t & region[0]) |
+    // region[1]); in the texture's texels. Regions are fetched, not
+    // filtered (a texture's, not a target's).
+    uint8_t wrapU = 0, wrapV = 0;
+    uint16_t regionU[2] = {0, 0}, regionV[2] = {0, 0};
     TextureFunction function = TextureFunction::Modulate;
     ChannelShuffle shuffle = ChannelShuffle::None;
     bool textureAlpha = true; // the texel's alpha is used; false: the vertex's

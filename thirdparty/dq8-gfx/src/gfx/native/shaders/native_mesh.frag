@@ -28,7 +28,22 @@ layout(set = 3, binding = 0) uniform Material {
     // destination alpha test, 0 none, 1 drawn where the target's alpha is
     // below 0x80, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
+    // The GS's CLAMP: x, y the u region (min, max), z, w the v region;
+    // wrap.x, .y the modes (0 repeat, 1 clamp, 2 region clamp, 3 region
+    // repeat).
+    uvec4 region;
+    uvec4 wrap;
 } material;
+
+int wrapAxis(int a, int size, uint mode, uint lo, uint hi, bool clampOld) {
+    if (mode == 2u)
+        a = clamp(a, int(lo), int(hi));
+    else if (mode == 3u)
+        a = (a & int(lo)) | int(hi);
+    else
+        return clampOld ? clamp(a, 0, size - 1) : int(mod(float(a), float(size)));
+    return clamp(a, 0, size - 1);
+}
 
 layout(location = 0) in vec2 inUv;
 layout(location = 1) in vec4 inColor;
@@ -61,14 +76,20 @@ void main() {
     if (material.mode.x != 0u) {
         vec4 t;
         vec2 texel = inUv * material.size.xy; // in the game's texels
-        if (material.mode.x == 2u) {
+        // A region (a tile of a sheet) is fetched as the GS addresses it.
+        bool region = material.mode.x != 3u && (material.wrap.x >= 2u || material.wrap.y >= 2u);
+        if (material.mode.x == 2u || region) {
             // Fetched, not filtered: an index is not a color.
             ivec2 size = ivec2(material.size.zw);
             ivec2 at = ivec2(floor(texel));
-            at.x = material.blend.z != 0.0 ? clamp(at.x, 0, size.x - 1) : int(mod(float(at.x), float(size.x)));
-            at.y = material.blend.w != 0.0 ? clamp(at.y, 0, size.y - 1) : int(mod(float(at.y), float(size.y)));
-            int index = int(texelFetch(image, at, 0).r * 255.0 + 0.5);
-            t = texelFetch(palette, ivec2(min(index, int(material.mode.w) - 1), 0), 0);
+            at.x = wrapAxis(at.x, size.x, material.wrap.x, material.region.x, material.region.y, material.blend.z != 0.0);
+            at.y = wrapAxis(at.y, size.y, material.wrap.y, material.region.z, material.region.w, material.blend.w != 0.0);
+            if (material.mode.x == 2u) {
+                int index = int(texelFetch(image, at, 0).r * 255.0 + 0.5);
+                t = texelFetch(palette, ivec2(min(index, int(material.mode.w) - 1), 0), 0);
+            } else {
+                t = texelFetch(image, at, 0);
+            }
         } else {
             t = texture(image, texel / material.size.zw);
         }

@@ -991,9 +991,16 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
         m.clampU = wms != 0u;
         m.clampV = wmt != 0u;
-        if (wms > 1u || wmt > 1u)
+        // Region clamp and repeat (a tile of a sheet): the renderer's.
+        m.wrapU = static_cast<uint8_t>(wms);
+        m.wrapV = static_cast<uint8_t>(wmt);
+        m.regionU[0] = static_cast<uint16_t>((c.clamp >> 4) & 0x3FFu);
+        m.regionU[1] = static_cast<uint16_t>((c.clamp >> 14) & 0x3FFu);
+        m.regionV[0] = static_cast<uint16_t>((c.clamp >> 24) & 0x3FFu);
+        m.regionV[1] = static_cast<uint16_t>((c.clamp >> 34) & 0x3FFu);
+        if ((wms > 1u || wmt > 1u) && m.sourceTarget)
         {
-            ++s.counts.unknownClamp;
+            ++s.counts.unknownClamp; // a target's region: not fetched so
             known = false;
         }
         static constexpr native::TextureFunction functions[4] = {
@@ -1254,13 +1261,14 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
                 }
         std::fprintf(stderr,
                      "[mesh-dump] source declared %ux%u | fbp %04x -> target %u depth %u cam %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp "
-                     "%05x csa %u tfx %u tcc %u -> %s %u palette %u | alpha %llx test %llx | %zu vertices%s\n",
+                     "%05x csa %u tfx %u tcc %u -> %s %u palette %u | alpha %llx test %llx clamp %llx | %zu vertices%s\n",
                      declaredW, declaredH, c.frame.fbp * 32u, draw.target, draw.depthTarget, draw.camera,
                      int(drawState->prim.tme),
                      c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu, 1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp,
                      c.tex0.csa, c.tex0.tfx, c.tex0.tcc, m.sourceTarget ? "target" : "texture",
                      m.sourceTarget ? m.sourceTarget : m.texture, m.palette, (unsigned long long)c.alpha,
-                     (unsigned long long)c.test, draw.vertices.size(), m.known ? "" : " (unknown)");
+                     (unsigned long long)c.test, (unsigned long long)c.clamp, draw.vertices.size(),
+                     m.known ? "" : " (unknown)");
     }
     native::push(native::MeshDraw(std::move(draw)));
     return true;
@@ -1875,9 +1883,16 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
         m.clampU = wms != 0u;
         m.clampV = wmt != 0u;
-        if (wms > 1u || wmt > 1u)
+        // Region clamp and repeat (a tile of a sheet): the renderer's.
+        m.wrapU = static_cast<uint8_t>(wms);
+        m.wrapV = static_cast<uint8_t>(wmt);
+        m.regionU[0] = static_cast<uint16_t>((c.clamp >> 4) & 0x3FFu);
+        m.regionU[1] = static_cast<uint16_t>((c.clamp >> 14) & 0x3FFu);
+        m.regionV[0] = static_cast<uint16_t>((c.clamp >> 24) & 0x3FFu);
+        m.regionV[1] = static_cast<uint16_t>((c.clamp >> 34) & 0x3FFu);
+        if ((wms > 1u || wmt > 1u) && m.sourceTarget)
         {
-            known = false;
+            known = false; // a target's region: not fetched so
             why |= 2u;
         }
         static constexpr native::TextureFunction functions[4] = {
