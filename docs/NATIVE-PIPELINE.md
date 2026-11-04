@@ -255,8 +255,8 @@ build that compiles is not "done".
      draws, and clears the scene into the backend's pending command buffer,
      which the present copy submits first.
    - The old backend still draws everything the GS path sends, unseen.
-   - With a hidden-less, windowless run, or with screenshots, the GS
-     present path is kept.
+   - Without a window, the GS present path is kept. Whether screenshots
+     capture the native scene has not been checked.
    - R1-R5 read 0 of 0 until step 4 sends mesh draws.
 3. **Textures, palettes and targets by id.** The producer tables. Pass: G3
    at 0 for named uploads.
