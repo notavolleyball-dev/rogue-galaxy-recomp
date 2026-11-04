@@ -695,8 +695,12 @@ build that compiles is not "done".
      - `TBP0 02a00 PSM CT32 512x512`, one sprite a frame on the boot
        screens. A texture of another format was last uploaded there.
      - `TBP0 01c00 PSM T4HH CBP 03fc0 512x512`, with nothing uploaded
-       there. Up to 20k a window on the black stretch before the town
-       (frames ~1700-2300), and 960 a window (16 a frame) in the town.
+       there. Up to 20k a window on the title screen (frames ~1700-2300),
+       and 960 a window (16 a frame) in the town. **The title screen is
+       black under the pipeline:** the logo, the menu and the copyright
+       text are all missing. The GS path shows them (`refgs`, frame 1835).
+       The 7d run before step 6 (`step7`) was black there too, so this
+       isn't the absorber's doing.
        T4HH reads the top nibble of a 32-bit buffer's alpha, so this is
        most likely a buffer drawn or copied into, then read as an indexed
        texture. The producer has no model of that.
