@@ -55,6 +55,22 @@ The renderer threads have 20–25% headroom.
    bookkeeping (page sets, invalidation, `m_shadow`) is entered. Add them,
    run the walk once, and the nonzero ones are the remaining work. Nothing
    else gets added to the list.
+
+   **Built (2026-11-04), not yet run.** The `[decoupled]` line, printed with
+   the `[gfx]` stats (`DQ8_GFX_STATS_EVERY`), counts per window. Converted
+   draws are the calls to `SdlGpuBackend::SubmitNativeMesh` and
+   `SubmitNativeEffect`, host reads on the effect queue excluded. (a) counts
+   every mesh (its `GSDrawState` holds FRAME, ZBUF, TEX0) and every effect
+   with buffers (`Buffer::base`). (b) counts every mesh. Both are true by
+   the interface's types, so they read 0 only once the interface changes.
+   (c) counts the draws whose submit entered a function that calls
+   `gsNotePageBookkeeping()` (`gs_vram.h`, a thread-local count): page
+   and block marking, both caches' `invalidate`, the target cache's page-set
+   lookups and resolves, `markReadPages`, `markClutReads`, `sourcePagesFor`,
+   texture reads served from `m_shadow`, and the backend's pending-page
+   helpers, including the same-state path's inline test. Not counted: work
+   deferred past the call (a later flush), and effects carry raw ALPHA/TEST/ZBUF
+   values, which are GS registers but not a `GSDrawState`.
 3. **Performance** beyond that is the game thread (the recompiler's output,
    the runtime's dispatch and checkpoints, or `docs/LOGIC-DRAW-SPLIT.md`).
    Separate project.

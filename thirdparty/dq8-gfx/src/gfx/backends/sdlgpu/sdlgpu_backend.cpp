@@ -766,6 +766,7 @@ struct SdlGpuBackend::Impl {
     GsPageSet pendingPages{};
     std::vector<PendingTarget> pendingTargets;
     void notePending(const GsSurface *color, const GsPageSet &pages) {
+        gsNotePageBookkeeping();
         pendingPages |= pages;
         for (auto &target : pendingTargets) {
             if (target.color == color) {
@@ -780,6 +781,7 @@ struct SdlGpuBackend::Impl {
     // takes. A host write into them has to wait for that flush.
     GsPageSet pendingSourcePages{};
     void noteSampled(const DrawBatch &draw) {
+        gsNotePageBookkeeping();
         if (draw.source)
             pendingSourcePages |= draw.source->pages;
         if ((draw.feedback || draw.destination) && draw.color)
@@ -886,6 +888,7 @@ struct SdlGpuBackend::Impl {
             GsRegion reach;
             const bool bounded = sampledTexelRect(batch, reach);
             const bool covered = last.reachAll || (bounded && last.reach.contains(reach));
+            gsNotePageBookkeeping();
             const bool untouched = (last.sourcePages & pendingPages).none();
             if (!covered || !untouched) {
                 if (!untouched && pendingDrawsTouch(sampledSourcePages(batch, last.sourcePages)))
@@ -973,6 +976,7 @@ struct SdlGpuBackend::Impl {
     // about 350 textures a frame between its draws; flushing at each one
     // submitted that many command buffers a frame.
     bool transferConflicts(const GsPageSet &pages) const {
+        gsNotePageBookkeeping();
         if (flushOnTransfer || (pendingPages & pages).any() || (pendingSourcePages & pages).any())
             return true;
         for (const auto &target : pendingTargets)
@@ -1424,6 +1428,7 @@ struct SdlGpuBackend::Impl {
     // draws had not happened yet, and the draws would then be applied on top.
     bool settleFor(const GsPageSet &pages, GsResolveReason reason, bool hostWrite = false,
                    const GsPageSet &covered = {}, bool flush = true) {
+        gsNotePageBookkeeping();
         if (flush && !flushFor(stats.flushSettle))
             return false;
         std::string error;
@@ -1446,10 +1451,12 @@ struct SdlGpuBackend::Impl {
     // True when a queued batch draws into any of these pages, so their content
     // is not yet in the render target -- let alone in local memory.
     bool pendingDrawsTouch(const GsPageSet &pages) const {
+        gsNotePageBookkeeping();
         return (pendingPages & pages).any();
     }
 
     bool pendingDrawsTouchOthers(const GsPageSet &pages, const GsSurface *surface) const {
+        gsNotePageBookkeeping();
         for (const auto &target : pendingTargets) {
             if (target.color != surface && (target.pages & pages).any())
                 return true;
@@ -1895,6 +1902,7 @@ struct SdlGpuBackend::Impl {
     // A write to local memory invalidates both caches: a render target holding
     // that region is now stale, and so is any texture built from it.
     void invalidatePages(const GsPageSet &pages) {
+        gsNotePageBookkeeping();
         if (!patchingHostWrite)
             targets->invalidate(pages);
         if (textures)
@@ -5362,6 +5370,14 @@ struct SdlGpuBackend::Impl {
                      d(stats.layerComposites, previousReasons.layerComposites),
                      d(stats.layerOverflows, previousReasons.layerOverflows),
                      d(stats.layerLost, previousReasons.layerLost));
+        // docs/NATIVE-SUBMIT-STATUS.md: each of a, b, c must read 0.
+        std::fprintf(stderr,
+                     "[decoupled] converted draws %llu: a) carry a GS address %llu, b) carry a GSDrawState %llu, "
+                     "c) entered page bookkeeping %llu\n",
+                     d(stats.convertedDraws, previousReasons.convertedDraws),
+                     d(stats.convertedGsAddress, previousReasons.convertedGsAddress),
+                     d(stats.convertedDrawState, previousReasons.convertedDrawState),
+                     d(stats.convertedPageBookkeeping, previousReasons.convertedPageBookkeeping));
         if (textures && textures->auditEnabled())
             std::fputs(textures->auditReport().c_str(), stderr);
         if (textures && (textures->stats().uploadStoreReads | textures->stats().localMemoryReads | textures->stats().targetReadsSkipped) != 0u)
@@ -6810,9 +6826,18 @@ void SdlGpuBackend::Submit(const GSPrimitiveBatch &batch) {
 void SdlGpuBackend::SubmitNativeMesh(const GSNativeMesh &mesh, const GSDrawState &state) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
+    // The decoupled counters: a GSDrawState holds FRAME, ZBUF and TEX0, GS
+    // addresses all (a), and is itself one (b).
+    SdlGpuStats &stats = m_impl->stats;
+    ++stats.convertedDraws;
+    ++stats.convertedGsAddress;
+    ++stats.convertedDrawState;
+    const uint64_t bookkeeping = t_gsPageBookkeeping;
     if (m_impl->writesDeferredSource(uint32_t(state.context.frame.fbp) << 5u))
         m_impl->resolveDeferredFlip(false);
     m_impl->submitNative(mesh, state);
+    if (t_gsPageBookkeeping != bookkeeping)
+        ++stats.convertedPageBookkeeping;
 }
 
 bool SdlGpuBackend::SupportsNativeEffects() const {
@@ -6823,7 +6848,21 @@ bool SdlGpuBackend::SupportsNativeEffects() const {
 void SdlGpuBackend::SubmitNativeEffect(const GSNativeEffect &effect) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
+    // A host read rides the effect queue but draws nothing: not counted.
+    if ((effect.command & hostreads::kCommandMask) == hostreads::kCommand) {
+        m_impl->submitEffect(effect);
+        return;
+    }
+    // The decoupled counters: an effect names its buffers by GS block
+    // address (Buffer::base) (a); it carries no GSDrawState (b).
+    SdlGpuStats &stats = m_impl->stats;
+    ++stats.convertedDraws;
+    if (effect.bufferCount != 0u)
+        ++stats.convertedGsAddress;
+    const uint64_t bookkeeping = t_gsPageBookkeeping;
     m_impl->submitEffect(effect);
+    if (t_gsPageBookkeeping != bookkeeping)
+        ++stats.convertedPageBookkeeping;
 }
 
 void SdlGpuBackend::SubmitMany(const GSPrimitiveBatch *const *batches, size_t count) {

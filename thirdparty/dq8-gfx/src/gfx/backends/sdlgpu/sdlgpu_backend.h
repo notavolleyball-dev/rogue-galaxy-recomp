@@ -74,6 +74,16 @@ struct SdlGpuStats {
     // GSNativeEffects drawn, and their sprites (Rogue Galaxy: added).
     uint64_t nativeEffects = 0u;
     uint64_t nativeEffectOps = 0u;
+    // Decoupled, by docs/NATIVE-SUBMIT-STATUS.md (Rogue Galaxy: added): of
+    // the converted draws (native meshes and effects, host reads not
+    // counted), those whose record carries a GS frame or texture address
+    // (a), the meshes handed a GSDrawState (b), and those during whose
+    // submit the page bookkeeping was entered (c, gsNotePageBookkeeping).
+    // Each must read 0 for the converted draws to be decoupled.
+    uint64_t convertedDraws = 0u;
+    uint64_t convertedGsAddress = 0u;
+    uint64_t convertedDrawState = 0u;
+    uint64_t convertedPageBookkeeping = 0u;
     // Of them, plain copies done as texture copies (Rogue Galaxy: added).
     uint64_t nativeEffectCopies = 0u;
     // The display frame copied into the GS display buffer for a reader other

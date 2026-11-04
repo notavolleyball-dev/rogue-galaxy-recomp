@@ -624,6 +624,7 @@ void GsTargetCache::markDrawn(GsSurface &surface, const GsRegion &region) {
 }
 
 void GsTargetCache::invalidate(const GsPageSet &pages, bool preserveOwned) {
+    gsNotePageBookkeeping();
     for (auto &candidate : m_surfaces) {
         GsSurface &surface = *candidate;
         if ((surface.pages & pages).none())
@@ -663,6 +664,7 @@ void GsTargetCache::invalidate(const GsPageSet &pages, bool preserveOwned) {
 }
 
 uint32_t GsTargetCache::releaseCoveredPages(const GsPageSet &covered) {
+    gsNotePageBookkeeping();
     // The game streams its textures through the pages its scene buffer
     // occupied a frame earlier, 400 uploads a frame; recording a patch per
     // block for a buffer it then clears whole was a tenth of the worker.
@@ -704,6 +706,7 @@ bool nativeCt32(const GsSurface &surface, bool anyScale = false) {
 }
 
 GsSurface *GsTargetCache::nativeOwner(const GsPageSet &pages, bool allowScaled) {
+    gsNotePageBookkeeping();
     GsSurface *owner = nullptr;
     for (auto &candidate : m_surfaces) {
         GsSurface &surface = *candidate;
@@ -719,6 +722,7 @@ GsSurface *GsTargetCache::nativeOwner(const GsPageSet &pages, bool allowScaled) 
 }
 
 bool GsTargetCache::canPatchHostWrite(const GsPageSet &pages) const {
+    gsNotePageBookkeeping();
     bool owned = false;
     for (const auto &candidate : m_surfaces) {
         const GsSurface &surface = *candidate;
@@ -919,6 +923,7 @@ void GsTargetCache::patchHostWrite(const GsPageSet &pages, uint32_t base, uint32
 
 void GsTargetCache::markReadPagesCt32(GsPageSet &pages, uint32_t base, uint32_t bw,
                                      const GsRegion &region) const {
+    gsNotePageBookkeeping();
     for (uint32_t y = region.y0; y < region.y1;) {
         const uint32_t ey = std::min(region.y1, (y | 7u) + 1u);
         for (uint32_t x = region.x0; x < region.x1;) {
@@ -937,6 +942,7 @@ void GsTargetCache::markReadPagesCt32(GsPageSet &pages, uint32_t base, uint32_t 
 
 void GsTargetCache::markReadPages(GsPageSet &pages, uint32_t base, uint32_t bw, uint32_t psm,
                                  const GsRegion &region) const {
+    gsNotePageBookkeeping();
     if ((psm & 0x3fu) == GS_PSM_CT32) {
         markReadPagesCt32(pages, base, bw, region);
         return;
@@ -967,6 +973,7 @@ void GsTargetCache::markReadPages(GsPageSet &pages, uint32_t base, uint32_t bw, 
 }
 
 bool GsTargetCache::ownsAny(const GsPageSet &pages) const {
+    gsNotePageBookkeeping();
     for (const auto &candidate : m_surfaces) {
         if (candidate->depth || candidate->gpuDirty.empty())
             continue;
@@ -977,6 +984,7 @@ bool GsTargetCache::ownsAny(const GsPageSet &pages) const {
 }
 
 bool GsTargetCache::resolve(const GsPageSet &pages, std::string &error) {
+    gsNotePageBookkeeping();
     std::vector<GsSurface *> surfaces;
     for (auto &candidate : m_surfaces) {
         GsSurface &surface = *candidate;
@@ -995,6 +1003,7 @@ bool GsTargetCache::resolve(const GsPageSet &pages, std::string &error) {
 }
 
 bool GsTargetCache::copyOut(const GsPageSet &pages, std::string &error) {
+    gsNotePageBookkeeping();
     if (pages.none())
         return true;
     for (auto &candidate : m_surfaces) {
@@ -1027,6 +1036,7 @@ bool GsTargetCache::resolveAll(std::string &error) {
 
 bool GsTargetCache::resolveForHostWrite(const GsPageSet &pages, std::string &error,
                                         const GsPageSet &covered) {
+    gsNotePageBookkeeping();
     std::vector<GsSurface *> surfaces;
     for (auto &candidate : m_surfaces) {
         auto &surface = *candidate;
