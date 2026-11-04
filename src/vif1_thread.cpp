@@ -24,6 +24,7 @@
 #include "runtime/gs/gs_boundary.h"
 #include "native_producer.h"
 #if defined(RG_HAS_SDLGPU)
+#include "gfx/gs/gs_named_textures.h"
 #include "gfx/native/native_pipeline.h"
 #endif
 #include "debug/draw_origins.h"
@@ -1959,8 +1960,47 @@ struct UploadWithhold
     uint32_t transferBytes = 0; // the withheld transfer's data still to come in IMAGE tags
     uint32_t imageBytes = 0;    // an IMAGE tag's data still to come outside its packet
     bool palette = false;
+    // The withheld data as sent, against the record's hash of the guest
+    // memory it was made from (a record made before the game finished
+    // writing that memory is stale): RG_NATIVE_UPLOAD_CHECK.
+    std::vector<uint8_t> seen;
+    uint64_t expectHash = 0u;
+    uint32_t expectBytes = 0u, dbp = 0u, dpsm = 0u, width = 0u, height = 0u;
 };
+std::atomic<uint64_t> g_uploadsChecked{0}, g_uploadsStale{0};
+
+bool checkingUploads()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("RG_NATIVE_UPLOAD_CHECK");
+        return v && *v && *v != '0';
+    }();
+    return on;
+}
 thread_local UploadWithhold t_upload;
+
+// Withheld bytes, for the check; compared when all have come.
+void seeWithheld(const uint8_t *data, uint32_t size)
+{
+    UploadWithhold &u = t_upload;
+    if (!checkingUploads() || u.expectBytes == 0u || u.seen.size() >= u.expectBytes)
+        return;
+    const uint32_t n = std::min<uint32_t>(size, u.expectBytes - static_cast<uint32_t>(u.seen.size()));
+    u.seen.insert(u.seen.end(), data, data + n);
+    if (u.seen.size() < u.expectBytes)
+        return;
+    g_uploadsChecked.fetch_add(1u, std::memory_order_relaxed);
+    if (dq8::gfx::namedtextures::imageHash(u.seen.data(), u.expectBytes) != u.expectHash)
+    {
+        const uint64_t stale = g_uploadsStale.fetch_add(1u, std::memory_order_relaxed);
+        if (stale < 24u)
+            std::fprintf(stderr,
+                         "[native-upload] stale record: DBP %04x DPSM %02x %ux%u%s, %u bytes (sent differs from the "
+                         "record's guest memory)\n",
+                         u.dbp, u.dpsm, u.width, u.height, u.palette ? " (palette)" : "", u.expectBytes);
+    }
+    u.expectBytes = 0u;
+}
 
 uint32_t transferBits(uint32_t psm)
 {
@@ -1989,6 +2029,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         // A withheld image's data at the packet's start, not behind a tag.
         const uint32_t n = std::min(t_upload.imageBytes, size);
         t_upload.imageBytes -= n;
+        seeWithheld(data, n);
         pos = n;
         changed = true;
         producer::noteContinuedInPacket();
@@ -2036,14 +2077,23 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                 const uint32_t rrh = static_cast<uint32_t>((trxreg >> 32) & 0xFFFu);
                 const uint32_t bits = transferBits(dpsm);
                 bool palette = false;
+                uint64_t hash = 0u;
+                uint32_t hashedBytes = 0u;
                 if ((trxdir & 3u) != 0u || bits == 0u)
                     ; // not an upload this takes
-                else if (!producer::takeProduced(dbp, dbw, dpsm, rrw, rrh, palette))
+                else if (!producer::takeProduced(dbp, dbw, dpsm, rrw, rrh, palette, hash, hashedBytes))
                     producer::notePassed(producer::Passed::NotProduced);
                 else
                 {
                     t_upload.transferBytes = (rrw * rrh * bits / 8u + 15u) & ~15u;
                     t_upload.palette = palette;
+                    t_upload.seen.clear();
+                    t_upload.expectHash = hash;
+                    t_upload.expectBytes = hashedBytes;
+                    t_upload.dbp = dbp;
+                    t_upload.dpsm = dpsm;
+                    t_upload.width = rrw;
+                    t_upload.height = rrh;
                     drop = true;
                     if (others != 0u)
                     {
@@ -2067,6 +2117,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
             drop = true;
             const uint32_t taken = static_cast<uint32_t>(std::min<uint64_t>(body, t_upload.transferBytes));
             t_upload.transferBytes -= taken;
+            seeWithheld(data + pos + 16u, std::min<uint32_t>(taken, end - (pos + 16u)));
             t_upload.imageBytes = static_cast<uint32_t>(pos + 16u + body - end);
             if (t_upload.transferBytes == 0u)
                 producer::noteWithheld(t_upload.palette, taken);
@@ -2084,17 +2135,18 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
 
 // An image continuation's bytes that belong to a withheld upload; the rest,
 // if any, goes on.
-uint32_t withheldContinuation(uint32_t size)
+uint32_t withheldContinuation(const uint8_t *data, uint32_t size)
 {
     if (t_upload.imageBytes == 0u)
         return 0u;
     const uint32_t n = std::min(t_upload.imageBytes, size);
     t_upload.imageBytes -= n;
+    seeWithheld(data, n);
     return n;
 }
 #else
 bool withholdUploads(const uint8_t *, uint32_t, std::vector<uint8_t> &) { return false; }
-uint32_t withheldContinuation(uint32_t) { return 0u; }
+uint32_t withheldContinuation(const uint8_t *, uint32_t) { return 0u; }
 #endif
 
 // Step 6 of docs/NATIVE-PIPELINE.md: under the pipeline (with the
@@ -2206,6 +2258,15 @@ void absorbRegister(uint8_t reg, uint64_t value)
             startCapture();
         else
             t_capture.active = false;
+        if ((value & 3u) == 2u)
+        {
+            const uint64_t b = t_bitbltbuf;
+            rg::nativeproducer::noteLocalCopy(
+                unsigned(b & 0x3FFFu), unsigned((b >> 16) & 0x3Fu), unsigned((b >> 24) & 0x3Fu),
+                unsigned(t_trxpos & 0x7FFu), unsigned((t_trxpos >> 16) & 0x7FFu), unsigned((b >> 32) & 0x3FFFu),
+                unsigned((b >> 48) & 0x3Fu), unsigned((b >> 56) & 0x3Fu), unsigned((t_trxpos >> 32) & 0x7FFu),
+                unsigned((t_trxpos >> 48) & 0x7FFu), unsigned(t_trxreg & 0xFFFu), unsigned((t_trxreg >> 32) & 0xFFFu));
+        }
         if ((value & 3u) == 2u || (value & 3u) == 0u)
         {
             // The first few of each shape (docs/NATIVE-PIPELINE.md step 6);
@@ -2644,7 +2705,7 @@ void install(PS2Runtime &runtime)
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
         // The rest of a named upload withheld from the GS (step 3b).
-        if (const uint32_t withheld = withheldContinuation(size))
+        if (const uint32_t withheld = withheldContinuation(data, size))
         {
             data += withheld;
             size -= withheld;
@@ -2815,6 +2876,18 @@ std::string busyReport()
                       (unsigned long long)d[6], (unsigned long long)d[7], (unsigned long long)d[8],
                       (unsigned long long)(d[9] / 1024u), (unsigned long long)(d[10] / 1024u));
         line += more;
+#if defined(RG_HAS_SDLGPU)
+        if (checkingUploads())
+        {
+            static uint64_t lastChecked = 0u, lastStale = 0u;
+            const uint64_t checked = g_uploadsChecked.load(), stale = g_uploadsStale.load();
+            std::snprintf(more, sizeof(more), " | withheld uploads checked %llu, stale %llu",
+                          (unsigned long long)(checked - lastChecked), (unsigned long long)(stale - lastStale));
+            lastChecked = checked;
+            lastStale = stale;
+            line += more;
+        }
+#endif
     }
     return line;
 }

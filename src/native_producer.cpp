@@ -7,6 +7,8 @@
 #include <deque>
 #include <atomic>
 #include <map>
+#include <set>
+#include <string>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -18,6 +20,7 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/gs/gs_types.h"
 #include "native_effects.h"
+#include "flip_pacing.h"
 
 #include <cmath>
 #include <cstring>
@@ -99,6 +102,8 @@ struct State
         bool palette;
         uint32_t key, psm; // the texture's TBP and format, or the palette's CBP
         native::Id id;
+        uint64_t hash; // imageHash of the guest memory it was made from
+        uint32_t bytes;
     };
     // What GS memory holds as the VIF1 thread sends it on, in the stream's
     // order (takeProduced): the game thread's tables above run a frame of
@@ -133,9 +138,40 @@ struct State
         native::Id id = 0u;
     };
     std::unordered_map<uint64_t, HostRecord> hostTextures, hostPalettes;
+    std::set<uint32_t> copiedTo; // local copies' destinations (logged reads)
+    // RG_NATIVE_TEXTURE_DUMP: the records' contents kept, to write out.
+    struct Kept
+    {
+        std::shared_ptr<std::vector<uint8_t>> data;
+        uint32_t width = 0u, height = 0u;
+        bool indexed = false;
+    };
+    std::unordered_map<native::Id, Kept> keptTextures, keptPalettes;
+    std::set<uint64_t> dumped;
     Counts counts, reported;
     bool statsSet = false;
 };
+// RG_NATIVE_TEXTURE_DUMP=tbp,tbp (hex): the textures 2D pieces read there,
+// written to build/run/texdump as PPM (colour, and alpha beside it).
+const std::vector<uint32_t> &dumpBases()
+{
+    static const std::vector<uint32_t> bases = [] {
+        std::vector<uint32_t> out;
+        const char *v = std::getenv("RG_NATIVE_TEXTURE_DUMP");
+        while (v && *v)
+        {
+            char *end = nullptr;
+            out.push_back(static_cast<uint32_t>(std::strtoul(v, &end, 16)));
+            v = (end && *end == ',') ? end + 1 : nullptr;
+        }
+        return out;
+    }();
+    return bases;
+}
+bool dumpingTextures()
+{
+    return !dumpBases().empty();
+}
 State &state()
 {
     static State instance;
@@ -229,12 +265,13 @@ std::string statsLine()
 
 // Locked. An upload made into a record (or known as one), for takeProduced.
 void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool palette,
-                  uint32_t key, uint32_t psm, native::Id id)
+                  uint32_t key, uint32_t psm, native::Id id, uint64_t hash, uint32_t bytes)
 {
     // Never sent ones age out; a bound in case the VIF1 thread takes none.
     if (s.produced.size() >= 8192u)
         s.produced.pop_front();
-    s.produced.push_back({dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette, key, psm, id});
+    s.produced.push_back(
+        {dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette, key, psm, id, hash, bytes});
 }
 
 // Locked. The renderer's evictions, forgotten here so they are sent again.
@@ -351,7 +388,7 @@ void texture(const TextureLevel &l)
         ++s.counts.texturesKnown;
         s.textureAt[l.tbp] = {psm, known->second};
         noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp,
-                     psm, known->second);
+                     psm, known->second, hash, static_cast<uint32_t>(bytes));
         return;
     }
     auto out = std::make_shared<std::vector<uint8_t>>();
@@ -397,12 +434,15 @@ void texture(const TextureLevel &l)
             (*out)[i] = (l.ram[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
     }
     record.id = s.nextTexture++;
+    if (dumpingTextures())
+        s.keptTextures[record.id] = {out, record.width, record.height,
+                                     record.format == native::PixelFormat::Index8};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
     s.textureAt[l.tbp] = {psm, record.id};
     noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp, psm,
-                 record.id);
+                 record.id, hash, static_cast<uint32_t>(bytes));
     ++s.counts.texturesNew;
     native::push(std::move(record));
 }
@@ -430,7 +470,7 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
         ++s.counts.palettesKnown;
         s.paletteAt[cbp] = known->second;
         noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
-                     known->second);
+                     known->second, hash, bytes);
         return;
     }
     auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
@@ -447,11 +487,13 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     native::Palette record;
     record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
+    if (dumpingTextures())
+        s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     s.paletteAt[cbp] = record.id;
     noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
-                 record.id);
+                 record.id, hash, bytes);
     ++s.counts.palettesNew;
     native::push(std::move(record));
 }
@@ -580,7 +622,8 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
     declare(s, base, width, height, psm, kind);
 }
 
-bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette)
+bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette,
+                  uint64_t &hash, uint32_t &bytes)
 {
     if (!native::enabled())
         return false;
@@ -595,6 +638,8 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
             p.height == height)
         {
             palette = p.palette;
+            hash = p.hash;
+            bytes = p.bytes;
             if (p.palette)
             {
                 s.residentPalette[p.key] = p.id;
@@ -1253,6 +1298,9 @@ native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg 
     record.height = static_cast<uint16_t>(height);
     record.format = rgba ? native::PixelFormat::Rgba8 : native::PixelFormat::Index8;
     record.id = s.nextTexture++;
+    if (dumpingTextures())
+        s.keptTextures[record.id] = {out, record.width, record.height,
+                                     record.format == native::PixelFormat::Index8};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
@@ -1298,6 +1346,8 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
     native::Palette record;
     record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
+    if (dumpingTextures())
+        s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     made.id = record.id;
@@ -1372,6 +1422,59 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
             return false;
     }
     return m.texture != 0u;
+}
+
+namespace
+{
+// Locked. What the producer holds at a GS address, for the logs.
+std::string holdingAt(State &s, uint32_t base)
+{
+    std::string out;
+    char buf[96];
+    if (const auto t = s.residentTexture.find(base); t != s.residentTexture.end())
+    {
+        std::snprintf(buf, sizeof(buf), " texture psm %02x id %u (taken seq %llu)", t->second.first, t->second.second,
+                      (unsigned long long)(s.takenSeq.count(base) ? s.takenSeq[base] : 0u));
+        out += buf;
+    }
+    if (const auto t = s.targetAt.find(base); t != s.targetAt.end())
+    {
+        std::snprintf(buf, sizeof(buf), " target %u (drawn seq %llu)", t->second,
+                      (unsigned long long)(s.drawnSeq.count(base) ? s.drawnSeq[base] : 0u));
+        out += buf;
+    }
+    for (const auto &[key, image] : s.hostImages)
+        if (key.first == base)
+        {
+            std::snprintf(buf, sizeof(buf), " host image psm %02x dbw %u h %u", key.second, image.dbw, image.height);
+            out += buf;
+        }
+    if (const auto t = s.textureAt.find(base); t != s.textureAt.end())
+    {
+        std::snprintf(buf, sizeof(buf), " (game thread: texture psm %02x id %u)", t->second.first, t->second.second);
+        out += buf;
+    }
+    return out.empty() ? " nothing" : out;
+}
+} // namespace
+
+void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
+                   uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    static uint32_t told = 0u;
+    if (told >= 48u)
+        return;
+    ++told;
+    std::fprintf(stderr,
+                 "[native-copy] SBP %04x SBW %u SPSM %02x (%u,%u) -> DBP %04x DBW %u DPSM %02x (%u,%u) %ux%u, seq "
+                 "%llu\n  source:%s\n  destination:%s\n",
+                 sbp, sbw, spsm, sx, sy, dbp, dbw, dpsm, dx, dy, width, height, (unsigned long long)s.sequence,
+                 holdingAt(s, sbp).c_str(), holdingAt(s, dbp).c_str());
+    s.copiedTo.insert(dbp);
 }
 
 void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
@@ -1488,6 +1591,67 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
                              mesh.vertices.size());
             }
             return false;
+        }
+        if (dumpingTextures() && m.texture &&
+            std::find(dumpBases().begin(), dumpBases().end(), c.tex0.tbp0) != dumpBases().end())
+        {
+            const uint64_t what = (uint64_t(m.texture) << 32) | m.palette;
+            const auto tex = s.keptTextures.find(m.texture);
+            if (tex != s.keptTextures.end() && tex->second.indexed && s.dumped.size() < 64u &&
+                s.dumped.insert(what).second)
+            {
+                const State::Kept &k = tex->second;
+                const auto pal = s.keptPalettes.find(m.palette);
+                char name[160];
+                std::snprintf(name, sizeof(name), "build/run/texdump/tbp%05x_psm%02x_tex%u_pal%u_flip%llu.ppm",
+                              c.tex0.tbp0, c.tex0.psm & 0x3Fu, m.texture, m.palette,
+                              (unsigned long long)rg::graphics::guestFlips());
+                if (FILE *f = std::fopen(name, "wb"))
+                {
+                    std::fprintf(f, "P6\n%u %u\n255\n", k.width * 2u, k.height);
+                    for (uint32_t y = 0; y < k.height; ++y)
+                    {
+                        std::vector<uint8_t> row(size_t(k.width) * 6u);
+                        for (uint32_t x = 0; x < k.width; ++x)
+                        {
+                            uint8_t rgba[4] = {0, 0, 0, 0};
+                            const size_t i = size_t(y) * k.width + x;
+                            if (k.indexed)
+                            {
+                                const uint8_t idx = (*k.data)[i];
+                                if (pal != s.keptPalettes.end() && idx < pal->second.width)
+                                    std::memcpy(rgba, pal->second.data->data() + idx * 4u, 4u);
+                                else
+                                    rgba[0] = rgba[1] = rgba[2] = rgba[3] = uint8_t(idx * 16u);
+                            }
+                            else
+                                std::memcpy(rgba, k.data->data() + i * 4u, 4u);
+                            std::memcpy(row.data() + x * 3u, rgba, 3u);
+                            const uint8_t a = uint8_t(std::min(255, rgba[3] * 2));
+                            row[(k.width + x) * 3u] = row[(k.width + x) * 3u + 1u] = row[(k.width + x) * 3u + 2u] = a;
+                        }
+                        std::fwrite(row.data(), 1, row.size(), f);
+                    }
+                    std::fclose(f);
+                    std::fprintf(stderr, "[texdump] %s\n", name);
+                }
+            }
+        }
+        if (!s.copiedTo.empty())
+        {
+            static uint32_t toldReads = 0u;
+            const auto near = s.copiedTo.upper_bound(c.tex0.tbp0);
+            const bool inside = near != s.copiedTo.begin() && c.tex0.tbp0 - *std::prev(near) < 0x200u;
+            if (inside && toldReads < 24u)
+            {
+                ++toldReads;
+                std::fprintf(stderr,
+                             "[native-copy] a piece reads TBP0 %05x TBW %u PSM %02x %ux%u CBP %05x: %s %u, seq %llu, "
+                             "%zu vertices\n",
+                             c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu, 1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp,
+                             m.sourceTarget ? "target" : "texture", m.sourceTarget ? m.sourceTarget : m.texture,
+                             (unsigned long long)s.sequence, mesh.vertices.size());
+            }
         }
         if (m.sourceTarget)
             ++s.counts.piecesFromTarget;
@@ -1610,6 +1774,71 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
                          (unsigned long long)c.alpha, (unsigned long long)c.test, drawState->texa.ta0,
                          int(drawState->texa.aem));
         }
+    }
+    // RG_NATIVE_PIECE_DUMP=N: flip N's 2D pieces, with what they read in GS
+    // terms (the renderer's RG_NATIVE_FRAME_DUMP has the records' side).
+    // N-M: flips N to M, each distinct read once a flip.
+    static const std::pair<uint64_t, uint64_t> dumpFlips = [] {
+        const char *v = std::getenv("RG_NATIVE_PIECE_DUMP");
+        if (!v)
+            return std::pair<uint64_t, uint64_t>{0u, 0u};
+        char *end = nullptr;
+        const uint64_t a = std::strtoull(v, &end, 10);
+        const uint64_t b = end && *end == '-' ? std::strtoull(end + 1, nullptr, 10) : a;
+        return std::pair<uint64_t, uint64_t>{a, b};
+    }();
+    const uint64_t flip = rg::graphics::guestFlips();
+    static uint64_t dumpedFlip = 0u;
+    static std::set<uint64_t> dumpedReads;
+    // Or the flip after `touch build/run/dump-now` (which also asks the
+    // renderer for its side of that frame: build/run/dump-gpu).
+    static uint64_t triggerChecked = 0u, triggeredFlip = 0u;
+    if (flip != triggerChecked)
+    {
+        triggerChecked = flip;
+        if (std::remove("build/run/dump-now") == 0)
+        {
+            triggeredFlip = flip + 1u;
+            if (FILE *f = std::fopen("build/run/dump-gpu", "w"))
+                std::fclose(f);
+            std::fprintf(stderr, "[piece-dump] dumping flip %llu\n", (unsigned long long)triggeredFlip);
+        }
+    }
+    bool dumpThis = (dumpFlips.first != 0u && flip >= dumpFlips.first && flip <= dumpFlips.second) ||
+                    (triggeredFlip != 0u && flip == triggeredFlip);
+    if (dumpThis && flip != triggeredFlip && dumpFlips.first != dumpFlips.second)
+    {
+        if (dumpedFlip != flip)
+        {
+            dumpedFlip = flip;
+            dumpedReads.clear();
+        }
+        const uint64_t read = (uint64_t(c.tex0.tbp0) << 40) ^ (uint64_t(c.tex0.psm) << 32) ^
+                              (uint64_t(frameBase) << 16) ^ (uint64_t(drawState->prim.tme) << 15) ^
+                              (m.sourceTarget ? m.sourceTarget : m.texture);
+        dumpThis = dumpedReads.insert(read).second;
+    }
+    if (dumpThis)
+    {
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (const native::Vertex &v : draw.vertices)
+        {
+            x0 = std::min(x0, v.position[0]);
+            y0 = std::min(y0, v.position[1]);
+            x1 = std::max(x1, v.position[0]);
+            y1 = std::max(y1, v.position[1]);
+        }
+        const native::Vertex *v0 = draw.vertices.empty() ? nullptr : &draw.vertices[0];
+        std::fprintf(stderr,
+                     "[piece-dump] flip %llu fbp %04x -> target %u | tme %d tbp %05x tbw %u psm %02x %ux%u cbp %05x cpsm %02x csa "
+                     "%u tfx %u tcc %u -> %s %u palette %u | box %.0f,%.0f-%.0f,%.0f uv %.1f,%.1f rgba %.0f,%.0f,%.0f,%.0f "
+                     "alpha %llx test %llx fbmsk %08x%s\n",
+                     (unsigned long long)flip, frameBase, draw.target, int(drawState->prim.tme), c.tex0.tbp0, c.tex0.tbw, c.tex0.psm & 0x3Fu,
+                     1u << c.tex0.tw, 1u << c.tex0.th, c.tex0.cbp, c.tex0.cpsm, c.tex0.csa, c.tex0.tfx, c.tex0.tcc,
+                     m.sourceTarget ? "target" : "texture", m.sourceTarget ? m.sourceTarget : m.texture, m.palette, x0,
+                     y0, x1, y1, v0 ? v0->uv[0] : 0.f, v0 ? v0->uv[1] : 0.f, v0 ? v0->color[0] : 0.f,
+                     v0 ? v0->color[1] : 0.f, v0 ? v0->color[2] : 0.f, v0 ? v0->color[3] : 0.f,
+                     (unsigned long long)c.alpha, (unsigned long long)c.test, c.frame.fbmsk, known ? "" : " (unknown)");
     }
     ++s.counts.piecesMade;
     if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
@@ -1977,7 +2206,7 @@ void target(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, int) {}
 void noteWithheld(bool, uint32_t) {}
 void notePassed(Passed) {}
 void noteSplit() {}
-bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { return false; }
+bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &, uint64_t &, uint32_t &) { return false; }
 void noteContinuedInPacket() {}
 bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
 bool pipelineOn() { return false; }
@@ -1986,6 +2215,8 @@ bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::
 void noteEffect(const GSNativeEffect &) {}
 bool piece(const GSNativeMesh &, const GSDrawState *) { return false; }
 void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
+void noteLocalCopy(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                   uint32_t, uint32_t) {}
 bool effect(const GSNativeEffect &) { return false; }
 uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
 uint32_t paletteAt(uint32_t) { return 0u; }

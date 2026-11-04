@@ -576,7 +576,12 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         const char *v = std::getenv("RG_NATIVE_FRAME_DUMP");
         return v ? std::strtoull(v, nullptr, 10) : 0ull;
     }();
-    if (dumpFrame != 0u && m_meshCounts.frames == dumpFrame)
+    // Or the frame after build/run/dump-gpu appears (the producer's trigger).
+    const bool triggered = std::remove("build/run/dump-gpu") == 0;
+    if (triggered)
+        std::fprintf(stderr, "[frame-dump] frame %llu (%zu draws)\n", (unsigned long long)m_meshCounts.frames,
+                     m_frameMeshes.size());
+    if ((dumpFrame != 0u && m_meshCounts.frames == dumpFrame) || triggered)
     {
         for (size_t n = 0; n < m_frameMeshes.size(); ++n)
         {

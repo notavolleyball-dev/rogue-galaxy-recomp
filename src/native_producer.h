@@ -90,7 +90,10 @@ bool effect(const GSNativeEffect &effect);
 // producer made a record of it (in the order the game built them; uploads
 // not seen within a short lookahead were never sent and are dropped). Taken
 // when it did: the upload is withheld, and `palette` says which it was.
-bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette);
+// `hash` and `bytes`: the record's imageHash of the guest memory it was
+// made from (what the upload sends, when the game has not changed it since).
+bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette,
+                  uint64_t &hash, uint32_t &bytes);
 
 enum class Passed
 {
@@ -102,6 +105,10 @@ enum class Passed
 // which draws reading that format at that buffer width sample (sourceOf).
 void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                 const uint8_t *data, uint32_t bytes);
+// Step 6: a local copy (TRXDIR 2) the absorber took, logged with what the
+// producer holds at its source and destination (the first few).
+void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
+                   uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height);
 void noteWithheld(bool palette, uint32_t imageBytes);
 void notePassed(Passed why);
 void noteSplit();
