@@ -585,6 +585,78 @@ build that compiles is not "done".
      records: the plan's `EffectKind::ObjectLayer`). It's a piece of its
      own: **5c**.
 
+6. **2D** through the converter as sprite draws, then the remaining VU1
+   programs on packets (outlines, shadow volumes, particles). Pass: G1 and
+   G5 at 0.
+7. **Present, clears, readbacks, depth probe.** Pass: G2, G4 at 0. Then the
+   structural check: no `GS` object.
+
+   On the walk (`pipeline-step5b`) G2 and G4 come from one place each:
+   - **G2:** `GS::writeRegister` from kernel stubs, 960 a window (16 a
+     frame). These are the libgraph stubs' draw environments and clears
+     (`sceGsSwapDBuff`'s register pairs and clear sprite).
+   - **G4:** `GS::drawRegisters`, 120 a window. This is the converter
+     reading the register file back after those stubs (`gsWaiter`).
+
+   Neither the depth probe nor the colour captures were reached on the
+   walk. They are G4 wherever they run.
+
+   **7a, clears and draw environments (built 2026-11-04, not yet run).**
+   - **Pass:** under the pipeline, G2 has no `writeRegister` and G4 has no
+     `drawRegisters`, and the picture is unchanged on the walk.
+   - The GS front end gains a per-thread register sink (patch 0035,
+     `GS::setRegisterSink`). While a thread has one set, its
+     `writeRegister` calls are collected instead of applied, and its
+     framebuffer clear shortcuts are dropped. The clear sprite that follows
+     them is among the collected writes.
+   - `gsWaiter` sets the sink around the stub. It then sends the writes
+     through the converter as one A+D packet, in order with the lists it
+     has just drained.
+   - So the mirror follows the stub's registers with no read-back, and the
+     clear sprite becomes a 2D piece like any other.
+
+   **7b, the depth probe (built 2026-11-04, not yet run).**
+   - **Pass:** at a lens flare (the sun in view), the producer's depth
+     reads count up with answers. The renderer's line shows them copied
+     and published with none unserved. The flare is hidden when an object
+     covers the sun, and there is no G4 `depthprobe::read`.
+   - The native library has a GS-free mailbox (`native::readDepth`,
+     `DepthBlock`), modelled on the GS backend's probe: reads are told
+     apart by their order, and answers arrive a frame or two late.
+   - At each `render`, the renderer publishes the copy that has finished.
+     It then copies the asked-for blocks out of its D32 depth targets, from
+     the last frame drawn, in a command buffer of its own with a fence.
+   - Each block is reduced to game pixels, keeping the nearest value.
+   - The producer (`readDepth`) maps the read's SBP to the depth target by
+     its ZBUF base. It turns reversed depth d back into GS Z through the
+     last 3D camera's viewport: Z = v22·(1 − 2d) + v32, with 0 where
+     nothing was drawn.
+   - The `sceGsExecStoreImage` hook serves it ahead of the GS probe.
+   - Only a D32_FLOAT depth is served. On D24 the reads count as
+     unserved.
+
+   **7c, colour captures (open, not built).** The fade's and the menu's
+   frame captures (`sceGsExecStoreImage` of colour) still take the GS's
+   host-read path. Under the pipeline the GS targets hold nothing, so these
+   captures are wrong there.
+
+   The blocker is that the renderer runs only when the game's flip makes
+   the GS present. A capture the game thread waits on can't be answered
+   until the next flip, which the waiting thread is holding up, so it
+   deadlocks. The options:
+   1. Answer from the last frame drawn.
+   2. Give the pipeline its own present driver, which the structural check
+      needs anyway (7d).
+   3. Keep the capture on the GPU: note which main-memory range holds a
+      capture of which target, and when that range is uploaded as a
+      texture, copy target to texture. This is the upscale-friendly one.
+
+   **7d, present.** The pipeline presents through the GS's present (G5,
+   PMODE/DISPFB). The structural check needs a native present driven by
+   the flip hook.
+8. **Features**: TAA/upscaling first, then shadows, then RT, each on the R
+   counters it needs.
+
 Steps 3 to 7 can be split differently once step 1's numbers show where the
 crossings really are.
 

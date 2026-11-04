@@ -43,7 +43,69 @@ constexpr uint32_t kViewRows = 6u;
 constexpr const char *kRecordNames[] = {"texture", "palette", "target",     "camera",   "mesh",      "sprite",
                                         "effect",  "frame",   "present",    "readback", "depth-query"};
 static_assert(std::size(kRecordNames) == std::variant_size_v<Record>, "a name per record kind");
+
+// Step 7b's depth reads: what was asked since the renderer last took them,
+// and the last answer for each place in that order.
+struct DepthMailbox
+{
+    std::mutex mutex;
+    std::vector<DepthBlock> wanted;
+    uint32_t asked = 0; // reads since the renderer last took them
+    struct Answer
+    {
+        DepthBlock block;
+        std::vector<float> values;
+        bool valid = false;
+    };
+    Answer answers[kMaxDepthReads];
+};
+DepthMailbox &depthMailbox()
+{
+    static DepthMailbox instance;
+    return instance;
+}
+
+std::vector<DepthBlock> takeDepthReads()
+{
+    DepthMailbox &m = depthMailbox();
+    std::lock_guard lock(m.mutex);
+    m.asked = 0u;
+    std::vector<DepthBlock> out;
+    out.swap(m.wanted);
+    return out;
+}
+
+void publishDepth(uint32_t index, const DepthBlock &block, std::vector<float> &&values)
+{
+    if (index >= kMaxDepthReads)
+        return;
+    DepthMailbox &m = depthMailbox();
+    std::lock_guard lock(m.mutex);
+    m.answers[index].block = block;
+    m.answers[index].values = std::move(values);
+    m.answers[index].valid = true;
+}
 } // namespace
+
+bool readDepth(const DepthBlock &block, std::vector<float> &out)
+{
+    if (!enabled() || block.target == 0u || block.width == 0u || block.height == 0u ||
+        block.width > kMaxDepthSide || block.height > kMaxDepthSide)
+        return false;
+    DepthMailbox &m = depthMailbox();
+    std::lock_guard lock(m.mutex);
+    const uint32_t index = m.asked++;
+    if (m.wanted.size() < kMaxDepthReads)
+        m.wanted.push_back(block);
+    if (index >= kMaxDepthReads)
+        return false;
+    const DepthMailbox::Answer &a = m.answers[index];
+    if (!a.valid || a.block.target != block.target || a.block.width != block.width ||
+        a.block.height != block.height)
+        return false;
+    out = a.values;
+    return true;
+}
 
 void setOuterSwitch(bool (*outer)())
 {
@@ -436,6 +498,9 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         m_uploads.clear();
     }
     evict(device);
+    // The depth reads, from the last frame drawn (submitted ahead of this
+    // one's draws).
+    serveDepth(device);
 
     uint32_t width = kDefaultWidth, height = kDefaultHeight;
     if (const auto t = m_targets.find(m_sceneTarget); t != m_targets.end() && t->second.width && t->second.height)
@@ -490,6 +555,8 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
     {
         std::string failed;
         drawn = drawFrame(device, commands, scale, failed);
+        if (drawn)
+            m_frameScale = scale;
         if (!drawn)
             std::fprintf(stderr, "[native-pipeline] frame lost: %s\n", failed.c_str());
     }
@@ -555,6 +622,13 @@ std::string Renderer::statsLine()
             "; window space " + d(mc.window, mr.window) + ", from a target " + d(mc.fromTarget, mr.fromTarget) +
             "; a second depth target in a pass " +
             d(mc.depthMismatch, mr.depthMismatch) + "\n";
+    const DepthCounts &dc = m_depthCounts, &dr = m_depthReported;
+    if (dc.asked != dr.asked)
+        line += "  [native-pipeline] depth reads: asked " + d(dc.asked, dr.asked) + ", copied " + d(dc.copied, dr.copied) +
+                ", published " + d(dc.published, dr.published) + ", no such depth target (the clear's) " +
+                d(dc.noTarget, dr.noTarget) + ", left for a copy in flight " + d(dc.waiting, dr.waiting) +
+                ", unserved " + d(dc.unserved, dr.unserved) + "\n";
+    m_depthReported = m_depthCounts;
     m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;
     std::function<std::string()> producer;
@@ -568,11 +642,148 @@ std::string Renderer::statsLine()
     return line;
 }
 
+void Renderer::serveDepth(SDL_GPUDevice *device)
+{
+    // The copy the GPU has finished: each block brought to the game's
+    // pixels (the nearest of the pixels each covers) and published.
+    if (m_depthFence)
+    {
+        if (!SDL_QueryGPUFence(device, m_depthFence))
+        {
+            m_depthCounts.waiting += takeDepthReads().size(); // asked again next frame
+            return;
+        }
+        SDL_ReleaseGPUFence(device, m_depthFence);
+        m_depthFence = nullptr;
+        const auto *mapped = static_cast<const float *>(SDL_MapGPUTransferBuffer(device, m_depthDownload, false));
+        if (mapped)
+        {
+            const uint32_t s = m_depthCopyScale;
+            size_t offset = 0u;
+            for (const auto &[index, block] : m_depthCopied)
+            {
+                const uint32_t w = block.width * s, h = block.height * s;
+                std::vector<float> values(size_t(block.width) * block.height, 0.0f);
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < w; ++x)
+                    {
+                        float &v = values[size_t(y / s) * block.width + x / s];
+                        v = std::max(v, mapped[offset + size_t(y) * w + x]);
+                    }
+                offset += size_t(w) * h;
+                publishDepth(index, block, std::move(values));
+                ++m_depthCounts.published;
+            }
+            SDL_UnmapGPUTransferBuffer(device, m_depthDownload);
+        }
+        m_depthCopied.clear();
+    }
+
+    const std::vector<DepthBlock> wanted = takeDepthReads();
+    if (wanted.empty())
+        return;
+    m_depthCounts.asked += wanted.size();
+    // Only a float depth is copied out as it is.
+    if (m_depthFailed || m_depthFormat != SDL_GPU_TEXTUREFORMAT_D32_FLOAT || m_frameScale == 0u)
+    {
+        m_depthCounts.unserved += wanted.size();
+        return;
+    }
+    const uint32_t s = m_frameScale;
+    std::vector<std::pair<uint32_t, DepthBlock>> copies;
+    size_t floats = 0u;
+    for (uint32_t index = 0; index < wanted.size(); ++index)
+    {
+        const DepthBlock &b = wanted[index];
+        const auto t = m_gpuTargets.find(b.target);
+        if (t == m_gpuTargets.end() || !t->second.texture || b.x < 0 || b.y < 0 ||
+            (uint32_t(b.x) + b.width) * s > t->second.width || (uint32_t(b.y) + b.height) * s > t->second.height)
+        {
+            // Never drawn here: the clear's depth, as the GS's memory held.
+            publishDepth(index, b, std::vector<float>(size_t(b.width) * b.height, 0.0f));
+            ++m_depthCounts.noTarget;
+            continue;
+        }
+        copies.emplace_back(index, b);
+        floats += size_t(b.width) * s * b.height * s;
+    }
+    if (copies.empty())
+        return;
+    const auto fail = [&](const char *what) {
+        std::fprintf(stderr, "[native-pipeline] depth reads off: %s: %s\n", what, SDL_GetError());
+        m_depthFailed = true;
+        m_depthCounts.unserved += copies.size();
+    };
+    const uint32_t bytes = uint32_t(floats * sizeof(float));
+    if (m_depthDownloadBytes < bytes)
+    {
+        if (m_depthDownload)
+            SDL_ReleaseGPUTransferBuffer(device, m_depthDownload);
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+        info.size = bytes;
+        m_depthDownload = SDL_CreateGPUTransferBuffer(device, &info);
+        m_depthDownloadBytes = m_depthDownload ? bytes : 0u;
+        if (!m_depthDownload)
+            return fail("SDL_CreateGPUTransferBuffer");
+    }
+    SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
+    if (!commands)
+        return fail("SDL_AcquireGPUCommandBuffer");
+    SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands);
+    if (!pass)
+    {
+        SDL_CancelGPUCommandBuffer(commands);
+        return fail("SDL_BeginGPUCopyPass");
+    }
+    uint32_t offset = 0u;
+    for (const auto &[index, b] : copies)
+    {
+        SDL_GPUTextureRegion region{};
+        region.texture = m_gpuTargets[b.target].texture;
+        region.x = uint32_t(b.x) * s;
+        region.y = uint32_t(b.y) * s;
+        region.w = b.width * s;
+        region.h = b.height * s;
+        region.d = 1u;
+        SDL_GPUTextureTransferInfo destination{};
+        destination.transfer_buffer = m_depthDownload;
+        destination.offset = offset;
+        destination.pixels_per_row = region.w;
+        destination.rows_per_layer = region.h;
+        SDL_DownloadFromGPUTexture(pass, &region, &destination);
+        offset += region.w * region.h * uint32_t(sizeof(float));
+    }
+    SDL_EndGPUCopyPass(pass);
+    m_depthFence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+    if (!m_depthFence)
+        return fail("SDL_SubmitGPUCommandBufferAndAcquireFence");
+    m_depthCopied = std::move(copies);
+    m_depthCopyScale = s;
+    m_depthCounts.copied += m_depthCopied.size();
+}
+
+void Renderer::releaseDepth(SDL_GPUDevice *device)
+{
+    if (m_depthFence)
+    {
+        SDL_WaitForGPUFences(device, true, &m_depthFence, 1u);
+        SDL_ReleaseGPUFence(device, m_depthFence);
+    }
+    if (m_depthDownload)
+        SDL_ReleaseGPUTransferBuffer(device, m_depthDownload);
+    m_depthFence = nullptr;
+    m_depthDownload = nullptr;
+    m_depthDownloadBytes = 0u;
+    m_depthCopied.clear();
+}
+
 void Renderer::release(SDL_GPUDevice *device)
 {
     if (!device)
         return;
     releaseMeshes(device);
+    releaseDepth(device);
     m_meshes.clear();
     m_frameMeshes.clear();
     if (m_scene)

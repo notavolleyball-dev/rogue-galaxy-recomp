@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct GSNativeMesh;
 struct GSDrawState;
@@ -99,6 +100,15 @@ void noteWithheld(bool palette, uint32_t imageBytes);
 void notePassed(Passed why);
 void noteSplit();
 void noteContinuedInPacket();
+
+// Step 7b: a depth read the game makes (sceGsExecStoreImage of a Z buffer:
+// the lens flare's 8x8 block at the sun), from the renderer's depth a frame
+// or two late, in the read's format (Z32, Z24, Z16: little-endian, rows in
+// order). `base` is the read's SBP, in blocks. Zeros (the clear's) where the
+// renderer has no answer yet. False when the pipeline is off or the read is
+// not of a depth format or too large: it then goes as before.
+bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+               std::vector<uint8_t> &out);
 
 // The scene target's id (the frame's).
 constexpr uint32_t kSceneTarget = 1u;

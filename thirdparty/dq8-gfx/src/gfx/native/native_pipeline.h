@@ -19,6 +19,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace dq8::gfx::native
@@ -37,6 +38,26 @@ void push(Record &&record);
 // a texture once and names it by id afterwards drains these and sends them
 // again when next used. Any thread.
 std::vector<Id> takeEvicted();
+
+// Step 7b: depth reads (the game's lens flare tests the sun against the
+// scene's depth), answered a frame or two late, without waiting for the GPU.
+// The caller asks and takes the last answer for a read in its place: reads
+// are told apart by their order since the renderer last took them, and an
+// answer is used only for a block of the same target and size. The
+// renderer, at each frame it draws, publishes the blocks it copied out of
+// its depth for the reads before, and copies out what was asked since.
+struct DepthBlock
+{
+    Id target = 0; // a depth target
+    int32_t x = 0, y = 0;
+    uint32_t width = 0, height = 0; // in the game's pixels
+};
+constexpr uint32_t kMaxDepthReads = 4u; // a frame's
+constexpr uint32_t kMaxDepthSide = 64u;
+// Any thread: the block's depth, reversed (1 nearest, 0 the clear), one
+// value a game pixel (the nearest of the pixels it covers), rows in order.
+// False when there is no answer for it yet.
+bool readDepth(const DepthBlock &block, std::vector<float> &out);
 
 // A line of the producers' own counts, printed with the renderer's.
 void setProducerStats(std::function<std::string()> line);
@@ -118,6 +139,11 @@ private:
     SDL_GPUTexture *targetTexture(SDL_GPUDevice *device, Id id, bool depth, uint32_t minW, uint32_t minH,
                                   bool &fresh, std::string &error);
     void releaseMeshes(SDL_GPUDevice *device);
+    // Step 7b: publishes the depth blocks the GPU copied out, and copies out
+    // the ones asked since (from the last frame drawn, before this one's
+    // draws), in a command buffer of its own.
+    void serveDepth(SDL_GPUDevice *device);
+    void releaseDepth(SDL_GPUDevice *device);
     struct MeshCounts
     {
         uint64_t drawn = 0, offscreen = 0, noTarget = 0, depthAsColor = 0, depthMismatch = 0, passes = 0;
@@ -174,5 +200,18 @@ private:
     std::vector<uint32_t> m_firstIndex; // per frame mesh, into the index buffer
     std::vector<int32_t> m_vertexOffset;
     MeshCounts m_meshCounts, m_meshReported;
+    // Step 7b's depth reads in flight (one copy at a time).
+    SDL_GPUTransferBuffer *m_depthDownload = nullptr;
+    uint32_t m_depthDownloadBytes = 0;
+    SDL_GPUFence *m_depthFence = nullptr;
+    std::vector<std::pair<uint32_t, DepthBlock>> m_depthCopied; // the read's index, its block
+    uint32_t m_depthCopyScale = 1;
+    uint32_t m_frameScale = 0; // the scale the last frame was drawn at; 0 none yet
+    bool m_depthFailed = false;
+    struct DepthCounts
+    {
+        uint64_t asked = 0, copied = 0, published = 0, noTarget = 0, waiting = 0, unserved = 0;
+    };
+    DepthCounts m_depthCounts, m_depthReported;
 };
 } // namespace dq8::gfx::native

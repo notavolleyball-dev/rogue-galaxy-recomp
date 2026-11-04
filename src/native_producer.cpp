@@ -73,6 +73,10 @@ struct State
     std::unordered_map<uint64_t, native::Id> cameraIds;                       // matrices' hash -> id
     native::Id nextCamera = 1u;
     native::Id lastCamera = 0u; // the newest 3D draw's, for 2D draws that test depth
+    // Its viewport's depth row (z' = v22 z + v32 w), for depth read back
+    // (step 7b).
+    float lastDepthScale = 0.0f, lastDepthOffset = 0.0f;
+    uint64_t depthReads = 0u, depthAnswered = 0u, depthNoTarget = 0u;
     uint32_t sceneBase = 0u;
     bool sceneBaseKnown = false;
     // Uploads made into records, in the game's order, for takeProduced.
@@ -169,7 +173,9 @@ std::string statsLine()
                        std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
                        d(n.passedNotProduced, r.passedNotProduced) + "; A+D blocks split (other registers kept) " +
                        d(n.split, r.split) + "; image continued in a packet " +
-                       d(n.continuedInPacket, r.continuedInPacket);
+                       d(n.continuedInPacket, r.continuedInPacket) + " | depth reads (all so far) " +
+                       std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
+                       ", no depth target there " + std::to_string(s.depthNoTarget);
     s.reported = s.counts;
     return line;
 }
@@ -968,6 +974,8 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         foldOffset(viewport, ofx, ofy);
         draw.camera = cameraOf(s, view, projection, viewport);
         s.lastCamera = draw.camera;
+        s.lastDepthScale = viewport[10];
+        s.lastDepthOffset = viewport[14];
         draw.hasModel = true;
         std::memcpy(draw.model, model, sizeof(draw.model));
         draw.floatDepth = true;
@@ -1404,6 +1412,60 @@ uint32_t targetAt(uint32_t base)
     const auto it = s.targetAt.find(base);
     return it != s.targetAt.end() ? it->second : 0u;
 }
+
+bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+               std::vector<uint8_t> &out)
+{
+    if (!native::enabled())
+        return false;
+    psm &= 0x3Fu;
+    const uint32_t bytesPerPixel = psm == 0x30u ? 4u : psm == 0x31u ? 3u : (psm == 0x32u || psm == 0x3Au) ? 2u : 0u;
+    if (bytesPerPixel == 0u || width == 0u || height == 0u || width > native::kMaxDepthSide ||
+        height > native::kMaxDepthSide)
+        return false;
+    native::DepthBlock block;
+    float scale = 0.0f, offset = 0.0f;
+    {
+        State &s = state();
+        std::lock_guard lock(s.mutex);
+        ++s.depthReads;
+        const auto at = s.depthAt.find(base);
+        if (at != s.depthAt.end())
+            block.target = at->second;
+        else
+            ++s.depthNoTarget;
+        scale = s.lastDepthScale;
+        offset = s.lastDepthOffset;
+    }
+    block.x = static_cast<int32_t>(x);
+    block.y = static_cast<int32_t>(y);
+    block.width = width;
+    block.height = height;
+    // Until there is an answer (or with no depth drawn there): the clear's
+    // 0, as the GS's memory would hold.
+    thread_local std::vector<float> depth;
+    depth.assign(size_t(width) * height, 0.0f);
+    if (block.target != 0u && native::readDepth(block, depth))
+    {
+        State &s = state();
+        std::lock_guard lock(s.mutex);
+        ++s.depthAnswered;
+    }
+    const double maximum = bytesPerPixel == 4u ? 4294967295.0 : bytesPerPixel == 3u ? 16777215.0 : 65535.0;
+    out.resize(size_t(width) * height * bytesPerPixel);
+    for (size_t i = 0; i < depth.size(); ++i)
+    {
+        // Reversed depth d is (1 - z/w) / 2 of the projection's z; the GS's
+        // Z is v22 z/w + v32 through the camera's viewport.
+        const float d = depth[i];
+        double z = d > 0.0f ? double(scale) * (1.0 - 2.0 * double(d)) + double(offset) : 0.0;
+        z = std::clamp(z, 0.0, maximum);
+        const uint32_t value = static_cast<uint32_t>(z);
+        for (uint32_t b = 0; b < bytesPerPixel; ++b)
+            out[i * bytesPerPixel + b] = static_cast<uint8_t>(value >> (8u * b));
+    }
+    return true;
+}
 } // namespace rg::nativeproducer
 
 #else
@@ -1420,6 +1482,7 @@ bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &) { re
 void noteContinuedInPacket() {}
 bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
 bool pipelineOn() { return false; }
+bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &) { return false; }
 void noteEffect(const GSNativeEffect &) {}
 bool piece(const GSNativeMesh &, const GSDrawState *) { return false; }
 bool effect(const GSNativeEffect &) { return false; }

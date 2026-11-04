@@ -1536,6 +1536,21 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t psm = t_storeImage.request.psm;
     const bool depth = psm == 0x30u || psm == 0x31u || psm == 0x32u || psm == 0x3Au;
     thread_local std::vector<uint8_t> bytes;
+    // Step 7b: under the native pipeline, from the renderer's own depth (no
+    // GS memory or depth probe).
+    if (g_rdram && si == t_storeImage.si && depth && rg::nativeproducer::pipelineOn())
+    {
+        const dq8::gfx::depthprobe::Request &q = t_storeImage.request;
+        if (rg::nativeproducer::readDepth(q.base, q.psm, q.x, q.y, q.width, q.height, bytes) && !bytes.empty())
+        {
+            std::memcpy(g_rdram + physical(buffer), bytes.data(), bytes.size());
+            t_storeImage.si = 0u;
+            t_skipSync = true;
+            setReturnS32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    }
     if (g_rdram && si == t_storeImage.si && depth && probe::served() &&
         probe::read(t_storeImage.request, bytes) && !bytes.empty())
     {
@@ -2642,6 +2657,11 @@ bool takeOwedRegisters(std::vector<uint8_t> &packet)
     }
     packet = adPacket(writes);
     return true;
+}
+
+std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
+{
+    return adPacket(writes);
 }
 
 void readDrawRegisters(const GS &gs)

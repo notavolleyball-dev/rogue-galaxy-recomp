@@ -2306,6 +2306,27 @@ template <size_t Index>
 void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_thread->drain();
+    // Step 7a (docs/NATIVE-PIPELINE.md): under the native pipeline the
+    // stub's register writes (its draw environments, and the clear sprite)
+    // are taken instead of written to the GS, and go through the converter
+    // as one A+D packet, in order with the lists just drained: the mirror
+    // follows them (no read back of the GS's registers), and the clear is a
+    // 2D piece like any other. The GS's own clear shortcut is dropped.
+    if (rg::nativeproducer::pipelineOn() && convertAll() && rg::nativefx::drawStateOwned())
+    {
+        thread_local GS::RegisterSink writes;
+        writes.clear();
+        GS::setRegisterSink(&writes);
+        g_gsWaiters[Index].second(rdram, ctx, runtime);
+        GS::setRegisterSink(nullptr);
+        if (!writes.empty())
+        {
+            const std::vector<uint8_t> packet = rg::nativefx::registerPacket(writes);
+            const gs_boundary::FromScope boundaryFrom(gs_boundary::kFromKernel);
+            sendPacket(runtime->gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+        }
+        return;
+    }
     // The libgraph stubs write the front end's registers themselves
     // (sceGsPutDrawEnv, sceGsSwapDBuff's environments and clear): it gets
     // what it is owed first, and the converter reads them back after.

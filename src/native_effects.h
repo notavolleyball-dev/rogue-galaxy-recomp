@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "runtime/gs/gs_types.h"
@@ -202,6 +203,8 @@ bool textureSource(uint32_t address, uint32_t bytes);
 GSDrawState mirroredDrawState();
 // The owed registers as one A+D packet; false when none are owed.
 bool takeOwedRegisters(std::vector<uint8_t> &packet);
+// Register writes as one A+D packet (PACKED, NLOOP of them, EOP).
+std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes);
 // After something wrote the front end's registers directly: read them back.
 void readDrawRegisters(const GS &gs);
 // The 8 KiB pages of GS memory (block address / 32) a box covers.
