@@ -208,6 +208,29 @@ build that compiles is not "done".
    `SupportsNativeEffects` query. **Deviation, announced:** R1-R5 move to
    step 2. Today they are 0 by construction, because the fields they count
    only exist in step 2's record types.
+   **Baseline (2026-11-04, one walk):** `RG_GS_VRAM_RESERVE=1
+   tools/vu1/oracle/native-run.sh boundary-base gpu 110 3000`, with the
+   native flag at its defaults. 30 fps, one 60-frame window on the field
+   (pad 2900 onward), **per frame**. In that run the report printed site
+   names containing a parenthesis as empty (fixed since). The sites below
+   are identified from the window's `[gfx]` and `[decoupled]` lines, except
+   where marked unresolved.
+
+   | | per frame | what |
+   |---|---|---|
+   | G1 | 1,656 + 548 | `processGIFPacket` and image continuations, all from the game's GIF stage (2 from game hooks). GIF paths 1-3 carry nothing: the VIF1 thread routes every packet. |
+   | G2 | 16 | `writeRegister` from kernel stubs (the draw environment) |
+   | G3 | 340 + 1,096 | transfers begun, payload calls |
+   | G4 | 2 | one site from an unmarked caller, unresolved (the debug snapshot, `drawRegisters`, a host read or the depth probe) |
+   | G5 | 1,516 + 67 + 1,288 + 2 | native meshes with a `GSDrawState`, native effects, one site unresolved (GS `Submit`, `TEXFLUSH` or `FINISH`), presents |
+   | G6 | ~16,400 | page-bookkeeping entries. The largest are `gsMarkPages` 3,785, `pendingDrawsTouch` 1,496, `gsMarkBlocks` 1,395, `pendingDrawsTouchOthers` 1,305, `notePending` 1,249, `gsMarkCoveredPages` 1,111, `canPatchHostWrite` 888, `transferConflicts` 887, `sourcePagesFor` 808, `markReadPagesCt32` 677, `GsTextureCache::invalidate` 565. 80% of converted draws (75,575 of 94,995) entered it. GS memory held: 4 MiB local (the backend's own) plus 4 MiB host writes. |
+   | T | ~5,100 | packets decoded: two converter sites (456 and 4,650, unresolved which is `build2D`). 706 of them came from an unmarked caller. |
+
+   G6 comes from the renderer thread, which no caller scope reaches, so it
+   is attributed by function only. What this says for the order: meshes
+   (G5) and uploads (G3) are the bulk of the traffic, so steps 3 and 4
+   remove most of it. G6 goes with them, because it is the old backend's
+   way of handling exactly those calls.
 2. **The interface and an empty renderer.** Record types, the queue, and the
    renderer class presenting a cleared scene target. Behind its own switch
    inside the native flag, so the current native path keeps working until

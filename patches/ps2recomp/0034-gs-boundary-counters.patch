@@ -1,9 +1,9 @@
 diff --git a/ps2xRuntime/include/runtime/gs/gs_boundary.h b/ps2xRuntime/include/runtime/gs/gs_boundary.h
 new file mode 100644
-index 0000000..17257d9
+index 0000000..cac3e43
 --- /dev/null
 +++ b/ps2xRuntime/include/runtime/gs/gs_boundary.h
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,174 @@
 +#pragma once
 +
 +#include <atomic>
@@ -74,11 +74,12 @@ index 0000000..17257d9
 +{
 +    const char *name;
 +    Kind kind;
++    bool signature; // name is a __PRETTY_FUNCTION__, shortened when printed
 +    std::atomic<uint64_t> counts[kFromCount]{};
 +    std::atomic<bool> linked{false};
 +    Site *next = nullptr;
 +    uint64_t reported[kFromCount]{}; // the reporting thread's last read
-+    Site(const char *n, Kind k) : name(n), kind(k) {}
++    Site(const char *n, Kind k, bool sig = false) : name(n), kind(k), signature(sig) {}
 +};
 +
 +inline std::atomic<Site *> &head()
@@ -96,21 +97,24 @@ index 0000000..17257d9
 +    return on;
 +}
 +
-+// "ret ns::Class::method(args)" (__PRETTY_FUNCTION__) to "Class::method".
-+inline std::string shortName(const char *name)
++// A site's printed name: a signature ("ret *ns::Class::method(args)",
++// __PRETTY_FUNCTION__) shortened to "Class::method", any other as it is.
++inline std::string shortName(const Site &site)
 +{
-+    std::string s(name);
++    std::string s(site.name);
++    if (!site.signature)
++        return s;
 +    const size_t open = s.find('(');
 +    if (open != std::string::npos)
-+    {
 +        s.resize(open);
-+        const size_t space = s.rfind(' ');
-+        if (space != std::string::npos)
-+            s.erase(0, space + 1);
-+        for (const char *ns : {"dq8::gfx::", "SdlGpuBackend::Impl::"})
-+            if (s.compare(0, std::strlen(ns), ns) == 0)
-+                s.erase(0, std::strlen(ns));
-+    }
++    const size_t space = s.rfind(' ');
++    if (space != std::string::npos)
++        s.erase(0, space + 1);
++    while (!s.empty() && (s[0] == '*' || s[0] == '&'))
++        s.erase(0, 1);
++    for (const char *ns : {"dq8::gfx::", "SdlGpuBackend::Impl::"})
++        if (s.compare(0, std::strlen(ns), ns) == 0)
++            s.erase(0, std::strlen(ns));
 +    return s;
 +}
 +
@@ -126,7 +130,7 @@ index 0000000..17257d9
 +    const From from = t_from;
 +    if (site.counts[from].fetch_add(n, std::memory_order_relaxed) == 0u && warnEnabled())
 +        std::fprintf(stderr, "[gs-boundary] first: %s %s from %s\n", kKindNames[site.kind],
-+                     shortName(site.name).c_str(), kFromNames[from]);
++                     shortName(site).c_str(), kFromNames[from]);
 +}
 +
 +// Since the last call (one reporting thread): a summary line of each kind's
@@ -152,7 +156,7 @@ index 0000000..17257d9
 +        if (siteTotal == 0u)
 +            continue;
 +        totals[site->kind] += siteTotal;
-+        sites += std::string("  ") + kKindNames[site->kind] + " | " + shortName(site->name) + ": " +
++        sites += std::string("  ") + kKindNames[site->kind] + " | " + shortName(*site) + ": " +
 +                 std::to_string(siteTotal) + " (" + callers + ")\n";
 +    }
 +    std::string line = "[gs-boundary]";
@@ -162,18 +166,18 @@ index 0000000..17257d9
 +}
 +} // namespace gs_boundary
 +
-+#define GS_BOUNDARY_SITE_(kind, name, n)                                \
-+    do                                                                  \
-+    {                                                                   \
-+        static ::gs_boundary::Site gsBoundarySite_{(name), (kind)};     \
-+        ::gs_boundary::add(gsBoundarySite_, static_cast<uint64_t>(n));  \
++#define GS_BOUNDARY_SITE_(kind, name, n, signature)                                \
++    do                                                                            \
++    {                                                                             \
++        static ::gs_boundary::Site gsBoundarySite_{(name), (kind), (signature)};  \
++        ::gs_boundary::add(gsBoundarySite_, static_cast<uint64_t>(n));            \
 +    } while (0)
 +// One crossing of `kind` at this site, named `name` (a string literal).
-+#define GS_BOUNDARY(kind, name) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, 1u)
++#define GS_BOUNDARY(kind, name) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, 1u, false)
 +// `n` at once (packets decoded, bytes).
-+#define GS_BOUNDARY_N(kind, name, n) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, n)
++#define GS_BOUNDARY_N(kind, name, n) GS_BOUNDARY_SITE_(::gs_boundary::kind, name, n, false)
 +// Named after the enclosing function.
-+#define GS_BOUNDARY_HERE(kind) GS_BOUNDARY_SITE_(::gs_boundary::kind, __PRETTY_FUNCTION__, 1u)
++#define GS_BOUNDARY_HERE(kind) GS_BOUNDARY_SITE_(::gs_boundary::kind, __PRETTY_FUNCTION__, 1u, true)
 diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
 index 9c54919..2930ea4 100644
 --- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
