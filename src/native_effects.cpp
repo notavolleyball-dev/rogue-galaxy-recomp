@@ -1576,10 +1576,8 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         read.target = rg::nativeproducer::captureTarget(q.base);
         read.rect = {static_cast<int32_t>(q.x), static_cast<int32_t>(q.y), static_cast<int32_t>(q.x + q.width),
                      static_cast<int32_t>(q.y + q.height)};
+        // The presenting thread answers it (step 7d), nothing on the GS queue.
         const uint32_t id = native::beginColorRead(read);
-        GSNativeEffect marker{};
-        marker.command = native::kServeCommand;
-        rg::vif1::submitEffectFromGame(runtime->gs(), marker);
         thread_local std::vector<uint8_t> rgba;
         if (native::waitColorRead(id, rgba, 2000u))
         {

@@ -20,6 +20,7 @@ in each step's record.
 | 5b: CBlur green-to-alpha natively | `95b2ae7` | no `SubmitNativeEffect` on the walk; CBlur looks as before |
 | 7c: colour captures from the renderer | `95b2ae7` | the menu and fades show the right frame; colour reads are served, none failed |
 | 5c: object layers drawn by the producer | `7dc4a97` | no boxes around characters, which still draw whole |
+| 7d: the pipeline's own present (patch 0036) | this commit | no `GS present (PMODE, DISPFB)`; window, screenshots and F1 menu as before; colour reads served with no marker on the GS queue |
 | `tools/native-check.sh` | `1c52b19` | prints PASS/FAIL per check from a run log |
 
 **To resume:**
@@ -36,8 +37,6 @@ in each step's record.
    below.
 
 **Not built yet:**
-- **7d:** the pipeline's own present, driven by the flip hook instead of
-  the GS present (G5). It also replaces 7c's marker on the GS queue.
 - **The structural check:** no `GS` object at all.
 - **Step 6's remainders:** G1 raw packets, TEXFLUSH, 540 G3 transfers, and
   the 2D pieces whose source is unknown.
@@ -746,9 +745,27 @@ build that compiles is not "done".
       capture of which target, and when that range is uploaded as a
       texture, copy target to texture. This is the upscale-friendly one.
 
-   **7d, present.** The pipeline presents through the GS's present (G5,
-   PMODE/DISPFB). The structural check needs a native present driven by
-   the flip hook.
+   **7d, present (built 2026-11-04, not yet run).**
+   - **Pass:** under the pipeline, `tools/native-check.sh` shows no `GS
+     present (PMODE, DISPFB)`. The window, the screenshots and the F1 menu
+     look as before, also with the game paused. The menu capture and fades
+     still show the right frame, with colour reads served and none failed.
+   - Patch 0036 gives the runtime's presenter loop a host hook
+     (`ps2SetHostPresentHook`, its own header). At a new vsync, a hook that
+     returns true has shown the frame, and the GS latch is skipped.
+   - The game's hook (`presentNative` in src/graphics.cpp) presents when the
+     flip counter moved. The flip hook pushes the Present record before it
+     counts the flip. Without a flip for 200 ms it presents at every vsync.
+   - The backend's `presentNativeFrame` is `PreparePresentation` with no
+     GS request: the renderer's scene into a presentation slot, then the
+     usual window display, screenshot download and capture.
+   - Under the pipeline the flip no longer prepares a GS presentation on
+     the game thread.
+   - Colour reads: the hook calls `serveNativeReads` at every pass of the
+     presenter loop. The 7c marker (`kServeCommand`) is gone, and so is its
+     G5 `SubmitNativeEffect`.
+   - The hook writes the screenshots itself, in the GS latch's format and
+     naming.
 8. **Features**: TAA/upscaling first, then shadows, then RT, each on the R
    counters it needs.
 

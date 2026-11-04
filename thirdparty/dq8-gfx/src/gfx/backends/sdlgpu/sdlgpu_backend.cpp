@@ -3488,17 +3488,6 @@ struct SdlGpuBackend::Impl {
     bool submitEffect(const GSNativeEffect &effect) {
         if ((effect.command & dq8::gfx::hostreads::kCommandMask) == dq8::gfx::hostreads::kCommand)
             return serveHostRead(effect.command & 0xFFFFu);
-        // The native pipeline's colour reads (step 7c), in the order drawn:
-        // what is pending goes to the GPU first.
-        if (effect.command == native::kServeCommand) {
-            if (native::enabled() && device.valid()) {
-                std::string error;
-                if (!device.submitPending(error))
-                    std::fprintf(stderr, "[native-pipeline] before colour reads: %s\n", error.c_str());
-                nativeRenderer.serveColorReads(device.handle());
-            }
-            return true;
-        }
         if (effect.command != GSNativeEffect::kSprites) {
             resolveDeferredFlip(false);
             return device.valid() && layerCommand(effect);
@@ -6911,7 +6900,7 @@ void SdlGpuBackend::SubmitNativeEffect(const GSNativeEffect &effect) {
     std::lock_guard lock(m_impl->mutex);
     Impl::ScopedTimer timer(m_impl->backendNanos);
     // A host read rides the effect queue but draws nothing: not counted.
-    if ((effect.command & hostreads::kCommandMask) == hostreads::kCommand || effect.command == native::kServeCommand) {
+    if ((effect.command & hostreads::kCommandMask) == hostreads::kCommand) {
         m_impl->submitEffect(effect);
         return;
     }
@@ -7218,8 +7207,30 @@ PresentationFrame SdlGpuBackend::Present(const GSPresentationRequest &request) {
 }
 
 GSPresentationTicket SdlGpuBackend::PreparePresentation(const GSPresentationRequest &request) {
+    return prepare(&request);
+}
+
+PresentationFrame SdlGpuBackend::presentNativeFrame() {
+    return DisplayPreparedPresentation(prepare(nullptr));
+}
+
+void SdlGpuBackend::serveNativeReads() {
+    if (!native::colorReadsWaiting())
+        return;
+    std::lock_guard lock(m_impl->mutex);
+    if (!native::enabled() || !m_impl->device.valid())
+        return;
+    // What is pending goes to the GPU first.
+    std::string error;
+    if (!m_impl->device.submitPending(error))
+        std::fprintf(stderr, "[native-pipeline] before colour reads: %s\n", error.c_str());
+    m_impl->nativeRenderer.serveColorReads(m_impl->device.handle());
+}
+
+// Null `request`: the native pipeline's present, not the GS's.
+GSPresentationTicket SdlGpuBackend::prepare(const GSPresentationRequest *request) {
     auto prepared = m_impl->leasePresentation();
-    prepared->sourceVsyncTick = request.vsyncTick;
+    prepared->sourceVsyncTick = request ? request->vsyncTick : 0u;
     auto &slot = prepared->pool->slots[prepared->slot];
     Impl::PresentStage stage;
     {
@@ -7237,9 +7248,15 @@ GSPresentationTicket SdlGpuBackend::PreparePresentation(const GSPresentationRequ
         m_impl->reportStats();
         m_impl->lastError.clear();
         m_impl->applyRequestedScale();
-        // The frame's depth, for the game's Z reads of a later frame.
-        m_impl->captureDepthProbes();
-        m_impl->acquirePresentation(request, stage);
+        if (request) {
+            // The frame's depth, for the game's Z reads of a later frame.
+            m_impl->captureDepthProbes();
+            m_impl->acquirePresentation(*request, stage);
+        } else if (m_impl->window != nullptr) {
+            ++m_impl->stats.presents;
+            stage.gsActive = true;
+            m_impl->stats.nativePresents += m_impl->presentNative(stage) ? 1u : 0u;
+        }
         m_impl->finishPresentation(stage);
         if (!m_impl->lastError.empty())
             throw std::runtime_error(m_impl->lastError);

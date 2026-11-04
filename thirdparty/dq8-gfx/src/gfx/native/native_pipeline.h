@@ -62,16 +62,16 @@ bool readDepth(const DepthBlock &block, std::vector<float> &out);
 // Step 7c: the game's colour reads (the fade's and the menu's frame
 // captures), from what the renderer drew last, each game pixel the mean of
 // the pixels it covers. The caller opens a read and waits; the renderer's
-// owner, on its GPU thread, calls Renderer::serveColorReads when it reaches
-// the caller's marker (kServeCommand, in the order of what was drawn: until
-// the pipeline drives its own present, it rides the old backend's queue).
+// owner's presenting thread, which runs beside the game's (step 7d), sees
+// colorReadsWaiting and calls Renderer::serveColorReads.
 struct ColorRead
 {
     Id target = 0;
     Rect rect; // in the target's game pixels
 };
-constexpr uint32_t kServeCommand = 0x4E520000u; // the marker, distinct from any other command
 uint32_t beginColorRead(const ColorRead &read);
+// Any thread: a read was opened and not answered yet.
+bool colorReadsWaiting();
 // RGBA8, rows in order, alpha as the game's (0x80 is 1.0). False when the
 // renderer could not serve it, or did not within `timeoutMs`.
 bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs);

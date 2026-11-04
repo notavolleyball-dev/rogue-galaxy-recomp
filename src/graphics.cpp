@@ -49,6 +49,8 @@
 #include "gfx/backends/sdlgpu/sdlgpu_backend.h"
 #include "gfx/backends/sdlgpu/sdlgpu_targets.h"
 #include "gfx/native/native_pipeline.h"
+#include "ps2_host_present.h"
+#include "runtime/ps2_pad_host.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_native_iop.h"
 #include "runtime/ps2_pad_host.h"
@@ -345,6 +347,76 @@ bool SDLCALL countMarkKeys(void *, SDL_Event *event)
 // Called once per frame by the runtime when the backend owns the window:
 // services SDL events (the menu takes its own first) and hands the host pad
 // to the runtime.
+// DQ8_GFX_SCREENSHOT_DIR/_EVERY for the native present, as the GS's latch
+// writes them: frame_<guest vsync>.ppm.
+void writeNativeScreenshot(const PresentationFrame &frame)
+{
+    static const char *directory = std::getenv("DQ8_GFX_SCREENSHOT_DIR");
+    static const uint64_t every = [] {
+        const char *value = std::getenv("DQ8_GFX_SCREENSHOT_EVERY");
+        const long long parsed = value ? std::atoll(value) : 0;
+        return parsed > 0 ? static_cast<uint64_t>(parsed) : 60ull;
+    }();
+    if (!directory || !*directory || frame.width == 0u || frame.height == 0u)
+        return;
+    const uint32_t pitch = frame.rowPitchBytes ? frame.rowPitchBytes : frame.width * 4u;
+    if (frame.pixels.size() < static_cast<size_t>(pitch) * frame.height)
+        return;
+    const uint64_t tick = ps2PadCurrentGuestFrame();
+    static uint64_t lastWritten = UINT64_MAX;
+    if (lastWritten != UINT64_MAX && tick < lastWritten + every)
+        return;
+    lastWritten = tick;
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/frame_%06llu.ppm", directory, static_cast<unsigned long long>(tick));
+    FILE *out = std::fopen(path, "wb");
+    if (!out)
+        return;
+    std::fprintf(out, "P6\n%u %u\n255\n", frame.width, frame.height);
+    std::vector<uint8_t> rgb(static_cast<size_t>(frame.width) * 3u);
+    for (uint32_t y = 0; y < frame.height; ++y)
+    {
+        const uint8_t *row = frame.pixels.data() + static_cast<size_t>(y) * pitch;
+        for (uint32_t x = 0; x < frame.width; ++x)
+            std::memcpy(rgb.data() + x * 3u, row + x * 4u, 3u);
+        std::fwrite(rgb.data(), 1, rgb.size(), out);
+    }
+    std::fclose(out);
+}
+
+// Step 7d of docs/NATIVE-PIPELINE.md: under the pipeline the presenting
+// thread shows the frame each flip closed (flip_pacing.cpp pushes its Present
+// record) through the backend's native present, in place of the GS's display
+// (PMODE/DISPFB). It also answers the game's colour reads, which wait on
+// the game's thread beside it. Without a flip for 200 ms (the game is not
+// drawing frames of its own) the last frame is shown at every vsync, so the
+// window and the menu keep up.
+bool presentNative(void *userData, bool newTick)
+{
+    if (!dq8::gfx::native::enabled())
+        return false;
+    auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
+    backend->serveNativeReads();
+    if (!newTick)
+        return true;
+    using Clock = std::chrono::steady_clock;
+    static uint64_t shownFlip = 0u;
+    static Clock::time_point flipAt{};
+    const uint64_t flips = rg::graphics::guestFlips();
+    const Clock::time_point now = Clock::now();
+    if (flips != shownFlip)
+    {
+        shownFlip = flips;
+        flipAt = now;
+    }
+    else if (now - flipAt < std::chrono::milliseconds(200))
+        return true;
+    const PresentationFrame frame = backend->presentNativeFrame();
+    if (frame.mode == GSPresentationMode::HostPixels)
+        writeNativeScreenshot(frame);
+    return true;
+}
+
 bool pump(void *userData)
 {
     auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
@@ -855,6 +927,7 @@ Setup::Setup(PS2Runtime &runtime)
                                 initialWindowPlacement(settings)))
             {
                 runtime.setExternalPresenter(&pump, sdl.get());
+                ps2SetHostPresentHook(&presentNative, sdl.get());
                 if (!sdl->supportsPresentMode(settings.display.presentMode))
                 {
                     settings.display.presentMode = SDL_GPU_PRESENTMODE_VSYNC;

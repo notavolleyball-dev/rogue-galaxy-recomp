@@ -331,8 +331,19 @@ public:
     SdlGpuStats stats() const;
     void resetStats();
 
+    // The native pipeline's own present (step 7d of the game's
+    // docs/NATIVE-PIPELINE.md; Rogue Galaxy: added): the renderer's scene
+    // into the window, with no GS display registers and nothing on the GS
+    // queue. The presenting thread calls it for each frame a flip closed.
+    // The frame carries host pixels when screenshots are on.
+    PresentationFrame presentNativeFrame();
+    // Answers the native pipeline's waiting colour reads from what was drawn
+    // last. Any thread; a no-op when none wait.
+    void serveNativeReads();
+
 private:
     void beginTransfer(const GSTransferCommand &command);
+    GSPresentationTicket prepare(const GSPresentationRequest *request);
     friend std::unique_ptr<SdlGpuBackend> createSdlGpuBackend(std::string &error);
 
     struct Impl;

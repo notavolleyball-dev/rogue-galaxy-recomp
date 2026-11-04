@@ -120,6 +120,16 @@ uint32_t beginColorRead(const ColorRead &read)
     return id;
 }
 
+bool colorReadsWaiting()
+{
+    ColorMailbox &m = colorMailbox();
+    std::lock_guard lock(m.mutex);
+    for (const auto &entry : m.entries)
+        if (!entry.second.finished)
+            return true;
+    return false;
+}
+
 bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs)
 {
     ColorMailbox &m = colorMailbox();

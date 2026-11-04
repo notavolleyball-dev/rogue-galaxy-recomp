@@ -1,5 +1,5 @@
 #!/bin/bash
-# The native pipeline's pass criteria (docs/NATIVE-PIPELINE.md, steps 5b-7c)
+# The native pipeline's pass criteria (docs/NATIVE-PIPELINE.md, steps 5b-7d)
 # from a run's log: build/run/NAME.log. Prints one line per check.
 #   tools/native-check.sh NAME
 set -u
@@ -21,6 +21,7 @@ verdict "7a: no GS::writeRegister" "$(total 'GS::writeRegister')"
 verdict "7a: no GS::drawRegisters" "$(total 'GS::drawRegisters (the register file)')"
 verdict "7b: no depthprobe::read" "$(total 'depthprobe::read (depth by GS address)')"
 verdict "7c: no hostreads::begin" "$(total 'hostreads::begin (a target by GS address)')"
+verdict "7d: no GS present" "$(total 'GS present (PMODE, DISPFB)')"
 verdict "5b/5c: no SubmitNativeEffect" "$(total 'renderer SubmitNativeEffect (GS buffers, registers)')"
 echo "INFO  5b: green-to-alpha ops made: $(count 'made green to alpha')"
 echo "INFO  5c: objects routed: $(count 'object layers: routed'), tails made: $(count 'tails made'), put back: $(count 'put back for packets')"
