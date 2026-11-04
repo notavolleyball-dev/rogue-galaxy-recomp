@@ -52,7 +52,7 @@ struct Counts
     uint64_t opsFromNothing = 0, opsFromTarget = 0, opsFromTexture = 0, opsFromUnknown = 0, opsFromLayer = 0;
     // Step 5b: 2D pieces and effects made window-space mesh draws, and why not.
     uint64_t pieces = 0, piecesMade = 0, piecesNoState = 0, piecesNoTarget = 0, piecesNoSource = 0;
-    uint64_t piecesFogged = 0, piecesFromTarget = 0, piecesSubTarget = 0;
+    uint64_t piecesFogged = 0, piecesFromTarget = 0, piecesSubTarget = 0, piecesCt24 = 0;
     uint64_t effectsMade = 0, effectsRefused = 0, opsMade = 0, opsNoTarget = 0, opsNoSource = 0, opsLayer = 0;
     uint64_t opsGreenToAlpha = 0, opsFeedback = 0, opsDepth = 0;
 };
@@ -145,7 +145,8 @@ std::string statsLine()
                        " / a texture " + d(n.opsFromTexture, r.opsFromTexture) + " / a layer " +
                        d(n.opsFromLayer, r.opsFromLayer) + " / unknown " + d(n.opsFromUnknown, r.opsFromUnknown) +
                        " | 2D pieces " + d(n.pieces, r.pieces) + ": made " + d(n.piecesMade, r.piecesMade) +
-                       " (from a target " + d(n.piecesFromTarget, r.piecesFromTarget) + ", fog dropped " +
+                       " (from a target " + d(n.piecesFromTarget, r.piecesFromTarget) + ", as CT24 " +
+                       d(n.piecesCt24, r.piecesCt24) + ", fog dropped " +
                        d(n.piecesFogged, r.piecesFogged) + "), to the GS: no state " +
                        d(n.piecesNoState, r.piecesNoState) + ", target not declared " +
                        d(n.piecesNoTarget, r.piecesNoTarget) + ", source unknown " +
@@ -691,8 +692,7 @@ bool blendOf(uint64_t alpha, native::Material &m)
     return known;
 }
 
-// The alpha and depth tests TEST means, with ZBUF's mask. False where it
-// asks for what nothing here does (the destination alpha test).
+// The alpha, destination alpha and depth tests TEST means, with ZBUF's mask.
 bool testOf(uint64_t test, bool zmask, native::Material &m)
 {
     if (test & 1u)
@@ -708,7 +708,9 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
                                                   native::Compare::GreaterEqual, native::Compare::Greater};
     m.depthTest = zte ? depths[(test >> 17) & 3u] : native::Compare::Always;
     m.depthWrite = !zmask && m.depthTest != native::Compare::Never;
-    return ((test >> 14) & 1u) == 0u;
+    // DATE, by DATM: the pixels whose alpha bit 7 is DATM's.
+    m.destinationAlphaTest = ((test >> 14) & 1u) ? static_cast<int8_t>((test >> 15) & 1u) : int8_t(-1);
+    return true;
 }
 
 // Locked. The material the draw state means; false where some part of it
@@ -1103,6 +1105,18 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState)
         }
         if (m.sourceTarget)
             ++s.counts.piecesFromTarget;
+        // A buffer read as CT24 (the character layers are, by the scene):
+        // the GS takes its alpha from TEXA, not the buffer, 0 for black
+        // texels with AEM. A 16-bit view of a 32-bit buffer has no meaning
+        // here yet.
+        if (m.sourceTarget && (c.tex0.psm & 0x3Fu) == 0x01u)
+        {
+            m.fixedTextureAlpha = drawState->texa.ta0;
+            m.alphaZeroOnBlack = drawState->texa.aem;
+            ++s.counts.piecesCt24;
+        }
+        else if (m.sourceTarget && (c.tex0.psm & 0x3Fu) != 0x00u)
+            known = false;
         // build2D's texel UVs (FST) carry the flag in the source's top bit.
         const bool texels = (h.source & 0x80000000u) != 0u;
         m.textureWidth = texels ? 1u : static_cast<uint16_t>(1u << std::min<uint32_t>(c.tex0.tw, 10u));

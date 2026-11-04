@@ -453,6 +453,19 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
             mu.mode[1] = static_cast<uint32_t>(m.function);
             mu.mode[2] = m.textureAlpha ? 1u : 0u;
         }
+        if (m.destinationAlphaTest >= 0)
+        {
+            // The target's alpha, from the copy, at the pixel (the palette
+            // slot, which an Index8 texture would need too).
+            if (!copy || n != first || mu.mode[0] == 2u)
+            {
+                ++m_meshCounts.feedback;
+                continue;
+            }
+            palette = copy;
+            mu.texa[2] = 1.0f + float(m.destinationAlphaTest);
+            ++m_meshCounts.destinationAlpha;
+        }
         SDL_GPUGraphicsPipeline *pipeline = meshPipeline(device, pipelineKey(m, depthAttached));
         if (!pipeline)
         {
@@ -650,14 +663,18 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
             depthInfo.clear_depth = 0.0f;
         }
-        // A draw that reads the target it draws into reads a copy taken
-        // just before it: the pass ends there, and the next one loads.
+        // A draw that reads the target it draws into (its texels, or its
+        // alpha for the destination alpha test) reads a copy taken just
+        // before it: the pass ends there, and the next one loads.
+        const auto readsTarget = [&](const MeshDraw &d) {
+            return d.material.sourceTarget == target || d.material.destinationAlphaTest >= 0;
+        };
         size_t a = first;
         while (a < j)
         {
-            const bool reads = m_frameMeshes[a].material.sourceTarget == target;
+            const bool reads = readsTarget(m_frameMeshes[a]);
             size_t b = a + 1;
-            while (b < j && m_frameMeshes[b].material.sourceTarget != target)
+            while (b < j && !readsTarget(m_frameMeshes[b]))
                 ++b;
             SDL_GPUTexture *copy = nullptr;
             if (reads)

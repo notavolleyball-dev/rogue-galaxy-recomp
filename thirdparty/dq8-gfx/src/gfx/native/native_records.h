@@ -158,6 +158,9 @@ struct Material
     Compare alphaTest = Compare::Always;
     uint8_t alphaRef = 0;
     AlphaFail alphaFail = AlphaFail::Nothing;
+    // Drawn only where the target's alpha is below 0x80 (0) or at least
+    // 0x80 (1), as it was before the draw; -1: everywhere.
+    int8_t destinationAlphaTest = -1;
     // Depth grows toward the camera (reversed): Greater passes a nearer pixel.
     Compare depthTest = Compare::Always;
     bool depthWrite = false;

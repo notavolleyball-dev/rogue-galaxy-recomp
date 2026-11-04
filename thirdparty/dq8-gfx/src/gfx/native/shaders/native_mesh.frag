@@ -23,7 +23,9 @@ layout(set = 3, binding = 0) uniform Material {
     vec4 blend;
     vec4 fogColor; // 0-1
     // x: the texel's alpha replaced by this (0-255) when not negative (a
-    // CT24 read); y: then 0 where the texel is black (AEM)
+    // CT24 read); y: then 0 where the texel is black (AEM); z: the
+    // destination alpha test, 0 none, 1 drawn where the target's alpha is
+    // below 0x80, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
 } material;
 
@@ -46,6 +48,12 @@ bool passes(uint compare, float a, float ref) {
 }
 
 void main() {
+    if (material.texa.z > 0.0) {
+        // Stored as A / 0x80: bit 7 set is 1.0.
+        bool high = texelFetch(palette, ivec2(gl_FragCoord.xy), 0).a >= 0.999;
+        if (high != (material.texa.z > 1.5))
+            discard;
+    }
     // The vertex color as the GS takes it: truncated to integers 0-255.
     vec4 f = clamp(floor(inColor), 0.0, 255.0);
     vec4 c = f;

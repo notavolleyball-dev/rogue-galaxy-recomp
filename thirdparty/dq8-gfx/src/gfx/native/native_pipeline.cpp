@@ -551,7 +551,7 @@ std::string Renderer::statsLine()
             ", texture not held " + d(mc.noTexture, mr.noTexture) + ", no pipeline " +
             d(mc.noPipeline, mr.noPipeline) + ", source target never drawn " +
             d(mc.sourceNotDrawn, mr.sourceNotDrawn) + ", reading its own target uncopied " + d(mc.feedback, mr.feedback) + ", copies for those that do " +
-            d(mc.copies, mr.copies) +
+            d(mc.copies, mr.copies) + " (destination alpha tests " + d(mc.destinationAlpha, mr.destinationAlpha) + ")" +
             "; window space " + d(mc.window, mr.window) + ", from a target " + d(mc.fromTarget, mr.fromTarget) +
             "; a second depth target in a pass " +
             d(mc.depthMismatch, mr.depthMismatch) + "\n";

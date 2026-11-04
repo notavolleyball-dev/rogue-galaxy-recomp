@@ -122,7 +122,7 @@ private:
     {
         uint64_t drawn = 0, offscreen = 0, noTarget = 0, depthAsColor = 0, depthMismatch = 0, passes = 0;
         uint64_t noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
-        uint64_t window = 0, fromTarget = 0, sourceNotDrawn = 0, feedback = 0, copies = 0;
+        uint64_t window = 0, fromTarget = 0, sourceNotDrawn = 0, feedback = 0, copies = 0, destinationAlpha = 0;
     };
     struct GpuTarget
     {

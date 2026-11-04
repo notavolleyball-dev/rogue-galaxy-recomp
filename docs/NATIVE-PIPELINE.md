@@ -542,12 +542,26 @@ build that compiles is not "done".
      - Layers were drawn past their declared height, so composites read
        nothing.
 
+     **Characters, found (2026-11-04):** the scene reads the character
+     layers as **PSMCT24**, so the alpha comes from TEXA (TA0, and 0 for
+     black texels with AEM), not from the layer. Effect ops already did
+     this; 2D pieces now do too (1,957 a window). The Hooded Man now shows
+     solid.
+
+     The **destination alpha test** (DATE/DATM) is now drawn too
+     (`Material::destinationAlphaTest`). The draw reads the target's alpha
+     at its pixel from a copy taken just before it, as draws reading their
+     own target do. 60 a window.
+
      **Open:**
-     - **Characters are half transparent.** Their layers are composited
-       with vertex alpha about 64 times the layer's alpha. The GS shows them
-       solid, so either the layer's alpha goes above 0x80 there (our 8-bit
-       targets store A / 0x80 and clamp it), or another draw gives the
-       rest. Not yet known which.
+     - **Dark boxes around characters**, and Jaster still partly
+       translucent in some frames. Just before each composite, a sprite
+       covers the layer's box with texture 72, color (16,16,16), alpha
+       test GEQUAL 40 and a depth test. It's flagged unknown for a reason
+       not yet named, and it isn't DATE. Next: name its unknown reason (its
+       raw FRAME, TEST and FBA) and compare the layer's pixels against the
+       GS's at the same frame (`tools/bench/vram2png.py` decodes CT32 at a
+       base).
      - The minimap has a dark panel behind it.
      - Fog on 2D pieces is dropped (1,038 a window): its F is per vertex.
      - CBlur's green-to-alpha is still on the GS.
