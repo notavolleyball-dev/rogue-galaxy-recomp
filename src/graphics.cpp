@@ -34,6 +34,7 @@
 #include "scene_timing.h"
 #include "settings_pages.h"
 #include "shop_prices.h"
+#include "texture_pack.h"
 #include "vif1_thread.h"
 #include "hud_size.h"
 #include "inventory.h"
@@ -243,6 +244,8 @@ void applyGameOption(const std::string &key, bool on)
         rg::loading::setInstantRecap(on);
     else if (key == "instant_text")
         rg::instanttext::setEnabled(on);
+    else if (key.rfind("texture_pack_", 0) == 0)
+        rg::texturePack::setPackEnabled(key.substr(13), on);
     else if (key == "japanese_voices")
         rg::voicelanguage::setEnabled(on);
     else if (key == "full_bag_to_storage")
@@ -538,7 +541,7 @@ bool pump(void *userData)
         if (const rg::updates::Release newer = rg::updates::newer(); !newer.version.empty())
         {
             releaseTold = true;
-            g_menu->notify("Version " + newer.version + " is out: F1, then Rogue Galaxy > About", dq8::ui::Icon::Info,
+            g_menu->notify("Version " + newer.version + " is out: run Update.bat, or see F1 > Rogue Galaxy > About", dq8::ui::Icon::Info,
                            10.0);
         }
     }
@@ -636,6 +639,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     dq8::ui::HostServices host;
     host.version = RG_APP_VERSION;
     host.revision = RG_REVISION;
+    // Steam sets SteamDeck=1 on the Deck, natively and under Proton.
+    host.steamDeck = env("SteamDeck", "0") == "1";
     // RG_MUTE=1 keeps the game silent whatever the menu's volume says.
     const bool mute = env("RG_MUTE", "0") != "0";
     host.setVolume = [mute](float volume) { ps2_native_iop::setVolume(mute ? 0.0f : volume); };
@@ -778,7 +783,7 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "ones; the text stays as it is. It needs that disc's files: run Install-Undub.bat in the game's folder "
          "once and pick your Japanese disc image. Without them the voices stay English. A few lines have no "
          "Japanese voice and play silent. Takes effect the next time the game starts.",
-         false, 0, 0, 0, "", 1, true, true, true},
+         false, 0, 0, 0, "", 1, true, true, "language"},
         {"native_renderer", "Native renderer",
          "The models and the post effects (the glare, the bloom, the shadows, the soft edges of characters) are "
          "drawn by the PC's renderer instead of through an emulation of the PS2's graphics chip, which is much "
@@ -793,6 +798,18 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "not let you skip, which can leave the story out of order.",
          false},
     };
+    // One switch for each pack found, on a page of their own in the menu (F1 > Settings > Textures).
+    for (const rg::texturePack::PackInfo &pack : rg::texturePack::packs())
+    {
+        dq8::ui::GameOption option{"texture_pack_" + pack.key, "Pack: " + pack.name,
+                                   "The game's art is drawn from this pack's " + std::to_string(pack.regions) +
+                                       " pictures, where it has them: 2D art above 1x, a PCSX2 pack's 3D at any "
+                                       "scale. Packs are read by name, a later one over an earlier one, textures\\hd "
+                                       "first.",
+                                   pack.enabled};
+        option.page = "textures";
+        host.gameOptions.push_back(std::move(option));
+    }
     host.gameSections = {
         {"sixty_fps", "Camera and view"},
         {"skip_opening", "Convenience"},
@@ -886,6 +903,12 @@ Setup::Setup(PS2Runtime &runtime)
         {
             settings.fullscreen = true;
         }
+        // Steam keeps the Deck's Steam button: View + Menu is the only way to
+        // the game's menu there, so it cannot be left off.
+        if (env("SteamDeck", "0") == "1")
+        {
+            settings.backStartOpensMenu = true;
+        }
         uint32_t runScale = settings.resolutionScale;
         if (const std::string scale = env("RG_GS_SCALE", ""); !scale.empty())
         {
@@ -915,6 +938,7 @@ Setup::Setup(PS2Runtime &runtime)
         dq8::gfx::setDiscardImportQuery([] { return rg::nativerenderer::enabled(); });
         // Aspect ratio Auto follows the Widescreen option.
         sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
+        rg::texturePack::install(*sdl);
         sdl->setSideImageLoader(&loadBorderImage);
         if (noWindow)
         {

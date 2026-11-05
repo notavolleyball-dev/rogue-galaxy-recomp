@@ -196,6 +196,34 @@ or two, water, lava and waterfalls, each planet's first enemy area, save
 points and the other warps, space and the planet select, menus with models,
 story scenes, the first-person view.
 
+## Status (2026-11-03)
+
+The emulated GS path draws everything by default. Phase 1 is built for every
+VU1 program the recordings hold, behind `RG_VU1_NATIVE` (`src/vu1_native.h`),
+off unless set; `gpu` sends their chunks as meshes the GPU transforms. The
+F1 menu's "Native renderer" switch (the Game page's Rendering section;
+`native_renderer` in settings.ini, `RG_NATIVE_RENDERER=0` or `1` for a run;
+`src/native_renderer.h`, `aaec68f`) is what the native side goes behind as
+it lands; nothing reads it yet, and `RG_VU1_NATIVE` does not follow it.
+Notes marked *Status* below say where the code went another way than this
+plan.
+
+The renderer documents:
+
+- [NATIVE-RENDERER.md](NATIVE-RENDERER.md) (this file): the plan, phases 0
+  to 6, for a renderer that knows what it draws in place of the GS emulation.
+- [VU1-NATIVE.md](VU1-NATIVE.md): how a VU1 program moves off the VU1 (the
+  oracle loop, the pieces, VU1 data memory), what is done, and its speed.
+- [VU1-RECON.md](VU1-RECON.md): what VU1 data memory gives a temporal
+  upscaler: the capture, object identity, jitter and cameras; the
+  motion-vector pass is not built.
+- [GS-AUDIT.md](GS-AUDIT.md): where the field walk's GPU frame goes with
+  every program native, what was cut on 2026-10-29, and what is left.
+- [GS-PASS-GRAPH.md](GS-PASS-GRAPH.md): one frame of Salgin's first scene,
+  pass by pass (stages A to F).
+- [GS-PERFORMANCE.md](GS-PERFORMANCE.md): the ledger of measurements and
+  candidates on the GS side.
+
 ## Why
 
 The GS path works and is fast on a desktop card, but what it can do is capped
@@ -231,7 +259,7 @@ people expect from a modern port all need data the GS never sees:
 | UI at output resolution, 4:3 UI in widescreen | to know a draw is UI | UI and scene are the same GS sprites ("menus and text are stretched", CHANGELOG) |
 | MSAA, anisotropic filtering, mip control | native targets and samplers | targets alias texture pages; CT32 viewed as T8 |
 | Higher-resolution shadows, PCF | the shadow pass as a pass | the shadow map is a 64x64 / 128x128 GS buffer |
-| Texture replacement packs | a stable texture identity | identity is a VRAM address (`gs_replacement_hash` is in flight) |
+| Texture replacement packs | a stable texture identity | identity is a VRAM address (`gs_replacement_hash` is in flight; *Status:* not built; packs name a texture by a content hash, `src/texture_pack.cpp`) |
 | Lower power on tile GPUs | few passes | 98 snapshot passes; about 470 MB of tile traffic from the blur alone (arithmetic) |
 
 ## What "dropping the GS" means here
@@ -270,7 +298,7 @@ people expect from a modern port all need data the GS never sees:
   hypotheses to check here. Its own renderer is not correct yet.
 - **Verified in this repo:** VU1 data memory holds projection at quads 8-11,
   view 24-27, model 60-63 and their product 72-75 at every draw start
-  captured (`RG_VU1_CAPTURE`, `bc49172`). The microcode manifest
+  captured (`RG_VU1_CAPTURE`, `4e14705`). The microcode manifest
   (`build/vu1-manifest`) shows program starts at pairs 0x64, 0x12C, 0x21C,
   0x320, 0x4C4 and 0x73A. That is a six-slot layout whose pieces the game
   swaps per draw. Across 41 microcode images there are 53 distinct
@@ -331,6 +359,14 @@ cost, but it needs the model formats understood first. The program start
 needs nothing but the VU1 memory layout, which we can capture and verify.
 Phase 6 revisits it.
 
+*Status:* built another way ([VU1-NATIVE.md](VU1-NATIVE.md)). The program is
+identified at its `MSCAL` and each chunk is taken at the `MSCNT` that runs
+it (an `MSCAL 0x64` only ends). `src/vu1_native.cpp` decodes the chunk on
+the CPU into a `GSNativeMesh` (patch 0021; no `NativeMesh`), and one vertex
+shader, `gs_native.vert` in the backend, does the transform, the fixed
+point, fog and the color clamp. The mesh carries each vertex's Z from the
+CPU. Chunks that clip go to the VU1 in every mode (`11b3890`).
+
 **Two steps per family, so features don't wait for CPU savings:**
 
 1. *Replace the output:* the compiled program still runs, keeping every VU1
@@ -368,7 +404,8 @@ order to port them:
 
 Each pass ships twice: a **parity** version that matches the GS path at 1x,
 which is the default, and later an **enhanced** version (HDR intermediate,
-resolution-scaled kernels) behind a menu option.
+resolution-scaled kernels) behind a menu option. (*Status:* the native side
+as a whole is opt-in; see phase 5's note.)
 
 ### Textures without local memory
 
@@ -380,6 +417,10 @@ there, with the view it was drawn as. CLUT loads resolve the same way. The
 reinterpretations the game uses today (CT32 read as T8 for channel shuffles,
 CT16 views of 0x3800) belong to effects. Once those effects are native, the
 census should show none left; any that remain get an explicit case.
+
+*Status:* `gs_replacement_hash` was not built. The texture packs name a
+texture as PCSX2 does, by an XXH3-64 hash of its GS blocks and of its
+palette (`src/texture_pack.cpp`, [TEXTURE_PACKS.md](TEXTURE_PACKS.md)).
 
 ### 2D and UI
 
@@ -406,6 +447,11 @@ hands its setting over. Upstream, the switch alone is victor-takai's PR #15
 (branch `native-renderer-flag`), so native work can go behind it. A debug
 key that flips native pieces live on the same frame is still planned.
 
+*Status:* neither `RG_RENDER` nor `RG_NATIVE` was built. The switch for a
+run is `RG_NATIVE_RENDERER` (the F1 "Native renderer"), which nothing reads
+yet; the VU1 programs have their own modes in `RG_VU1_NATIVE` (`0`, `check`,
+`1`, `skip`, `gpu`).
+
 **Reference scenes:** Salgin's first scene, the town square (`TOWN=1
 walk.sh`), a forced battle (battle bench), the boss gate, an event with an
 item message and a battle dissolve (screen captures), the item menu, a movie.
@@ -416,7 +462,8 @@ item message and a battle dissolve (screen captures), the item menu, a movie.
   hashes, not just the entry), or the EE function on whose behalf a `DIRECT`
   packet was built. That means hooks around the effect functions above and the
   task boundaries, setting the source tag. Extend the `[frame]` dump and the
-  profile cycle to group by it.
+  profile cycle to group by it (both were on the contributor's machine; not
+  in this repository).
 - Log the slot compositions a play session uses, with their draw and vertex
   counts. Map the ledger's heavy tags (`#6bcb`, `#e35a`, `#0970`) to
   compositions.
@@ -548,6 +595,15 @@ sprites too, though with the object layers their sprites become a
 **Done when** the families covering at least 95% of VU1 draw starts in the
 reference scenes draw natively, with no visible difference at 1x and
 measured GPU power within noise of the GS path.
+
+*Status:* built for every recorded program ([VU1-NATIVE.md](VU1-NATIVE.md)),
+without `NativeDrawSink`, `NativePass` or `src/render/`, which were not
+built. `GS::submitNativeMesh` (patch 0021) hands a `GSNativeMesh` to the
+backend in order with the packets; the game's side is `src/vu1_native.cpp`.
+The harness is `rg_vu1_oracle` on `RG_VU1_REPLAY` recordings (`.vu1r`, not
+`build/vu1.cap`; [tools/vu1/oracle/README.md](../tools/vu1/oracle/README.md)),
+and the image check compares `RG_VU1_NATIVE` modes on the same frame
+(`tools/vu1/oracle/native-run.sh`).
 
 ### Phase 2: motion vectors and temporal upscaling
 
@@ -783,7 +839,8 @@ the scene target").
 
 **Done when** Salgin's first scene runs in at most about 25 render passes
 with no snapshot copies or destination copies, and the GPU power measured
-with `gpubusy.sh` falls by an amount recorded in the ledger.
+with `gpubusy.sh` (on the contributor's machine; not in this repository)
+falls by an amount recorded in the ledger.
 
 ### Phase 4: textures and 2D without local memory
 
@@ -1130,6 +1187,11 @@ destination copies, round trips and readbacks from the backend, plus the
 `DQ8_GFX_*` switches that exist only for them. Keep `RG_RENDER=gs` for one
 release as a fallback, then remove it. The backend's device, window,
 present, display filters and menu stay.
+
+*Status:* the direction accepted for this work (issue 10, `aaec68f`,
+`src/native_renderer.h`) keeps the GS path as the default and the fallback,
+with the native side opt-in behind the "Native renderer" switch, which this
+phase's removal would undo.
 
 ### Phase 6: further work (optional, each behind an option)
 
