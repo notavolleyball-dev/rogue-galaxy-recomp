@@ -39,7 +39,7 @@ against `victor-takai/rogue-galaxy-recomp`, each one built fresh from
 | #39 | `split/2-cpu` | direct call table (0026), `lean_pc` (0027), the VU0 matrix program native (0025) | open, built; `rg_vu0_check` 100,000 cases, 0 differ |
 | #40 | `split/3-vu1` | the remaining VU1 program pieces, clipping chunks on the GPU (0028), program identification by code-image hash (0029), backface lists (0030), the menu switch turns the native VU1 programs on, `tools/vu1`, `VU1-NATIVE.md` | open, built; `rg_vu1_oracle --candidate native` over 268 recordings: 4,164 runs, 0 differ |
 | #41 | `split/4-pipeline` | pipeline foundation: `dq8_gfx_native`, backend hosting, producer (textures, palettes, targets, VU1 mesh draws), `src/native_capture.*`, `src/draw_state_mirror.*`, draw registers (0031), `NATIVE-PIPELINE.md` | open, built, **not run in game** |
-| 5 | `split/5-pipeline-frame` | the rest of the frame (below) | not started |
+| 5 | `split/5-pipeline-frame` | effects as sprite draws (`d8d98cc`), 2D through the converter (`47d47f4`); host uploads and local copies next (below) | in progress, built, **not run in game** |
 | 6 | `split/6-fsr` | FSR 1 display filter | not started |
 
 **Before PR 5: run #41 in game.** `RG_NATIVE_RENDERER=1
@@ -76,6 +76,33 @@ draws), the 2D converter, and the draw-register mirror. Only the sdlgpu
 side of the effects is dropped. Main has none of `native_effects.cpp`.
 
 ## PR 5: the rest of the frame
+
+**Progress (2026-11-06).** On `split/5-pipeline-frame`:
+- `d8d98cc`: `GSNativeEffect` moved game-side (`src/native_effect.h`, no
+  patch). `src/native_effects.*` keeps the effect hooks, the builder, the
+  colour filter and the flip's copy. Probes, composites, 2D, store-image
+  and the target/texture hooks (#41's `native_capture`) are out. The
+  producer's `noteEffect`, `effect` and `layerCommand` are back. In the
+  VIF1 thread: the held effect, `listAddress`, list origins gathered when
+  effects are on. A refused effect goes on as its packets, since there's
+  no `SubmitNativeEffect` fallback.
+- `47d47f4`: the converter is `src/native_2d.*` (`rg::native2d::build`
+  and `observe`). There's no owed-register mode: it writes each mesh's PRIM
+  before it, and #41's `draw_state_mirror` gives the state, so there's one
+  mirror. The texel flag is `Piece::texelUvs` plus a `piece()` argument, so
+  patch 0028's `source` isn't needed. Every packet is converted under the
+  pipeline (`RG_NATIVE_2D=0` turns it off); the Prim2D block hooks were
+  dropped as redundant. A refused piece goes to `gs.submitNativeMesh`.
+  `eachPacket` moved to `gif_events.h`.
+
+**Next in PR 5:** host uploads and local copies (items 4 and 5 below). The
+archive only calls `hostUpload` and `noteLocalCopy` from the absorber;
+here, capture them in `sendRaw` while still sending to the GS, so a 2D
+piece reading a non-named upload isn't "source unknown". Then the
+stale-record check (`replaceUpload`, from `withholdUploads`). Composites
+(object layers) need `vif1Cursor` (from the dropped patch 0022): either a
+small new patch or another way to tell a tail's VU1 kicks. Step 7 and the
+tripwire could be PR 6.
 
 Steps 5 to 7 of the branch's `docs/NATIVE-PIPELINE.md`, carved from the
 final code. Read that doc's step records before starting. What has to come
