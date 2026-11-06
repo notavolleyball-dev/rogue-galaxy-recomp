@@ -39,8 +39,9 @@ against `victor-takai/rogue-galaxy-recomp`, each one built fresh from
 | #39 | `split/2-cpu` | direct call table (0026), `lean_pc` (0027), the VU0 matrix program native (0025) | open, built; `rg_vu0_check` 100,000 cases, 0 differ |
 | #40 | `split/3-vu1` | the remaining VU1 program pieces, clipping chunks on the GPU (0028), program identification by code-image hash (0029), backface lists (0030), the menu switch turns the native VU1 programs on, `tools/vu1`, `VU1-NATIVE.md` | open, built; `rg_vu1_oracle --candidate native` over 268 recordings: 4,164 runs, 0 differ |
 | #41 | `split/4-pipeline` | pipeline foundation: `dq8_gfx_native`, backend hosting, producer (textures, palettes, targets, VU1 mesh draws), `src/native_capture.*`, `src/draw_state_mirror.*`, draw registers (0031), `NATIVE-PIPELINE.md` | open, built, **not run in game** |
-| 5 | `split/5-pipeline-frame` | effects as sprite draws (`d8d98cc`), 2D through the converter (`47d47f4`); host uploads and local copies next (below) | in progress, built, **not run in game** |
-| 6 | `split/6-fsr` | FSR 1 display filter | not started |
+| 5 | `split/5-pipeline-frame` | effects (`d8d98cc`), 2D converter (`47d47f4`), uploads withheld + stale check + host uploads/local copies (`b496867`), composites as object layers + patch 0032 `vif1Cursor` (`17d1b72`) | pushed, built, **not run**, no PR yet |
+| 6 | `split/6-pipeline-own-frame` | 7a stub register sink (0034), 7b/7c reads from the renderer, 7d own present (0033), absorber, tripwire, `tools/native-check.sh` (`869bc5a`) | pushed, built, **not run**, no PR yet |
+| 7 | `split/7-fsr` | FSR 1 display filter (`a630976`, `81992ad`, `86a563f` picked) | pushed, built, **not run**, no PR yet |
 
 **Before PR 5: run #41 in game.** `RG_NATIVE_RENDERER=1
 RG_NATIVE_PIPELINE=1 build/game/src/roguegalaxy disc/SCUS_974.90` in the
@@ -51,7 +52,7 @@ run.
 
 Patch numbers taken: 0024 cdrom1, 0025 vu0 hook, 0026 direct call table,
 0027 lean_pc, 0028 clip planes, 0029 MPG of the same code, 0030 backface
-lists, 0031 draw registers. Next free: **0032**.
+lists, 0031 draw registers. 0032 vif1 cursor, 0033 host present hook, 0034 register sink. Next free: **0035**.
 
 ## What was dropped
 
@@ -95,14 +96,14 @@ side of the effects is dropped. Main has none of `native_effects.cpp`.
   dropped as redundant. A refused piece goes to `gs.submitNativeMesh`.
   `eachPacket` moved to `gif_events.h`.
 
-**Next in PR 5:** host uploads and local copies (items 4 and 5 below). The
-archive only calls `hostUpload` and `noteLocalCopy` from the absorber;
-here, capture them in `sendRaw` while still sending to the GS, so a 2D
-piece reading a non-named upload isn't "source unknown". Then the
-stale-record check (`replaceUpload`, from `withholdUploads`). Composites
-(object layers) need `vif1Cursor` (from the dropped patch 0022): either a
-small new patch or another way to tell a tail's VU1 kicks. Step 7 and the
-tripwire could be PR 6.
+**Done (2026-11-06), all three branches built (tools + recompile + build) and the patch stack clean at each:**
+- `b496867`: `withholdUploads`/`withheldContinuation` ported; host uploads and local copies are captured in `sendRaw` (`watchTransfers`) while still going to the GS.
+- `17d1b72`: composite hooks and batching; a tail the producer refuses goes back as packets (no `SubmitNativeEffect`). Patch 0032 is 0022's `vif1Cursor` alone.
+- PR 6 `869bc5a`: the archive's 0035/0036 were regenerated over this stack (their context had `GS_BOUNDARY`) as 0034/0033. The store-image hooks live in `native_capture.cpp`. The backend gained `prepare(nullptr)`, `presentNativeFrame`, `serveNativeReads`. **Not ported:** the "bare" backend (no GS memory or caches), which needs archive backend changes; the tripwire still drops every call. `native-check.sh` is cut down (no boundary counters).
+- Fixes after step 7 (item 8): all covered (producer and `gfx/native` taken whole in #41; the VIF1 parts of 4aad920/a2a9c87 ported).
+- `docs/FSR.md` left out: it's FSR 3 research and points at docs not in the split.
+
+**The final head** is `split/7-fsr`; compare it against `native-renderer`.
 
 Steps 5 to 7 of the branch's `docs/NATIVE-PIPELINE.md`, carved from the
 final code. Read that doc's step records before starting. What has to come
