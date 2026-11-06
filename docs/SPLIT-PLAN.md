@@ -39,9 +39,9 @@ against `victor-takai/rogue-galaxy-recomp`, each one built fresh from
 | #39 | `split/2-cpu` | direct call table (0026), `lean_pc` (0027), the VU0 matrix program native (0025) | open, built; `rg_vu0_check` 100,000 cases, 0 differ |
 | #40 | `split/3-vu1` | the remaining VU1 program pieces, clipping chunks on the GPU (0028), program identification by code-image hash (0029), backface lists (0030), the menu switch turns the native VU1 programs on, `tools/vu1`, `VU1-NATIVE.md` | open, built; `rg_vu1_oracle --candidate native` over 268 recordings: 4,164 runs, 0 differ |
 | #41 | `split/4-pipeline` | pipeline foundation: `dq8_gfx_native`, backend hosting, producer (textures, palettes, targets, VU1 mesh draws), `src/native_capture.*`, `src/draw_state_mirror.*`, draw registers (0031), `NATIVE-PIPELINE.md` | open, built, **not run in game** |
-| 5 | `split/5-pipeline-frame` | effects (`d8d98cc`), 2D converter (`47d47f4`), uploads withheld + stale check + host uploads/local copies (`b496867`), composites as object layers + patch 0032 `vif1Cursor` (`17d1b72`) | pushed, built, **not run**, no PR yet |
-| 6 | `split/6-pipeline-own-frame` | 7a stub register sink (0034), 7b/7c reads from the renderer, 7d own present (0033), absorber, tripwire, `tools/native-check.sh` (`869bc5a`) | pushed, built, **not run**, no PR yet |
-| 7 | `split/7-fsr` | FSR 1 display filter (`a630976`, `81992ad`, `86a563f` picked) | pushed, built, **not run**, no PR yet |
+| #47 | `split/5-pipeline-frame` | effects (`d8d98cc`), 2D converter (`47d47f4`), uploads withheld + stale check + host uploads/local copies (`b496867`), composites as object layers + patch 0032 `vif1Cursor` (`17d1b72`) | PR open, built, **not run** |
+| #48 | `split/6-pipeline-own-frame` | 7a stub register sink (0034), 7b/7c reads from the renderer, 7d own present (0033), absorber, tripwire, `tools/native-check.sh` (`869bc5a`) | PR open, built, **not run** |
+| #49 | `split/7-fsr` | FSR 1 display filter (`a630976`, `81992ad`, `86a563f` picked) | PR open, built, **not run** |
 
 **Before PR 5: run #41 in game.** `RG_NATIVE_RENDERER=1
 RG_NATIVE_PIPELINE=1 build/game/src/roguegalaxy disc/SCUS_974.90` in the
