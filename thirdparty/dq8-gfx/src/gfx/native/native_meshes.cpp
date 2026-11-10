@@ -15,11 +15,27 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace dq8::gfx::native
 {
 namespace
 {
+std::atomic<bool> g_drawLabels{false};
+// Made at first use: a producer names its sources from a static initializer.
+struct SourceNames
+{
+    std::mutex mutex;
+    std::unordered_map<uint32_t, std::string> names;
+};
+SourceNames &sourceNames()
+{
+    static SourceNames instance;
+    return instance;
+}
 // Depth log (debug): `touch build/run/depth-log-now` and the next
 // RG_NATIVE_DEPTH_LOG_FRAMES frames (30 unless set) go to
 // build/run/depthlog-<frame>.txt: each pass (target, depth target, cleared
@@ -899,6 +915,18 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
 // sampler, scissor and blend constant are one call: their indices are one
 // range of the index buffer (a draw left out between them breaks it), and
 // each vertex finds its own uniforms in the draw table.
+void setDrawLabels(bool on)
+{
+    g_drawLabels.store(on, std::memory_order_relaxed);
+}
+
+void nameSource(uint32_t source, const char *name)
+{
+    SourceNames &known = sourceNames();
+    std::lock_guard lock(known.mutex);
+    known.names[source] = name ? name : "";
+}
+
 void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, const PassPlan &plan)
 {
     (void)commands;
@@ -976,6 +1004,28 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
             const float f = d.blendConstant;
             SDL_SetGPUBlendConstants(pass, SDL_FColor{f, f, f, f});
             boundBlend = f;
+        }
+        if (g_drawLabels.load(std::memory_order_relaxed))
+        {
+            const MeshDraw &mesh = m_frameMeshes[n];
+            std::string source;
+            {
+                SourceNames &known = sourceNames();
+                std::lock_guard lock(known.mutex);
+                if (const auto named = known.names.find(mesh.source); named != known.names.end())
+                    source = named->second;
+            }
+            char text[256];
+            if (source.empty())
+                std::snprintf(text, sizeof(text), "%x", mesh.source);
+            else
+                std::snprintf(text, sizeof(text), "%s", source.c_str());
+            char label[512];
+            std::snprintf(label, sizeof(label), "rg f=%llu n=%zu-%zu tgt=%u dt=%u tex=%u stex=%u obj=%llx cam=%u model=%d src=%s",
+                          (unsigned long long)m_meshCounts.frames, n, m - 1u, mesh.target, mesh.depthTarget,
+                          mesh.material.texture, mesh.material.sourceTarget, (unsigned long long)mesh.object,
+                          mesh.camera, mesh.hasModel ? 1 : 0, text);
+            SDL_InsertGPUDebugLabel(commands, label);
         }
         if (retained)
         {

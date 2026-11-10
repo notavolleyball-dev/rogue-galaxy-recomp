@@ -132,6 +132,11 @@ Most of these set an option of the F1 menu for one run, without saving it.
 
 ### Diagnosis
 
+For a graphics fault, start with a bug mark: F8 with the mouse over it writes
+one folder that `tools/bugmark/bugmark.py` reads, naming every draw that
+touched that pixel. See [BUG-MARKS.md](BUG-MARKS.md) (the frame capture part
+is Linux only so far).
+
 Scripted input, traces, watches, the profiler, and switches that turn one of
 the project's fixes off to compare.
 

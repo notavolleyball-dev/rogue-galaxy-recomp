@@ -139,6 +139,7 @@ add_executable(roguegalaxy
     vu0_flags.cpp
     vu0_native.cpp
     overlay/overlay_manager.cpp
+    debug/bug_mark.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
     debug/gs_census.cpp

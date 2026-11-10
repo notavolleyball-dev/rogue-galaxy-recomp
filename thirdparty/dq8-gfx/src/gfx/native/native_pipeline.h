@@ -34,6 +34,14 @@ bool enabled();
 // Any thread. Dropped when the pipeline is off.
 void push(Record &&record);
 
+// Debug: with draw labels on, the renderer puts a label before each mesh
+// call in the command buffer, for a frame capture (RenderDoc) to show:
+//   rg f=FRAME n=FIRST-LAST tgt=T dt=D tex=X stex=S obj=O cam=C model=0|1 src=NAME
+// FRAME and n are the depth log's (its F and D lines), the ids the records',
+// NAME what nameSource() gave MeshDraw::source (else its hex). Any thread.
+void setDrawLabels(bool on);
+void nameSource(uint32_t source, const char *name);
+
 // A mesh draw's vertex and index buffers, empty but with the capacity of one
 // the renderer has drawn and let go of, so a producer makes its draws
 // without the allocator. The renderer frees nothing it was handed: freeing

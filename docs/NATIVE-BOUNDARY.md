@@ -274,6 +274,10 @@ the sync is waiting on.
 
 ## The working tree, 2026-11-09
 
+(Checked 2026-11-10 at `9cc364f`: the tree is clean and these are all in the
+committed code. They are still unmeasured on their own, and the elided
+uploads are still to remove.)
+
 Uncommitted on `perf/native-cpu` (at `7a1e509`), besides the texture work
 above. Small trims, none measured on their own; finish, measure, and commit
 or drop each:

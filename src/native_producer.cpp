@@ -38,6 +38,16 @@ namespace rg::nativeproducer
 namespace
 {
 namespace native = dq8::gfx::native;
+// MeshDraw::source of the draws made here that no VU1 program drew (a VU1
+// mesh has its program's, vif1_thread.cpp), named for the renderer's
+// draw labels (a frame capture's; debug/bug_mark.h).
+constexpr uint32_t kSource2d = 1u, kSourceLayer = 2u, kSourceEffect = 3u;
+const bool g_sourcesNamed = [] {
+    native::nameSource(kSource2d, "2D piece");
+    native::nameSource(kSourceLayer, "object layer rectangle");
+    native::nameSource(kSourceEffect, "effect op");
+    return true;
+}();
 
 constexpr uint32_t kCT32 = 0x00u, kCT16 = 0x02u, kCT16S = 0x0Au, kT8 = 0x13u, kT4 = 0x14u;
 
@@ -1794,6 +1804,11 @@ void cullMesh(native::MeshDraw &draw)
 }
 } // namespace
 
+void nameSource(uint32_t source, const char *name)
+{
+    native::nameSource(source, name);
+}
+
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source,
           uint32_t retained)
 {
@@ -2571,6 +2586,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     const GSNativeMesh::Header &h = mesh.header;
     native::MeshDraw draw;
     native::reuseMeshBuffers(draw);
+    draw.source = kSource2d;
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     const bool view = narrow(s, frameBase, c.frame.fbw);
@@ -2848,6 +2864,7 @@ native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id so
 {
     native::MeshDraw draw;
     native::reuseMeshBuffers(draw);
+    draw.source = kSourceLayer;
     draw.target = target;
     native::Material &m = draw.material;
     if (source != 0u)
@@ -2992,6 +3009,7 @@ bool effect(const GSNativeEffect &e)
         const bool greenToAlpha = (op.flags & GSNativeEffect::kGreenToAlpha) != 0u;
         native::MeshDraw draw;
         native::reuseMeshBuffers(draw); // the renderer gives every draw's buffers back to the pool
+        draw.source = kSourceEffect;
         draw.target = target;
         native::Material &m = draw.material;
         bool known = true;

@@ -125,6 +125,16 @@ thread_local bool t_listDecoder = false;
 // RG_JITTER is set):
 // 0x80000000 | its entry (a pair index) << 16 | a hash of the microcode there.
 thread_local uint32_t t_vu1Tag = 0;
+// The native program whose chunk is being made a mesh on this thread, as its
+// meshes' MeshDraw::source (0: none): what the renderer's draw labels name
+// (a frame capture's; debug/bug_mark.h). Not t_vu1Tag, which only the
+// tagged profile runs set and the GS's batches follow.
+thread_local uint32_t t_vu1Source = 0;
+uint32_t programSource(const rg::vu1native::Program *program)
+{
+    const uint64_t address = reinterpret_cast<uintptr_t>(program);
+    return program ? static_cast<uint32_t>(address ^ (address >> 32)) | 0x80000000u : 0u;
+}
 // And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
 thread_local uint32_t t_vu1Camera = 0;
 // RG_VU1_NATIVE (src/vu1_native.h): while a chunk done natively runs on the
@@ -1211,7 +1221,7 @@ private:
         uint32_t address;
         uint32_t cursor;
         uint32_t mxcsr; // as GifStage's, without the sticky flags
-        uint32_t tag;   // t_vu1Tag
+        uint32_t tag;   // t_vu1Tag in a tagged run (g_tagPrograms), else t_vu1Source
         uint32_t camera; // t_vu1Camera
         uint32_t vu1;   // a mesh: the VU1 quads follow its vertices
     };
@@ -1226,7 +1236,8 @@ private:
     {
         if (m_staged.size() >= kPublishBytes)
             publish();
-        const Header header{kind, size, address, cursor, _mm_getcsr() & ~kMxcsrFlags, t_vu1Tag, t_vu1Camera, vu1};
+        const Header header{kind,        size, address, cursor, _mm_getcsr() & ~kMxcsrFlags,
+                            g_tagPrograms ? t_vu1Tag : t_vu1Source, t_vu1Camera, vu1};
         const size_t at = m_staged.size();
         m_staged.resize(at + sizeof(Header) + ((static_cast<size_t>(size) + 15u) & ~size_t{15u}));
         std::memcpy(m_staged.data() + at, &header, sizeof(header));
@@ -1281,7 +1292,8 @@ private:
                     _mm_setcsr(header.mxcsr);
                     mxcsr = header.mxcsr;
                 }
-                t_vu1Tag = header.tag;
+                t_vu1Tag = g_tagPrograms ? header.tag : 0u;
+                t_vu1Source = g_tagPrograms ? 0u : header.tag;
                 t_vu1Camera = header.camera;
                 try
                 {
@@ -1336,6 +1348,7 @@ private:
                     }
                     case Kind::ListEnd:
                         t_vu1Tag = 0u;
+                        t_vu1Source = 0u;
                         t_vu1Camera = 0u;
                         flushEffect();
                         flushComposites();
@@ -1606,6 +1619,9 @@ public:
                     if (m_identified.size() >= 4096u)
                         m_identified.clear();
                     found = m_identified.emplace(key, rg::vu1native::identify(memory.getVU1Code(), startPC)).first;
+                    // For the renderer's draw labels (debug/bug_mark.h).
+                    if (found->second)
+                        rg::nativeproducer::nameSource(programSource(found->second), found->second->name);
                 }
                 m_nativeProgram = found->second;
             }
@@ -1615,6 +1631,7 @@ public:
                 // program was identified in is gone.
                 m_nativeProgram = nullptr;
             }
+            t_vu1Source = programSource(m_nativeProgram);
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
@@ -1742,6 +1759,7 @@ public:
             }
         }
         t_vu1Tag = 0u;
+        t_vu1Source = 0u;
         t_vu1Camera = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
@@ -3268,7 +3286,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
         if (g_stage && !t_onVif1Thread)
             g_thread->drain();
         const GSDrawState state = rg::drawstate::current();
-        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, 0u, t_retain.id))
+        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, t_vu1Source, t_retain.id))
             return;
         // Refused here only for a buffer the game never named (counted as a
         // target miss): with no GS behind the pipeline nothing can draw it,

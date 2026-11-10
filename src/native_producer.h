@@ -112,6 +112,9 @@ uint32_t targetAt(uint32_t base);
 // without them (a later draw) only the id goes.
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source,
           uint32_t retained = 0u);
+// A name for a `source`, for the renderer's draw labels (a frame capture's;
+// debug/bug_mark.h). A VU1 mesh's source stands for its native program.
+void nameSource(uint32_t source, const char *name);
 
 // The renderer's epoch of retained meshes: when it changes, the ids handed
 // out before are no longer drawn (the renderer let go of them all).
