@@ -110,9 +110,17 @@ goes behind a flag.
    code, turns it into C++ under the contract, and is checked against
    PS2Recomp's output, which stays the oracle. The runtime half it calls
    is patches 0038-0040.
-4. **In the game.** `RG_NATIVE_CPU=1` puts the translated functions into the
-   function table, and the remaining runtime boundary (checkpoint and calls
-   out of native code) moves inline.
+4. **In the game** (`src/native_cpu.cpp`). `setup.py recompile` translates
+   the main ELF into `build/generated/native`, which the game links when it
+   is there. At boot `RG_NATIVE_CPU=1` puts each `NAME_nc` into the table's
+   slot, after every hook is installed: a slot a hook replaced keeps the
+   hook. Native callers guard on the slot (a call whose slot is not its
+   `NAME_nc` goes through the boundary), so a hook installed later is still
+   called. Hooked functions listed in `config/SCUS_974.90/native-hooks.txt`
+   are always called as boundaries with every argument register; an
+   unlisted one gets only what its MIPS code reads, and the boot warns.
+   Under the flag the VU0 box tests (`src/vu0_flags.cpp`) run translated
+   instead of as host hooks: ~4,000 boundary calls a frame in the field.
 
 Measure each step in the game. The metric is the main guest thread's ms per
 frame from `RG_EE_WAITLOG=1` (its share of wall time over the frame rate),
@@ -189,3 +197,18 @@ design.
 game thread), `gate.sh` (the frame compare), `gbisect.py` (which native
 function breaks the boot, by halving `RG_NATIVE_CPU_ONLY`) and `tree.py`
 (a function's native call tree).
+
+## Status (2026-11-10)
+
+The whole game runs on the translation under `RG_NATIVE_CPU=1`. Measured on
+the unpaced field walk with `RG_EE_WAITLOG=1`, the main guest thread's ms
+per frame: 4.17 on PS2Recomp's output, 3.45 native (2026-11-08, before the
+inline checkpoint, one run each). With the inline checkpoint the game
+thread's guest share in the field fell from 83.5% to 77.9% of wall; with
+the native pipeline as well, the field reaches ~300 fps unthrottled on a
+16-core desktop, and the game thread is the limit: translated code 63% of
+it, the scheduler and the native/runtime boundary 13%.
+
+Next: devirtualize the hot `jalr` sites (record the targets per site, a
+compare and a direct native call before the boundary); a cheaper call form
+for host leaf hooks and stubs (`GsPktSetXYZ`, `memcpy`, `MtxMulVec4`).
