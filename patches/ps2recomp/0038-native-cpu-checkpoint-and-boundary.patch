@@ -1,0 +1,85 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index d280f2f..1c1bebb 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -477,6 +477,13 @@ public:
+     void postEeEvent(EeEvent event);
+     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+     void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
++    // RG_NATIVE_CPU: the runtime half of the native CPU contract
++    // (tools/rgcpu, docs/NATIVE-CPU.md). Native code never unwinds: a due
++    // checkpoint suspends its fiber in place, and a call or jump into code
++    // that is not native runs a dispatch of its own until it comes back to
++    // `ret` with sp where it was.
++    void nativeCheckpoint(uint32_t cycles);
++    void nativeBoundary(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t ret, bool call);
+ 
+     struct EeExitHandlerRegistration
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index c7e2ac4..c75a7ed 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2457,6 +2457,62 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+     return false;
+ }
+ 
++void PS2Runtime::nativeCheckpoint(uint32_t cycles)
++{
++    if (!m_eeScheduler->checkpointDue(cycles) || m_eeScheduler->yieldInPlace())
++    {
++        return;
++    }
++    // On a stop the run loop is leaving: unwinding lets the stacks end.
++    if (isStopRequested())
++    {
++        throw EeDispatcherTransfer{};
++    }
++    // Inside an interrupt handler: it runs on to its end, as on the EE.
++}
++
++void PS2Runtime::nativeBoundary(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t ret, bool call)
++{
++    const uint32_t entrySp = getRegU32(ctx, 29);
++    ctx->pc = target;
++    if (call)
++    {
++        // The caller charged the call (NC_CALLCHECK); this is the rest of
++        // directGuestCall, a hook's slot included.
++        const RecompiledFunction fn = lookupFunction(target);
++        const bool returned = fn ? callGuestFunction(rdram, ctx, fn, target, ret)
++                                 : dispatchGuestBranch(rdram, ctx, target, ret - 8u, ret,
++                                                       GuestBranchKind::IndirectCall, "native call");
++        if (returned && getRegU32(ctx, 29) == entrySp)
++        {
++            ctx->pc = ret;
++            return;
++        }
++    }
++    // A tail jump below, or a jump from native code: dispatch from pc, as
++    // the run loop would after an unwind, until the code comes back.
++    for (;;)
++    {
++        if (ctx->pc == ret && getRegU32(ctx, 29) == entrySp)
++        {
++            return;
++        }
++        if (isStopRequested() || ctx->pc == 0u)
++        {
++            throw EeDispatcherTransfer{};
++        }
++        nativeCheckpoint(EeScheduler::kGuestDispatchCycles);
++        const RecompiledFunction fn = lookupFunction(ctx->pc);
++        if (!fn)
++        {
++            reportMissingFunction(rdram, ctx, ctx->pc, ret, GuestBranchKind::DirectJump, "native jump");
++            throw EeDispatcherTransfer{};
++        }
++        pushDispatchPc(ctx->pc);
++        fn(rdram, ctx, this);
++    }
++}
++
+ void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
+ {
+     const uint64_t currentTick = m_eeScheduler->currentVSyncTick();

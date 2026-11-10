@@ -106,9 +106,10 @@ goes behind a flag.
    its own**. At ~100 unwinds a frame a fiber switch costs about what the
    unwind did. What it buys is native code that never has to be re-entered
    in the middle of a function. The 30 fps walk's frames match.
-3. **Our own translator** (tools/rgcpu). It reads the game's MIPS code,
-   turns it into C++ under the contract, and is checked against
-   PS2Recomp's output, which stays the oracle.
+3. **Our own translator** (tools/rgcpu, below). It reads the game's MIPS
+   code, turns it into C++ under the contract, and is checked against
+   PS2Recomp's output, which stays the oracle. The runtime half it calls
+   is patches 0038-0040.
 4. **In the game.** `RG_NATIVE_CPU=1` puts the translated functions into the
    function table, and the remaining runtime boundary (checkpoint and calls
    out of native code) moves inline.
@@ -116,3 +117,75 @@ goes behind a flag.
 Measure each step in the game. The metric is the main guest thread's ms per
 frame from `RG_EE_WAITLOG=1` (its share of wall time over the frame rate),
 taken over several runs a side, alternating.
+
+## The translator (tools/rgcpu)
+
+    python3 tools/rgcpu/rgcpu.py disc/SCUS_974.90 config/SCUS_974.90/functions_main.csv \
+        build/generated/main build/generated/native
+
+About 95 s. It translates 17,303 of the main ELF's 17,733 functions; the
+rest stay on PS2Recomp's output, and `skipped.txt` says why (mostly a
+computed jump into the middle of a function).
+
+- `r5900.py` decodes and gives each instruction's C++, exact to the
+  oracle's semantics. VU0 macro and MMI statements are taken from the
+  oracle's own output, with VU0 state in the guest context.
+- `analysis.py` is the whole-program dataflow: per function, the registers
+  it reads (IN), may write (MAYDEF), must write (MUSTDEF) and gives back
+  (OUT); which callee-saved registers it provably preserves; and whether
+  its stack frame can be owned.
+- `rgcpu.py` emits the code. Each function is `NAME_nc` (the table's entry,
+  copying registers in and out of the guest context) around `nc_ADDR`, which
+  takes its inputs as arguments and returns its outputs. Calls between
+  translated functions are direct C calls. A call to anything else (a hook,
+  a stub, an untranslated function) goes through `ncBoundaryCall`, a jump
+  out through `ncBoundaryJump`, and a jump table through the oracle's
+  switch.
+- **Owned stack frames** (10,214 functions): spills and saved registers are
+  C++ locals; guest stack memory is used only where a slot's address
+  escapes. A save slot counts only as a full-width store and load of one
+  callee-saved register.
+- **The calling convention is the contract** between translated functions:
+  a call gives back only results (v0/v1 and their upper halves, f0/f1) and
+  callee-saved registers. Other temporaries a callee leaves are garbage.
+  Boundaries take the arguments, gp, sp, ra and fcr31; callee-saved
+  registers are neither flushed nor reloaded around them. A prologue save
+  of a register the function provably preserves is not a use; an unproven
+  one is (`OperatorNew` gives s0 and fp back through fp). This took the
+  median function's inputs from 13 to 7. `RGCPU_EXACT=1` restores the
+  exact sets, for diffs that compare every register.
+- A register tail jump (`jr` to a computed target) reads what a `jalr`
+  reads and may define what a call may. Taking it as reading everything
+  made functions with 100+ parameters; taking it as defining nothing hung
+  the game at the memory card check (a pointer-to-member call's result
+  never came back).
+- Hooked functions (`config/SCUS_974.90/native-hooks.txt`) are translated
+  but always called through the boundary, since a hook may read any
+  argument register.
+
+### Checking it against the oracle
+
+    NC_ONLY=1 NO_RUN=1 tools/rgcpu/check_trees.sh OUT   # translate and build (once without NC_ONLY)
+    RG_ELF=disc/SCUS_974.90 OUT/rg_harness OUT/lib.so NAMES.txt 4   # ulimit -s unlimited
+
+`check_trees.sh` builds the oracle's functions and the translated ones into
+one library, and `rg_harness.cpp` runs each listed function's whole call
+tree both ways on random guest states (the ELF's own data over random RAM),
+then compares the registers and all of RAM. Functions outside the tree are
+fakes that return floats and write what a stub would. A run where a fake
+was handed a stack pointer (an out-parameter it cannot fill) is UNSURE.
+`RG_ORACLE=FILE` keeps the named functions on the oracle
+(`bench/bisect.sh` bisects a mismatching tree with it); `RG_TRACE=1|2`,
+`RG_DUMP=prefix` and `RG_VERBOSE=1` show more.
+
+Result (2026-11-07): the hot trees (`FrameUpdateWorld`,
+`FrameCalcWorldMatrix`, the collision and animation trees) and 2,400
+random functions match. One tree (`MovieDrawFrame`'s) reads a stack slot
+the oracle's own frame left behind, which owning the stack changes by
+design.
+
+`bench/` has the in-game tools: `walk.sh` (the scripted walk), `cpuframe.sh`
+(per-thread CPU ms per frame, unpaced), `cyc.sh` (hardware counters on the
+game thread), `gate.sh` (the frame compare), `gbisect.py` (which native
+function breaks the boot, by halving `RG_NATIVE_CPU_ONLY`) and `tree.py`
+(a function's native call tree).

@@ -1,0 +1,41 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 69b213c..cf0e747 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -361,7 +361,16 @@ public:
+     // deadline, so this can never run the game faster than real time.
+     void accountCycles(uint32_t cycles) noexcept
+     {
+-        chargeElapsed(std::max<uint64_t>(1u, cycles) * s_eeCycleScale);
++        chargeElapsed(scaled(std::max<uint64_t>(1u, cycles)));
++    }
++    // The scale is 1 unless DQ8_EE_CYCLE_SCALE says otherwise: the native
++    // budget is settled and granted ~23,000 times a frame (Rogue Galaxy's
++    // field, every boundary call and checkpoint), and the grant's 64-bit
++    // division by a runtime value was most of the grant's time (Rogue
++    // Galaxy: changed).
++    static uint64_t scaled(uint64_t cycles) noexcept
++    {
++        return s_eeCycleScale == 1u ? cycles : cycles * s_eeCycleScale;
+     }
+     // The native code's spending since the last settle, into the clock (and
+     // the timers) as accountCycles would have put it a checkpoint at a time.
+@@ -371,7 +380,7 @@ public:
+         if (spent > 0)
+         {
+             m_nativeGranted = g_eeNativeBudget;
+-            chargeElapsed(uint64_t(spent) * s_eeCycleScale);
++            chargeElapsed(scaled(uint64_t(spent)));
+         }
+     }
+     // A budget up to whatever comes due first; 0 when something is due now.
+@@ -384,7 +393,8 @@ public:
+             room = std::min(room, next > m_eeCycle ? next - m_eeCycle : 0u);
+         room = std::min(room, m_sliceEndCycle > m_eeCycle ? m_sliceEndCycle - m_eeCycle : 0u);
+         room = std::min(room, m_runtime.memory().eeTimerRoom());
+-        const int64_t units = int64_t((room + s_eeCycleScale - 1u) / s_eeCycleScale);
++        const int64_t units = s_eeCycleScale == 1u ? int64_t(room)
++                                                   : int64_t((room + s_eeCycleScale - 1u) / s_eeCycleScale);
+         g_eeNativeBudget = m_nativeGranted = units;
+     }
+     // At most this many cycles between the scheduler's looks: a deadline set
