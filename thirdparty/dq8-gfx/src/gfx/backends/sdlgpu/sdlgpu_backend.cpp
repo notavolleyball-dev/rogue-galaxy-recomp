@@ -5540,8 +5540,13 @@ PresentationFrame SdlGpuBackend::DisplayPreparedPresentation(const GSPresentatio
     }
     auto &slot = prepared->pool->slots[prepared->slot];
     if (prepared->haveFrame && m_impl->window != nullptr) {
-        if (slot.prepared && !SDL_WaitForGPUFences(m_impl->device.handle(), true, &slot.prepared, 1))
-            throw std::runtime_error(std::string("SDL_WaitForGPUFences(snapshot): ") + SDL_GetError());
+        // No wait for the snapshot's fence (Rogue Galaxy: removed): the
+        // window's blit is submitted after it on the same queue, and SDL GPU
+        // orders a later command buffer's reads after an earlier one's
+        // writes. Waiting here made the CPU idle while the GPU drew each
+        // frame (two thirds of the presenter's time, unpaced), never
+        // recording the next one meanwhile; the swapchain's frames in flight
+        // still bound how far ahead it runs.
         std::string error;
         if (!m_impl->showInWindow(&slot, error))
             throw std::runtime_error(error);

@@ -191,6 +191,80 @@ bool enabled()
     return on;
 }
 
+namespace
+{
+struct MeshBufferPool
+{
+    std::mutex mutex;
+    std::vector<std::vector<Vertex>> vertices;
+    std::vector<std::vector<uint32_t>> indices;
+    static constexpr size_t kMax = 16384u;
+};
+MeshBufferPool &meshBufferPool()
+{
+    static MeshBufferPool pool;
+    return pool;
+}
+
+// The renderer's: a frame's draws, done with, their buffers to the pool.
+void recycleMeshes(std::vector<MeshDraw> &meshes)
+{
+    if (meshes.empty())
+        return;
+    MeshBufferPool &pool = meshBufferPool();
+    {
+        std::lock_guard lock(pool.mutex);
+        for (MeshDraw &draw : meshes)
+        {
+            if (draw.vertices.capacity() != 0u && pool.vertices.size() < MeshBufferPool::kMax)
+            {
+                draw.vertices.clear();
+                pool.vertices.push_back(std::move(draw.vertices));
+            }
+            if (draw.indices.capacity() != 0u && pool.indices.size() < MeshBufferPool::kMax)
+            {
+                draw.indices.clear();
+                pool.indices.push_back(std::move(draw.indices));
+            }
+        }
+    }
+    meshes.clear();
+}
+} // namespace
+
+void reuseMeshBuffers(MeshDraw &draw)
+{
+    // A batch at a time, so the pool's lock is taken once per many draws.
+    constexpr size_t kBatch = 256u;
+    thread_local std::vector<std::vector<Vertex>> vertices;
+    thread_local std::vector<std::vector<uint32_t>> indices;
+    if (vertices.empty() || indices.empty())
+    {
+        MeshBufferPool &pool = meshBufferPool();
+        std::lock_guard lock(pool.mutex);
+        while (vertices.size() < kBatch && !pool.vertices.empty())
+        {
+            vertices.push_back(std::move(pool.vertices.back()));
+            pool.vertices.pop_back();
+        }
+        while (indices.size() < kBatch && !pool.indices.empty())
+        {
+            indices.push_back(std::move(pool.indices.back()));
+            pool.indices.pop_back();
+        }
+    }
+    if (!vertices.empty() && draw.vertices.capacity() == 0u)
+    {
+        draw.vertices = std::move(vertices.back());
+        vertices.pop_back();
+    }
+    if (!indices.empty() && draw.indices.capacity() == 0u)
+    {
+        draw.indices = std::move(indices.back());
+        indices.pop_back();
+    }
+}
+
 void push(Record &&record)
 {
     if (!enabled())
@@ -282,7 +356,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                 // The draws since the last one are a frame; a frame not yet
                 // drawn when the next closes is dropped (the newest shows).
                 m_frameMeshes.swap(m_meshes);
-                m_meshes.clear();
+                recycleMeshes(m_meshes);
                 m_frameReady = true;
                 ++m_meshCounts.frames;
             }
@@ -681,7 +755,8 @@ std::string Renderer::statsLine()
             ", R3 scene float depth " + d(now.sceneFloatDepth, was.sceneFloatDepth) + ", R4 material " +
             d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals);
     const MeshCounts &mc = m_meshCounts, &mr = m_meshReported;
-    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " (offscreen " + d(mc.offscreen, mr.offscreen) + ") over " +
+    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " in " + d(mc.calls, mr.calls) + " GPU calls (offscreen " +
+            d(mc.offscreen, mr.offscreen) + ") over " +
             d(mc.frames, mr.frames) + " frames in " + d(mc.passes, mr.passes) +
             " passes; not drawn: target not declared " + d(mc.noTarget, mr.noTarget) + ", a depth buffer as color " +
             d(mc.depthAsColor, mr.depthAsColor) + ", no camera " + d(mc.noCamera, mr.noCamera) +

@@ -463,14 +463,20 @@ const std::vector<uint32_t> &unswizzle(const TextureLevel &l)
 }
 } // namespace
 
+// The game thread's, for every level it sends (some 24 a frame in the
+// field): the hash and the conversion run outside s.mutex, which the VIF1
+// thread takes for every mesh and piece. Holding it through them put the
+// VIF1 thread to sleep on the lock some 20 times a frame, each wake costing
+// it ~200 us (2026-11-08: VIF1 on the CPU 35% of the wall it was "busy").
 void texture(const TextureLevel &l)
 {
     if (!native::enabled())
         return;
     State &s = state();
-    std::lock_guard lock(s.mutex);
+    std::unique_lock lock(s.mutex);
     forgetEvicted(s);
     ++s.counts.levels;
+    lock.unlock();
     const uint32_t psm = l.psm & 0x3Fu;
     const size_t texels = size_t(l.width) * l.height;
     // What it occupies in EE memory, as sent.
@@ -487,18 +493,20 @@ void texture(const TextureLevel &l)
         bytes = (texels + 1u) / 2u;
     else
     {
+        lock.lock();
         ++s.counts.refusedFormat;
         return;
     }
     if (texels == 0u || bytes == 0u || !l.ram || l.ramBytes < bytes || l.width > 4096u || l.height > 4096u)
     {
+        lock.lock();
         ++s.counts.refusedBytes;
         return;
     }
     const uint64_t hash = imageHash(l.ram, bytes);
-    s.counts.bytesHashed += bytes;
     const uint64_t key = keyOf(hash, psm | (l.preSwizzled ? 0x100u : 0u), l.width, l.height);
-    const native::Id palette = (psm == kT8 || psm == kT4) ? (s.paletteAt.count(l.cbp) ? s.paletteAt[l.cbp] : 0u) : 0u;
+    lock.lock();
+    s.counts.bytesHashed += bytes;
     if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
     {
         ++s.counts.texturesKnown;
@@ -507,11 +515,14 @@ void texture(const TextureLevel &l)
                      psm, known->second, hash, static_cast<uint32_t>(bytes));
         return;
     }
+    lock.unlock();
+    // New: converted unlocked. Should the VIF1 thread make the same image
+    // meanwhile (from a host upload), this record replaces its map entry:
+    // one texture twice, never a wrong one.
     auto out = std::make_shared<std::vector<uint8_t>>();
     native::Texture record;
     record.width = static_cast<uint16_t>(l.width);
     record.height = static_cast<uint16_t>(l.height);
-    record.palette = palette;
     if (psm == kCT32 && !l.preSwizzled)
     {
         record.format = native::PixelFormat::Rgba8;
@@ -529,6 +540,7 @@ void texture(const TextureLevel &l)
         const std::vector<uint32_t> &byteOf = unswizzle(l);
         if (byteOf.empty())
         {
+            lock.lock();
             ++s.counts.refusedLayout;
             return;
         }
@@ -549,6 +561,8 @@ void texture(const TextureLevel &l)
         for (size_t i = 0; i < texels; ++i)
             (*out)[i] = (l.ram[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
     }
+    lock.lock();
+    record.palette = (psm == kT8 || psm == kT4) ? (s.paletteAt.count(l.cbp) ? s.paletteAt[l.cbp] : 0u) : 0u;
     record.id = s.nextTexture++;
     if (dumpingTextures())
         s.keptTextures[record.id] = {out, record.width, record.height,
@@ -570,17 +584,19 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
     if (!native::enabled())
         return;
     State &s = state();
-    std::lock_guard lock(s.mutex);
-    forgetEvicted(s);
     cpsm &= 0x3Fu;
     const bool is16 = cpsm == kCT16 || cpsm == kCT16S;
     const uint32_t bytes = entries * (is16 ? 2u : 4u);
-    if (!ram || (entries != 16u && entries != 256u) || (cpsm != kCT32 && !is16) || ramBytes < bytes)
+    const bool usable = ram && (entries == 16u || entries == 256u) && (cpsm == kCT32 || is16) && ramBytes >= bytes;
+    // Hashed unlocked, as texture() is.
+    const uint64_t hash = usable ? imageHash(ram, bytes) : 0u;
+    std::lock_guard lock(s.mutex);
+    forgetEvicted(s);
+    if (!usable)
     {
         ++s.counts.palettesRefused;
         return;
     }
-    const uint64_t hash = imageHash(ram, bytes);
     s.counts.bytesHashed += bytes;
     const uint64_t key = keyOf(hash, cpsm, entries, 0u);
     if (const auto known = s.paletteIds.find(key); known != s.paletteIds.end())
@@ -1356,6 +1372,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
 
     native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
     draw.source = source;
     // The program scales its window depth and caps it (VU quad 87.z, quad
     // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
@@ -2150,6 +2167,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
         return true; // dropped
     const GSNativeMesh::Header &h = mesh.header;
     native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     const bool view = narrow(s, frameBase, c.frame.fbw);
@@ -2421,6 +2439,7 @@ namespace
 native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id source)
 {
     native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
     draw.target = target;
     native::Material &m = draw.material;
     if (source != 0u)
@@ -2564,6 +2583,7 @@ bool effect(const GSNativeEffect &e)
             return refuse(s.counts.opsNoTarget);
         const bool greenToAlpha = (op.flags & GSNativeEffect::kGreenToAlpha) != 0u;
         native::MeshDraw draw;
+        native::reuseMeshBuffers(draw); // the renderer gives every draw's buffers back to the pool
         draw.target = target;
         native::Material &m = draw.material;
         bool known = true;

@@ -11,6 +11,7 @@
 
 #include "ps2_runtime.h"
 #include "return_hook.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_backend.h"
 #include "scene_timing.h"
 
@@ -187,8 +188,10 @@ bool presentNative(uint64_t frame)
 #endif
 }
 
-void afterFlip(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+void afterFlip(uint8_t *, R5900Context *, PS2Runtime *runtime, uint32_t)
 {
+    // Unpaced, the scheduler gives the game its vsyncs a frame at a time.
+    runtime->eeScheduler().noteGuestFrame();
     rg::nativefx::endFlip();
     // Under the pipeline the presenting thread shows the frame the Present
     // record closed (graphics.cpp's presentNative, step 7d), not the GS's

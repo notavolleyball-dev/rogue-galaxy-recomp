@@ -74,37 +74,17 @@ void rowTimes(const float m[16], const double v[4], double out[4])
         out[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
 }
 
-// A vertex as the mesh shader takes it.
+// A vertex as the mesh shader takes it: `draw` is its draw's row in the
+// frame's draw table.
 struct GpuVertex
 {
     float position[3];
     float uv[2];
     float color[4];
     float fog;
+    uint32_t draw;
 };
-static_assert(sizeof(GpuVertex) == 40u, "tightly packed");
-
-struct DrawUniforms
-{
-    float clip[16];
-    float viewport[16];
-    float target[4];
-    float fog[4];
-    float depthRow[4]; // reversed depth (w - z) / 2 straight from the position
-    float depthLimit[4]; // x: the program's depthMax as this depth (times w); y: 1 when it applies
-};
-
-struct MaterialUniforms
-{
-    uint32_t mode[4];
-    uint32_t test[4];
-    float size[4];
-    float blend[4];
-    float fogColor[4];
-    float texa[4];
-    uint32_t region[4]; // min u, max u, min v, max v (the GS's CLAMP)
-    uint32_t wrap[4];   // u, v: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
-};
+static_assert(sizeof(GpuVertex) == 44u, "tightly packed");
 
 // a x b x c in double, rounded once: the clip matrix of a model under a
 // camera, and the reversed-depth row taken from it before rounding.
@@ -242,7 +222,7 @@ bool Renderer::ensureMeshes(SDL_GPUDevice *device, std::string &error)
     vertexInfo.entrypoint = "main";
     vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    vertexInfo.num_uniform_buffers = 1u;
+    vertexInfo.num_storage_buffers = 1u; // the draw table
     SDL_GPUShaderCreateInfo fragmentInfo{};
     fragmentInfo.code = reinterpret_cast<const uint8_t *>(kNativeMeshFragSpirv);
     fragmentInfo.code_size = sizeof(kNativeMeshFragSpirv);
@@ -250,7 +230,7 @@ bool Renderer::ensureMeshes(SDL_GPUDevice *device, std::string &error)
     fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
     fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     fragmentInfo.num_samplers = 2u;
-    fragmentInfo.num_uniform_buffers = 1u;
+    fragmentInfo.num_storage_buffers = 1u; // the draw table
     m_meshVertex = SDL_CreateGPUShader(device, &vertexInfo);
     m_meshFragment = m_meshVertex ? SDL_CreateGPUShader(device, &fragmentInfo) : nullptr;
     if (!m_meshVertex || !m_meshFragment)
@@ -282,7 +262,7 @@ SDL_GPUTexture *Renderer::targetTexture(SDL_GPUDevice *device, Id id, bool depth
         return t.texture;
     const uint32_t width = std::max(t.width, minW), height = std::max(t.height, minH);
     if (t.texture)
-        SDL_ReleaseGPUTexture(device, t.texture);
+        m_retired.push_back(t.texture); // a draw planned before may bind it
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = depth ? m_depthFormat : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -348,11 +328,12 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     buffer.slot = 0u;
     buffer.pitch = sizeof(GpuVertex);
     buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-    SDL_GPUVertexAttribute attributes[4]{};
+    SDL_GPUVertexAttribute attributes[5]{};
     attributes[0] = {0u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuVertex, position)};
     attributes[1] = {1u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuVertex, uv)};
     attributes[2] = {2u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuVertex, color)};
     attributes[3] = {3u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(GpuVertex, fog)};
+    attributes[4] = {4u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_UINT, offsetof(GpuVertex, draw)};
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = m_meshVertex;
@@ -360,7 +341,7 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     info.vertex_input_state.vertex_buffer_descriptions = &buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 4u;
+    info.vertex_input_state.num_vertex_attributes = 5u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; // the producer's indices are already culled
@@ -382,20 +363,21 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
 
 bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
 {
+    static_assert(sizeof(GpuDraw) == 320u, "std430, as the shaders read it");
     m_firstIndex.clear();
-    m_vertexOffset.clear();
     uint64_t vertices = 0u, indices = 0u;
     for (const MeshDraw &d : m_frameMeshes)
     {
         m_firstIndex.push_back(static_cast<uint32_t>(indices));
-        m_vertexOffset.push_back(static_cast<int32_t>(vertices));
         vertices += d.vertices.size();
         indices += d.indices.size();
     }
     if (indices == 0u)
         return true;
     const uint64_t vertexBytes = vertices * sizeof(GpuVertex), indexBytes = indices * sizeof(uint32_t);
-    if (vertexBytes + indexBytes > (1ull << 31))
+    const uint64_t tableOffset = (vertexBytes + indexBytes + 15u) & ~uint64_t(15u);
+    const uint64_t tableBytes = m_drawTable.size() * sizeof(GpuDraw);
+    if (tableOffset + tableBytes > (1ull << 31))
     {
         error = "native meshes: a frame over 2 GiB of vertices";
         return false;
@@ -403,9 +385,11 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
     if (!growBuffer(device, m_vertexBuffer, m_vertexCapacity, static_cast<uint32_t>(vertexBytes),
                     SDL_GPU_BUFFERUSAGE_VERTEX, error) ||
         !growBuffer(device, m_indexBuffer, m_indexCapacity, static_cast<uint32_t>(indexBytes),
-                    SDL_GPU_BUFFERUSAGE_INDEX, error))
+                    SDL_GPU_BUFFERUSAGE_INDEX, error) ||
+        !growBuffer(device, m_drawBuffer, m_drawCapacity, static_cast<uint32_t>(tableBytes),
+                    SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, error))
         return false;
-    const uint32_t total = static_cast<uint32_t>(vertexBytes + indexBytes);
+    const uint32_t total = static_cast<uint32_t>(tableOffset + tableBytes);
     if (!m_meshTransfer || m_transferCapacity < total)
     {
         if (m_meshTransfer)
@@ -427,21 +411,32 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
         error = std::string("SDL_MapGPUTransferBuffer(native meshes): ") + SDL_GetError();
         return false;
     }
+    // Each vertex carries its draw's row; indices are made the buffer's own
+    // (offset by the vertices before), so neighbouring draws are one range.
     auto *v = reinterpret_cast<GpuVertex *>(mapped);
     auto *ix = reinterpret_cast<uint32_t *>(mapped + vertexBytes);
-    for (const MeshDraw &d : m_frameMeshes)
+    uint32_t base = 0u;
+    for (size_t n = 0; n < m_frameMeshes.size(); ++n)
     {
+        const MeshDraw &d = m_frameMeshes[n];
+        const uint32_t row = static_cast<uint32_t>(n);
         for (const Vertex &in : d.vertices)
         {
             std::memcpy(v->position, in.position, sizeof(v->position));
             std::memcpy(v->uv, in.uv, sizeof(v->uv));
             std::memcpy(v->color, in.color, sizeof(v->color));
             v->fog = in.fog;
+            v->draw = row;
             ++v;
         }
-        std::memcpy(ix, d.indices.data(), d.indices.size() * sizeof(uint32_t));
-        ix += d.indices.size();
+        const uint32_t *from = d.indices.data();
+        const size_t count = d.indices.size();
+        for (size_t k = 0; k < count; ++k)
+            ix[k] = from[k] + base;
+        ix += count;
+        base += static_cast<uint32_t>(d.vertices.size());
     }
+    std::memcpy(mapped + tableOffset, m_drawTable.data(), tableBytes);
     SDL_UnmapGPUTransferBuffer(device, m_meshTransfer);
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     SDL_GPUTransferBufferLocation source{m_meshTransfer, 0u};
@@ -450,24 +445,26 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
     source.offset = static_cast<uint32_t>(vertexBytes);
     destination = {m_indexBuffer, 0u, static_cast<uint32_t>(indexBytes)};
     SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    source.offset = static_cast<uint32_t>(tableOffset);
+    destination = {m_drawBuffer, 0u, static_cast<uint32_t>(tableBytes)};
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     SDL_EndGPUCopyPass(copy);
     return true;
 }
 
-void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass,
-                          size_t first, size_t last, Id target, bool depthAttached, float targetW, float targetH,
-                          uint32_t scale, SDL_GPUTexture *copy, uint32_t copyW, uint32_t copyH)
+// One pass's draws: each one's binding state into m_drawPlans and its
+// uniforms into the draw table (a draw left out keeps no pipeline).
+void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t scale, uint32_t copyW, uint32_t copyH)
 {
-    if (!m_vertexBuffer || !m_indexBuffer)
-        return;
-    const SDL_GPUBufferBinding vertexBinding{m_vertexBuffer, 0u};
-    SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
-    const SDL_GPUBufferBinding indexBinding{m_indexBuffer, 0u};
-    SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-    SDL_GPUGraphicsPipeline *bound = nullptr;
+    const size_t first = pass.first, last = pass.last;
+    const Id target = pass.target;
+    const bool depthAttached = pass.depthId != 0u;
+    const float targetW = float(pass.gameW), targetH = float(pass.gameH);
+    SDL_GPUTexture *const copy = pass.copy;
     for (size_t n = first; n < last; ++n)
     {
         const MeshDraw &d = m_frameMeshes[n];
+        DrawPlan &plan = m_drawPlans[n];
         if (d.indices.empty())
             continue;
         const Camera *camera = nullptr;
@@ -483,7 +480,8 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
             ++m_meshCounts.noCamera;
             continue;
         }
-        MaterialUniforms mu{};
+        GpuDraw &du = m_drawTable[n], &mu = du; // the vertex stage's half, the fragment stage's
+        du = GpuDraw{};
         mu.texa[0] = m.fixedTextureAlpha;
         mu.texa[1] = m.alphaZeroOnBlack ? 1.0f : 0.0f;
         SDL_GPUTexture *image = m_white, *palette = m_white;
@@ -576,11 +574,6 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
             ++m_meshCounts.noPipeline;
             continue;
         }
-        if (pipeline != bound)
-        {
-            SDL_BindGPUGraphicsPipeline(pass, pipeline);
-            bound = pipeline;
-        }
         mu.test[0] = static_cast<uint32_t>(m.alphaTest);
         mu.test[1] = m.alphaRef;
         // RG_NATIVE_AFAIL_DISCARD=1 (debug): pixels failing the alpha test are
@@ -612,7 +605,6 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = float(d.fogColor[i]) / 255.0f;
 
-        DrawUniforms du{};
         if (d.hasModel)
         {
             // The program's depthScale and depthMax (see clipAndDepth). The
@@ -744,25 +736,104 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
                            m.dstFactor == BlendFactor::Fixed || m.dstFactor == BlendFactor::InvFixed))
         {
             const float f = std::min(float(m.blendFactor) / 128.0f, 1.0f);
-            SDL_SetGPUBlendConstants(pass, SDL_FColor{f, f, f, f});
+            plan.blendConstant = f;
         }
-        SDL_PushGPUVertexUniformData(commands, 0, &du, sizeof(du));
-        SDL_PushGPUFragmentUniformData(commands, 0, &mu, sizeof(mu));
         const uint32_t samplerKey = (m.linear ? 1u : 0u) | (m.clampU ? 2u : 0u) | (m.clampV ? 4u : 0u);
-        SDL_GPUSampler *sampler = meshSampler(device, samplerKey);
-        const SDL_GPUTextureSamplerBinding bindings[2] = {{image, sampler}, {palette, sampler}};
-        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+        plan.sampler = meshSampler(device, samplerKey);
+        plan.image = image;
+        plan.palette = palette;
 
         const int32_t sx0 = std::clamp(d.scissor.x0, 0, int32_t(targetW));
         const int32_t sy0 = std::clamp(d.scissor.y0, 0, int32_t(targetH));
         const int32_t sx1 = std::clamp(d.scissor.x1, sx0, int32_t(targetW));
         const int32_t sy1 = std::clamp(d.scissor.y1, sy0, int32_t(targetH));
         const int32_t s = int32_t(std::max(scale, 1u));
-        const SDL_Rect scissor{sx0 * s, sy0 * s, (sx1 - sx0) * s, (sy1 - sy0) * s};
-        SDL_SetGPUScissor(pass, &scissor);
-        SDL_DrawGPUIndexedPrimitives(pass, static_cast<uint32_t>(d.indices.size()), 1, m_firstIndex[n],
-                                     m_vertexOffset[n], 0);
+        plan.scissor = SDL_Rect{sx0 * s, sy0 * s, (sx1 - sx0) * s, (sy1 - sy0) * s};
+        plan.pipeline = pipeline;
         ++m_meshCounts.drawn;
+    }
+}
+
+// One pass's draws as planned. Neighbours with the same pipeline, textures,
+// sampler, scissor and blend constant are one call: their indices are one
+// range of the index buffer (a draw left out between them breaks it), and
+// each vertex finds its own uniforms in the draw table.
+void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, const PassPlan &plan)
+{
+    (void)commands;
+    if (!m_vertexBuffer || !m_indexBuffer || !m_drawBuffer)
+        return;
+    const SDL_GPUBufferBinding vertexBinding{m_vertexBuffer, 0u};
+    SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+    const SDL_GPUBufferBinding indexBinding{m_indexBuffer, 0u};
+    SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+    SDL_BindGPUVertexStorageBuffers(pass, 0, &m_drawBuffer, 1);
+    SDL_BindGPUFragmentStorageBuffers(pass, 0, &m_drawBuffer, 1);
+    SDL_GPUGraphicsPipeline *bound = nullptr;
+    SDL_GPUTexture *boundImage = nullptr, *boundPalette = nullptr;
+    SDL_GPUSampler *boundSampler = nullptr;
+    SDL_Rect boundScissor{-1, -1, -1, -1};
+    float boundBlend = -1.0f;
+    const auto sameRect = [](const SDL_Rect &a, const SDL_Rect &b) {
+        return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+    };
+    const auto sameState = [&](const DrawPlan &a, const DrawPlan &b) {
+        return a.pipeline == b.pipeline && a.image == b.image && a.palette == b.palette && a.sampler == b.sampler &&
+               sameRect(a.scissor, b.scissor) && a.blendConstant == b.blendConstant;
+    };
+    size_t n = plan.first;
+    while (n < plan.last)
+    {
+        const DrawPlan &d = m_drawPlans[n];
+        uint32_t count = static_cast<uint32_t>(m_frameMeshes[n].indices.size());
+        if (!d.pipeline || count == 0u)
+        {
+            ++n;
+            continue;
+        }
+        size_t m = n + 1;
+        // Whole triangles only: a stray index would shift the next draw's.
+        if (count % 3u == 0u)
+            while (m < plan.last)
+            {
+                const uint32_t more = static_cast<uint32_t>(m_frameMeshes[m].indices.size());
+                if (more == 0u)
+                {
+                    ++m;
+                    continue;
+                }
+                if (more % 3u != 0u || !m_drawPlans[m].pipeline || !sameState(d, m_drawPlans[m]))
+                    break;
+                count += more;
+                ++m;
+            }
+        if (d.pipeline != bound)
+        {
+            SDL_BindGPUGraphicsPipeline(pass, d.pipeline);
+            bound = d.pipeline;
+        }
+        if (d.image != boundImage || d.palette != boundPalette || d.sampler != boundSampler)
+        {
+            const SDL_GPUTextureSamplerBinding bindings[2] = {{d.image, d.sampler}, {d.palette, d.sampler}};
+            SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+            boundImage = d.image;
+            boundPalette = d.palette;
+            boundSampler = d.sampler;
+        }
+        if (!sameRect(d.scissor, boundScissor))
+        {
+            SDL_SetGPUScissor(pass, &d.scissor);
+            boundScissor = d.scissor;
+        }
+        if (d.blendConstant >= 0.0f && d.blendConstant != boundBlend)
+        {
+            const float f = d.blendConstant;
+            SDL_SetGPUBlendConstants(pass, SDL_FColor{f, f, f, f});
+            boundBlend = f;
+        }
+        SDL_DrawGPUIndexedPrimitives(pass, count, 1, m_firstIndex[n], 0, 0);
+        ++m_meshCounts.calls;
+        n = m;
     }
 }
 
@@ -785,8 +856,6 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         }
         SDL_EndGPURenderPass(pass);
     }
-    if (!uploadMeshes(device, commands, error))
-        return false;
     {
         DepthLog &log = depthLog();
         if (!log.file && std::remove("build/run/depth-log-now") == 0)
@@ -845,6 +914,9 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     }
     std::vector<Id> depthsCleared;
     const size_t count = m_frameMeshes.size();
+    m_drawPlans.assign(count, DrawPlan{});
+    m_drawTable.resize(count);
+    m_passPlans.clear();
     size_t i = 0;
     while (i < count)
     {
@@ -888,26 +960,25 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             colorW = m_gpuTargets[target].width;
             colorH = m_gpuTargets[target].height;
         }
-        SDL_GPUColorTargetInfo colorInfo{};
-        colorInfo.texture = color;
-        colorInfo.load_op = fresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-        colorInfo.store_op = SDL_GPU_STOREOP_STORE;
-        colorInfo.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
-        SDL_GPUDepthStencilTargetInfo depthInfo{};
+        PassPlan plan;
+        plan.target = target;
+        plan.depthId = depthId;
+        plan.color = color;
+        plan.colorW = colorW;
+        plan.colorH = colorH;
+        plan.gameW = gameW;
+        plan.gameH = gameH;
+        plan.colorLoad = fresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         if (depthId != 0u)
         {
             bool depthFresh = false;
-            depthInfo.texture = targetTexture(device, depthId, true, colorW, colorH, depthFresh, error);
-            if (!depthInfo.texture)
+            plan.depth = targetTexture(device, depthId, true, colorW, colorH, depthFresh, error);
+            if (!plan.depth)
                 return false;
             const bool firstUse = std::find(depthsCleared.begin(), depthsCleared.end(), depthId) == depthsCleared.end();
             if (firstUse)
                 depthsCleared.push_back(depthId);
-            depthInfo.load_op = firstUse || depthFresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-            depthInfo.store_op = SDL_GPU_STOREOP_STORE;
-            depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-            depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-            depthInfo.clear_depth = 0.0f;
+            plan.depthLoad = firstUse || depthFresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         }
         // A draw that reads the target it draws into (its texels, or its
         // alpha for the destination alpha test) reads a copy taken just
@@ -922,46 +993,76 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             size_t b = a + 1;
             while (b < j && !readsTarget(m_frameMeshes[b]))
                 ++b;
-            SDL_GPUTexture *copy = nullptr;
+            plan.copy = nullptr;
             if (reads)
             {
                 bool copyFresh = false;
-                copy = targetTexture(device, kFeedbackCopy, false, colorW, colorH, copyFresh, error);
-                if (!copy)
+                plan.copy = targetTexture(device, kFeedbackCopy, false, colorW, colorH, copyFresh, error);
+                if (!plan.copy)
                     return false;
-                SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands);
-                SDL_GPUTextureLocation from{}, to{};
-                from.texture = color;
-                to.texture = copy;
-                SDL_CopyGPUTextureToTexture(pass, &from, &to, colorW, colorH, 1, false);
-                SDL_EndGPUCopyPass(pass);
-                ++m_meshCounts.copies;
             }
-            SDL_GPURenderPass *pass =
-                SDL_BeginGPURenderPass(commands, &colorInfo, 1, depthId ? &depthInfo : nullptr);
-            if (!pass)
-            {
-                error = std::string("SDL_BeginGPURenderPass(native target): ") + SDL_GetError();
-                return false;
-            }
-            ++m_meshCounts.passes;
-            const SDL_GPUViewport viewport{0.0f, 0.0f, float(gameW * scale), float(gameH * scale), 0.0f, 1.0f};
-            SDL_SetGPUViewport(pass, &viewport);
+            plan.first = a;
+            plan.last = b;
             const GpuTarget &copied = m_gpuTargets[kFeedbackCopy]; // its texture may be the larger
             if (FILE *log = depthLog().file)
                 std::fprintf(log, "P tgt=%u dt=%u depth=%s first=%zu last=%zu w=%u h=%u\n", target, depthId,
-                             !depthId                                         ? "none"
-                             : depthInfo.load_op == SDL_GPU_LOADOP_CLEAR ? "clear"
-                                                                         : "load",
+                             !depthId                                       ? "none"
+                             : plan.depthLoad == SDL_GPU_LOADOP_CLEAR ? "clear"
+                                                                      : "load",
                              a, b, gameW, gameH);
-            drawMeshes(device, commands, pass, a, b, target, depthId != 0u, float(gameW), float(gameH), scale,
-                       copy, copied.width, copied.height);
-            SDL_EndGPURenderPass(pass);
-            colorInfo.load_op = SDL_GPU_LOADOP_LOAD;
-            depthInfo.load_op = SDL_GPU_LOADOP_LOAD;
+            planDraws(device, plan, scale, copied.width, copied.height);
+            m_passPlans.push_back(plan);
+            plan.colorLoad = SDL_GPU_LOADOP_LOAD;
+            plan.depthLoad = SDL_GPU_LOADOP_LOAD;
             a = b;
         }
     }
+    // Every texture is made and every draw's uniforms written: up they go
+    // with the vertices, then the passes are recorded.
+    const bool uploaded = uploadMeshes(device, commands, error);
+    for (const PassPlan &plan : m_passPlans)
+    {
+        if (!uploaded)
+            break;
+        if (plan.copy)
+        {
+            SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands);
+            SDL_GPUTextureLocation from{}, to{};
+            from.texture = plan.color;
+            to.texture = plan.copy;
+            SDL_CopyGPUTextureToTexture(pass, &from, &to, plan.colorW, plan.colorH, 1, false);
+            SDL_EndGPUCopyPass(pass);
+            ++m_meshCounts.copies;
+        }
+        SDL_GPUColorTargetInfo colorInfo{};
+        colorInfo.texture = plan.color;
+        colorInfo.load_op = plan.colorLoad;
+        colorInfo.store_op = SDL_GPU_STOREOP_STORE;
+        colorInfo.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
+        SDL_GPUDepthStencilTargetInfo depthInfo{};
+        depthInfo.texture = plan.depth;
+        depthInfo.load_op = plan.depthLoad;
+        depthInfo.store_op = SDL_GPU_STOREOP_STORE;
+        depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        depthInfo.clear_depth = 0.0f;
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &colorInfo, 1, plan.depth ? &depthInfo : nullptr);
+        if (!pass)
+        {
+            error = std::string("SDL_BeginGPURenderPass(native target): ") + SDL_GetError();
+            break;
+        }
+        ++m_meshCounts.passes;
+        const SDL_GPUViewport viewport{0.0f, 0.0f, float(plan.gameW * scale), float(plan.gameH * scale), 0.0f, 1.0f};
+        SDL_SetGPUViewport(pass, &viewport);
+        recordPass(commands, pass, plan);
+        SDL_EndGPURenderPass(pass);
+    }
+    for (SDL_GPUTexture *texture : m_retired)
+        SDL_ReleaseGPUTexture(device, texture);
+    m_retired.clear();
+    if (!error.empty())
+        return false;
     if (DepthLog &log = depthLog(); log.file && --log.framesLeft == 0u)
     {
         std::fclose(log.file);
@@ -997,13 +1098,18 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
         SDL_ReleaseGPUBuffer(device, m_vertexBuffer);
     if (m_indexBuffer)
         SDL_ReleaseGPUBuffer(device, m_indexBuffer);
+    if (m_drawBuffer)
+        SDL_ReleaseGPUBuffer(device, m_drawBuffer);
+    for (SDL_GPUTexture *texture : m_retired)
+        SDL_ReleaseGPUTexture(device, texture);
+    m_retired.clear();
     if (m_meshTransfer)
         SDL_ReleaseGPUTransferBuffer(device, m_meshTransfer);
     m_meshVertex = m_meshFragment = nullptr;
     m_white = nullptr;
-    m_vertexBuffer = m_indexBuffer = nullptr;
+    m_vertexBuffer = m_indexBuffer = m_drawBuffer = nullptr;
     m_meshTransfer = nullptr;
-    m_vertexCapacity = m_indexCapacity = m_transferCapacity = 0u;
+    m_vertexCapacity = m_indexCapacity = m_drawCapacity = m_transferCapacity = 0u;
     m_meshFailed = false;
 }
 } // namespace dq8::gfx::native
