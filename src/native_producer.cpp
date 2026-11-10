@@ -4,6 +4,8 @@
 #if defined(RG_HAS_SDLGPU)
 
 #include <algorithm>
+#include <cstddef>
+#include <type_traits>
 #include <array>
 #include <deque>
 #include <atomic>
@@ -264,10 +266,15 @@ uint64_t keyOf(uint64_t hash, uint32_t a, uint32_t b, uint32_t c)
     return k ? k : 1u;
 }
 
+// The renderer's cull's counts (cullMesh, on its thread).
+std::atomic<uint64_t> g_triangles{0u}, g_trianglesSkipped{0u};
+
 std::string statsLine()
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
+    s.counts.triangles = g_triangles.load(std::memory_order_relaxed);
+    s.counts.trianglesSkipped = g_trianglesSkipped.load(std::memory_order_relaxed);
     const Counts &n = s.counts, &r = s.reported;
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
     std::string line = "[native-producer] texture levels " + d(n.levels, r.levels) + ": new " +
@@ -1347,44 +1354,17 @@ bool hiddenDraw(uint32_t target, bool depthTested, bool reads, uint32_t source)
 
 } // namespace
 
-bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
+namespace
 {
-    if (!native::enabled() || !vu1Data)
-        return false;
-    // A chunk the program clips (h.clips: its slot E clips at z = -w and
-    // z = w) keeps the triangles crossing the guard band: the GS backend
-    // draws them clipped by the planes, and here the GPU clips them in clip
-    // space. Skipping them left holes in floors near the camera.
-    // RG_NATIVE_GUARD_CLIPPED=1 skips them as before (for comparing).
-    static const bool guardClipped = [] {
-        const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
-        return v && std::strcmp(v, "0") != 0;
-    }();
-    if (drawState && !hiddenBases().empty())
-    {
-        const GSContext &hc = drawState->context;
-        if (hiddenDraw(hc.frame.fbp * 32u, ((hc.test >> 16) & 1u) != 0u && ((hc.test >> 17) & 3u) >= 2u,
-                       drawState->prim.tme != 0u, hc.tex0.tbp0))
-            return true; // dropped
-    }
-    GSNativeMesh::Header h = mesh.header;
-    if (h.clips && !guardClipped)
-        h.guardBand = 0u;
-    const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
-
-    native::MeshDraw draw;
-    native::reuseMeshBuffers(draw);
-    draw.source = source;
-    // The program scales its window depth and caps it (VU quad 87.z, quad
-    // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
-    draw.depthScale = mesh.header.depthScale;
-    draw.depthMax = mesh.header.depthMax;
-    // For the depth log: the program's matrix, to give the GS's Z.
-    draw.gsKnown = true;
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            draw.gsMatrix[i * 4 + j] = mesh.header.matrix[i][j];
-
+// The renderer's cull of a raw mesh draw (native::setMeshCull), on its
+// thread: the triangles the program draws into draw.indices, by the rule
+// and arithmetic mesh() applied on the producer's thread before.
+void cullMesh(native::MeshDraw &draw)
+{
+    GSNativeMesh::Header h;
+    std::memcpy(&h, draw.rawHeader, sizeof(h));
+    const uint32_t count = static_cast<uint32_t>(draw.raw.size());
+    draw.indices.clear();
     // The triangles the program draws: a strip's every vertex from the
     // third on, a list's every third, less those the program culls (the
     // GS front end's rule for this mesh, gsNativeMeshSkips).
@@ -1401,7 +1381,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
 #if defined(__clang__)
 #pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
 #endif
-            const GSNativeMesh::Vertex &v = mesh.vertices[k];
+            const native::RawVertex &v = draw.raw[k];
             float clip[4];
             for (int i = 0; i < 4; ++i)
                 clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
@@ -1474,21 +1454,66 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         draw.indices.push_back(k);
     }
 
-    draw.vertices.resize(count);
-    for (uint32_t k = 0; k < count; ++k)
+    g_triangles.fetch_add(draw.indices.size() / 3u, std::memory_order_relaxed);
+    g_trianglesSkipped.fetch_add(skipped, std::memory_order_relaxed);
+}
+} // namespace
+
+bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
+{
+    if (!native::enabled() || !vu1Data)
+        return false;
+    // A chunk the program clips (h.clips: its slot E clips at z = -w and
+    // z = w) keeps the triangles crossing the guard band: the GS backend
+    // draws them clipped by the planes, and here the GPU clips them in clip
+    // space. Skipping them left holes in floors near the camera.
+    // RG_NATIVE_GUARD_CLIPPED=1 skips them as before (for comparing).
+    static const bool guardClipped = [] {
+        const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
+        return v && std::strcmp(v, "0") != 0;
+    }();
+    if (drawState && !hiddenBases().empty())
     {
-        const GSNativeMesh::Vertex &in = mesh.vertices[k];
-        native::Vertex &out = draw.vertices[k];
-        out.position[0] = in.x;
-        out.position[1] = in.y;
-        out.position[2] = in.z;
-        out.uv[0] = in.u;
-        out.uv[1] = in.v;
-        out.color[0] = rg::fmin(in.r, h.colorMax[0]);
-        out.color[1] = rg::fmin(in.g, h.colorMax[1]);
-        out.color[2] = rg::fmin(in.b, h.colorMax[2]);
-        out.color[3] = rg::fmin(in.a, h.colorMax[3]);
+        const GSContext &hc = drawState->context;
+        if (hiddenDraw(hc.frame.fbp * 32u, ((hc.test >> 16) & 1u) != 0u && ((hc.test >> 17) & 3u) >= 2u,
+                       drawState->prim.tme != 0u, hc.tex0.tbp0))
+            return true; // dropped
     }
+    GSNativeMesh::Header h = mesh.header;
+    if (h.clips && !guardClipped)
+        h.guardBand = 0u;
+    const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
+
+    native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
+    draw.source = source;
+    // The program scales its window depth and caps it (VU quad 87.z, quad
+    // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
+    draw.depthScale = mesh.header.depthScale;
+    draw.depthMax = mesh.header.depthMax;
+    // For the depth log: the program's matrix, to give the GS's Z.
+    draw.gsKnown = true;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            draw.gsMatrix[i * 4 + j] = mesh.header.matrix[i][j];
+
+    // The chunk as the program left it: the renderer culls it (cullMesh,
+    // on its thread) and makes its GPU vertices from these.
+    static const bool cullSet = (native::setMeshCull(&cullMesh), true);
+    (void)cullSet;
+    static_assert(sizeof(native::RawVertex) == sizeof(GSNativeMesh::Vertex) &&
+                      offsetof(native::RawVertex, u) == offsetof(GSNativeMesh::Vertex, u) &&
+                      offsetof(native::RawVertex, r) == offsetof(GSNativeMesh::Vertex, r) &&
+                      offsetof(native::RawVertex, depth) == offsetof(GSNativeMesh::Vertex, depth),
+                  "RawVertex is GSNativeMesh::Vertex, field for field");
+    static_assert(sizeof(GSNativeMesh::Header) <= sizeof(native::MeshDraw::rawHeader) &&
+                      std::is_trivially_copyable_v<GSNativeMesh::Header>,
+                  "the header fits MeshDraw::rawHeader");
+    native::reuseRawBuffer(draw);
+    const auto *rawFirst = reinterpret_cast<const native::RawVertex *>(mesh.vertices.data());
+    draw.raw.assign(rawFirst, rawFirst + count);
+    std::memcpy(draw.rawHeader, &h, sizeof(h));
+    std::memcpy(draw.rawColorMax, h.colorMax, sizeof(draw.rawColorMax));
     std::memcpy(draw.fog, h.fog, sizeof(draw.fog));
 
     // The camera and the model, as the game keeps them in VU1 data memory.
@@ -1513,8 +1538,6 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     std::lock_guard lock(s.mutex);
     forgetEvicted(s);
     ++s.counts.meshes;
-    s.counts.triangles += draw.indices.size() / 3u;
-    s.counts.trianglesSkipped += skipped;
     if (!drawState)
     {
         ++s.counts.meshesNoState;
@@ -2148,7 +2171,7 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
     image.seq = s.uploadedSeq[dbp] = ++s.sequence;
 }
 
-bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
+bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, const std::vector<uint32_t> &indices)
 {
     if (!native::enabled())
         return false;
@@ -2355,10 +2378,15 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
         if (fogged)
             out.fog = std::clamp((w - 1.0f) * 255.0f - 0.25f, 0.0f, 255.0f);
     }
-    const uint32_t count = static_cast<uint32_t>(draw.vertices.size()) / 3u * 3u;
-    draw.indices.resize(count);
-    for (uint32_t k = 0; k < count; ++k)
-        draw.indices[k] = k;
+    if (!indices.empty())
+        draw.indices.assign(indices.begin(), indices.begin() + indices.size() / 3u * 3u);
+    else
+    {
+        const uint32_t count = static_cast<uint32_t>(draw.vertices.size()) / 3u * 3u;
+        draw.indices.resize(count);
+        for (uint32_t k = 0; k < count; ++k)
+            draw.indices[k] = k;
+    }
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
     draw.fog[0] = draw.fog[1] = 255.0f; // a model's F: none (the vertices carry theirs)
     m.fog = fogged;
@@ -2815,7 +2843,7 @@ bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::
 void replaceUpload(bool, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void noteEffect(const GSNativeEffect &) {}
-bool piece(const GSNativeMesh &, const GSDrawState *, bool) { return false; }
+bool piece(const GSNativeMesh &, const GSDrawState *, bool, const std::vector<uint32_t> &) { return false; }
 bool effect(const GSNativeEffect &) { return false; }
 void noteLocalCopy(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                    uint32_t, uint32_t) {}

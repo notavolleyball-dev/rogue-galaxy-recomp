@@ -81,7 +81,10 @@ void noteEffect(const GSNativeEffect &effect);
 // renderer's window-space mesh draw. `texels`: its UVs are texels (FST),
 // not normalised. True when made; false leaves it to the GS (counted by
 // why).
-bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels);
+// `indices`: the mesh's triangles into mesh.vertices (empty: the vertices
+// are a triangle list themselves).
+bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels,
+           const std::vector<uint32_t> &indices = {});
 
 // Step 5b: an effect's sprites (src/native_effects.h) as the renderer's
 // window-space mesh draws, and step 5c's object layer commands. True when

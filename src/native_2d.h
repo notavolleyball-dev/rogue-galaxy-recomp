@@ -37,6 +37,10 @@ struct Piece
     const uint8_t *view = nullptr;
     uint32_t viewSize = 0u;
     GSNativeMesh mesh; // otherwise
+    // The mesh's triangles, three indices into mesh.vertices each: a sprite
+    // or a line's quad is four vertices, not six. (mesh.vertices alone is
+    // not a triangle list: expand through these for one.)
+    std::vector<uint32_t> indices;
     // The mesh's UVs are texels (FST), not normalised coordinates.
     bool texelUvs = false;
     bool isWrites() const { return !writes.empty(); }
@@ -55,6 +59,20 @@ struct Span
 // meshes. False, with `why`, when they hold something the converter cannot
 // express (a reserved primitive type): then they go on as they are.
 bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::string &why);
+
+// Packets that draw nothing, the most common kind, taken as build takes
+// them without its pieces. Writes: register writes alone, with no transfer
+// register; the draw-state mirror's writes into `writes` (build's one writes
+// piece). Raw: they go to sendRaw as they are (a transfer's registers, an
+// upload's IMAGE tag in a packet of its own), as build's pieces would.
+// No: anything else (a vertex, an upload among other packets); nothing done.
+enum class Quick : uint8_t
+{
+    No,
+    Writes,
+    Raw,
+};
+Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, uint64_t>> &writes);
 
 // Register writes as one A+D packet (PACKED, NLOOP of them, EOP).
 std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes);

@@ -198,6 +198,7 @@ struct MeshBufferPool
     std::mutex mutex;
     std::vector<std::vector<Vertex>> vertices;
     std::vector<std::vector<uint32_t>> indices;
+    std::vector<std::vector<RawVertex>> raw;
     static constexpr size_t kMax = 16384u;
 };
 MeshBufferPool &meshBufferPool()
@@ -225,6 +226,11 @@ void recycleMeshes(std::vector<MeshDraw> &meshes)
             {
                 draw.indices.clear();
                 pool.indices.push_back(std::move(draw.indices));
+            }
+            if (draw.raw.capacity() != 0u && pool.raw.size() < MeshBufferPool::kMax)
+            {
+                draw.raw.clear();
+                pool.raw.push_back(std::move(draw.raw));
             }
         }
     }
@@ -263,6 +269,42 @@ void reuseMeshBuffers(MeshDraw &draw)
         draw.indices = std::move(indices.back());
         indices.pop_back();
     }
+}
+
+// MeshDraw::raw's vectors, for a producer that fills raw rather than
+// vertices: from the same pool, apart from the others (a 2D draw takes none).
+void reuseRawBuffer(MeshDraw &draw)
+{
+    constexpr size_t kBatch = 256u;
+    thread_local std::vector<std::vector<RawVertex>> raw;
+    if (raw.empty())
+    {
+        MeshBufferPool &pool = meshBufferPool();
+        std::lock_guard lock(pool.mutex);
+        while (raw.size() < kBatch && !pool.raw.empty())
+        {
+            raw.push_back(std::move(pool.raw.back()));
+            pool.raw.pop_back();
+        }
+    }
+    if (!raw.empty() && draw.raw.capacity() == 0u)
+    {
+        draw.raw = std::move(raw.back());
+        raw.pop_back();
+    }
+}
+
+namespace
+{
+std::atomic<void (*)(MeshDraw &)> g_meshCull{nullptr};
+}
+void setMeshCull(void (*cull)(MeshDraw &draw))
+{
+    g_meshCull.store(cull, std::memory_order_release);
+}
+void (*meshCull())(MeshDraw &draw)
+{
+    return g_meshCull.load(std::memory_order_acquire);
 }
 
 void push(Record &&record)

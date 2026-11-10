@@ -211,6 +211,17 @@ struct Vertex
     float fog = 255.0f;
 };
 
+// A VU1 chunk's vertex as the program left it (the producer's
+// GSNativeMesh::Vertex, field for field): object space, UVs before the
+// divide, colour before its cap, the program's own Z (depth, unused here).
+struct RawVertex
+{
+    float x, y, z;
+    float u, v;
+    float r, g, b, a;
+    float depth;
+};
+
 // With hasModel, vertices are in object space, through the model and the
 // camera. Without it, they are the target's pixels (x, y) and the game's
 // window depth (z), which the camera, when there is one, maps to the
@@ -249,6 +260,14 @@ struct MeshDraw
     // (row vectors), so the log can give the GS's integer Z beside ours.
     bool gsKnown = false;
     float gsMatrix[16] = {};
+    // Instead of vertices and indices: a VU1 chunk as the program left it.
+    // The renderer makes its triangles on its own thread through the cull
+    // the producer set (setMeshCull, which reads rawHeader, the producer's
+    // own description of the chunk), and its GPU vertices straight from
+    // these, each colour capped at rawColorMax (fmin).
+    std::vector<RawVertex> raw;
+    float rawColorMax[4] = {};
+    alignas(16) unsigned char rawHeader[256];
 };
 
 struct SpriteDraw

@@ -43,6 +43,16 @@ void push(Record &&record);
 // Any thread; the producer's side takes a batch at a time.
 void reuseMeshBuffers(MeshDraw &draw);
 
+// MeshDraw::raw's buffer from the same pool (reuseMeshBuffers gives the
+// others). Any thread.
+void reuseRawBuffer(MeshDraw &draw);
+
+// The producer's cull for MeshDraw::raw draws: fills draw.indices with the
+// triangles the program draws. Called on the renderer's thread for each
+// such draw of a frame it draws, before anything else reads the draw.
+void setMeshCull(void (*cull)(MeshDraw &draw));
+void (*meshCull())(MeshDraw &draw);
+
 // Textures the renderer let go of (its memory budget): a producer that sends
 // a texture once and names it by id afterwards drains these and sends them
 // again when next used. Any thread.

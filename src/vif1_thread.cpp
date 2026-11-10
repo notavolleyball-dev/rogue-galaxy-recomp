@@ -706,13 +706,18 @@ public:
         const uint32_t vertices = static_cast<uint32_t>(mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
         const uint32_t size = static_cast<uint32_t>(sizeof(GSNativeMesh::Header)) + vertices +
                               (vu1Data ? kVu1Bytes : 0u);
+        static_assert(kVu1Bytes == 16u * 16u, "the quads below");
         uint8_t *at = append(Kind::Mesh, size, ~0u, ~0u, vu1Data ? 1u : 0u);
         std::memcpy(at, &mesh.header, sizeof(mesh.header));
         at += sizeof(mesh.header);
         if (vertices)
             std::memcpy(at, mesh.vertices.data(), vertices);
         if (vu1Data)
-            std::memcpy(at + vertices, vu1Data, kVu1Bytes);
+            for (const auto &[first, count] : kVu1Runs)
+            {
+                std::memcpy(at + vertices, vu1Data + first * 16u, count * 16u);
+                at += count * 16u;
+            }
     }
     // The list's end: hands over what is staged; the stage then flushes the
     // held effect and composites and finishes the list.
@@ -735,6 +740,25 @@ public:
     }
 
 private:
+    // Bytes the records are written into whole: growing them leaves the new
+    // bytes as they are (std::vector<uint8_t> zeroes them, and each record
+    // was written twice).
+    template <typename T> struct NoInit : std::allocator<T>
+    {
+        template <typename U> struct rebind
+        {
+            using other = NoInit<U>;
+        };
+        NoInit() = default;
+        template <typename U> NoInit(const NoInit<U> &) noexcept {}
+        template <typename U> void construct(U *p) noexcept { ::new (static_cast<void *>(p)) U; }
+        template <typename U, typename... A> void construct(U *p, A &&...a)
+        {
+            ::new (static_cast<void *>(p)) U(std::forward<A>(a)...);
+        }
+    };
+    using Bytes = std::vector<uint8_t, NoInit<uint8_t>>;
+
     enum class Kind : uint32_t
     {
         Packet,
@@ -754,7 +778,10 @@ private:
         uint32_t vu1;   // a mesh: the VU1 quads follow its vertices
     };
     static_assert(sizeof(Header) == 32u);
-    static constexpr uint32_t kVu1Bytes = 64u * 16u;
+    // The VU1 quads the producer reads of a mesh (nativeproducer::mesh: the
+    // viewport 4-7, projection 8-11, view 24-27, model 60-63), in runs.
+    static constexpr std::pair<uint32_t, uint32_t> kVu1Runs[3] = {{4u, 8u}, {24u, 4u}, {60u, 4u}};
+    static constexpr uint32_t kVu1Bytes = 16u * 16u;
 
     // Room for a record of `size` bytes at the end of the staged buffer.
     uint8_t *append(Kind kind, uint32_t size, uint32_t address, uint32_t cursor, uint32_t vu1)
@@ -795,7 +822,7 @@ private:
         uint32_t mxcsr = _mm_getcsr() & ~kMxcsrFlags;
         for (;;)
         {
-            std::vector<uint8_t> buffer;
+            Bytes buffer;
             {
                 std::unique_lock lock(m_mutex);
                 m_work.wait(lock, [&] { return !m_buffers.empty() || m_stop; });
@@ -836,8 +863,20 @@ private:
                         m_mesh.vertices.resize(vertices / sizeof(GSNativeMesh::Vertex));
                         if (vertices)
                             std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header), vertices);
-                        deliverMesh(m_gs, m_mesh,
-                                    header.vu1 ? data + sizeof(m_mesh.header) + vertices : nullptr);
+                        // The quads back where VU1 memory has them (the rest
+                        // of this copy is never read).
+                        const uint8_t *quads = nullptr;
+                        if (header.vu1)
+                        {
+                            const uint8_t *from = data + sizeof(m_mesh.header) + vertices;
+                            for (const auto &[first, count] : kVu1Runs)
+                            {
+                                std::memcpy(m_vu1 + first * 16u, from, count * 16u);
+                                from += count * 16u;
+                            }
+                            quads = m_vu1;
+                        }
+                        deliverMesh(m_gs, m_mesh, quads);
                         break;
                     }
                     case Kind::ListEnd:
@@ -891,10 +930,11 @@ private:
     std::thread::id m_id;
     std::mutex m_mutex;
     std::condition_variable m_work, m_space;
-    std::deque<std::vector<uint8_t>> m_buffers; // guarded by m_mutex
-    std::vector<std::vector<uint8_t>> m_pool;   // guarded by m_mutex
-    std::vector<uint8_t> m_staged;              // the VIF1 thread's
+    std::deque<Bytes> m_buffers; // guarded by m_mutex
+    std::vector<Bytes> m_pool;   // guarded by m_mutex
+    Bytes m_staged;              // the VIF1 thread's
     GSNativeMesh m_mesh;                        // the stage's
+    alignas(16) uint8_t m_vu1[64u * 16u] = {};  // the stage's: a mesh's VU1 quads, in place
     size_t m_outstanding = 0u;                  // guarded by m_mutex
     bool m_stop = false;                        // guarded by m_mutex
 };
@@ -1436,19 +1476,44 @@ private:
     std::unordered_map<uint64_t, const rg::vu1native::Program *> m_identified;
     uint64_t m_codeHash = 0u;
 
-    // The 16 KiB of micro memory, a word at a time.
-    static uint64_t imageHash(const uint8_t *code)
+    // The 16 KiB of micro memory: a hash per 256-byte block, made again only
+    // for the blocks whose bytes changed since the last (against a copy of
+    // them), folded into one. Rehashing the whole image a word at a time
+    // on every code upload was ~15% of this thread (2026-11-09): the game
+    // uploads pieces of its programs per object.
+    static constexpr uint32_t kCodeBlock = 256u, kCodeBlocks = PS2_VU1_CODE_SIZE / kCodeBlock;
+    static_assert(PS2_VU1_CODE_SIZE % kCodeBlock == 0u);
+    uint64_t imageHash(const uint8_t *code)
     {
-        uint64_t hash = 0x84222325CBF29CE4ull;
-        for (uint32_t i = 0; i < PS2_VU1_CODE_SIZE; i += 8u)
+        for (uint32_t b = 0; b < kCodeBlocks; ++b)
         {
-            uint64_t word;
-            std::memcpy(&word, code + i, sizeof(word));
-            hash = (hash ^ word) * 0x100000001B3ull;
+            const uint8_t *at = code + b * kCodeBlock;
+            uint8_t *seen = m_codeSeen.data() + b * kCodeBlock;
+            if (m_codeSeenValid && std::memcmp(seen, at, kCodeBlock) == 0)
+                continue;
+            std::memcpy(seen, at, kCodeBlock);
+            uint64_t hash = 0x84222325CBF29CE4ull ^ (uint64_t(b) * 0x9E3779B97F4A7C15ull);
+            for (uint32_t i = 0; i < kCodeBlock; i += 8u)
+            {
+                uint64_t word;
+                std::memcpy(&word, at + i, sizeof(word));
+                hash = (hash ^ word) * 0x100000001B3ull;
+                hash ^= hash >> 29;
+            }
+            m_blockHash[b] = hash;
+        }
+        m_codeSeenValid = true;
+        uint64_t hash = 0x84222325CBF29CE4ull;
+        for (uint32_t b = 0; b < kCodeBlocks; ++b)
+        {
+            hash = (hash ^ m_blockHash[b]) * 0x100000001B3ull;
             hash ^= hash >> 29;
         }
         return hash;
     }
+    std::vector<uint8_t> m_codeSeen = std::vector<uint8_t>(PS2_VU1_CODE_SIZE);
+    std::array<uint64_t, kCodeBlocks> m_blockHash{};
+    bool m_codeSeenValid = false;
     uint32_t m_checkCount = 0u;
     rg::vu1native::Monitor m_nativeMonitor{nativeMode()};
     std::vector<std::vector<uint8_t>> m_nativePackets;
@@ -1571,6 +1636,9 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         return false;
     kept.clear();
     bool changed = false;
+    // `kept` is filled only once something is dropped: until then the
+    // packet goes on as it is, uncopied.
+    bool copying = false;
     uint32_t pos = 0u;
     if (t_upload.imageBytes > 0u)
     {
@@ -1579,7 +1647,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         t_upload.imageBytes -= n;
         seeWithheld(data, n);
         pos = n;
-        changed = true;
+        changed = copying = true;
         producer::noteContinuedInPacket();
     }
     while (pos + 16u <= size)
@@ -1643,6 +1711,11 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     t_upload.width = rrw;
                     t_upload.height = rrh;
                     drop = true;
+                    if (!copying)
+                    {
+                        kept.assign(data, data + pos);
+                        copying = true;
+                    }
                     if (others != 0u)
                     {
                         // The block's other registers, as a block of their own.
@@ -1663,6 +1736,11 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         {
             // The withheld transfer's data, as many IMAGE tags as it takes.
             drop = true;
+            if (!copying)
+            {
+                kept.assign(data, data + pos);
+                copying = true;
+            }
             const uint32_t taken = static_cast<uint32_t>(std::min<uint64_t>(body, t_upload.transferBytes));
             t_upload.transferBytes -= taken;
             seeWithheld(data + pos + 16u, std::min<uint32_t>(taken, end - (pos + 16u)));
@@ -1672,7 +1750,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         }
         if (drop)
             changed = true;
-        else
+        else if (copying)
             kept.insert(kept.end(), data + pos, data + end);
         pos = end;
     }
@@ -1782,9 +1860,16 @@ void transferRegister(uint8_t reg, uint64_t value)
     }
 }
 
-// A packet on its way to the GS: its transfers, for the producer.
-void watchTransfers(const uint8_t *data, uint32_t size)
+void absorbRegister(uint8_t reg, uint64_t value);
+std::atomic<uint64_t> g_absorbedPackets{0u};
+
+// A packet on its way to the GS: its transfers, for the producer; with
+// `absorbToo`, its SIGNAL, FINISH and LABEL as well (absorb's, in the same
+// walk).
+void watchTransfers(const uint8_t *data, uint32_t size, bool absorbToo = false)
 {
+    if (absorbToo)
+        g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
     uint32_t pos = 0u;
     while (pos + 16u <= size)
     {
@@ -1805,6 +1890,8 @@ void watchTransfers(const uint8_t *data, uint32_t size)
                     uint64_t value = 0u;
                     std::memcpy(&value, data + pos, 8u);
                     transferRegister(data[pos + 8u], value);
+                    if (absorbToo)
+                        absorbRegister(data[pos + 8u], value);
                 }
         }
         else if (flg == 1u)
@@ -1838,7 +1925,6 @@ bool absorbing()
     }();
     return on;
 }
-std::atomic<uint64_t> g_absorbedPackets{0u};
 
 void absorbRegister(uint8_t reg, uint64_t value)
 {
@@ -1872,39 +1958,6 @@ void absorbRegister(uint8_t reg, uint64_t value)
     }
 }
 
-// The packet's SIGNAL, FINISH and LABEL (A+D writes; the GIF has no other
-// way to them), as the GS would take them.
-void absorb(const uint8_t *data, uint32_t size)
-{
-    g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
-    uint32_t pos = 0u;
-    while (pos + 16u <= size)
-    {
-        uint64_t lo = 0u, hi = 0u;
-        std::memcpy(&lo, data + pos, 8u);
-        std::memcpy(&hi, data + pos + 8u, 8u);
-        const uint32_t nloop = static_cast<uint32_t>(lo & 0x7FFFu);
-        const uint32_t flg = static_cast<uint32_t>((lo >> 58) & 3u);
-        uint32_t nreg = static_cast<uint32_t>((lo >> 60) & 0xFu);
-        nreg = nreg ? nreg : 16u;
-        pos += 16u;
-        if (flg == 0u)
-        {
-            for (uint32_t i = 0; i < nloop * nreg && pos + 16u <= size; ++i, pos += 16u)
-                if (((hi >> ((i % nreg) * 4u)) & 0xFu) == 0xEu)
-                {
-                    uint64_t value = 0u;
-                    std::memcpy(&value, data + pos, 8u);
-                    absorbRegister(data[pos + 8u], value);
-                }
-        }
-        else if (flg == 1u)
-            pos += ((nloop * nreg * 8u) + 15u) & ~15u;
-        else
-            pos += std::min<uint32_t>(nloop * 16u, size - std::min(size, pos));
-    }
-}
-
 // A packet to the GS as it is.
 void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 {
@@ -1918,13 +1971,13 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
             data = kept.data();
             size = static_cast<uint32_t>(kept.size());
         }
-        watchTransfers(data, size);
         if (absorbing())
         {
+            watchTransfers(data, size, true);
             rg::drawstate::observe(data, size);
-            absorb(data, size);
             return;
         }
+        watchTransfers(data, size);
     }
     // The native pipeline's draw-state mirror follows every packet, in the
     // order the GS gets them.
@@ -1953,6 +2006,14 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
 // registers, a withheld image's data due at the packet's start, a vertex
 // kick, the GS itself) goes the packet's way.
 std::atomic<uint64_t> g_writesDirect{0u}, g_writesAsPackets{0u};
+// sendWrites' direct way: the mirror, then SIGNAL, FINISH and LABEL.
+void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
+{
+    rg::drawstate::observeWrites(writes.data(), writes.size());
+    g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
+    for (const auto &[reg, value] : writes)
+        absorbRegister(reg, value);
+}
 void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 {
     bool direct = uploadsTaken() && absorbing() && t_upload.imageBytes == 0u;
@@ -1969,10 +2030,7 @@ void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
         return;
     }
     g_writesDirect.fetch_add(1u, std::memory_order_relaxed);
-    rg::drawstate::observeWrites(writes.data(), writes.size());
-    g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
-    for (const auto &[reg, value] : writes)
-        absorbRegister(reg, value);
+    applyWrites(writes);
 }
 
 // A native strip to the GS, in order with the packets.
@@ -1998,7 +2056,7 @@ bool native2D()
     return on;
 }
 std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_piecesMade{0u}, g_piecesToGs{0u},
-    g_piecesDropped{0u};
+    g_piecesDropped{0u}, g_packetsRegisterOnly{0u};
 
 // Step 5b: a converter mesh as the producer's window-space draw, under the
 // draw state the packets before it left (the PRIM write just before it
@@ -2011,7 +2069,7 @@ void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
         g_thread->drain(); // the lists in flight first, as for the GS
     }
     const GSDrawState state = rg::drawstate::current();
-    if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs))
+    if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs, piece.indices))
     {
         ++g_piecesMade;
         return;
@@ -2022,7 +2080,14 @@ void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
         return;
     }
     ++g_piecesToGs;
-    meshToGs(gs, piece.mesh);
+    // The GS takes a triangle list: the indexed vertices, expanded.
+    GSNativeMesh list;
+    list.header = piece.mesh.header;
+    list.vertices.reserve(piece.indices.size());
+    for (uint32_t index : piece.indices)
+        list.vertices.push_back(piece.mesh.vertices[index]);
+    list.header.vertexCount = static_cast<uint32_t>(list.vertices.size());
+    meshToGs(gs, list);
 }
 
 // A packet on to the GS. Under the native pipeline's 2D its primitives
@@ -2031,6 +2096,24 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
 {
     if (native2D() && data && size >= 16u)
     {
+        // Most packets draw nothing (a mesh's register writes, an upload's
+        // tags): under absorb they skip the converter's pieces (no withheld
+        // image data may be due first).
+        if (absorbing() && t_upload.imageBytes == 0u)
+        {
+            thread_local std::vector<std::pair<uint8_t, uint64_t>> writes;
+            writes.clear();
+            const rg::native2d::Quick quick = rg::native2d::quick(data, size, writes);
+            if (quick != rg::native2d::Quick::No)
+            {
+                ++g_packetsRegisterOnly;
+                if (quick == rg::native2d::Quick::Writes)
+                    applyWrites(writes);
+                else
+                    sendRaw(gs, data, size);
+                return;
+            }
+        }
         thread_local std::vector<rg::native2d::Piece> pieces;
         const rg::native2d::Span one{data, size};
         std::string why;
@@ -2039,7 +2122,9 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
             const bool anyMesh = std::any_of(pieces.begin(), pieces.end(), [](const rg::native2d::Piece &p) {
                 return !p.isPacket() && !p.isWrites();
             });
-            if (!anyMesh)
+            // Under absorb a packet without meshes goes as its pieces too:
+            // its register writes reach the mirror without a second decode.
+            if (!anyMesh && !absorbing())
             {
                 sendRaw(gs, data, size); // the converter has seen it
                 return;
@@ -2055,12 +2140,14 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
             }
             const uint64_t count = ++g_packetsConverted;
             if (count == 1u || count % 100000u == 0u)
-                std::fprintf(stderr, "[native2d] packets converted: %llu (pieces made %llu, to the GS %llu, dropped %llu), %llu refused\n",
+                std::fprintf(stderr, "[native2d] packets converted: %llu (pieces made %llu, to the GS %llu, dropped %llu), %llu refused, "
+                             "%llu without draws\n",
                              static_cast<unsigned long long>(count),
                              static_cast<unsigned long long>(g_piecesMade.load()),
                              static_cast<unsigned long long>(g_piecesToGs.load()),
                              static_cast<unsigned long long>(g_piecesDropped.load()),
-                             static_cast<unsigned long long>(g_packetsRefused.load()));
+                             static_cast<unsigned long long>(g_packetsRefused.load()),
+                             static_cast<unsigned long long>(g_packetsRegisterOnly.load()));
             return;
         }
         ++g_packetsRefused;
