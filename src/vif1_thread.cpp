@@ -1946,6 +1946,35 @@ void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
     gs.processGIFPacket(data, size);
 }
 
+// Register writes the 2D converter made, as sendRaw would take them in an
+// A+D packet, without making and decoding one: under the pipeline's absorb
+// that is the draw-state mirror (and its carried vertex state) and SIGNAL,
+// FINISH and LABEL. Anything else a packet would do with them (a transfer's
+// registers, a withheld image's data due at the packet's start, a vertex
+// kick, the GS itself) goes the packet's way.
+std::atomic<uint64_t> g_writesDirect{0u}, g_writesAsPackets{0u};
+void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
+{
+    bool direct = uploadsTaken() && absorbing() && t_upload.imageBytes == 0u;
+    for (size_t i = 0; direct && i < writes.size(); ++i)
+    {
+        const uint8_t reg = writes[i].first;
+        direct = !(reg >= 0x50u && reg <= 0x53u) && reg != 0x04u && reg != 0x05u && reg != 0x0Cu && reg != 0x0Du;
+    }
+    if (!direct)
+    {
+        g_writesAsPackets.fetch_add(1u, std::memory_order_relaxed);
+        const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
+        sendRaw(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        return;
+    }
+    g_writesDirect.fetch_add(1u, std::memory_order_relaxed);
+    rg::drawstate::observeWrites(writes.data(), writes.size());
+    g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
+    for (const auto &[reg, value] : writes)
+        absorbRegister(reg, value);
+}
+
 // A native strip to the GS, in order with the packets.
 void meshToGs(GS &gs, const GSNativeMesh &mesh)
 {
@@ -2007,8 +2036,9 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
         std::string why;
         if (rg::native2d::build(&one, 1u, pieces, why))
         {
-            const bool anyMesh = std::any_of(pieces.begin(), pieces.end(),
-                                             [](const rg::native2d::Piece &p) { return !p.isPacket(); });
+            const bool anyMesh = std::any_of(pieces.begin(), pieces.end(), [](const rg::native2d::Piece &p) {
+                return !p.isPacket() && !p.isWrites();
+            });
             if (!anyMesh)
             {
                 sendRaw(gs, data, size); // the converter has seen it
@@ -2016,7 +2046,9 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
             }
             for (const rg::native2d::Piece &piece : pieces)
             {
-                if (piece.isPacket())
+                if (piece.isWrites())
+                    sendWrites(gs, piece.writes);
+                else if (piece.isPacket())
                     sendRaw(gs, piece.bytes(), piece.size());
                 else
                     deliverPiece(gs, piece);

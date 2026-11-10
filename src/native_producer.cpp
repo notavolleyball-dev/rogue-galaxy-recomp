@@ -1,4 +1,5 @@
 #include "native_producer.h"
+#include "fminmax.h"
 
 #if defined(RG_HAS_SDLGPU)
 
@@ -1483,10 +1484,10 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         out.position[2] = in.z;
         out.uv[0] = in.u;
         out.uv[1] = in.v;
-        out.color[0] = std::fmin(in.r, h.colorMax[0]);
-        out.color[1] = std::fmin(in.g, h.colorMax[1]);
-        out.color[2] = std::fmin(in.b, h.colorMax[2]);
-        out.color[3] = std::fmin(in.a, h.colorMax[3]);
+        out.color[0] = rg::fmin(in.r, h.colorMax[0]);
+        out.color[1] = rg::fmin(in.g, h.colorMax[1]);
+        out.color[2] = rg::fmin(in.b, h.colorMax[2]);
+        out.color[3] = rg::fmin(in.a, h.colorMax[3]);
     }
     std::memcpy(draw.fog, h.fog, sizeof(draw.fog));
 

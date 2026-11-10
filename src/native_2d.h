@@ -28,6 +28,9 @@ bool enabled();
 
 struct Piece
 {
+    // Register writes the converter made (an A+D packet's worth), when not
+    // empty: the sender applies them without the packet (vif1's sendWrites).
+    std::vector<std::pair<uint8_t, uint64_t>> writes;
     std::vector<uint8_t> packet; // a packet the converter made, when not empty
     // Or a packet of the input as it is (an upload), in place: valid while
     // the input is.
@@ -36,6 +39,7 @@ struct Piece
     GSNativeMesh mesh; // otherwise
     // The mesh's UVs are texels (FST), not normalised coordinates.
     bool texelUvs = false;
+    bool isWrites() const { return !writes.empty(); }
     bool isPacket() const { return view != nullptr || !packet.empty(); }
     const uint8_t *bytes() const { return view ? view : packet.data(); }
     uint32_t size() const { return view ? viewSize : static_cast<uint32_t>(packet.size()); }

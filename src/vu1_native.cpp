@@ -1,4 +1,5 @@
 #include "vu1_native.h"
+#include "fminmax.h"
 
 #include <cfenv>
 #include <chrono>
@@ -519,7 +520,7 @@ struct Lights
         float d[4];
         for (int i = 0; i < 4; ++i)
         {
-            d[i] = std::fmax(d0[i] * n[0] + d1[i] * n[1] + d2[i] * n[2], 0.0f);
+            d[i] = rg::fmax(d0[i] * n[0] + d1[i] * n[1] + d2[i] * n[2], 0.0f);
         }
         const float *c0 = &color[0].x, *c1 = &color[1].x, *c2 = &color[2].x, *c3 = &color[3].x;
         const float *base = &ambient.x;
@@ -658,7 +659,7 @@ struct Swell
     void push(float p[3], const float n[3]) const
     {
         const float depth = ((lane[0] * p[0] + lane[1] * p[1]) + lane[2] * p[2]) + lane[3] * 1.0f;
-        const float scale = std::fmin(std::fmax((far - depth) * inverseFar, 0.2f), 1.0f);
+        const float scale = rg::fmin(rg::fmax((far - depth) * inverseFar, 0.2f), 1.0f);
         for (int i = 0; i < 3; ++i)
             p[i] = p[i] + ((n[i] * q) * depth) * scale;
     }
@@ -778,10 +779,10 @@ struct PointLights
         for (uint32_t i = 0; i < 4u; ++i)
         {
             const float dx = position[i].x - w[0], dy = position[i].y - w[1], dz = position[i].z - w[2];
-            const float dot = std::fmax((dx * nx + dy * ny) + dz * nz, 0.0f);
+            const float dot = rg::fmax((dx * nx + dy * ny) + dz * nz, 0.0f);
             const float root = std::sqrt(std::fabs((dx * dx + dy * dy) + (dz * dz) * 1.0f));
             const float inverse = root != 0.0f ? 1.0f / root : std::numeric_limits<float>::max();
-            const float f = std::fmax(dot * inverse - dot * position[i].w, 0.0f);
+            const float f = rg::fmax(dot * inverse - dot * position[i].w, 0.0f);
             for (int k = 0; k < 3; ++k)
                 sum[k] = i == 0u ? color[i][k] * f : sum[k] + color[i][k] * f;
         }
@@ -957,7 +958,7 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
                     for (uint32_t i = 0; i < 3u; ++i)
                     {
                         const float cv = itof15(vu.word(colors + k, i)) * 256.0f;
-                        out[i] = std::fmax((lit[i] * cv) * sign, (lit[i] + cv * 128.0f) * -sign);
+                        out[i] = rg::fmax((lit[i] * cv) * sign, (lit[i] + cv * 128.0f) * -sign);
                     }
                     v.r = out[0];
                     v.g = out[1];
@@ -1083,7 +1084,7 @@ void buildOutline(const Program &program, const VuData &vu, uint32_t top,
             const float far = cx * ey - ex * cy;
             hidden = hidden || near * far < 0.0f;
         }
-        const float alpha = std::fmin(std::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
+        const float alpha = rg::fmin(rg::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
         const float h = 0.5f * alpha;
         putWords(packet, 16u, 16u, 16u, static_cast<uint32_t>(gsNativeFtoi(alpha * 64.0f, 1.0f)));
         // MFIR sign-extends ADC's 0x8000 into the word (0xffff8000, an
@@ -1457,7 +1458,7 @@ void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint
         for (int l = 0; l < 4; ++l)
         {
             rgba[l] = static_cast<uint32_t>(
-                gsNativeFtoi(std::fmax(std::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
+                gsNativeFtoi(rg::fmax(rg::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
         }
         uint32_t st[4][4], xyz[4][4];
         bool outside = false;
@@ -1567,8 +1568,8 @@ void buildProjector(const Program &program, const VuData &vu, uint32_t top,
         const Vec4 c = transform(window, point);
         const float q = vuReciprocal(c.w);
         const float raw[3] = {c.x * q, c.y * q, c.z * q};
-        const float scaled[3] = {raw[0], raw[1], std::fmin(raw[2] * depthScale, depthMax)};
-        const float f = std::fmax(std::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
+        const float scaled[3] = {raw[0], raw[1], rg::fmin(raw[2] * depthScale, depthMax)};
+        const float f = rg::fmax(rg::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
         const float ax = before[1][0] - before[0][0], ay = before[1][1] - before[0][1];
         const float bx = scaled[0] - before[1][0], by = scaled[1] - before[1][1];
         if (j != 0u && !list)
@@ -1675,8 +1676,8 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     std::memcpy(data + 144u * 16u, &end, 4u);
 
     const Vec4 lo = vu.quad(98), hi = vu.quad(99), rectLo = vu.quad(140), rectHi = vu.quad(141);
-    const Vec4 a{std::fmax(rectLo.x, lo.x - 1.0f), std::fmax(rectLo.y, lo.y - 1.0f), std::fmax(rectLo.z, lo.z), 0.0f};
-    const Vec4 b{std::fmin(rectHi.x, hi.x + 1.0f), std::fmin(rectHi.y, hi.y + 1.0f), std::fmin(rectHi.z, hi.z), 0.0f};
+    const Vec4 a{rg::fmax(rectLo.x, lo.x - 1.0f), rg::fmax(rectLo.y, lo.y - 1.0f), rg::fmax(rectLo.z, lo.z), 0.0f};
+    const Vec4 b{rg::fmin(rectHi.x, hi.x + 1.0f), rg::fmin(rectHi.y, hi.y + 1.0f), rg::fmin(rectHi.z, hi.z), 0.0f};
     if (b.x - a.x < 0.0f || b.y - a.y < 0.0f)
     {
         return;
@@ -1688,7 +1689,7 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     uint32_t tag = 145u, other = 165u;
     for (;;)
     {
-        const Vec4 to{std::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
+        const Vec4 to{rg::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
         const Vec4 corners[4] = {{from.x + offset.x, from.y + offset.y, from.z + offset.z, from.w + offset.w},
                                  {from.x + xyOffset.x, from.y + xyOffset.y, from.z + xyOffset.z, from.w + xyOffset.w},
                                  {to.x + offset.x, to.y + offset.y, to.z + offset.z, to.w + offset.w},
@@ -1958,12 +1959,12 @@ void widenBounds(const GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
             clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
         const float q = gsNativeReciprocal(clip[3]);
         const float z = clip[2] * q;
-        const float lanes[4] = {clip[0] * q, clip[1] * q, std::fmin(z * h.depthScale, h.depthMax),
-                                std::fmax(std::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
+        const float lanes[4] = {clip[0] * q, clip[1] * q, rg::fmin(z * h.depthScale, h.depthMax),
+                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
         for (int i = 0; i < 4; ++i)
         {
-            lo[i] = std::fmin(lo[i], lanes[i]);
-            hi[i] = std::fmax(hi[i], lanes[i]);
+            lo[i] = rg::fmin(lo[i], lanes[i]);
+            hi[i] = rg::fmax(hi[i], lanes[i]);
         }
     }
 }
@@ -2061,7 +2062,7 @@ bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t 
     const float *a = &least.x, *b = &vuLeast.x, *c = &most.x, *d = &vuMost.x;
     for (int i = 0; i < 4; ++i)
     {
-        const float scale = std::fmax(1.0f, std::fmax(std::fabs(a[i]), std::fabs(c[i])));
+        const float scale = rg::fmax(1.0f, rg::fmax(std::fabs(a[i]), std::fabs(c[i])));
         if (std::fabs(a[i] - b[i]) > 1e-4f * scale || std::fabs(c[i] - d[i]) > 1e-4f * scale)
         {
             return false;

@@ -95,19 +95,37 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
     // The last call's meshes' vertex storage, for this call's meshes: a
     // packet's meshes would otherwise allocate and free it each time.
     thread_local std::vector<std::vector<GSNativeMesh::Vertex>> spare;
+    // And its register writes' (one vector a flush).
+    thread_local std::vector<std::vector<std::pair<uint8_t, uint64_t>>> spareWrites;
     for (Piece &old : out)
+    {
         if (old.mesh.vertices.capacity() != 0u && spare.size() < 64u)
         {
             old.mesh.vertices.clear();
             spare.push_back(std::move(old.mesh.vertices));
         }
+        if (old.writes.capacity() != 0u && spareWrites.size() < 64u)
+        {
+            old.writes.clear();
+            spareWrites.push_back(std::move(old.writes));
+        }
+    }
     out.clear();
+    const auto freshWrites = [&](std::vector<std::pair<uint8_t, uint64_t>> &into) {
+        if (!spareWrites.empty())
+        {
+            into.swap(spareWrites.back());
+            spareWrites.pop_back();
+        }
+        into.clear();
+    };
     Carried &carried = t_carried;
     rg::gif::GifState &state = carried.state;
     std::vector<rg::gif::GifEvent> &queue = carried.queue;
     uint16_t &queuePrim = carried.queuePrim;
     thread_local std::vector<rg::gif::GifEvent> events;
     std::vector<std::pair<uint8_t, uint64_t>> writes;
+    freshWrites(writes);
     Piece mesh;
     uint16_t meshPrim = 0xFFFFu;
 
@@ -157,9 +175,9 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         {
             closeMesh();
             Piece piece;
-            piece.packet = adPacket(writes);
+            piece.writes.swap(writes);
             out.push_back(std::move(piece));
-            writes.clear();
+            freshWrites(writes);
         }
     };
     const auto vertexOf = [&](const rg::gif::GifEvent &e, const rg::gif::GifEvent &provoking, uint16_t prim, bool &ok) {

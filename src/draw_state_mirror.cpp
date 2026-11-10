@@ -165,12 +165,28 @@ bool enabled()
 #endif
 }
 
+// The vertex state a packet leaves for the next, per sending thread.
+thread_local rg::gif::GifState t_carried;
+
+void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
+{
+    if (!enabled() || count == 0u)
+        return;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    events.clear();
+    for (size_t i = 0; i < count; ++i)
+        rg::gif::applyRegister(writes[i].first, writes[i].second, t_carried, events);
+    std::lock_guard lock(g_mirror.mutex);
+    for (const rg::gif::GifEvent &e : events)
+        if (e.kind == rg::gif::GifEvent::Kind::Register)
+            write(g_mirror, e.reg, e.value);
+}
+
 void observe(const uint8_t *data, uint32_t size)
 {
     if (!enabled() || !data || size < 16u)
         return;
-    // The vertex state a packet leaves for the next, per sending thread.
-    thread_local rg::gif::GifState carried;
+    rg::gif::GifState &carried = t_carried;
     thread_local std::vector<rg::gif::GifEvent> events;
     events.clear();
     // Every GIF packet in the bytes, not only the first: the GS reads on

@@ -332,4 +332,9 @@ std::string describe(const GifEvent &event)
     return line;
 }
 
+void applyRegister(uint8_t reg, uint64_t value, GifState &state, std::vector<GifEvent> &out)
+{
+    writeRegister(reg, value, state, out);
+}
+
 } // namespace rg::gif
