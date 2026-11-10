@@ -625,8 +625,33 @@ def cmd_recompile(args: argparse.Namespace) -> int:
         changed, removed = sync_tree(stage, out)
         shutil.rmtree(stage)
         print(f"   {changed} file(s) changed, {removed} removed")
+    if not failed:
+        failed += translate_native_cpu(args)
     print("OK" if not failed else f"{failed} image(s) failed")
     return 1 if failed else 0
+
+
+def translate_native_cpu(args: argparse.Namespace) -> int:
+    """The native CPU (docs/NATIVE-CPU.md): tools/rgcpu translates the main ELF
+    into build/generated/native, which RG_NATIVE_CPU=1 runs. It reads the ELF,
+    the function map and ps2_recomp's output for the names. Staged like
+    ps2_recomp's output, so an incremental build recompiles only what changed."""
+    out = (ROOT / "build" / "generated" / "native").resolve()
+    stage = out.with_name(out.name + ".new")
+    shutil.rmtree(stage, ignore_errors=True)
+    log = ROOT / "build" / "logs" / "rgcpu_main.log"
+    print(f"== native CPU (tools/rgcpu; log: {log.relative_to(ROOT)})", flush=True)
+    cmd = [sys.executable, str(ROOT / "tools" / "rgcpu" / "rgcpu.py"), str(Path(args.disc) / load_hashes(args.version)["elf"]),
+           str(config_dir(args.version) / "functions_main.csv"), str(ROOT / "build" / "generated" / "main"), str(stage)]
+    with open(log, "w", encoding="utf-8", errors="replace") as f:
+        rc = subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT).returncode
+    if rc != 0 or not (stage / "register_native.cpp").is_file():
+        print(f"   FAILED (exit {rc}); see the log")
+        return 1
+    changed, removed = sync_tree(stage, out)
+    shutil.rmtree(stage)
+    print(f"   {sum(1 for _ in out.glob('nc_*.cpp'))} translation units, {changed} file(s) changed, {removed} removed")
+    return 0
 
 
 VU1_TOOL = FRAMEWORK / "tools" / "vu_program_manifest.py"

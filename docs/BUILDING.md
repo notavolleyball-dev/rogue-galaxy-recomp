@@ -87,7 +87,7 @@ it touches on down. From the repository root:
 | What changed | Run |
 |---|---|
 | `src/`, `CMakeLists.txt`, `thirdparty/dq8-gfx`, `thirdparty/imgui` | `cmake --build build/game` |
-| `config/SCUS_974.90/` (function maps, recompiler configs, `vu1-programs.txt`, `vu-blocks.txt`), `tools/mwo3/`, `tools/funcmap/` | `python setup.py recompile`, then `python setup.py build` |
+| `config/SCUS_974.90/` (function maps, recompiler configs, `vu1-programs.txt`, `vu-blocks.txt`), `tools/mwo3/`, `tools/funcmap/`, `tools/rgcpu/` (the native CPU's translator; `native-hooks.txt` is in the config) | `python setup.py recompile`, then `python setup.py build` |
 | `patches/ps2recomp/`, or the commit `thirdparty/PS2Recomp` is pinned to | `python setup.py tools`, then `recompile`, then `build` |
 | A new version of a git checkout (`git pull`), or in doubt | `python setup.py install` (on Windows, `Install.bat`) |
 | A new release, in a folder `Install.bat` built | `Update.bat` ([`tools/install/update.ps1`](../tools/install/update.ps1): downloads the zip, writes only the files whose bytes differ, deletes from the code folders what the new version no longer has, then runs the installer) |
@@ -160,7 +160,7 @@ fullscreen there; Back + Start opens the menu (F1).
 | `cmake/framework_patches.cmake` | Applies `patches/ps2recomp/` to the framework, at configure and from `setup.py tools` |
 | `debug/` | Launchers for diagnosis: `RogueGalaxy.bat` (the game in a terminal), `-profile`, `-hitches`, `-capture` and `-collect` ([DEVELOPMENT.md](DEVELOPMENT.md)) |
 | `borders/` | An image you put here fills the window beside the 4:3 picture (`borders/README.txt`) |
-| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` and `vu-blocks.txt` (VU1 and VU0 microcode locations) |
+| `config/SCUS_974.90/` | `hashes.json` (known-good dump), `overlays.toml` (MWo3 table, loader hook), `funcmap.toml` (map sources and corrections), `native-hooks.txt` (the hooked functions the native CPU calls as boundaries), `functions_<image>.csv` (function maps), `recomp/<image>.toml` (ps2_recomp configs, SDK bindings), `vu1-programs.txt` and `vu-blocks.txt` (VU1 and VU0 microcode locations) |
 | `tools/disc/iso9660.py` | Read-only ISO9660 reader for dual-layer PS2 DVDs |
 | `tools/disc/archive.py`, `cfgbin.py`, `balance.py` | The game's archives (`.HD6` index, `.pac`), its compiled tables (`.cfg.bin`), and the Director's Cut balance's tables and enemy files built from them |
 | `tools/mwo3/mwo3.py` | MWo3 overlay header parser, ELF cross-check, overlay-to-ELF wrapper |

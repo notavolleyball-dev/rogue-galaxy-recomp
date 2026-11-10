@@ -51,4 +51,9 @@ std::string busyReport();
 // Lists handed over and not yet finished (the stall watch).
 bool busy();
 
+// Whether the texture hook (src/native_capture.cpp) writes binding markers
+// in place of a node's upload packets: the DMA send resolves them and the
+// pipeline applies them (docs/NATIVE-BOUNDARY.md). Asked after install().
+bool bindingTextures();
+
 } // namespace rg::vif1

@@ -34,6 +34,52 @@ bool enabled();
 // Any thread. Dropped when the pipeline is off.
 void push(Record &&record);
 
+// Debug: with draw labels on, the renderer puts a label before each mesh
+// call in the command buffer, for a frame capture (RenderDoc) to show:
+//   rg f=FRAME n=FIRST-LAST tgt=T dt=D tex=X stex=S obj=O cam=C model=0|1 src=NAME
+// FRAME and n are the depth log's (its F and D lines), the ids the records',
+// NAME what nameSource() gave MeshDraw::source (else its hex). Any thread.
+void setDrawLabels(bool on);
+void nameSource(uint32_t source, const char *name);
+
+// A mesh draw's vertex and index buffers, empty but with the capacity of one
+// the renderer has drawn and let go of, so a producer makes its draws
+// without the allocator. The renderer frees nothing it was handed: freeing
+// on its thread what the producer's allocated took the producer's malloc
+// arena lock, and the two threads spent most of their time waiting on it
+// (2026-11-08: the presenter blocked ~4,400 times a second in delete).
+// Any thread; the producer's side takes a batch at a time.
+void reuseMeshBuffers(MeshDraw &draw);
+
+// MeshDraw::raw's buffer from the same pool (reuseMeshBuffers gives the
+// others). Any thread.
+void reuseRawBuffer(MeshDraw &draw);
+
+// The producer's cull for MeshDraw::raw draws: fills draw.indices with the
+// triangles the program draws. Called on the renderer's thread for each
+// such draw of a frame it draws, before anything else reads the draw.
+void setMeshCull(void (*cull)(MeshDraw &draw));
+void (*meshCull())(MeshDraw &draw);
+
+// A retained mesh's vertex (native_mesh_static.vert): its triangle's three
+// corners, its own UV and colour, which corner it is and the triangle's
+// place in the strip (the sign its winding has there).
+struct StaticVertex
+{
+    float a[3], b[3], c[3];
+    float uv[2];
+    float color[4];
+    float corner, parity;
+};
+static_assert(sizeof(StaticVertex) == 68u, "tightly packed");
+constexpr uint32_t kStaticVertices = 1u << 19; // 34 MiB
+
+// Bumped when the renderer lets go of every retained mesh (its buffer
+// filled): the ids the producer handed out before are no longer drawn, and
+// it defines its meshes again under new ones. Any thread.
+uint64_t retainedEpoch();
+void retainedReset(); // the renderer's own: a new epoch
+
 // Textures the renderer let go of (its memory budget): a producer that sends
 // a texture once and names it by id afterwards drains these and sends them
 // again when next used. Any thread.
@@ -153,11 +199,23 @@ private:
     SDL_GPUSampler *meshSampler(SDL_GPUDevice *device, uint32_t key);
     bool uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error);
     // The frame's draws in order, a render pass per run of draws into one
-    // target (step 5a).
+    // target (step 5a). Planned first (every draw's state resolved, its
+    // uniforms written to the frame's draw table, every texture made), then
+    // uploaded with the vertices, then recorded: a draw reads its uniforms
+    // from the table by the draw id its vertices carry, so neighbours that
+    // bind the same state go to the GPU as one call.
     bool drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, std::string &error);
-    void drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, size_t first,
-                    size_t last, Id target, bool depthAttached, float targetW, float targetH, uint32_t scale,
-                    SDL_GPUTexture *copy, uint32_t copyW, uint32_t copyH);
+    struct PassPlan
+    {
+        Id target = 0, depthId = 0;
+        SDL_GPUTexture *color = nullptr, *depth = nullptr;
+        SDL_GPUTexture *copy = nullptr; // the color copied here first (a draw reads its own target)
+        uint32_t colorW = 0, colorH = 0, gameW = 0, gameH = 0;
+        SDL_GPULoadOp colorLoad = SDL_GPU_LOADOP_LOAD, depthLoad = SDL_GPU_LOADOP_LOAD;
+        size_t first = 0, last = 0;
+    };
+    void planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t scale, uint32_t copyW, uint32_t copyH);
+    void recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass, const PassPlan &plan);
     // m_gpuTargets' key for the copy a draw reading its own target reads.
     static constexpr Id kFeedbackCopy = 0xFFFFFFFFu;
     // A target's GPU texture (color, or depth), at least `minW` by `minH`
@@ -175,6 +233,43 @@ private:
         uint64_t drawn = 0, offscreen = 0, noTarget = 0, depthAsColor = 0, depthMismatch = 0, passes = 0;
         uint64_t noCamera = 0, noTexture = 0, noPipeline = 0, frames = 0;
         uint64_t window = 0, fromTarget = 0, sourceNotDrawn = 0, feedback = 0, copies = 0, destinationAlpha = 0;
+        uint64_t calls = 0; // GPU draw calls the drawn meshes took
+    };
+    // A draw's uniforms as the mesh shaders read them from the frame's draw
+    // table (std430: every member 16-byte aligned).
+    struct GpuDraw
+    {
+        // The vertex stage's.
+        float clip[16];
+        float viewport[16];
+        float target[4];
+        float fog[4];
+        float depthRow[4];   // reversed depth (w - z) / 2 straight from the position
+        float depthLimit[4]; // x: the program's depthMax as this depth (times w); y: 1 when it applies
+        // The fragment stage's.
+        uint32_t mode[4];
+        uint32_t test[4];
+        float size[4];
+        float blend[4];
+        float fogColor[4];
+        float texa[4];
+        uint32_t region[4]; // min u, max u, min v, max v (the GS's CLAMP)
+        uint32_t wrap[4];   // u, v: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
+        // A retained mesh's cull and colour cap (native_mesh_static.vert).
+        float cullMatrix[16];
+        float bandScale[4];
+        float bandOffset[4];
+        float cull[4]; // the winding sign; the guard band test, the backface test, a clipped chunk (0 or 1)
+        float colorMax[4];
+    };
+    // A draw's binding state, resolved before recording.
+    struct DrawPlan
+    {
+        SDL_GPUGraphicsPipeline *pipeline = nullptr; // null: not drawn
+        SDL_GPUTexture *image = nullptr, *palette = nullptr;
+        SDL_GPUSampler *sampler = nullptr;
+        SDL_Rect scissor{};
+        float blendConstant = -1.0f; // set when not negative
     };
     struct GpuTarget
     {
@@ -225,8 +320,36 @@ private:
     uint32_t m_vertexCapacity = 0, m_indexCapacity = 0;
     SDL_GPUTransferBuffer *m_meshTransfer = nullptr;
     uint32_t m_transferCapacity = 0;
+    SDL_GPUBuffer *m_drawBuffer = nullptr; // the frame's draw table
+    uint32_t m_drawCapacity = 0;
     std::vector<uint32_t> m_firstIndex; // per frame mesh, into the index buffer
-    std::vector<int32_t> m_vertexOffset;
+    // Retained meshes: their triangles, three vertices each, in one buffer
+    // filled from its start (m_staticUsed vertices); what apply() took in
+    // since the last upload waits in m_staticPending.
+    struct Retained
+    {
+        uint32_t first = 0, count = 0; // vertices
+    };
+    void retain(const RetainedMesh &mesh);
+    const Retained *retainedOf(const MeshDraw &draw) const
+    {
+        if (draw.retained == 0u)
+            return nullptr;
+        const auto it = m_retained.find(draw.retained);
+        return it != m_retained.end() ? &it->second : nullptr;
+    }
+    std::unordered_map<Id, Retained> m_retained;
+    SDL_GPUBuffer *m_staticBuffer = nullptr;
+    SDL_GPUShader *m_staticVertex = nullptr;
+    uint32_t m_staticUsed = 0, m_staticUploaded = 0;
+    std::vector<uint8_t> m_staticPending;
+    uint64_t m_retainedDefined = 0, m_retainedDrawn = 0, m_retainedMissing = 0, m_retainedResets = 0;
+    std::vector<GpuDraw> m_drawTable;   // per frame mesh
+    std::vector<DrawPlan> m_drawPlans;  // per frame mesh
+    std::vector<PassPlan> m_passPlans;
+    // Textures replaced while a frame is planned, released once it is
+    // recorded (a draw planned earlier may still bind one).
+    std::vector<SDL_GPUTexture *> m_retired;
     MeshCounts m_meshCounts, m_meshReported;
     // Step 7b's depth reads in flight (one copy at a time).
     SDL_GPUTransferBuffer *m_depthDownload = nullptr;

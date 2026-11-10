@@ -46,7 +46,7 @@ constexpr uint32_t kViewColumns = 8u;
 constexpr uint32_t kViewRows = 6u;
 
 constexpr const char *kRecordNames[] = {"texture", "palette", "target",     "camera",   "mesh",      "sprite",
-                                        "effect",  "frame",   "present",    "readback", "depth-query"};
+                                        "effect",  "frame",   "present",    "readback", "depth-query", "retained-mesh"};
 static_assert(std::size(kRecordNames) == std::variant_size_v<Record>, "a name per record kind");
 
 // Step 7b's depth reads: what was asked since the renderer last took them,
@@ -191,6 +191,122 @@ bool enabled()
     return on;
 }
 
+namespace
+{
+struct MeshBufferPool
+{
+    std::mutex mutex;
+    std::vector<std::vector<Vertex>> vertices;
+    std::vector<std::vector<uint32_t>> indices;
+    std::vector<std::vector<RawVertex>> raw;
+    static constexpr size_t kMax = 16384u;
+};
+MeshBufferPool &meshBufferPool()
+{
+    static MeshBufferPool pool;
+    return pool;
+}
+
+// The renderer's: a frame's draws, done with, their buffers to the pool.
+void recycleMeshes(std::vector<MeshDraw> &meshes)
+{
+    if (meshes.empty())
+        return;
+    MeshBufferPool &pool = meshBufferPool();
+    {
+        std::lock_guard lock(pool.mutex);
+        for (MeshDraw &draw : meshes)
+        {
+            if (draw.vertices.capacity() != 0u && pool.vertices.size() < MeshBufferPool::kMax)
+            {
+                draw.vertices.clear();
+                pool.vertices.push_back(std::move(draw.vertices));
+            }
+            if (draw.indices.capacity() != 0u && pool.indices.size() < MeshBufferPool::kMax)
+            {
+                draw.indices.clear();
+                pool.indices.push_back(std::move(draw.indices));
+            }
+            if (draw.raw.capacity() != 0u && pool.raw.size() < MeshBufferPool::kMax)
+            {
+                draw.raw.clear();
+                pool.raw.push_back(std::move(draw.raw));
+            }
+        }
+    }
+    meshes.clear();
+}
+} // namespace
+
+void reuseMeshBuffers(MeshDraw &draw)
+{
+    // A batch at a time, so the pool's lock is taken once per many draws.
+    constexpr size_t kBatch = 256u;
+    thread_local std::vector<std::vector<Vertex>> vertices;
+    thread_local std::vector<std::vector<uint32_t>> indices;
+    if (vertices.empty() || indices.empty())
+    {
+        MeshBufferPool &pool = meshBufferPool();
+        std::lock_guard lock(pool.mutex);
+        while (vertices.size() < kBatch && !pool.vertices.empty())
+        {
+            vertices.push_back(std::move(pool.vertices.back()));
+            pool.vertices.pop_back();
+        }
+        while (indices.size() < kBatch && !pool.indices.empty())
+        {
+            indices.push_back(std::move(pool.indices.back()));
+            pool.indices.pop_back();
+        }
+    }
+    if (!vertices.empty() && draw.vertices.capacity() == 0u)
+    {
+        draw.vertices = std::move(vertices.back());
+        vertices.pop_back();
+    }
+    if (!indices.empty() && draw.indices.capacity() == 0u)
+    {
+        draw.indices = std::move(indices.back());
+        indices.pop_back();
+    }
+}
+
+// MeshDraw::raw's vectors, for a producer that fills raw rather than
+// vertices: from the same pool, apart from the others (a 2D draw takes none).
+void reuseRawBuffer(MeshDraw &draw)
+{
+    constexpr size_t kBatch = 256u;
+    thread_local std::vector<std::vector<RawVertex>> raw;
+    if (raw.empty())
+    {
+        MeshBufferPool &pool = meshBufferPool();
+        std::lock_guard lock(pool.mutex);
+        while (raw.size() < kBatch && !pool.raw.empty())
+        {
+            raw.push_back(std::move(pool.raw.back()));
+            pool.raw.pop_back();
+        }
+    }
+    if (!raw.empty() && draw.raw.capacity() == 0u)
+    {
+        draw.raw = std::move(raw.back());
+        raw.pop_back();
+    }
+}
+
+namespace
+{
+std::atomic<void (*)(MeshDraw &)> g_meshCull{nullptr};
+}
+void setMeshCull(void (*cull)(MeshDraw &draw))
+{
+    g_meshCull.store(cull, std::memory_order_release);
+}
+void (*meshCull())(MeshDraw &draw)
+{
+    return g_meshCull.load(std::memory_order_acquire);
+}
+
 void push(Record &&record)
 {
     if (!enabled())
@@ -198,6 +314,70 @@ void push(Record &&record)
     Queue &q = queue();
     std::lock_guard lock(q.mutex);
     q.records.push_back(std::move(record));
+}
+
+std::atomic<uint64_t> g_retainedEpoch{1u};
+uint64_t retainedEpoch()
+{
+    return g_retainedEpoch.load(std::memory_order_relaxed);
+}
+void retainedReset()
+{
+    g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
+}
+
+// A defining draw: its triangles into the buffer's pending part, under its
+// id. Taken at the record, not at the frame: a frame may be dropped, its
+// definitions may not.
+void Renderer::retain(const RetainedMesh &d)
+{
+    const uint32_t count = static_cast<uint32_t>(d.raw.size());
+    const uint32_t triangles = d.list ? count / 3u : (count >= 2u ? count - 2u : 0u);
+    if (m_staticUsed + triangles * 3u > kStaticVertices)
+    {
+        // Full: everything goes, and the producer starts again.
+        m_retained.clear();
+        m_staticPending.clear();
+        m_staticUsed = m_staticUploaded = 0u;
+        ++m_retainedResets;
+        g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
+    }
+    if (triangles * 3u <= kStaticVertices)
+    {
+        const size_t at = m_staticPending.size();
+        m_staticPending.resize(at + size_t(triangles) * 3u * sizeof(StaticVertex));
+        auto *out = reinterpret_cast<StaticVertex *>(m_staticPending.data() + at);
+        for (uint32_t k = 2u; k < count; ++k)
+        {
+            if (d.list && k % 3u != 2u)
+                continue;
+            // The sign the strip's winding has at this triangle (cullMesh:
+            // it starts at the second vertex and turns at each); a list's
+            // never turns.
+            const float parity = d.list || (k - 1u) % 2u == 0u ? 1.0f : -1.0f;
+            const RawVertex *corner[3] = {&d.raw[k - 2u], &d.raw[k - 1u], &d.raw[k]};
+            for (int i = 0; i < 3; ++i, ++out)
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    out->a[j] = (&corner[0]->x)[j];
+                    out->b[j] = (&corner[1]->x)[j];
+                    out->c[j] = (&corner[2]->x)[j];
+                }
+                out->uv[0] = corner[i]->u;
+                out->uv[1] = corner[i]->v;
+                out->color[0] = corner[i]->r;
+                out->color[1] = corner[i]->g;
+                out->color[2] = corner[i]->b;
+                out->color[3] = corner[i]->a;
+                out->corner = float(i);
+                out->parity = parity;
+            }
+        }
+        m_retained[d.id] = {m_staticUsed, triangles * 3u};
+        m_staticUsed += triangles * 3u;
+        ++m_retainedDefined;
+    }
 }
 
 std::vector<Id> takeEvicted()
@@ -282,7 +462,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                 // The draws since the last one are a frame; a frame not yet
                 // drawn when the next closes is dropped (the newest shows).
                 m_frameMeshes.swap(m_meshes);
-                m_meshes.clear();
+                recycleMeshes(m_meshes);
                 m_frameReady = true;
                 ++m_meshCounts.frames;
             }
@@ -314,6 +494,13 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                 m_recent.push_front(r.id);
                 if (m_recent.size() > kViewColumns * kViewRows)
                     m_recent.pop_back();
+            }
+            else if constexpr (std::is_same_v<T, RetainedMesh>)
+            {
+                // At the record, not at the frame: a frame may be dropped,
+                // its definitions may not.
+                if (r.id != 0u)
+                    retain(r);
             }
             else if constexpr (std::is_same_v<T, Palette>)
             {
@@ -672,7 +859,11 @@ std::string Renderer::statsLine()
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
     line += " | held: textures " + std::to_string(m_images.size()) + " (" + std::to_string(m_imageBytes >> 20) +
             " MiB), palettes " + std::to_string(m_palettes.size()) + ", evicted " + d(m_evicted, m_evictedReported) +
-            ", refused " + d(m_refused, m_refusedReported);
+            ", refused " + d(m_refused, m_refusedReported) + " | retained meshes " +
+            std::to_string(m_retained.size()) + " (" + std::to_string(m_staticUsed) + " vertices, defined so far " +
+            std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
+            ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
+            std::to_string(m_retainedResets) + ")";
     m_evictedReported = m_evicted;
     m_refusedReported = m_refused;
     const Readiness &now = m_readiness, &was = m_readinessReported;
@@ -681,7 +872,8 @@ std::string Renderer::statsLine()
             ", R3 scene float depth " + d(now.sceneFloatDepth, was.sceneFloatDepth) + ", R4 material " +
             d(now.materialKnown, was.materialKnown) + ", R5 normals " + d(now.normals, was.normals);
     const MeshCounts &mc = m_meshCounts, &mr = m_meshReported;
-    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " (offscreen " + d(mc.offscreen, mr.offscreen) + ") over " +
+    line += " | meshes drawn " + d(mc.drawn, mr.drawn) + " in " + d(mc.calls, mr.calls) + " GPU calls (offscreen " +
+            d(mc.offscreen, mr.offscreen) + ") over " +
             d(mc.frames, mr.frames) + " frames in " + d(mc.passes, mr.passes) +
             " passes; not drawn: target not declared " + d(mc.noTarget, mr.noTarget) + ", a depth buffer as color " +
             d(mc.depthAsColor, mr.depthAsColor) + ", no camera " + d(mc.noCamera, mr.noCamera) +

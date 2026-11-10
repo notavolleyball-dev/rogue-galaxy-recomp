@@ -1,0 +1,103 @@
+--- a/ps2xRuntime/include/ps2_runtime_macros.h
++++ b/ps2xRuntime/include/ps2_runtime_macros.h
+@@ -341,32 +341,55 @@
+ #define FAST_WRITE64(addr, val) Ps2FastWrite64(rdram, (uint32_t)(addr), (uint64_t)(val))
+ #define FAST_WRITE128(addr, val) Ps2FastWrite128(rdram, (uint32_t)(addr), (val))
+ 
++// Plain RAM: an address below 32 MB is never special (every special range
++// starts at 0x10000000 or above), and one whose access ends inside RAM needs
++// neither the mask nor the wrap: one compare instead of the five ranges
++// (Rogue Galaxy: added). Anything else takes the path below, unchanged.
++template <typename T>
++static inline T Ps2PlainRead(const uint8_t *rdram, uint32_t addr)
++{
++    T value;
++    std::memcpy(&value, rdram + addr, sizeof(T));
++    return value;
++}
++template <typename T>
++static inline void Ps2PlainWrite(uint8_t *rdram, uint32_t addr, T value)
++{
++    std::memcpy(rdram + addr, &value, sizeof(T));
++}
++#define PS2_PLAIN_RAM(addr, bytes) __builtin_expect((addr) <= PS2_RAM_SIZE - (bytes), 1)
++
+ #define READ8(addr) ([&]() -> uint8_t {                       \
+     uint32_t _addr = (uint32_t)(addr);                        \
++    if (PS2_PLAIN_RAM(_addr, 1u)) return Ps2PlainRead<uint8_t>(rdram, _addr); \
+     return PS2Runtime::isSpecialAddress(_addr)                \
+         ? runtime->Load8(rdram, ctx, _addr)                   \
+         : FAST_READ8(_addr); }())
+ 
+ #define READ16(addr) ([&]() -> uint16_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
++    if (PS2_PLAIN_RAM(_addr, 2u)) return Ps2PlainRead<uint16_t>(rdram, _addr); \
+     return PS2Runtime::isSpecialAddress(_addr)                \
+         ? runtime->Load16(rdram, ctx, _addr)                  \
+         : FAST_READ16(_addr); }())
+ 
+ #define READ32(addr) ([&]() -> uint32_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
++    if (PS2_PLAIN_RAM(_addr, 4u)) return Ps2PlainRead<uint32_t>(rdram, _addr); \
+     return PS2Runtime::isSpecialAddress(_addr)                \
+         ? runtime->Load32(rdram, ctx, _addr)                  \
+         : FAST_READ32(_addr); }())
+ 
+ #define READ64(addr) ([&]() -> uint64_t {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
++    if (PS2_PLAIN_RAM(_addr, 8u)) return Ps2PlainRead<uint64_t>(rdram, _addr); \
+     return PS2Runtime::isSpecialAddress(_addr)                \
+         ? runtime->Load64(rdram, ctx, _addr)                  \
+         : FAST_READ64(_addr); }())
+ 
+ #define READ128(addr) ([&]() -> __m128i {                     \
+     uint32_t _addr = (uint32_t)(addr);                        \
++    if (PS2_PLAIN_RAM(_addr, 16u)) return Ps2PlainRead<__m128i>(rdram, _addr); \
+     return PS2Runtime::isSpecialAddress(_addr)                \
+         ? runtime->Load128(rdram, ctx, _addr)                 \
+         : FAST_READ128(_addr); }())
+@@ -375,7 +398,7 @@
+     do                                                                               \
+     {                                                                                \
+         uint32_t _addr = (addr);                                                     \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
++        if (PS2_PLAIN_RAM(_addr, 1u)) Ps2PlainWrite<uint8_t>(rdram, _addr, (uint8_t)(val)); else if (PS2Runtime::isSpecialAddress(_addr))                                     \
+             runtime->Store8(rdram, ctx, _addr, (val));                               \
+         else                                                                         \
+         {                                                                            \
+@@ -388,7 +411,7 @@
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
++        if (PS2_PLAIN_RAM(_addr, 2u)) Ps2PlainWrite<uint16_t>(rdram, _addr, (uint16_t)(val)); else if (PS2Runtime::isSpecialAddress(_addr))                                       \
+             runtime->Store16(rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+@@ -401,7 +424,7 @@
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
++        if (PS2_PLAIN_RAM(_addr, 4u)) Ps2PlainWrite<uint32_t>(rdram, _addr, (uint32_t)(val)); else if (PS2Runtime::isSpecialAddress(_addr))                                       \
+             runtime->Store32(rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+@@ -414,7 +437,7 @@
+     do                                                                                 \
+     {                                                                                  \
+         uint32_t _addr = (addr);                                                       \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
++        if (PS2_PLAIN_RAM(_addr, 8u)) Ps2PlainWrite<uint64_t>(rdram, _addr, (uint64_t)(val)); else if (PS2Runtime::isSpecialAddress(_addr))                                       \
+             runtime->Store64(rdram, ctx, _addr, (val));                                \
+         else                                                                           \
+         {                                                                              \
+@@ -428,7 +451,7 @@
+     {                                                                                \
+         uint32_t _addr = (addr);                                                     \
+         __m128i _value = (val);                                                      \
+-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
++        if (PS2_PLAIN_RAM(_addr, 16u)) Ps2PlainWrite<__m128i>(rdram, _addr, _value); else if (PS2Runtime::isSpecialAddress(_addr))                                     \
+             runtime->Store128(rdram, ctx, _addr, _value);                            \
+         else                                                                         \
+         {                                                                            \

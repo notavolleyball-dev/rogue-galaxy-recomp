@@ -1,4 +1,5 @@
 #include "vu1_native.h"
+#include "fminmax.h"
 
 #include <cfenv>
 #include <chrono>
@@ -519,7 +520,7 @@ struct Lights
         float d[4];
         for (int i = 0; i < 4; ++i)
         {
-            d[i] = std::fmax(d0[i] * n[0] + d1[i] * n[1] + d2[i] * n[2], 0.0f);
+            d[i] = rg::fmax(d0[i] * n[0] + d1[i] * n[1] + d2[i] * n[2], 0.0f);
         }
         const float *c0 = &color[0].x, *c1 = &color[1].x, *c2 = &color[2].x, *c3 = &color[3].x;
         const float *base = &ambient.x;
@@ -658,7 +659,7 @@ struct Swell
     void push(float p[3], const float n[3]) const
     {
         const float depth = ((lane[0] * p[0] + lane[1] * p[1]) + lane[2] * p[2]) + lane[3] * 1.0f;
-        const float scale = std::fmin(std::fmax((far - depth) * inverseFar, 0.2f), 1.0f);
+        const float scale = rg::fmin(rg::fmax((far - depth) * inverseFar, 0.2f), 1.0f);
         for (int i = 0; i < 3; ++i)
             p[i] = p[i] + ((n[i] * q) * depth) * scale;
     }
@@ -778,10 +779,10 @@ struct PointLights
         for (uint32_t i = 0; i < 4u; ++i)
         {
             const float dx = position[i].x - w[0], dy = position[i].y - w[1], dz = position[i].z - w[2];
-            const float dot = std::fmax((dx * nx + dy * ny) + dz * nz, 0.0f);
+            const float dot = rg::fmax((dx * nx + dy * ny) + dz * nz, 0.0f);
             const float root = std::sqrt(std::fabs((dx * dx + dy * dy) + (dz * dz) * 1.0f));
             const float inverse = root != 0.0f ? 1.0f / root : std::numeric_limits<float>::max();
-            const float f = std::fmax(dot * inverse - dot * position[i].w, 0.0f);
+            const float f = rg::fmax(dot * inverse - dot * position[i].w, 0.0f);
             for (int k = 0; k < 3; ++k)
                 sum[k] = i == 0u ? color[i][k] * f : sum[k] + color[i][k] * f;
         }
@@ -957,7 +958,7 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
                     for (uint32_t i = 0; i < 3u; ++i)
                     {
                         const float cv = itof15(vu.word(colors + k, i)) * 256.0f;
-                        out[i] = std::fmax((lit[i] * cv) * sign, (lit[i] + cv * 128.0f) * -sign);
+                        out[i] = rg::fmax((lit[i] * cv) * sign, (lit[i] + cv * 128.0f) * -sign);
                     }
                     v.r = out[0];
                     v.g = out[1];
@@ -1083,7 +1084,7 @@ void buildOutline(const Program &program, const VuData &vu, uint32_t top,
             const float far = cx * ey - ex * cy;
             hidden = hidden || near * far < 0.0f;
         }
-        const float alpha = std::fmin(std::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
+        const float alpha = rg::fmin(rg::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
         const float h = 0.5f * alpha;
         putWords(packet, 16u, 16u, 16u, static_cast<uint32_t>(gsNativeFtoi(alpha * 64.0f, 1.0f)));
         // MFIR sign-extends ADC's 0x8000 into the word (0xffff8000, an
@@ -1457,7 +1458,7 @@ void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint
         for (int l = 0; l < 4; ++l)
         {
             rgba[l] = static_cast<uint32_t>(
-                gsNativeFtoi(std::fmax(std::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
+                gsNativeFtoi(rg::fmax(rg::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
         }
         uint32_t st[4][4], xyz[4][4];
         bool outside = false;
@@ -1567,8 +1568,8 @@ void buildProjector(const Program &program, const VuData &vu, uint32_t top,
         const Vec4 c = transform(window, point);
         const float q = vuReciprocal(c.w);
         const float raw[3] = {c.x * q, c.y * q, c.z * q};
-        const float scaled[3] = {raw[0], raw[1], std::fmin(raw[2] * depthScale, depthMax)};
-        const float f = std::fmax(std::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
+        const float scaled[3] = {raw[0], raw[1], rg::fmin(raw[2] * depthScale, depthMax)};
+        const float f = rg::fmax(rg::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
         const float ax = before[1][0] - before[0][0], ay = before[1][1] - before[0][1];
         const float bx = scaled[0] - before[1][0], by = scaled[1] - before[1][1];
         if (j != 0u && !list)
@@ -1675,8 +1676,8 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     std::memcpy(data + 144u * 16u, &end, 4u);
 
     const Vec4 lo = vu.quad(98), hi = vu.quad(99), rectLo = vu.quad(140), rectHi = vu.quad(141);
-    const Vec4 a{std::fmax(rectLo.x, lo.x - 1.0f), std::fmax(rectLo.y, lo.y - 1.0f), std::fmax(rectLo.z, lo.z), 0.0f};
-    const Vec4 b{std::fmin(rectHi.x, hi.x + 1.0f), std::fmin(rectHi.y, hi.y + 1.0f), std::fmin(rectHi.z, hi.z), 0.0f};
+    const Vec4 a{rg::fmax(rectLo.x, lo.x - 1.0f), rg::fmax(rectLo.y, lo.y - 1.0f), rg::fmax(rectLo.z, lo.z), 0.0f};
+    const Vec4 b{rg::fmin(rectHi.x, hi.x + 1.0f), rg::fmin(rectHi.y, hi.y + 1.0f), rg::fmin(rectHi.z, hi.z), 0.0f};
     if (b.x - a.x < 0.0f || b.y - a.y < 0.0f)
     {
         return;
@@ -1688,7 +1689,7 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     uint32_t tag = 145u, other = 165u;
     for (;;)
     {
-        const Vec4 to{std::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
+        const Vec4 to{rg::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
         const Vec4 corners[4] = {{from.x + offset.x, from.y + offset.y, from.z + offset.z, from.w + offset.w},
                                  {from.x + xyOffset.x, from.y + xyOffset.y, from.z + xyOffset.z, from.w + xyOffset.w},
                                  {to.x + offset.x, to.y + offset.y, to.z + offset.z, to.w + offset.w},
@@ -1940,30 +1941,88 @@ namespace
 {
 
 // The bounds a depth-and-bounds chunk leaves: quads 98 and 99 as they were,
-// widened lane by lane by each vertex's projected x, y, z and fog.
-void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most)
+// widened lane by lane by each vertex's projected x, y, z and fog. Only
+// those four of gsNativeMeshPoint, by the same operations in the same
+// order, so the same bits.
+void widenBounds(const GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
 {
-    const VuData vu(data);
-    least = vu.quad(98);
-    most = vu.quad(99);
-    Chunk chunk;
-    readChunk(program, vu, top, chunk);
-    for (const GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+#if defined(__clang__)
+#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
+#endif
+    const GSNativeMesh::Header &h = mesh.header;
+    const auto &m = h.matrix;
+    float *lo = &least.x, *hi = &most.x;
+    for (const GSNativeMesh::Vertex &v : mesh.vertices)
     {
-        const GSNativeMeshPoint p = gsNativeMeshPoint(chunk.mesh.header, v);
-        const float lanes[4] = {p.px, p.py, p.pz, p.pf};
-        float *lo = &least.x, *hi = &most.x;
+        float clip[4];
+        for (int i = 0; i < 4; ++i)
+            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+        const float q = gsNativeReciprocal(clip[3]);
+        const float z = clip[2] * q;
+        const float lanes[4] = {clip[0] * q, clip[1] * q, rg::fmin(z * h.depthScale, h.depthMax),
+                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
         for (int i = 0; i < 4; ++i)
         {
-            lo[i] = std::fmin(lo[i], lanes[i]);
-            hi[i] = std::fmax(hi[i], lanes[i]);
+            lo[i] = rg::fmin(lo[i], lanes[i]);
+            hi[i] = rg::fmax(hi[i], lanes[i]);
         }
     }
 }
 
+// A mesh's depths (buildMesh's, gsNativeMeshDepth) and its bounds
+// (widenBounds) in one pass: both project the vertex with the same matrix,
+// and the depth is the bounds' z lane in whole units. The same operations in
+// the same order as the two apart, so the same bits; apart they were a
+// tenth of the VIF1 thread (2026-11-09).
+void depthsAndBounds(GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
+{
+#if defined(__clang__)
+#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
+#endif
+    const GSNativeMesh::Header &h = mesh.header;
+    const auto &m = h.matrix;
+    float *lo = &least.x, *hi = &most.x;
+    for (GSNativeMesh::Vertex &v : mesh.vertices)
+    {
+        float clip[4];
+        for (int i = 0; i < 4; ++i)
+            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+        const float q = gsNativeReciprocal(clip[3]);
+        const float z = clip[2] * q;
+        const float pz = rg::fmin(z * h.depthScale, h.depthMax);
+        const float lanes[4] = {clip[0] * q, clip[1] * q, pz,
+                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
+        for (int i = 0; i < 4; ++i)
+        {
+            lo[i] = rg::fmin(lo[i], lanes[i]);
+            hi[i] = rg::fmax(hi[i], lanes[i]);
+        }
+        v.depth = static_cast<float>((static_cast<uint32_t>(gsNativeFtoi(pz, 16.0f)) >> 4) & 0xFFFFFFu);
+    }
+}
+
+// `built`: the chunk as buildMesh made it from this same data memory, so as
+// not to read it again; null to read it here.
+void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most,
+                 const GSNativeMesh *built = nullptr)
+{
+    const VuData vu(data);
+    least = vu.quad(98);
+    most = vu.quad(99);
+    if (built)
+    {
+        widenBounds(*built, least, most);
+        return;
+    }
+    Chunk chunk;
+    readChunk(program, vu, top, chunk);
+    widenBounds(chunk.mesh, least, most);
+}
+
 } // namespace
 
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built,
+                        const Bounds *bounds)
 {
     if (program.kind == Kind::Overlay)
     {
@@ -1988,9 +2047,20 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
     {
         return;
     }
+    if (bounds && bounds->made)
+    {
+        // buildMesh's, from this data memory as it still is.
+        std::memcpy(data + 98u * 16u, bounds->least, sizeof(bounds->least));
+        std::memcpy(data + 99u * 16u, bounds->most, sizeof(bounds->most));
+        return;
+    }
     const VuRounding rounding;
     Vec4 least, most;
-    boundsAfter(program, data, top, least, most);
+    // A projector's mesh is rewritten after the read (projectorMesh), and a
+    // program without a mesh has none: those read the chunk here.
+    if (built && (program.kind == Kind::Projector || !hasMesh(program)))
+        built = nullptr;
+    boundsAfter(program, data, top, least, most, built);
     std::memcpy(data + 98u * 16u, &least, sizeof(least));
     std::memcpy(data + 99u * 16u, &most, sizeof(most));
 }
@@ -2032,7 +2102,7 @@ bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t 
     const float *a = &least.x, *b = &vuLeast.x, *c = &most.x, *d = &vuMost.x;
     for (int i = 0; i < 4; ++i)
     {
-        const float scale = std::fmax(1.0f, std::fmax(std::fabs(a[i]), std::fabs(c[i])));
+        const float scale = rg::fmax(1.0f, rg::fmax(std::fabs(a[i]), std::fabs(c[i])));
         if (std::fabs(a[i] - b[i]) > 1e-4f * scale || std::fabs(c[i] - d[i]) > 1e-4f * scale)
         {
             return false;
@@ -2135,8 +2205,10 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
-               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds)
 {
+    if (bounds)
+        bounds->made = false;
     if (!hasMesh(program))
     {
         buildChunk(program, data, top, packets);
@@ -2161,10 +2233,24 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
     putQuad(state, tag);
     putQuad(state, chunk.header[1]);
     putQuad(state, chunk.header[2]);
-    // The Z exactly as the program has it: the GPU rounds to nearest.
-    for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+    // The Z exactly as the program has it: the GPU rounds to nearest. With
+    // the bounds the program keeps, where they come from this same mesh
+    // (not a projector's, rewritten above): quads 98 and 99 widened by it.
+    if (bounds && program.depthBounds && program.bounds && program.kind != Kind::Projector)
     {
-        v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
+        const VuData vu(data);
+        Vec4 least = vu.quad(98), most = vu.quad(99);
+        depthsAndBounds(chunk.mesh, least, most);
+        std::memcpy(bounds->least, &least, sizeof(bounds->least));
+        std::memcpy(bounds->most, &most, sizeof(bounds->most));
+        bounds->made = true;
+    }
+    else
+    {
+        for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+        {
+            v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
+        }
     }
     mesh = std::move(chunk.mesh);
 }

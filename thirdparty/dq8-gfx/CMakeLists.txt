@@ -58,6 +58,7 @@ foreach(shader IN ITEMS
         "native_view.vert;vert;kNativeViewVertSpirv"
         "native_view.frag;frag;kNativeViewFragSpirv"
         "native_mesh.vert;vert;kNativeMeshVertSpirv"
+        "native_mesh_static.vert;vert;kNativeMeshStaticVertSpirv"
         "native_mesh.frag;frag;kNativeMeshFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)
@@ -87,7 +88,8 @@ foreach(shader IN ITEMS
         "gs_display.frag;frag;kGsDisplayFragSpirv"
         "gs_index8.frag;frag;kGsIndex8FragSpirv"
         "gs_local_copy.frag;frag;kGsLocalCopyFragSpirv"
-        "present_sides.frag;frag;kPresentSidesFragSpirv")
+        "present_sides.frag;frag;kPresentSidesFragSpirv"
+        "present_fsr.frag;frag;kPresentFsrFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)
     list(GET shader 2 symbol)

@@ -94,7 +94,38 @@ include(cmake/framework_patches.cmake)
 # and the game's link inputs with the other; Ninja, matching them by case,
 # had no rule for the libraries, and a fresh build stopped at once
 # (2026-10-26; an existing build had them from before).
+# ThinLTO over the game: the runtime, the renderer and the generated code
+# (old and native) optimised across files at the link, so a runtime helper
+# the generated code calls (the memory slow path, the scheduler's boundary)
+# can be inlined into it. Clang and lld only, and not on Windows (the COFF
+# TLS loss above). The VU AOT shards stay out: 2.2 GB a shard to compile,
+# and in the link's backend all at once they would not fit. Field walk
+# (2026-11-09): game thread 3.04 -> 2.94 ms/frame, 307 -> 320 fps; an
+# incremental rebuild stays seconds (the ThinLTO cache).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT WIN32)
+    set(rg_thin_lto_default ON)
+else()
+    set(rg_thin_lto_default OFF)
+endif()
+option(RG_THIN_LTO "ThinLTO over the game (clang + lld)" ${rg_thin_lto_default})
+set(RG_THIN_LTO_JOBS "8" CACHE STRING "ThinLTO backend jobs at the link")
+if(RG_THIN_LTO)
+    add_compile_options(-flto=thin)
+    add_link_options(-fuse-ld=lld -flto=thin "-Wl,--thinlto-jobs=${RG_THIN_LTO_JOBS}"
+        "-Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache")
+endif()
+
 add_subdirectory(thirdparty/PS2Recomp "${CMAKE_BINARY_DIR}/ps2recomp" EXCLUDE_FROM_ALL)
+
+if(RG_THIN_LTO)
+    set(rg_vu_aot_dir "${CMAKE_BINARY_DIR}/ps2recomp/ps2xRuntime/generated")
+    math(EXPR rg_last_shard "${PS2X_VU_AOT_SHARDS} - 1")
+    foreach(shard RANGE ${rg_last_shard})
+        set_source_files_properties("${rg_vu_aot_dir}/vu_aot_blocks_${shard}.cpp"
+            DIRECTORY thirdparty/PS2Recomp/ps2xRuntime
+            PROPERTIES COMPILE_OPTIONS -fno-lto)
+    endforeach()
+endif()
 
 # The runtime asks for link-time optimization in Release. With clang on
 # MinGW (COFF) that loses the TLS initialization routine of an inline

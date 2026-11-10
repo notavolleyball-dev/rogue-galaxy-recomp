@@ -1,8 +1,11 @@
 #include "native_producer.h"
+#include "fminmax.h"
 
 #if defined(RG_HAS_SDLGPU)
 
 #include <algorithm>
+#include <cstddef>
+#include <type_traits>
 #include <array>
 #include <deque>
 #include <atomic>
@@ -20,9 +23,12 @@
 #include "runtime/gs/gs_types.h"
 #include "native_effect.h"
 #include "draw_state_mirror.h"
+#include "guest_write_watch.h"
 #include "flip_pacing.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +38,16 @@ namespace rg::nativeproducer
 namespace
 {
 namespace native = dq8::gfx::native;
+// MeshDraw::source of the draws made here that no VU1 program drew (a VU1
+// mesh has its program's, vif1_thread.cpp), named for the renderer's
+// draw labels (a frame capture's; debug/bug_mark.h).
+constexpr uint32_t kSource2d = 1u, kSourceLayer = 2u, kSourceEffect = 3u;
+const bool g_sourcesNamed = [] {
+    native::nameSource(kSource2d, "2D piece");
+    native::nameSource(kSourceLayer, "object layer rectangle");
+    native::nameSource(kSourceEffect, "effect op");
+    return true;
+}();
 
 constexpr uint32_t kCT32 = 0x00u, kCT16 = 0x02u, kCT16S = 0x0Au, kT8 = 0x13u, kT4 = 0x14u;
 
@@ -43,7 +59,13 @@ struct Counts
     uint64_t targetsNew = 0, targetsAuto = 0, targetsGrown = 0, texturesOverTargets = 0;
     uint64_t bytesHashed = 0;
     uint64_t withheldTextures = 0, withheldPalettes = 0, withheldBytes = 0;
+    // Withheld uploads whose bytes never left guest memory (sourceUnchanged),
+    // and those fetched from it after all.
+    uint64_t elided = 0, elidedBytes = 0, elidedFetched = 0;
     uint64_t passedNotProduced = 0, split = 0, continuedInPacket = 0;
+    // Bindings applied in the stream's order (bound), and entries no record
+    // could be made of (bindResolve).
+    uint64_t boundTextures = 0, boundPalettes = 0, bindRefused = 0;
     // Step 4a: VU1 meshes made mesh draws.
     uint64_t meshes = 0, meshesNoState = 0, meshesSplit = 0, meshesWhole = 0, camerasNew = 0;
     uint64_t materialKnown = 0, textureMiss = 0, textureMissPsm = 0, textureMissTarget = 0, paletteMiss = 0, targetMiss = 0;
@@ -253,6 +275,71 @@ uint64_t imageHash(const uint8_t *at, size_t size)
     return h | 1u;
 }
 
+// A texture upload's source hash, reused while its guest RAM pages are
+// unwritten (rg::writewatch): the game sends the same textures from the
+// same memory every frame (~4.6 MB a frame in the field, 2026-11-09), and
+// hashing them was ~9% of the game thread. `hashed`: the bytes read.
+struct SeenSource
+{
+    const uint8_t *at;
+    size_t size;
+    uint64_t hash, stamp;
+    uint32_t changes; // times found written since its last hash
+    // The record last made of it as a binding (bindTexture, bindPalette):
+    // its key (the hash with the shape), its id, and the eviction epoch the
+    // id was good in.
+    uint64_t key = 0u, epoch = 0u;
+    uint32_t id = 0u;
+};
+// The texture hooks' thread's (the game thread: sourceHash, sourceUnchanged).
+thread_local std::unordered_map<uint64_t, SeenSource> t_seenSources;
+uint64_t seenKey(const uint8_t *at, size_t size)
+{
+    return reinterpret_cast<uintptr_t>(at) ^ (uint64_t(size) * 0x9E3779B97F4A7C15ull);
+}
+
+// `found`: its entry (the game thread's, good until the next call), null
+// without the write watch.
+uint64_t sourceHash(const uint8_t *at, size_t size, size_t &hashed, SeenSource **found = nullptr)
+{
+    hashed = 0u;
+    if (!rg::writewatch::enabled())
+    {
+        hashed = size;
+        return imageHash(at, size);
+    }
+    auto &seen = t_seenSources;
+    const uint64_t key = seenKey(at, size);
+    const auto it = seen.find(key);
+    const bool same = it != seen.end() && it->second.at == at && it->second.size == size;
+    if (found && same)
+        *found = &it->second;
+    if (same && rg::writewatch::unchanged(at, size, it->second.stamp))
+        return it->second.hash;
+    hashed = size;
+    // Memory written again and again (a texture the game rewrites, or one
+    // sharing its pages with data that changes every frame) is hashed and
+    // not watched: watching it cost a fault and a protection change (with
+    // its TLB shootdown) every frame, more than the hash.
+    const uint32_t changes = same ? it->second.changes + 1u : 0u;
+    if (changes >= 2u)
+    {
+        it->second.changes = changes;
+        it->second.stamp = 0u;
+        return it->second.hash = imageHash(at, size);
+    }
+    // Watched first, then read: a write after the stamp is seen next time.
+    const uint64_t stamp = rg::writewatch::watch(at, size);
+    const uint64_t hash = imageHash(at, size);
+    if (seen.size() >= 65536u)
+        seen.clear();
+    SeenSource &entry = seen[key];
+    entry = {at, size, hash, stamp, changes};
+    if (found)
+        *found = &entry;
+    return hash;
+}
+
 uint64_t keyOf(uint64_t hash, uint32_t a, uint32_t b, uint32_t c)
 {
     uint64_t k = hash ^ (uint64_t(a) * 0x9E3779B97F4A7C15ull);
@@ -261,10 +348,15 @@ uint64_t keyOf(uint64_t hash, uint32_t a, uint32_t b, uint32_t c)
     return k ? k : 1u;
 }
 
+// The renderer's cull's counts (cullMesh, on its thread).
+std::atomic<uint64_t> g_triangles{0u}, g_trianglesSkipped{0u};
+
 std::string statsLine()
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
+    s.counts.triangles = g_triangles.load(std::memory_order_relaxed);
+    s.counts.trianglesSkipped = g_trianglesSkipped.load(std::memory_order_relaxed);
     const Counts &n = s.counts, &r = s.reported;
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
     std::string line = "[native-producer] texture levels " + d(n.levels, r.levels) + ": new " +
@@ -315,9 +407,14 @@ std::string statsLine()
                        ", from an object layer " + d(n.opsLayer, r.opsLayer) + "; made green to alpha " +
                        d(n.opsGreenToAlpha, r.opsGreenToAlpha) + ", made reading their own target " +
                        d(n.opsFeedback, r.opsFeedback) +
+                       " | bound in the stream: textures " + d(n.boundTextures, r.boundTextures) + ", palettes " +
+                       d(n.boundPalettes, r.boundPalettes) + ", no record " + d(n.bindRefused, r.bindRefused) +
                        " | withheld from the GS: textures " + d(n.withheldTextures, r.withheldTextures) +
                        ", palettes " + d(n.withheldPalettes, r.withheldPalettes) + " (" +
-                       std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB); uploads sent on (no record) " +
+                       std::to_string((n.withheldBytes - r.withheldBytes) >> 10) + " KiB; " +
+                       d(n.elided, r.elided) + " never copied, " +
+                       std::to_string((n.elidedBytes - r.elidedBytes) >> 10) + " KiB, " +
+                       d(n.elidedFetched, r.elidedFetched) + " read after all); uploads sent on (no record) " +
                        d(n.passedNotProduced, r.passedNotProduced) + "; A+D blocks split (other registers kept) " +
                        d(n.split, r.split) + "; image continued in a packet " +
                        d(n.continuedInPacket, r.continuedInPacket) + " | object layers: routed " +
@@ -355,6 +452,10 @@ void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t 
         {dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette, key, psm, id, hash, bytes});
 }
 
+// Bumped when the renderer evicts: an id a source remembers from an earlier
+// epoch is looked up again (bindTexture).
+std::atomic<uint64_t> g_evictEpoch{1u};
+
 // Locked. Whether a texture record is what GS memory holds at some address,
 // for the game thread (textureAt) or the VIF1 thread (residentTexture).
 bool textureNamed(const State &s, native::Id id)
@@ -375,7 +476,10 @@ bool textureNamed(const State &s, native::Id id)
 // 4 MiB. The rest are forgotten here, so they are made again when uploaded.
 void forgetEvicted(State &s)
 {
-    for (const native::Id id : native::takeEvicted())
+    const std::vector<native::Id> evicted = native::takeEvicted();
+    if (!evicted.empty())
+        g_evictEpoch.fetch_add(1u, std::memory_order_relaxed);
+    for (const native::Id id : evicted)
     {
         const auto key = s.textureKeys.find(id);
         if (key == s.textureKeys.end())
@@ -461,17 +565,15 @@ const std::vector<uint32_t> &unswizzle(const TextureLevel &l)
 }
 } // namespace
 
-void texture(const TextureLevel &l)
+namespace
 {
-    if (!native::enabled())
-        return;
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    forgetEvicted(s);
-    ++s.counts.levels;
+// What a level occupies in EE memory, as sent; 0 when it is not taken
+// (`format`: for its format, otherwise its size or its memory).
+size_t levelBytes(const TextureLevel &l, bool &format)
+{
+    format = false;
     const uint32_t psm = l.psm & 0x3Fu;
     const size_t texels = size_t(l.width) * l.height;
-    // What it occupies in EE memory, as sent.
     size_t bytes = 0u;
     if (l.preSwizzled)
         bytes = size_t(l.transferWidth) * l.transferHeight * 4u;
@@ -485,31 +587,48 @@ void texture(const TextureLevel &l)
         bytes = (texels + 1u) / 2u;
     else
     {
-        ++s.counts.refusedFormat;
-        return;
+        format = true;
+        return 0u;
     }
-    if (texels == 0u || bytes == 0u || !l.ram || l.ramBytes < bytes || l.width > 4096u || l.height > 4096u)
-    {
-        ++s.counts.refusedBytes;
-        return;
-    }
-    const uint64_t hash = imageHash(l.ram, bytes);
-    s.counts.bytesHashed += bytes;
+    if (texels == 0u || !l.ram || l.ramBytes < bytes || l.width > 4096u || l.height > 4096u)
+        return 0u;
+    return bytes;
+}
+
+// The record of a level whose `bytes` hash to `hash`: its id, made if new
+// (0: its layout is not one known). Takes s.mutex itself: the conversion
+// runs outside it, which the draw thread takes for every mesh and piece
+// (holding it through them put that thread to sleep on the lock some 20
+// times a frame, each wake ~200 us; 2026-11-08). `note`: an upload follows,
+// for takeProduced, and the game thread's table is kept. `palette`: the
+// palette bound at its CBP, when the caller keeps that itself.
+native::Id textureRecord(State &s, const TextureLevel &l, size_t bytes, uint64_t hash, size_t hashed, bool note,
+                         const native::Id *palette)
+{
+    const uint32_t psm = l.psm & 0x3Fu;
+    const size_t texels = size_t(l.width) * l.height;
     const uint64_t key = keyOf(hash, psm | (l.preSwizzled ? 0x100u : 0u), l.width, l.height);
-    const native::Id palette = (psm == kT8 || psm == kT4) ? (s.paletteAt.count(l.cbp) ? s.paletteAt[l.cbp] : 0u) : 0u;
+    std::unique_lock lock(s.mutex);
+    s.counts.bytesHashed += hashed;
     if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
     {
         ++s.counts.texturesKnown;
-        s.textureAt[l.tbp] = {psm, known->second};
-        noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp,
-                     psm, known->second, hash, static_cast<uint32_t>(bytes));
-        return;
+        if (note)
+        {
+            s.textureAt[l.tbp] = {psm, known->second};
+            noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false,
+                         l.tbp, psm, known->second, hash, static_cast<uint32_t>(bytes));
+        }
+        return known->second;
     }
+    lock.unlock();
+    // New: converted unlocked. Should the draw thread make the same image
+    // meanwhile (from a host upload), this record replaces its map entry:
+    // one texture twice, never a wrong one.
     auto out = std::make_shared<std::vector<uint8_t>>();
     native::Texture record;
     record.width = static_cast<uint16_t>(l.width);
     record.height = static_cast<uint16_t>(l.height);
-    record.palette = palette;
     if (psm == kCT32 && !l.preSwizzled)
     {
         record.format = native::PixelFormat::Rgba8;
@@ -527,8 +646,9 @@ void texture(const TextureLevel &l)
         const std::vector<uint32_t> &byteOf = unswizzle(l);
         if (byteOf.empty())
         {
+            lock.lock();
             ++s.counts.refusedLayout;
-            return;
+            return 0u;
         }
         record.format = native::PixelFormat::Index8;
         out->resize(texels);
@@ -547,7 +667,10 @@ void texture(const TextureLevel &l)
         for (size_t i = 0; i < texels; ++i)
             (*out)[i] = (l.ram[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
     }
-    record.id = s.nextTexture++;
+    lock.lock();
+    if (psm == kT8 || psm == kT4)
+        record.palette = palette ? *palette : (s.paletteAt.count(l.cbp) ? s.paletteAt[l.cbp] : 0u);
+    const native::Id id = record.id = s.nextTexture++;
     if (dumpingTextures())
         s.keptTextures[record.id] = {out, record.width, record.height,
                                      record.format == native::PixelFormat::Index8};
@@ -556,38 +679,42 @@ void texture(const TextureLevel &l)
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
-    s.textureAt[l.tbp] = {psm, record.id};
-    noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp, psm,
-                 record.id, hash, static_cast<uint32_t>(bytes));
+    if (note)
+    {
+        s.textureAt[l.tbp] = {psm, record.id};
+        noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false, l.tbp,
+                     psm, record.id, hash, static_cast<uint32_t>(bytes));
+    }
     ++s.counts.texturesNew;
     native::push(std::move(record));
+    return id;
 }
 
-void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm, uint32_t entries)
+// Whether a palette is one taken, and its bytes in EE memory.
+bool paletteUsable(const uint8_t *ram, uint32_t ramBytes, uint32_t cpsm, uint32_t entries, uint32_t &bytes)
 {
-    if (!native::enabled())
-        return;
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    forgetEvicted(s);
-    cpsm &= 0x3Fu;
     const bool is16 = cpsm == kCT16 || cpsm == kCT16S;
-    const uint32_t bytes = entries * (is16 ? 2u : 4u);
-    if (!ram || (entries != 16u && entries != 256u) || (cpsm != kCT32 && !is16) || ramBytes < bytes)
-    {
-        ++s.counts.palettesRefused;
-        return;
-    }
-    const uint64_t hash = imageHash(ram, bytes);
-    s.counts.bytesHashed += bytes;
+    bytes = entries * (is16 ? 2u : 4u);
+    return ram && (entries == 16u || entries == 256u) && (cpsm == kCT32 || is16) && ramBytes >= bytes;
+}
+
+// Locked. The record of a usable palette whose bytes hash to `hash`: its id,
+// made if new. `note`: as textureRecord's.
+native::Id paletteRecord(State &s, const uint8_t *ram, uint32_t cbp, uint32_t cpsm, uint32_t entries, uint64_t hash,
+                         uint32_t bytes, bool note)
+{
+    const bool is16 = cpsm == kCT16 || cpsm == kCT16S;
     const uint64_t key = keyOf(hash, cpsm, entries, 0u);
     if (const auto known = s.paletteIds.find(key); known != s.paletteIds.end())
     {
         ++s.counts.palettesKnown;
-        s.paletteAt[cbp] = known->second;
-        noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
-                     known->second, hash, bytes);
-        return;
+        if (note)
+        {
+            s.paletteAt[cbp] = known->second;
+            noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
+                         known->second, hash, bytes);
+        }
+        return known->second;
     }
     auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
     for (uint32_t i = 0; i < entries; ++i)
@@ -601,17 +728,240 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
             std::copy_n(ram + at * 4u, 4u, colors->data() + i * 4u);
     }
     native::Palette record;
-    record.id = s.nextPalette++;
+    const native::Id id = record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
     if (dumpingTextures())
         s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
-    s.paletteAt[cbp] = record.id;
-    noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
-                 record.id, hash, bytes);
+    if (note)
+    {
+        s.paletteAt[cbp] = record.id;
+        noteProduced(s, cbp, 1u, cpsm, entries == 256u ? 16u : 8u, entries == 256u ? 16u : 2u, true, cbp, cpsm,
+                     record.id, hash, bytes);
+    }
     ++s.counts.palettesNew;
     native::push(std::move(record));
+    return id;
+}
+
+// The game thread's bindings: what bindResolve counted since bindBegin, and
+// the palette it last bound at each CBP (a new texture's own palette).
+struct BindCounts
+{
+    uint64_t levels = 0u, known = 0u, palettesKnown = 0u, bytesHashed = 0u;
+};
+thread_local BindCounts t_bind;
+thread_local std::vector<native::Id> t_boundPalette;
+
+// A level bound: its record's id. A source unchanged since its last binding
+// (the write watch) takes no lock and reads no pixel.
+native::Id bindTexture(State &s, const TextureLevel &l)
+{
+    bool format = false;
+    const size_t bytes = levelBytes(l, format);
+    if (bytes == 0u)
+    {
+        std::lock_guard lock(s.mutex);
+        ++s.counts.levels;
+        ++(format ? s.counts.refusedFormat : s.counts.refusedBytes);
+        return 0u;
+    }
+    size_t hashed = 0u;
+    SeenSource *seen = nullptr;
+    const uint64_t hash = sourceHash(l.ram, bytes, hashed, &seen);
+    const uint64_t key = keyOf(hash, (l.psm & 0x3Fu) | (l.preSwizzled ? 0x100u : 0u), l.width, l.height);
+    const uint64_t epoch = g_evictEpoch.load(std::memory_order_relaxed);
+    ++t_bind.levels;
+    t_bind.bytesHashed += hashed;
+    if (seen && seen->id != 0u && seen->key == key && seen->epoch == epoch)
+    {
+        ++t_bind.known;
+        return seen->id;
+    }
+    if (t_boundPalette.empty())
+        t_boundPalette.resize(0x4000u);
+    const native::Id id = textureRecord(s, l, bytes, hash, 0u, false, &t_boundPalette[l.cbp & 0x3FFFu]);
+    if (seen && id != 0u)
+    {
+        seen->key = key;
+        seen->id = id;
+        seen->epoch = epoch;
+    }
+    return id;
+}
+
+native::Id bindPalette(State &s, const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm, uint32_t entries)
+{
+    cpsm &= 0x3Fu;
+    uint32_t bytes = 0u;
+    if (!paletteUsable(ram, ramBytes, cpsm, entries, bytes))
+    {
+        std::lock_guard lock(s.mutex);
+        ++s.counts.palettesRefused;
+        return 0u;
+    }
+    size_t hashed = 0u;
+    SeenSource *seen = nullptr;
+    const uint64_t hash = sourceHash(ram, bytes, hashed, &seen);
+    const uint64_t key = keyOf(hash, cpsm, entries, 0u);
+    t_bind.bytesHashed += hashed;
+    native::Id id = 0u;
+    // (Palettes are never evicted: no epoch.)
+    if (seen && seen->id != 0u && seen->key == key)
+    {
+        ++t_bind.palettesKnown;
+        id = seen->id;
+    }
+    else
+    {
+        std::lock_guard lock(s.mutex);
+        id = paletteRecord(s, ram, cbp, cpsm, entries, hash, bytes, false);
+        if (seen)
+        {
+            seen->key = key;
+            seen->id = id;
+        }
+    }
+    if (t_boundPalette.empty())
+        t_boundPalette.resize(0x4000u);
+    t_boundPalette[cbp & 0x3FFFu] = id;
+    return id;
+}
+} // namespace
+
+// The game thread's, for every level it sends with its upload (the texture
+// hook's old way: the upload follows and is withheld, takeProduced).
+void texture(const TextureLevel &l)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    bool format = false;
+    const size_t bytes = levelBytes(l, format);
+    {
+        std::lock_guard lock(s.mutex);
+        forgetEvicted(s);
+        ++s.counts.levels;
+        if (bytes == 0u)
+        {
+            ++(format ? s.counts.refusedFormat : s.counts.refusedBytes);
+            return;
+        }
+    }
+    size_t hashed = 0u;
+    const uint64_t hash = sourceHash(l.ram, bytes, hashed);
+    textureRecord(s, l, bytes, hash, hashed, true, nullptr);
+}
+
+void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm, uint32_t entries)
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    cpsm &= 0x3Fu;
+    uint32_t bytes = 0u;
+    const bool usable = paletteUsable(ram, ramBytes, cpsm, entries, bytes);
+    // Hashed unlocked, as a texture is.
+    const uint64_t hash = usable ? imageHash(ram, bytes) : 0u;
+    std::lock_guard lock(s.mutex);
+    forgetEvicted(s);
+    if (!usable)
+    {
+        ++s.counts.palettesRefused;
+        return;
+    }
+    s.counts.bytesHashed += bytes;
+    paletteRecord(s, ram, cbp, cpsm, entries, hash, bytes, true);
+}
+
+bool bindable(const TextureLevel &l)
+{
+    bool format = false;
+    return native::enabled() && levelBytes(l, format) != 0u && (!l.preSwizzled || !unswizzle(l).empty());
+}
+
+uint64_t retainedEpoch()
+{
+    return native::retainedEpoch();
+}
+
+void bindBegin()
+{
+    if (!native::enabled())
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    forgetEvicted(s);
+    s.counts.levels += t_bind.levels;
+    s.counts.texturesKnown += t_bind.known;
+    s.counts.palettesKnown += t_bind.palettesKnown;
+    s.counts.bytesHashed += t_bind.bytesHashed;
+    t_bind = {};
+}
+
+uint64_t bindResolve(const uint8_t *rdram, uint32_t ramSize, const BindEntry &e)
+{
+    const bool isPalette = (e.flags & kBindPalette) != 0u;
+    const uint64_t place = (uint64_t(e.at & 0x3FFFu) << 32) | (uint64_t(e.psm & 0x3Fu) << 46) |
+                           (uint64_t(isPalette ? 1u : 0u) << 52);
+    if (!native::enabled() || e.source >= ramSize)
+        return place;
+    State &s = state();
+    native::Id id = 0u;
+    if (isPalette)
+        id = bindPalette(s, rdram + e.source, ramSize - e.source, e.at, e.psm, e.width);
+    else
+    {
+        TextureLevel l;
+        l.ram = rdram + e.source;
+        l.ramBytes = ramSize - e.source;
+        l.tbp = e.at & 0x3FFFu;
+        l.psm = e.psm;
+        l.preSwizzled = (e.flags & kBindPreSwizzled) != 0u;
+        l.transferWidth = e.width;
+        l.transferHeight = e.height;
+        l.width = l.preSwizzled ? l.transferWidth * 2u : l.transferWidth;
+        l.height = l.preSwizzled ? l.transferHeight * 2u : l.transferHeight;
+        l.bufferWidth = std::max<uint32_t>(e.bufferWidth, 1u);
+        l.transferBufferWidth = l.preSwizzled ? std::max<uint32_t>(l.bufferWidth >> 1, 1u) : l.bufferWidth;
+        l.transferPsm = l.preSwizzled ? 0u : e.psm;
+        l.cbp = e.cbp & 0x3FFFu;
+        id = bindTexture(s, l);
+    }
+    return place | id;
+}
+
+void bound(const uint64_t *values, size_t count)
+{
+    if (!native::enabled() || count == 0u)
+        return;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const native::Id id = static_cast<native::Id>(values[i]);
+        const uint32_t at = static_cast<uint32_t>((values[i] >> 32) & 0x3FFFu);
+        const uint32_t psm = static_cast<uint32_t>((values[i] >> 46) & 0x3Fu);
+        if (id == 0u)
+        {
+            ++s.counts.bindRefused;
+            continue;
+        }
+        // As takeProduced leaves a withheld upload.
+        if ((values[i] >> 52) & 1u)
+        {
+            s.residentPalette[at] = id;
+            s.takenPaletteSeq[at] = ++s.sequence;
+            ++s.counts.boundPalettes;
+        }
+        else
+        {
+            s.residentTexture[at] = {psm, id};
+            s.uploadedSeq[at] = s.takenSeq[at] = ++s.sequence;
+            ++s.counts.boundTextures;
+        }
+    }
 }
 
 namespace
@@ -920,6 +1270,27 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
     resident->second.second = id;
     s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
     ++s.counts.texturesReplaced;
+}
+
+bool sourceUnchanged(const uint8_t *at, size_t size, uint64_t &hash)
+{
+    if (!rg::writewatch::enabled())
+        return false;
+    const auto it = t_seenSources.find(seenKey(at, size));
+    if (it == t_seenSources.end() || it->second.at != at || it->second.size != size || it->second.stamp == 0u ||
+        !rg::writewatch::unchanged(at, size, it->second.stamp))
+        return false;
+    hash = it->second.hash;
+    return true;
+}
+
+void noteElided(uint32_t imageBytes, bool fetched)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    ++(fetched ? s.counts.elidedFetched : s.counts.elided);
+    if (!fetched)
+        s.counts.elidedBytes += imageBytes;
 }
 
 void noteWithheld(bool palette, uint32_t imageBytes)
@@ -1278,33 +1649,67 @@ native::Id cameraOf(State &s, const float view[16], const float projection[16], 
     native::push(native::Camera(record));
     return record.id;
 }
+// RG_NATIVE_HIDE=hex,hex (debug): draws (2D pieces and effect ops) into or
+// reading from a buffer at one of these bases are dropped, to bisect which
+// pass a visual fault belongs to. A `z` suffix (2a00z) drops only the
+// depth-tested draws into that base (e.g. light volumes), nothing else; a
+// `t` suffix (2a40t) only the draws texturing from it, 3D meshes included.
+struct HiddenBase
+{
+    uint32_t base;
+    bool depthTestedOnly;
+    bool readsOnly;
+};
+const std::vector<HiddenBase> &hiddenBases()
+{
+    static const std::vector<HiddenBase> hidden = [] {
+        std::vector<HiddenBase> out;
+        const char *value = std::getenv("RG_NATIVE_HIDE");
+        for (const char *cursor = value ? value : ""; *cursor;)
+        {
+            char *end = nullptr;
+            const unsigned long b = std::strtoul(cursor, &end, 16);
+            if (end == cursor)
+                break;
+            const bool z = *end == 'z' || *end == 'Z';
+            const bool t = *end == 't' || *end == 'T';
+            if (z || t)
+                ++end;
+            out.push_back({static_cast<uint32_t>(b & 0x3FFFu), z, t});
+            cursor = *end == ',' ? end + 1 : end;
+        }
+        for (const HiddenBase &h : out)
+            std::fprintf(stderr, "[native] RG_NATIVE_HIDE: %04x%s\n", h.base, h.depthTestedOnly ? " (depth-tested draws into it)" : h.readsOnly ? " (draws texturing from it)" : "");
+        return out;
+    }();
+    return hidden;
+}
+// A draw into `target` (depth tested or not), reading `source` (or none).
+bool hiddenDraw(uint32_t target, bool depthTested, bool reads, uint32_t source)
+{
+    for (const HiddenBase &h : hiddenBases())
+    {
+        if (!h.readsOnly && (target & 0x3FFFu) == h.base && (depthTested || !h.depthTestedOnly))
+            return true;
+        if (reads && !h.depthTestedOnly && (source & 0x3FFFu) == h.base)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
-bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
+namespace
 {
-    if (!native::enabled() || !vu1Data)
-        return false;
-    // A chunk the program clips (h.clips: its slot E clips at z = -w and
-    // z = w) keeps the triangles crossing the guard band: the GS backend
-    // draws them clipped by the planes, and here the GPU clips them in clip
-    // space. Skipping them left holes in floors near the camera.
-    // RG_NATIVE_GUARD_CLIPPED=1 skips them as before (for comparing).
-    static const bool guardClipped = [] {
-        const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
-        return v && std::strcmp(v, "0") != 0;
-    }();
-    GSNativeMesh::Header h = mesh.header;
-    if (h.clips && !guardClipped)
-        h.guardBand = 0u;
-    const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
-
-    native::MeshDraw draw;
-    draw.source = source;
-    // The program scales its window depth and caps it (VU quad 87.z, quad
-    // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
-    draw.depthScale = mesh.header.depthScale;
-    draw.depthMax = mesh.header.depthMax;
-
+// The renderer's cull of a raw mesh draw (native::setMeshCull), on its
+// thread: the triangles the program draws into draw.indices, by the rule
+// and arithmetic mesh() applied on the producer's thread before.
+void cullMesh(native::MeshDraw &draw)
+{
+    GSNativeMesh::Header h;
+    std::memcpy(&h, draw.rawHeader, sizeof(h));
+    const uint32_t count = static_cast<uint32_t>(draw.raw.size());
+    draw.indices.clear();
     // The triangles the program draws: a strip's every vertex from the
     // third on, a list's every third, less those the program culls (the
     // GS front end's rule for this mesh, gsNativeMeshSkips).
@@ -1321,7 +1726,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
 #if defined(__clang__)
 #pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
 #endif
-            const GSNativeMesh::Vertex &v = mesh.vertices[k];
+            const native::RawVertex &v = draw.raw[k];
             float clip[4];
             for (int i = 0; i < 4; ++i)
                 clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
@@ -1367,6 +1772,18 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
                 skip = gsNativeMeshSkips(facingOnly, points.data(), k, -winding);
             }
         }
+        // RG_NATIVE_NO_CULL=1 (debug): nothing culled or guard-band
+        // skipped here, to tell triangles this rule drops from ones the
+        // depth test loses.
+        static const bool noCull = [] {
+            const char *v = std::getenv("RG_NATIVE_NO_CULL");
+            const bool on = v && *v && *v != '0';
+            if (on)
+                std::fprintf(stderr, "[native] RG_NATIVE_NO_CULL: no triangle culled\n");
+            return on;
+        }();
+        if (noCull)
+            skip = false;
         if (culls && !listCull)
             winding = -winding;
         const bool drawn = k >= 2u && (lists ? k % 3u == 2u : true);
@@ -1382,20 +1799,94 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         draw.indices.push_back(k);
     }
 
-    draw.vertices.resize(count);
-    for (uint32_t k = 0; k < count; ++k)
+    g_triangles.fetch_add(draw.indices.size() / 3u, std::memory_order_relaxed);
+    g_trianglesSkipped.fetch_add(skipped, std::memory_order_relaxed);
+}
+} // namespace
+
+void nameSource(uint32_t source, const char *name)
+{
+    native::nameSource(source, name);
+}
+
+bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source,
+          uint32_t retained)
+{
+    if (!native::enabled() || !vu1Data)
+        return false;
+    // A retained mesh's vertices, once, whatever becomes of this draw.
+    if (retained != 0u && !mesh.vertices.empty())
     {
-        const GSNativeMesh::Vertex &in = mesh.vertices[k];
-        native::Vertex &out = draw.vertices[k];
-        out.position[0] = in.x;
-        out.position[1] = in.y;
-        out.position[2] = in.z;
-        out.uv[0] = in.u;
-        out.uv[1] = in.v;
-        out.color[0] = std::fmin(in.r, h.colorMax[0]);
-        out.color[1] = std::fmin(in.g, h.colorMax[1]);
-        out.color[2] = std::fmin(in.b, h.colorMax[2]);
-        out.color[3] = std::fmin(in.a, h.colorMax[3]);
+        native::RetainedMesh kept;
+        kept.id = retained;
+        kept.list = mesh.header.triangleList != 0u;
+        const auto *first = reinterpret_cast<const native::RawVertex *>(mesh.vertices.data());
+        kept.raw.assign(first, first + mesh.vertices.size());
+        native::push(std::move(kept));
+    }
+    // A chunk the program clips (h.clips: its slot E clips at z = -w and
+    // z = w) keeps the triangles crossing the guard band: the GS backend
+    // draws them clipped by the planes, and here the GPU clips them in clip
+    // space. Skipping them left holes in floors near the camera.
+    // RG_NATIVE_GUARD_CLIPPED=1 skips them as before (for comparing).
+    static const bool guardClipped = [] {
+        const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
+        return v && std::strcmp(v, "0") != 0;
+    }();
+    if (drawState && !hiddenBases().empty())
+    {
+        const GSContext &hc = drawState->context;
+        if (hiddenDraw(hc.frame.fbp * 32u, ((hc.test >> 16) & 1u) != 0u && ((hc.test >> 17) & 3u) >= 2u,
+                       drawState->prim.tme != 0u, hc.tex0.tbp0))
+            return true; // dropped
+    }
+    GSNativeMesh::Header h = mesh.header;
+    if (h.clips && !guardClipped)
+        h.guardBand = 0u;
+    const uint32_t count = retained != 0u ? 0u : static_cast<uint32_t>(mesh.vertices.size());
+
+    native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
+    draw.source = source;
+    // The program scales its window depth and caps it (VU quad 87.z, quad
+    // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
+    draw.depthScale = mesh.header.depthScale;
+    draw.depthMax = mesh.header.depthMax;
+    // For the depth log: the program's matrix, to give the GS's Z.
+    draw.gsKnown = true;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            draw.gsMatrix[i * 4 + j] = mesh.header.matrix[i][j];
+
+    // The chunk as the program left it: the renderer culls it (cullMesh,
+    // on its thread) and makes its GPU vertices from these.
+    static const bool cullSet = (native::setMeshCull(&cullMesh), true);
+    (void)cullSet;
+    static_assert(sizeof(native::RawVertex) == sizeof(GSNativeMesh::Vertex) &&
+                      offsetof(native::RawVertex, u) == offsetof(GSNativeMesh::Vertex, u) &&
+                      offsetof(native::RawVertex, r) == offsetof(GSNativeMesh::Vertex, r) &&
+                      offsetof(native::RawVertex, depth) == offsetof(GSNativeMesh::Vertex, depth),
+                  "RawVertex is GSNativeMesh::Vertex, field for field");
+    static_assert(sizeof(GSNativeMesh::Header) <= sizeof(native::MeshDraw::rawHeader) &&
+                      std::is_trivially_copyable_v<GSNativeMesh::Header>,
+                  "the header fits MeshDraw::rawHeader");
+    native::reuseRawBuffer(draw);
+    const auto *rawFirst = reinterpret_cast<const native::RawVertex *>(mesh.vertices.data());
+    draw.raw.assign(rawFirst, rawFirst + count);
+    std::memcpy(draw.rawHeader, &h, sizeof(h));
+    std::memcpy(draw.rawColorMax, h.colorMax, sizeof(draw.rawColorMax));
+    if (retained != 0u)
+    {
+        // The renderer draws it from its own buffer and judges the
+        // program's cull on the GPU (cullMesh's rule, from these).
+        draw.retained = retained;
+        std::memcpy(draw.cullMatrix, h.matrix, sizeof(draw.cullMatrix));
+        std::memcpy(draw.bandScale, h.bandScale, sizeof(draw.bandScale));
+        std::memcpy(draw.bandOffset, h.bandOffset, sizeof(draw.bandOffset));
+        draw.winding = h.triangleList && h.backface ? -h.winding : h.winding;
+        draw.guardBand = h.guardBand != 0u;
+        draw.backface = h.backface != 0u;
+        draw.clips = h.clips != 0u;
     }
     std::memcpy(draw.fog, h.fog, sizeof(draw.fog));
 
@@ -1413,16 +1904,34 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     std::memcpy(toWindow, viewport, sizeof(toWindow));
     multiply(model, view, whole);
     multiply(whole, toWindow, whole);
-    const bool split = sameMatrix(whole, h.matrix) && invert(projection, inverse);
+    // The camera is the frame's, the same for mesh after mesh: its
+    // projection's inverse times the window matrix is kept from the last
+    // mesh that had these two (the inverse was a tenth of this function's
+    // caller's thread, once a mesh).
+    struct CameraSplit
+    {
+        float projection[16], toWindow[16], viewport[16];
+        bool set = false, invertible = false;
+    };
+    thread_local CameraSplit last;
+    if (!last.set || std::memcmp(last.projection, projection, sizeof(projection)) != 0 ||
+        std::memcmp(last.toWindow, toWindow, sizeof(toWindow)) != 0)
+    {
+        std::memcpy(last.projection, projection, sizeof(projection));
+        std::memcpy(last.toWindow, toWindow, sizeof(toWindow));
+        last.invertible = invert(projection, inverse);
+        if (last.invertible)
+            multiply(inverse, toWindow, last.viewport);
+        last.set = true;
+    }
+    const bool split = sameMatrix(whole, h.matrix) && last.invertible;
     if (split)
-        multiply(inverse, toWindow, viewport);
+        std::memcpy(viewport, last.viewport, sizeof(viewport));
 
     State &s = state();
     std::lock_guard lock(s.mutex);
     forgetEvicted(s);
     ++s.counts.meshes;
-    s.counts.triangles += draw.indices.size() / 3u;
-    s.counts.trianglesSkipped += skipped;
     if (!drawState)
     {
         ++s.counts.meshesNoState;
@@ -1454,6 +1963,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     }
 
     bool known = materialOf(s, *drawState, draw.material);
+    // RG_NATIVE_OVERLAY_NO_DEPTH=1 (debug): blended or depth-unwritten
+    // meshes (lights on walls, ground layers) skip the depth test, to tell
+    // a lost depth test from a dropped triangle. Overlays will show through
+    // whatever stands in front of them.
+    static const bool overlayNoDepth = [] {
+        const char *v = std::getenv("RG_NATIVE_OVERLAY_NO_DEPTH");
+        const bool on = v && *v && *v != '0';
+        if (on)
+            std::fprintf(stderr, "[native] RG_NATIVE_OVERLAY_NO_DEPTH: overlays skip the depth test\n");
+        return on;
+    }();
+    if (overlayNoDepth && (draw.material.blending || !draw.material.depthWrite))
+        draw.material.depthTest = native::Compare::Always;
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     if (narrow(s, frameBase, c.frame.fbw))
@@ -1955,7 +2477,9 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
     s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
     ++s.counts.copiesMirrored;
 }
+
 } // namespace
+
 
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
                    uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height)
@@ -2041,7 +2565,7 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
     image.seq = s.uploadedSeq[dbp] = ++s.sequence;
 }
 
-bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
+bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, const std::vector<uint32_t> &indices)
 {
     if (!native::enabled())
         return false;
@@ -2055,8 +2579,14 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
         return false;
     }
     const GSContext &c = drawState->context;
+    if (!hiddenBases().empty() &&
+        hiddenDraw(c.frame.fbp * 32u, ((c.test >> 16) & 1u) != 0u && ((c.test >> 17) & 3u) >= 2u,
+                   drawState->prim.tme != 0u, c.tex0.tbp0))
+        return true; // dropped
     const GSNativeMesh::Header &h = mesh.header;
     native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
+    draw.source = kSource2d;
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     const bool view = narrow(s, frameBase, c.frame.fbw);
@@ -2243,10 +2773,15 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
         if (fogged)
             out.fog = std::clamp((w - 1.0f) * 255.0f - 0.25f, 0.0f, 255.0f);
     }
-    const uint32_t count = static_cast<uint32_t>(draw.vertices.size()) / 3u * 3u;
-    draw.indices.resize(count);
-    for (uint32_t k = 0; k < count; ++k)
-        draw.indices[k] = k;
+    if (!indices.empty())
+        draw.indices.assign(indices.begin(), indices.begin() + indices.size() / 3u * 3u);
+    else
+    {
+        const uint32_t count = static_cast<uint32_t>(draw.vertices.size()) / 3u * 3u;
+        draw.indices.resize(count);
+        for (uint32_t k = 0; k < count; ++k)
+            draw.indices[k] = k;
+    }
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
     draw.fog[0] = draw.fog[1] = 255.0f; // a model's F: none (the vertices carry theirs)
     m.fog = fogged;
@@ -2328,6 +2863,8 @@ namespace
 native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id source)
 {
     native::MeshDraw draw;
+    native::reuseMeshBuffers(draw);
+    draw.source = kSourceLayer;
     draw.target = target;
     native::Material &m = draw.material;
     if (source != 0u)
@@ -2459,12 +2996,20 @@ bool effect(const GSNativeEffect &e)
         if (op.target >= e.bufferCount)
             return refuse(s.counts.opsNoTarget);
         const GSNativeEffect::Buffer &into = e.buffers[op.target];
+        if (!hiddenBases().empty() &&
+            hiddenDraw(into.base, false, op.source >= 0 && static_cast<uint32_t>(op.source) < e.bufferCount,
+                       op.source >= 0 && static_cast<uint32_t>(op.source) < e.bufferCount
+                           ? e.buffers[op.source].base
+                           : 0u))
+            continue;
         const native::Id target = targetFor(s, into.base, into.width ? into.width : std::max(into.fbw, 1u) * 64u,
                                             into.height, into.psm);
         if (target == 0u)
             return refuse(s.counts.opsNoTarget);
         const bool greenToAlpha = (op.flags & GSNativeEffect::kGreenToAlpha) != 0u;
         native::MeshDraw draw;
+        native::reuseMeshBuffers(draw); // the renderer gives every draw's buffers back to the pool
+        draw.source = kSourceEffect;
         draw.target = target;
         native::Material &m = draw.material;
         bool known = true;
@@ -2681,13 +3226,20 @@ namespace rg::nativeproducer
 {
 void texture(const TextureLevel &) {}
 void palette(const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void bindBegin() {}
+uint64_t retainedEpoch() { return 0u; }
+bool bindable(const TextureLevel &) { return false; }
+uint64_t bindResolve(const uint8_t *, uint32_t, const BindEntry &) { return 0u; }
+void bound(const uint64_t *, size_t) {}
 void target(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, int) {}
 void noteWithheld(bool, uint32_t) {}
+bool sourceUnchanged(const uint8_t *, size_t, uint64_t &) { return false; }
+void noteElided(uint32_t, bool) {}
 void notePassed(Passed) {}
 void noteSplit() {}
 bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &, uint64_t &, uint32_t &) { return false; }
 void noteContinuedInPacket() {}
-bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t) { return false; }
+bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t, uint32_t) { return false; }
 bool pipelineOn() { return false; }
 uint64_t uploadHash(const uint8_t *, size_t) { return 0u; }
 uint32_t captureTarget(uint32_t) { return 0u; }
@@ -2695,7 +3247,7 @@ bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::
 void replaceUpload(bool, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
 void noteEffect(const GSNativeEffect &) {}
-bool piece(const GSNativeMesh &, const GSDrawState *, bool) { return false; }
+bool piece(const GSNativeMesh &, const GSDrawState *, bool, const std::vector<uint32_t> &) { return false; }
 bool effect(const GSNativeEffect &) { return false; }
 void noteLocalCopy(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                    uint32_t, uint32_t) {}
