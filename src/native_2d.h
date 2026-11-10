@@ -80,5 +80,9 @@ std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_
 // A packet going to the GS as it is (not through build): the vertex state
 // the converter carries follows it, as the GS's does.
 void observe(const uint8_t *data, uint32_t size);
+// Register writes that reach the draw-state mirror without a packet (a VU1
+// mesh's own, carried with the mesh): what quick() keeps of a packet of
+// them, the carried PRIM, PRMODECONT and PRMODE and the strip under way.
+void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
 
 } // namespace rg::native2d

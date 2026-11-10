@@ -267,6 +267,19 @@ struct MeshDraw
     // these, each colour capped at rawColorMax (fmin).
     std::vector<RawVertex> raw;
     float rawColorMax[4] = {};
+    // A retained mesh (the game's docs/NATIVE-BOUNDARY.md, issue 2): a
+    // chunk the producer saw unchanged from one frame to the next, kept by
+    // the renderer in a vertex buffer of its own under this id (a
+    // RetainedMesh record sent before its first draw). The program's cull is
+    // then judged on the GPU, from these: the program's matrix to GS window
+    // coordinates (row vectors), its guard band, its winding sign, and
+    // which tests it makes. An id the renderer no longer holds is not
+    // drawn (retainedEpoch tells the producer to start again).
+    Id retained = 0;
+    float cullMatrix[16] = {};
+    float bandScale[4] = {}, bandOffset[4] = {};
+    float winding = 1.0f;
+    bool guardBand = false, backface = false, clips = false;
     alignas(16) unsigned char rawHeader[256];
 };
 
@@ -329,6 +342,16 @@ struct DepthQuery
     int32_t x = 0, y = 0;
 };
 
+// A retained mesh's vertices (MeshDraw::retained), sent once: a strip, or
+// with `list` a triangle list.
+struct RetainedMesh
+{
+    Id id = 0;
+    bool list = false;
+    std::vector<RawVertex> raw;
+};
+
 using Record = std::variant<Texture, Palette, Target, Camera, MeshDraw, SpriteDraw, Effect, FrameBegin, Present,
-                            Readback, DepthQuery>;
+                            Readback, DepthQuery,
+                            RetainedMesh>;
 } // namespace dq8::gfx::native

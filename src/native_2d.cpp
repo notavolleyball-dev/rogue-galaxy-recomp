@@ -111,7 +111,8 @@ Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, u
     {
         if (e.kind != rg::gif::GifEvent::Kind::Register)
             return Quick::No;
-        transfer |= e.reg >= 0x50u && e.reg <= 0x54u;
+        // (A texture binding goes where a transfer's registers go: sendRaw.)
+        transfer |= (e.reg >= 0x50u && e.reg <= 0x54u) || e.reg == rg::nativeproducer::kBindRegister;
     }
     carried.state = state;
     if (image)
@@ -138,6 +139,26 @@ Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, u
     for (const rg::gif::GifEvent &e : events)
         writes.emplace_back(e.reg, e.value);
     return Quick::Writes;
+}
+
+void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
+{
+    Carried &carried = t_carried;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    events.clear();
+    for (size_t i = 0; i < count; ++i)
+    {
+        rg::gif::applyRegister(writes[i].first, writes[i].second, carried.state, events);
+        if (writes[i].first == 0x1Au)
+            carried.attributesFromPrim = (writes[i].second & 1u) != 0u;
+        else if (writes[i].first == 0x1Bu)
+            carried.prmode = static_cast<uint16_t>(writes[i].second & 0x7F8u);
+        else if (writes[i].first == 0x00u)
+        {
+            carried.queue.clear();
+            carried.queuePrim = 0xFFFFu;
+        }
+    }
 }
 
 bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::string &why)

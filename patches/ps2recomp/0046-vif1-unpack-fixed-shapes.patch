@@ -1,0 +1,133 @@
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index 97b4aa2..2568ad6 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,6 +1,7 @@
+ // Based on Blackline Interactive implementation
+ #include "runtime/ps2_memory.h"
+ #include <cstring>
++#include <type_traits>
+ 
+ enum VIFCmd : uint8_t
+ {
+@@ -37,6 +38,59 @@ namespace
+     // lanes as they were. The generic loop below reads the destination back,
+     // decodes through lambdas and masks every lane; it was 7% of the VIF1
+     // thread, almost all of it on these shapes.
++    // One shape's run: N components of Raw a vector, widened to 32 bits
++    // (Raw's sign, or zero-extended), stored as whole words. The shape is
++    // fixed at compile time so the loop is loads, extends and stores: with
++    // the component count a variable, each vector was built in a buffer of
++    // four separate words and copied out by a library memcpy of 8 or 12
++    // bytes, which read the words back as wider loads the stores could not
++    // forward to (a fifth of the VIF1 thread in Rogue Galaxy's field,
++    // 2026-11-09: added).
++    template <typename Raw, uint32_t N, bool Zero>
++    void unpackRun(uint8_t *vuData, const uint8_t *src, uint32_t writeVectorCount, uint32_t vuAddr, uint32_t cl,
++                   uint32_t wl)
++    {
++        for (uint32_t writeIndex = 0u; writeIndex < writeVectorCount; ++writeIndex, src += N * sizeof(Raw))
++        {
++            const uint32_t destVec = cl == wl ? (vuAddr + writeIndex) & 0x3FFu
++                                              : (vuAddr + (writeIndex / wl) * cl + writeIndex % wl) & 0x3FFu;
++            uint8_t *dst = vuData + destVec * 16u;
++            uint32_t words[4];
++            for (uint32_t c = 0u; c < N; ++c)
++            {
++                Raw raw;
++                std::memcpy(&raw, src + c * sizeof(Raw), sizeof(Raw));
++                words[c] = Zero ? static_cast<uint32_t>(static_cast<std::make_unsigned_t<Raw>>(raw))
++                                : static_cast<uint32_t>(static_cast<int32_t>(raw));
++            }
++            if (N == 1u)
++            {
++                words[1] = words[2] = words[3] = words[0];
++                std::memcpy(dst, words, 16u);
++            }
++            else
++                std::memcpy(dst, words, N * 4u);
++        }
++    }
++
++    template <typename Raw>
++    void unpackShape(uint8_t *vuData, const uint8_t *src, uint32_t writeVectorCount, uint32_t vuAddr, uint32_t cl,
++                     uint32_t wl, uint32_t components, bool zeroExtend)
++    {
++        switch (components * 2u + (zeroExtend ? 1u : 0u))
++        {
++        case 2u: unpackRun<Raw, 1u, false>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 3u: unpackRun<Raw, 1u, true>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 4u: unpackRun<Raw, 2u, false>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 5u: unpackRun<Raw, 2u, true>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 6u: unpackRun<Raw, 3u, false>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 7u: unpackRun<Raw, 3u, true>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 8u: unpackRun<Raw, 4u, false>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        case 9u: unpackRun<Raw, 4u, true>(vuData, src, writeVectorCount, vuAddr, cl, wl); break;
++        default: break;
++        }
++    }
++
+     void unpackPlain(uint8_t *vuData, const uint8_t *src, uint32_t writeVectorCount, uint32_t vuAddr,
+                      uint32_t cl, uint32_t wl, uint32_t vl, uint32_t components, uint32_t bytesPerVector,
+                      bool zeroExtend)
+@@ -57,51 +111,15 @@ namespace
+             }
+             return;
+         }
+-        for (uint32_t writeIndex = 0u; writeIndex < writeVectorCount; ++writeIndex, src += bytesPerVector)
+-        {
+-            const uint32_t destVec = cl == wl ? (vuAddr + writeIndex) & 0x3FFu
+-                                              : (vuAddr + (writeIndex / wl) * cl + writeIndex % wl) & 0x3FFu;
+-            uint8_t *dst = vuData + destVec * 16u;
+-            uint32_t words[4];
+-            if (vl == 0u)
+-            {
+-                if (components == 1u)
+-                {
+-                    uint32_t scalar = 0u;
+-                    std::memcpy(&scalar, src, sizeof(scalar));
+-                    words[0] = words[1] = words[2] = words[3] = scalar;
+-                    std::memcpy(dst, words, sizeof(words));
+-                }
+-                else if (components == 4u)
+-                    std::memcpy(dst, src, 16u);
+-                else if (components == 3u)
+-                    std::memcpy(dst, src, 12u);
+-                else
+-                    std::memcpy(dst, src, 8u);
+-                continue;
+-            }
+-            for (uint32_t c = 0u; c < components; ++c)
+-            {
+-                if (vl == 1u)
+-                {
+-                    uint16_t raw = 0u;
+-                    std::memcpy(&raw, src + c * 2u, sizeof(raw));
+-                    words[c] = zeroExtend ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw)));
+-                }
+-                else
+-                {
+-                    const uint8_t raw = src[c];
+-                    words[c] = zeroExtend ? raw : static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(raw)));
+-                }
+-            }
+-            if (components == 1u)
+-            {
+-                words[1] = words[2] = words[3] = words[0];
+-                std::memcpy(dst, words, sizeof(words));
+-            }
+-            else
+-                std::memcpy(dst, words, components * 4u);
+-        }
++        // The other shapes, each its own loop (unpackRun). 32-bit components
++        // go as they are, whatever the extension bit says.
++        (void)bytesPerVector;
++        if (vl == 0u)
++            unpackShape<uint32_t>(vuData, src, writeVectorCount, vuAddr, cl, wl, components, true);
++        else if (vl == 1u)
++            unpackShape<int16_t>(vuData, src, writeVectorCount, vuAddr, cl, wl, components, zeroExtend);
++        else
++            unpackShape<int8_t>(vuData, src, writeVectorCount, vuAddr, cl, wl, components, zeroExtend);
+     }
+ 
+     uint32_t gifImageQwcFromTag(const uint8_t *data, uint32_t sizeBytes)

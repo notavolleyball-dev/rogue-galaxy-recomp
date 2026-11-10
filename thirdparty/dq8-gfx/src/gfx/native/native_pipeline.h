@@ -53,6 +53,25 @@ void reuseRawBuffer(MeshDraw &draw);
 void setMeshCull(void (*cull)(MeshDraw &draw));
 void (*meshCull())(MeshDraw &draw);
 
+// A retained mesh's vertex (native_mesh_static.vert): its triangle's three
+// corners, its own UV and colour, which corner it is and the triangle's
+// place in the strip (the sign its winding has there).
+struct StaticVertex
+{
+    float a[3], b[3], c[3];
+    float uv[2];
+    float color[4];
+    float corner, parity;
+};
+static_assert(sizeof(StaticVertex) == 68u, "tightly packed");
+constexpr uint32_t kStaticVertices = 1u << 19; // 34 MiB
+
+// Bumped when the renderer lets go of every retained mesh (its buffer
+// filled): the ids the producer handed out before are no longer drawn, and
+// it defines its meshes again under new ones. Any thread.
+uint64_t retainedEpoch();
+void retainedReset(); // the renderer's own: a new epoch
+
 // Textures the renderer let go of (its memory budget): a producer that sends
 // a texture once and names it by id afterwards drains these and sends them
 // again when next used. Any thread.
@@ -228,6 +247,12 @@ private:
         float texa[4];
         uint32_t region[4]; // min u, max u, min v, max v (the GS's CLAMP)
         uint32_t wrap[4];   // u, v: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
+        // A retained mesh's cull and colour cap (native_mesh_static.vert).
+        float cullMatrix[16];
+        float bandScale[4];
+        float bandOffset[4];
+        float cull[4]; // the winding sign; the guard band test, the backface test, a clipped chunk (0 or 1)
+        float colorMax[4];
     };
     // A draw's binding state, resolved before recording.
     struct DrawPlan
@@ -290,6 +315,27 @@ private:
     SDL_GPUBuffer *m_drawBuffer = nullptr; // the frame's draw table
     uint32_t m_drawCapacity = 0;
     std::vector<uint32_t> m_firstIndex; // per frame mesh, into the index buffer
+    // Retained meshes: their triangles, three vertices each, in one buffer
+    // filled from its start (m_staticUsed vertices); what apply() took in
+    // since the last upload waits in m_staticPending.
+    struct Retained
+    {
+        uint32_t first = 0, count = 0; // vertices
+    };
+    void retain(const RetainedMesh &mesh);
+    const Retained *retainedOf(const MeshDraw &draw) const
+    {
+        if (draw.retained == 0u)
+            return nullptr;
+        const auto it = m_retained.find(draw.retained);
+        return it != m_retained.end() ? &it->second : nullptr;
+    }
+    std::unordered_map<Id, Retained> m_retained;
+    SDL_GPUBuffer *m_staticBuffer = nullptr;
+    SDL_GPUShader *m_staticVertex = nullptr;
+    uint32_t m_staticUsed = 0, m_staticUploaded = 0;
+    std::vector<uint8_t> m_staticPending;
+    uint64_t m_retainedDefined = 0, m_retainedDrawn = 0, m_retainedMissing = 0, m_retainedResets = 0;
     std::vector<GpuDraw> m_drawTable;   // per frame mesh
     std::vector<DrawPlan> m_drawPlans;  // per frame mesh
     std::vector<PassPlan> m_passPlans;

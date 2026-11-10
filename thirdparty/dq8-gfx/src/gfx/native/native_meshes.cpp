@@ -8,6 +8,7 @@
 
 #include "native_mesh.frag.spv.h"
 #include "native_mesh.vert.spv.h"
+#include "native_mesh_static.vert.spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -233,7 +234,10 @@ bool Renderer::ensureMeshes(SDL_GPUDevice *device, std::string &error)
     fragmentInfo.num_storage_buffers = 1u; // the draw table
     m_meshVertex = SDL_CreateGPUShader(device, &vertexInfo);
     m_meshFragment = m_meshVertex ? SDL_CreateGPUShader(device, &fragmentInfo) : nullptr;
-    if (!m_meshVertex || !m_meshFragment)
+    vertexInfo.code = reinterpret_cast<const uint8_t *>(kNativeMeshStaticVertSpirv);
+    vertexInfo.code_size = sizeof(kNativeMeshStaticVertSpirv);
+    m_staticVertex = m_meshFragment ? SDL_CreateGPUShader(device, &vertexInfo) : nullptr;
+    if (!m_meshVertex || !m_meshFragment || !m_staticVertex)
     {
         error = std::string("SDL_CreateGPUShader(native mesh): ") + SDL_GetError();
         return false;
@@ -335,13 +339,25 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     attributes[3] = {3u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(GpuVertex, fog)};
     attributes[4] = {4u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_UINT, offsetof(GpuVertex, draw)};
 
+    // A retained mesh's (bit 31): its own vertex and its own vertex stage.
+    const bool retained = (key >> 31) != 0u;
+    SDL_GPUVertexAttribute staticAttributes[6]{};
+    staticAttributes[0] = {0u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(StaticVertex, a)};
+    staticAttributes[1] = {1u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(StaticVertex, b)};
+    staticAttributes[2] = {2u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(StaticVertex, c)};
+    staticAttributes[3] = {3u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(StaticVertex, uv)};
+    staticAttributes[4] = {4u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(StaticVertex, color)};
+    staticAttributes[5] = {5u, 0u, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(StaticVertex, corner)};
+    if (retained)
+        buffer.pitch = sizeof(StaticVertex);
+
     SDL_GPUGraphicsPipelineCreateInfo info{};
-    info.vertex_shader = m_meshVertex;
+    info.vertex_shader = retained ? m_staticVertex : m_meshVertex;
     info.fragment_shader = m_meshFragment;
     info.vertex_input_state.vertex_buffer_descriptions = &buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
-    info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 5u;
+    info.vertex_input_state.vertex_attributes = retained ? staticAttributes : attributes;
+    info.vertex_input_state.num_vertex_attributes = retained ? 6u : 5u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; // the producer's indices are already culled
@@ -414,16 +430,56 @@ inline size_t vertexCount(const MeshDraw &d)
 
 bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
 {
-    static_assert(sizeof(GpuDraw) == 320u, "std430, as the shaders read it");
+    static_assert(sizeof(GpuDraw) == 448u, "std430, as the shaders read it");
+    // The retained meshes taken in since the last frame drawn, behind those
+    // already in their buffer.
+    if (!m_staticBuffer)
+    {
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        info.size = kStaticVertices * sizeof(StaticVertex);
+        m_staticBuffer = SDL_CreateGPUBuffer(device, &info);
+        if (!m_staticBuffer)
+        {
+            error = std::string("SDL_CreateGPUBuffer(retained meshes): ") + SDL_GetError();
+            return false;
+        }
+    }
+    if (!m_staticPending.empty())
+    {
+        const uint32_t bytes = static_cast<uint32_t>(m_staticPending.size());
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        info.size = bytes;
+        SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &info);
+        void *mapped = transfer ? SDL_MapGPUTransferBuffer(device, transfer, false) : nullptr;
+        if (!mapped)
+        {
+            error = std::string("SDL_CreateGPUTransferBuffer(retained meshes): ") + SDL_GetError();
+            return false;
+        }
+        std::memcpy(mapped, m_staticPending.data(), bytes);
+        SDL_UnmapGPUTransferBuffer(device, transfer);
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        const SDL_GPUTransferBufferLocation source{transfer, 0u};
+        const SDL_GPUBufferRegion destination{m_staticBuffer, m_staticUploaded * uint32_t(sizeof(StaticVertex)), bytes};
+        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+        SDL_EndGPUCopyPass(copy);
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        m_staticUploaded += bytes / uint32_t(sizeof(StaticVertex));
+        m_staticPending.clear();
+    }
     m_firstIndex.clear();
     uint64_t vertices = 0u, indices = 0u;
+    bool anyRetained = false;
     for (const MeshDraw &d : m_frameMeshes)
     {
         m_firstIndex.push_back(static_cast<uint32_t>(indices));
         vertices += vertexCount(d);
         indices += d.indices.size();
+        anyRetained = anyRetained || d.retained != 0u;
     }
-    if (indices == 0u)
+    if (indices == 0u && !anyRetained)
         return true;
     const uint64_t vertexBytes = vertices * sizeof(GpuVertex), indexBytes = indices * sizeof(uint32_t);
     const uint64_t tableOffset = (vertexBytes + indexBytes + 15u) & ~uint64_t(15u);
@@ -508,10 +564,12 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
     SDL_GPUTransferBufferLocation source{m_meshTransfer, 0u};
     SDL_GPUBufferRegion destination{m_vertexBuffer, 0u, static_cast<uint32_t>(vertexBytes)};
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    if (vertexBytes != 0u)
+        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     source.offset = static_cast<uint32_t>(vertexBytes);
     destination = {m_indexBuffer, 0u, static_cast<uint32_t>(indexBytes)};
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    if (indexBytes != 0u)
+        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     source.offset = static_cast<uint32_t>(tableOffset);
     destination = {m_drawBuffer, 0u, static_cast<uint32_t>(tableBytes)};
     SDL_UploadToGPUBuffer(copy, &source, &destination, true);
@@ -532,7 +590,10 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
     {
         const MeshDraw &d = m_frameMeshes[n];
         DrawPlan &plan = m_drawPlans[n];
-        if (d.indices.empty())
+        const Retained *const retained = retainedOf(d);
+        if (d.retained != 0u && !retained)
+            ++m_retainedMissing;
+        if (retained ? retained->count == 0u : d.indices.empty())
             continue;
         const Camera *camera = nullptr;
         if (const auto it = m_cameras.find(d.camera); d.camera != 0u && it != m_cameras.end())
@@ -635,7 +696,20 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             mu.texa[2] = 1.0f + float(m.destinationAlphaTest);
             ++m_meshCounts.destinationAlpha;
         }
-        SDL_GPUGraphicsPipeline *pipeline = meshPipeline(device, pipelineKey(m, depthAttached));
+        SDL_GPUGraphicsPipeline *pipeline =
+            meshPipeline(device, pipelineKey(m, depthAttached) | (retained ? 1u << 31 : 0u));
+        if (retained)
+        {
+            std::memcpy(du.cullMatrix, d.cullMatrix, sizeof(du.cullMatrix));
+            std::memcpy(du.bandScale, d.bandScale, sizeof(du.bandScale));
+            std::memcpy(du.bandOffset, d.bandOffset, sizeof(du.bandOffset));
+            du.cull[0] = d.winding;
+            du.cull[1] = d.guardBand ? 1.0f : 0.0f;
+            du.cull[2] = d.backface ? 1.0f : 0.0f;
+            du.cull[3] = d.clips ? 1.0f : 0.0f;
+            std::memcpy(du.colorMax, d.rawColorMax, sizeof(du.colorMax));
+            ++m_retainedDrawn;
+        }
         if (!pipeline)
         {
             ++m_meshCounts.noPipeline;
@@ -852,7 +926,10 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
     while (n < plan.last)
     {
         const DrawPlan &d = m_drawPlans[n];
-        uint32_t count = static_cast<uint32_t>(m_frameMeshes[n].indices.size());
+        // A retained mesh is a call of its own, from its own buffer, its row
+        // the call's first instance.
+        const Retained *const retained = d.pipeline ? retainedOf(m_frameMeshes[n]) : nullptr;
+        uint32_t count = retained ? retained->count : static_cast<uint32_t>(m_frameMeshes[n].indices.size());
         if (!d.pipeline || count == 0u)
         {
             ++n;
@@ -860,9 +937,11 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
         }
         size_t m = n + 1;
         // Whole triangles only: a stray index would shift the next draw's.
-        if (count % 3u == 0u)
+        if (count % 3u == 0u && !retained)
             while (m < plan.last)
             {
+                if (m_drawPlans[m].pipeline && m_frameMeshes[m].retained != 0u)
+                    break;
                 const uint32_t more = static_cast<uint32_t>(m_frameMeshes[m].indices.size());
                 if (more == 0u)
                 {
@@ -898,7 +977,15 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
             SDL_SetGPUBlendConstants(pass, SDL_FColor{f, f, f, f});
             boundBlend = f;
         }
-        SDL_DrawGPUIndexedPrimitives(pass, count, 1, m_firstIndex[n], 0, 0);
+        if (retained)
+        {
+            const SDL_GPUBufferBinding staticBinding{m_staticBuffer, 0u};
+            SDL_BindGPUVertexBuffers(pass, 0, &staticBinding, 1);
+            SDL_DrawGPUPrimitives(pass, count, 1, retained->first, static_cast<uint32_t>(n));
+            SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+        }
+        else
+            SDL_DrawGPUIndexedPrimitives(pass, count, 1, m_firstIndex[n], 0, 0);
         ++m_meshCounts.calls;
         n = m;
     }
@@ -1173,6 +1260,17 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
     }
     if (m_meshVertex)
         SDL_ReleaseGPUShader(device, m_meshVertex);
+    if (m_staticVertex)
+        SDL_ReleaseGPUShader(device, m_staticVertex);
+    if (m_staticBuffer)
+        SDL_ReleaseGPUBuffer(device, m_staticBuffer);
+    m_staticVertex = nullptr;
+    m_staticBuffer = nullptr;
+    // What the buffer held is gone with it: the producer starts again.
+    m_retained.clear();
+    m_staticPending.clear();
+    m_staticUsed = m_staticUploaded = 0u;
+    retainedReset();
     if (m_meshFragment)
         SDL_ReleaseGPUShader(device, m_meshFragment);
     for (auto &[id, target] : m_gpuTargets)

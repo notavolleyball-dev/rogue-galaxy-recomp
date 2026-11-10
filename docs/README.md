@@ -54,6 +54,9 @@ What each page here is for, by who it is for. New to the project? Start with
 Start with [NATIVE-RENDERER.md](NATIVE-RENDERER.md): it says where things
 stand and what each of the others is for.
 
+- [NATIVE-BOUNDARY.md](NATIVE-BOUNDARY.md): work left between the native CPU and
+  the native GPU sides (textures sent every frame, geometry derived every
+  frame), and the plan.
 - [VU1-NATIVE.md](VU1-NATIVE.md): the VU1's 3D programs run as native code.
 - [NATIVE-CPU.md](NATIVE-CPU.md): the game's code translated by our own
   translator, without CPU emulation (`RG_NATIVE_CPU=1`); its goal in

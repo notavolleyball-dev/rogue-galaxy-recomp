@@ -28,6 +28,8 @@
 #include "native_2d.h"
 #include "native_effects.h"
 #include "native_producer.h"
+#include "gif_events.h"
+#include "guest_write_watch.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
 #include "runtime/ee_scheduler.h"
@@ -48,6 +50,10 @@ struct Acc
 constexpr int kLines = 4096;
 Acc g_drain[kLines]; // the game thread in Vif1Thread::drain, by caller line
 Acc g_vif1Idle, g_vif1Space, g_stageIdle, g_stageDrain;
+// A list's latency: from its send to the VIF1 thread's end of it, and to the
+// draw stage's (when the game's wait for it ends).
+Acc g_listVif1, g_listDraw;
+std::atomic<int64_t> g_listSent{0};
 std::atomic<int64_t> g_windowStart{0};
 int64_t nowNs()
 {
@@ -76,6 +82,15 @@ void report()
     std::fprintf(stderr, "[vifwait] vif1 idle %.1f%% (x%llu) waits-on-stage %.1f%% (x%llu) | stage idle %.1f%% (x%llu) | game->stage drain %.1f%% (x%llu) | game drains:",
                  pct(g_vif1Idle), cnt(g_vif1Idle), pct(g_vif1Space), cnt(g_vif1Space), pct(g_stageIdle),
                  cnt(g_stageIdle), pct(g_stageDrain), cnt(g_stageDrain));
+    {
+        const uint64_t lists = g_listDraw.count.load();
+        const double vif1 = double(g_listVif1.ns.exchange(0)), draw = double(g_listDraw.ns.exchange(0));
+        g_listVif1.count.exchange(0);
+        g_listDraw.count.exchange(0);
+        if (lists)
+            std::fprintf(stderr, " | a list, from its send: VIF1 done %.0f us, draw stage done %.0f us (x%llu) |",
+                         vif1 / double(lists) / 1000.0, draw / double(lists) / 1000.0, (unsigned long long)lists);
+    }
     double total = 0.0;
     for (int line = 0; line < kLines; ++line)
     {
@@ -136,6 +151,8 @@ PS2Memory *g_vif1Memory = nullptr;
 thread_local const uint8_t *t_listData = nullptr;
 thread_local size_t t_listSize = 0u;
 thread_local const std::vector<std::pair<uint32_t, uint32_t>> *t_listOrigins = nullptr;
+// The piece of t_listOrigins the last listAddress found (listAddress).
+thread_local size_t t_listOriginAt = 0u;
 // Read when the thread starts, after the menu's native renderer setting
 // (static initializers run before the menu hands it over).
 rg::vu1native::Mode nativeMode()
@@ -233,8 +250,265 @@ uint32_t toDmaPhys(uint32_t addr)
     return addr & 0x1FFFFFFFu;
 }
 
+// Bytes written whole before they are read: growing them leaves the new
+// bytes as they are (std::vector<uint8_t> zeroes them first).
+template <typename T> struct NoInit : std::allocator<T>
+{
+    template <typename U> struct rebind
+    {
+        using other = NoInit<U>;
+    };
+    NoInit() = default;
+    template <typename U> NoInit(const NoInit<U> &) noexcept {}
+    template <typename U> void construct(U *p) noexcept { ::new (static_cast<void *>(p)) U; }
+    template <typename U, typename... A> void construct(U *p, A &&...a)
+    {
+        ::new (static_cast<void *>(p)) U(std::forward<A>(a)...);
+    }
+};
+using Bytes = std::vector<uint8_t, NoInit<uint8_t>>;
+
+// A span of a list left uncopied (gatherChain): a texture upload's data the
+// producer already holds a record of, from guest memory unwritten since the
+// record's hash. `offset` and `bytes` are its place in the list, `phys` where
+// it is in guest RAM, `hash` the record's.
+struct Hole
+{
+    uint32_t offset = 0u, bytes = 0u, phys = 0u;
+    bool filled = false; // read from guest memory after all (listHole)
+    uint64_t hash = 0u;
+};
+// RG_MESH_REPEAT=1 (docs/NATIVE-BOUNDARY.md, issue 2's count): how much of
+// the geometry the native VU1 programs build is what they built a frame
+// before. A mesh is known by its vertices in object space (position, UV,
+// color; not the depth, which is the camera's); "repeated" when the same
+// was built in one of the 8 lists before this one, "with its matrix" when
+// its header (matrix, fog, clip planes) is the same too. Printed every 600
+// lists, on the VIF1 thread.
+struct MeshRepeat
+{
+    struct Seen
+    {
+        uint64_t list, header;
+    };
+    std::unordered_map<uint64_t, Seen> seen;
+    uint64_t list = 0u, reported = 0u;
+    uint64_t meshes[2] = {}, vertices[2] = {};             // [skinned]
+    uint64_t repeatMeshes[2] = {}, repeatVertices[2] = {}; // from an earlier list
+    uint64_t sameMatrix[2] = {}, sameList[2] = {};         // vertices
+};
+bool countingMeshRepeats()
+{
+    static const bool on = std::getenv("RG_MESH_REPEAT") != nullptr;
+    return on;
+}
+thread_local MeshRepeat t_meshRepeat;
+uint64_t repeatHash(const uint8_t *at, size_t size, uint64_t h)
+{
+    for (; size >= 8u; at += 8, size -= 8u)
+    {
+        uint64_t word;
+        std::memcpy(&word, at, 8);
+        h = (h ^ word) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    return h;
+}
+void noteMeshRepeat(const GSNativeMesh &mesh, bool skinned)
+{
+    MeshRepeat &r = t_meshRepeat;
+    const size_t count = mesh.vertices.size();
+    if (count == 0u)
+        return;
+    uint64_t h = count;
+    for (const GSNativeMesh::Vertex &v : mesh.vertices)
+        h = repeatHash(reinterpret_cast<const uint8_t *>(&v), offsetof(GSNativeMesh::Vertex, depth) & ~size_t(7), h) ^
+            static_cast<uint32_t>(v.a * 16.0f);
+    const uint64_t header = repeatHash(reinterpret_cast<const uint8_t *>(&mesh.header), sizeof(mesh.header) & ~size_t(7), 1u);
+    const int k = skinned ? 1 : 0;
+    ++r.meshes[k];
+    r.vertices[k] += count;
+    const auto it = r.seen.find(h);
+    if (it != r.seen.end() && it->second.list == r.list)
+        r.sameList[k] += count;
+    else if (it != r.seen.end() && r.list - it->second.list <= 8u)
+    {
+        ++r.repeatMeshes[k];
+        r.repeatVertices[k] += count;
+        if (it->second.header == header)
+            r.sameMatrix[k] += count;
+    }
+    r.seen[h] = {r.list, header};
+}
+void meshRepeatList()
+{
+    MeshRepeat &r = t_meshRepeat;
+    if (++r.list - r.reported < 600u)
+        return;
+    r.reported = r.list;
+    for (int k = 0; k < 2; ++k)
+        std::fprintf(stderr,
+                     "[mesh-repeat] %s: %llu meshes, %llu vertices; built the same in an earlier list: %llu meshes, "
+                     "%llu vertices (%.1f%%), %llu of those with the same header; same as one earlier in its own "
+                     "list: %llu vertices\n",
+                     k ? "skinned" : "not skinned", (unsigned long long)r.meshes[k],
+                     (unsigned long long)r.vertices[k], (unsigned long long)r.repeatMeshes[k],
+                     (unsigned long long)r.repeatVertices[k],
+                     r.vertices[k] ? 100.0 * double(r.repeatVertices[k]) / double(r.vertices[k]) : 0.0,
+                     (unsigned long long)r.sameMatrix[k], (unsigned long long)r.sameList[k]);
+    for (int k = 0; k < 2; ++k)
+        r.meshes[k] = r.vertices[k] = r.repeatMeshes[k] = r.repeatVertices[k] = r.sameMatrix[k] = r.sameList[k] = 0u;
+    if (r.seen.size() > (1u << 20))
+        r.seen.clear();
+}
+
+// Retained meshes (docs/NATIVE-BOUNDARY.md, issue 2). Half of a frame's
+// vertices are meshes the game sends unchanged frame after frame (the map).
+// One is known here by its vertices in object space (the native VU1
+// program's output, before the camera); built the same in two lists, it is
+// given an id and sent to the renderer once, which keeps it in a vertex
+// buffer of its own and judges the program's cull on the GPU. Every later
+// time only the id and the chunk's header go on: no vertex is copied to the
+// draw stage, to the producer or to the GPU, and none is culled on the CPU.
+// RG_MESH_RETAIN=0: every mesh whole, every frame, as before.
+struct MeshRetain
+{
+    uint32_t id = 0u;    // 0: not retained
+    bool define = false; // its vertices go with it (the first time)
+};
+// The mesh on its way (the VIF1 thread to the draw stage, the draw stage to
+// the producer).
+thread_local MeshRetain t_retain;
+struct RetainTable
+{
+    struct Entry
+    {
+        uint32_t id;
+        uint32_t sightings; // lists it was built in, while it has no id
+        uint64_t list;
+    };
+    // A mesh the same over this many lists is the map's; fewer, and what
+    // only holds still for a few frames (an animation's pose, a slow
+    // scroll) filled the renderer's buffer with meshes drawn twice.
+    static constexpr uint32_t kSightings = 8u;
+    std::unordered_map<uint64_t, Entry> seen;
+    uint64_t list = 0u, epoch = 0u;
+    uint32_t nextId = 0u; // never reused, whatever the epoch
+};
+thread_local RetainTable t_retained;
+bool retainingMeshes()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_MESH_RETAIN");
+        return rg::nativeproducer::pipelineOn() && !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
+// At a list's start: the renderer's epoch (a new one: every id is gone), and
+// now and then the meshes not seen for a while forgotten.
+void retainList()
+{
+    RetainTable &r = t_retained;
+    ++r.list;
+    const uint64_t epoch = rg::nativeproducer::retainedEpoch();
+    if (epoch != r.epoch)
+    {
+        r.epoch = epoch;
+        r.seen.clear();
+    }
+    if (r.list % 512u == 0u)
+        std::erase_if(r.seen, [&](const auto &e) { return e.second.id == 0u && r.list - e.second.list > 64u; });
+}
+MeshRetain retainOf(const GSNativeMesh &mesh)
+{
+    RetainTable &r = t_retained;
+    const size_t count = mesh.vertices.size();
+    if (count < 3u)
+        return {};
+    // Position, UV and colour (36 bytes of the 40; the depth is the
+    // camera's), and what the renderer makes its triangles by.
+    constexpr uint64_t k = 0x9E3779B97F4A7C15ull;
+    uint64_t lane[2] = {count * k, mesh.header.triangleList ? k : ~k};
+    for (const GSNativeMesh::Vertex &v : mesh.vertices)
+    {
+        uint64_t words[4];
+        uint32_t last;
+        std::memcpy(words, &v, sizeof(words));
+        std::memcpy(&last, &v.a, sizeof(last));
+        lane[0] = (lane[0] ^ words[0]) * k;
+        lane[1] = (lane[1] ^ words[1]) * k;
+        lane[0] = (lane[0] ^ (words[2] + (lane[1] >> 29))) * k;
+        lane[1] = (lane[1] ^ (words[3] + last + (lane[0] >> 31))) * k;
+    }
+    const uint64_t hash = lane[0] ^ (lane[1] >> 32) ^ (lane[1] << 32);
+    const auto [it, fresh] = r.seen.try_emplace(hash, RetainTable::Entry{0u, 1u, r.list});
+    RetainTable::Entry &entry = it->second;
+    if (fresh)
+        return {};
+    if (entry.id != 0u)
+    {
+        entry.list = r.list;
+        return {entry.id, false};
+    }
+    if (entry.list == r.list)
+        return {}; // twice in one list: it waits for another
+    entry.list = r.list;
+    if (++entry.sightings < RetainTable::kSightings)
+        return {};
+    entry.id = ++r.nextId;
+    return {entry.id, true};
+}
+
+// A VU1 mesh's own register writes (docs/NATIVE-BOUNDARY.md, issue 4): the
+// native program's fog colour, PRIM and PRMODE went ahead of each mesh as two
+// GIF packets this code had just encoded, for the draw stage to copy, place,
+// classify and decode again: some 1,500 packets a frame. They ride with the
+// mesh as (register, value) pairs instead and go straight to the draw-state
+// mirror. RG_MESH_WRITES=0: packets, as before.
+using RegisterWrite = std::pair<uint8_t, uint64_t>;
+thread_local const RegisterWrite *t_meshWrites = nullptr;
+thread_local uint32_t t_meshWriteCount = 0u;
+bool meshWritesOn()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_MESH_WRITES");
+        return !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
+// The packets as writes; false when they hold anything else (a vertex, a
+// transfer, image data): they then go as packets.
+bool packetsAsWrites(const std::vector<std::vector<uint8_t>> &packets, std::vector<RegisterWrite> &writes)
+{
+    thread_local std::vector<rg::gif::GifEvent> events;
+    writes.clear();
+    for (const std::vector<uint8_t> &packet : packets)
+    {
+        rg::gif::GifState state;
+        events.clear();
+        bool whole = true, image = false;
+        whole = rg::gif::eachPacket(packet.data(), static_cast<uint32_t>(packet.size()), [&](uint32_t at, uint32_t size) {
+            image |= rg::gif::decodeGifPacket(packet.data() + at, size, state, events).imageQwords != 0u;
+        });
+        if (!whole || image)
+            return false;
+        for (const rg::gif::GifEvent &e : events)
+        {
+            if (e.kind != rg::gif::GifEvent::Kind::Register || (e.reg >= 0x50u && e.reg <= 0x54u) ||
+                e.reg == rg::nativeproducer::kBindRegister || e.reg >= 0x60u)
+                return false;
+            writes.emplace_back(e.reg, e.value);
+        }
+    }
+    return true;
+}
+
+// The VIF1 thread's list's holes, and the first not yet passed (listHole).
+thread_local std::vector<Hole> *t_listHoles = nullptr;
+thread_local size_t t_listHoleAt = 0u;
+
 // Bytes from local memory or scratchpad, wrapping as the runtime's DMA does.
-void appendBytes(PS2Memory &memory, std::vector<uint8_t> &out, uint32_t address, uint32_t bytes)
+void appendBytes(PS2Memory &memory, Bytes &out, uint32_t address, uint32_t bytes)
 {
     const bool scratch = memory.isScratchpad(address);
     uint32_t source = memory.translateAddress(address);
@@ -308,7 +582,7 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
             break;
         default: data = tadr + 16u; end = true; break;
         }
-        if (!visit(tagAddress, data, qwc))
+        if (!visit(tagAddress, data, qwc, static_cast<uint32_t>(tag)))
         {
             break;
         }
@@ -326,25 +600,152 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 // vector through them copied most of that twice, while a second walk for
 // the size alone read every tag again (thousands a frame, 2% of the game
 // thread in a battle).
-void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vector<uint8_t> &out,
-                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr)
+//
+// With `holes`, a texture upload's data is not copied at all when nothing
+// downstream reads it (elidableUpload): the game sends some 4.4 MiB of
+// textures a frame in the field, the same ones from the same memory, and
+// under the native pipeline every byte of them was copied here, copied
+// again to the draw stage, and dropped there, the producer having made its
+// record of each from the same memory already (2026-11-09: 5% of the game
+// thread, 7% of the VIF1 thread). The span keeps its place in the list,
+// unwritten, and is named in `holes`.
+constexpr uint32_t kElideMin = 2048u;
+
+// Whether a ref tag's payload is such an upload: the tag's own two VIFcodes
+// are NOP and a DIRECT of exactly the payload, so the VIF hands the span to
+// the GIF and nothing else decodes it; and it is guest RAM the producer
+// hashed for a texture record and no write has reached since
+// (rg::nativeproducer::sourceUnchanged), so the bytes a copy would take now
+// are the record's. `phys`, `hash`: where it is and that record's hash.
+bool elidableUpload(PS2Memory &memory, uint32_t tagAddress, uint32_t data, uint32_t qwc, uint32_t &phys,
+                    uint64_t &hash)
+{
+    try
+    {
+        if (memory.isScratchpad(tagAddress) || memory.isScratchpad(data))
+            return false;
+        const uint32_t tagPhys = memory.translateAddress(tagAddress);
+        phys = memory.translateAddress(data);
+        const uint32_t bytes = qwc * 16u;
+        if (tagPhys + 16u > PS2_RAM_SIZE || static_cast<uint64_t>(phys) + bytes > PS2_RAM_SIZE)
+            return false;
+        uint32_t codes[2];
+        std::memcpy(codes, memory.getRDRAM() + tagPhys + 8u, sizeof(codes));
+        const uint32_t opcode = codes[1] >> 24;
+        if ((codes[0] >> 24) != 0u || (opcode != 0x50u && opcode != 0x51u) || (codes[1] & 0xFFFFu) != qwc)
+            return false;
+        return rg::nativeproducer::sourceUnchanged(memory.getRDRAM() + phys, bytes, hash);
+    }
+    catch (const std::exception &)
+    {
+        return false;
+    }
+}
+
+//
+// With `binds`, a texture binding marker (the texture hook's, in place of a
+// node's uploads: docs/NATIVE-BOUNDARY.md) is resolved in the copy: each
+// entry's source becomes its record's id, now, when the PS2's DMA would
+// read the pixels.
+void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &out,
+                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr, std::vector<Hole> *holes = nullptr,
+                 bool binds = false)
 {
     out.clear();
-    // (address, bytes) of each piece, in order. send() runs on the game
-    // thread alone.
-    thread_local std::vector<std::pair<uint32_t, uint32_t>> spans;
+    // Each piece, in order; `hash` set: left uncopied, at `phys`. send() runs
+    // on the game thread alone.
+    struct Span
+    {
+        uint32_t address, bytes, phys;
+        uint64_t hash;
+        bool bind;
+    };
+    thread_local std::vector<Span> spans;
     spans.clear();
     size_t total = 0u;
-    walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc) {
+    walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc, uint32_t tagLow) {
         if (tte)
         {
             // With TTE every tag supplies two VIFcodes before its payload.
-            spans.emplace_back(tagAddress + 8u, 8u);
+            spans.push_back({tagAddress + 8u, 8u, 0u, 0u, false});
             total += 8u;
         }
         if (qwc != 0u)
         {
-            spans.emplace_back(data, qwc * 16u);
+            uint32_t phys = 0u;
+            uint64_t hash = 0u;
+            // A reference's payload (not the tag's own), large enough to
+            // be worth the lookup.
+            if (!(holes && tte && qwc * 16u >= kElideMin && data != tagAddress + 16u &&
+                  elidableUpload(memory, tagAddress, data, qwc, phys, hash)))
+                hash = 0u;
+            // A marker: a cnt tag with the magic in its unused bits.
+            const bool bind = binds && tte && qwc >= 2u && ((tagLow >> 28) & 0x7u) == 1u &&
+                              ((tagLow >> 16) & 0x3FFu) == rg::nativeproducer::kBindTagMagic;
+            spans.push_back({data, qwc * 16u, phys, hash, bind});
+            if (countingMeshRepeats())
+            {
+                // Issue 2's count: what the list takes by reference (the
+                // game's own data, sent from where it is) and what the game
+                // wrote into the list this frame.
+                static uint64_t lists = 0u, inlineBytes = 0u, refBytes = 0u, refSpans = 0u, lastTadr = ~0ull;
+                if (lastTadr != tadr)
+                {
+                    lastTadr = tadr;
+                    if (++lists % 600u == 0u)
+                    {
+                        std::fprintf(stderr, "[mesh-repeat] lists: %llu KiB a list written by the game, %llu KiB by "
+                                             "reference in %llu spans\n",
+                                     (unsigned long long)(inlineBytes / 600u >> 10),
+                                     (unsigned long long)(refBytes / 600u >> 10), (unsigned long long)(refSpans / 600u));
+                        inlineBytes = refBytes = refSpans = 0u;
+                    }
+                }
+                if (data == tagAddress + 16u)
+                    inlineBytes += qwc * 16u;
+                else
+                {
+                    refBytes += qwc * 16u;
+                    ++refSpans;
+                    // Of the referenced: from memory no write reached since
+                    // the send before (the write watch), and the VIFcodes
+                    // its tag carries, by kind.
+                    static std::unordered_map<uint64_t, uint64_t> stamps;
+                    static uint64_t stable = 0u, spans = 0u, unpack = 0u, direct = 0u, other = 0u, reports = 0u;
+                    try
+                    {
+                        if (!memory.isScratchpad(data) && !memory.isScratchpad(tagAddress))
+                        {
+                            const uint32_t at = memory.translateAddress(data), bytes = qwc * 16u;
+                            const uint8_t *ram = memory.getRDRAM();
+                            if (uint64_t(at) + bytes <= PS2_RAM_SIZE)
+                            {
+                                uint64_t &stamp = stamps[(uint64_t(at) << 32) | bytes];
+                                if (stamp != 0u && rg::writewatch::unchanged(ram + at, bytes, stamp))
+                                    stable += bytes;
+                                else
+                                    stamp = rg::writewatch::watch(ram + at, bytes);
+                                uint32_t codes[2];
+                                std::memcpy(codes, ram + memory.translateAddress(tagAddress) + 8u, 8u);
+                                const uint32_t op = (codes[1] >> 24) & 0x7Fu;
+                                ++((op & 0x60u) == 0x60u ? unpack : (op == 0x50u || op == 0x51u) ? direct : other);
+                            }
+                        }
+                    }
+                    catch (const std::exception &)
+                    {
+                    }
+                    if (++spans % 300000u == 0u && reports++ < 40u)
+                    {
+                        std::fprintf(stderr, "[mesh-repeat] referenced: %llu KiB of the last 300000 spans from memory "
+                                             "unwritten since the send before; tags' second VIFcode: UNPACK %llu, "
+                                             "DIRECT %llu, other %llu\n",
+                                     (unsigned long long)(stable >> 10), (unsigned long long)unpack,
+                                     (unsigned long long)direct, (unsigned long long)other);
+                        stable = unpack = direct = other = 0u;
+                    }
+                }
+            }
             total += static_cast<size_t>(qwc) * 16u;
         }
         return true;
@@ -354,13 +755,41 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, std::vect
         // A garbage chain can sum to more than a buffer can hold; the list
         // then ends where the copy stops, like one that cannot be read.
         out.reserve(total);
-        for (const auto &[address, bytes] : spans)
+        bool begun = false;
+        for (const Span &span : spans)
         {
             if (origins)
             {
-                origins->emplace_back(static_cast<uint32_t>(out.size()), address);
+                origins->emplace_back(static_cast<uint32_t>(out.size()), span.address);
             }
-            appendBytes(memory, out, address, bytes);
+            if (span.hash != 0u)
+            {
+                holes->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, false, span.hash});
+                out.resize(out.size() + span.bytes);
+                continue;
+            }
+            const size_t at = out.size();
+            appendBytes(memory, out, span.address, span.bytes);
+            if (!span.bind)
+                continue;
+            if (!begun)
+            {
+                rg::nativeproducer::bindBegin();
+                begun = true;
+            }
+            // Past its GIF tag, each entry: its 64 bits resolved, the rest
+            // of the qword the register alone.
+            for (size_t q = at + 16u; q + 16u <= out.size(); q += 16u)
+            {
+                rg::nativeproducer::BindEntry entry;
+                std::memcpy(&entry, out.data() + q, sizeof(entry));
+                if (entry.reg != rg::nativeproducer::kBindRegister)
+                    continue;
+                const uint64_t resolved[2] = {
+                    rg::nativeproducer::bindResolve(memory.getRDRAM(), PS2_RAM_SIZE, entry),
+                    rg::nativeproducer::kBindRegister};
+                std::memcpy(out.data() + q, resolved, sizeof(resolved));
+            }
         }
     }
     catch (const std::exception &)
@@ -645,6 +1074,8 @@ void discardHeld();
 void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor);
 // A texture continued over DIRECT packets (PS2Memory's image callback).
 void deliverImage(GS &gs, const uint8_t *data, uint32_t size);
+// A hole's image data (gatherChain), which never left guest memory.
+void deliverElidedImage(GS &gs, uint32_t size, uint32_t phys, uint64_t hash);
 // A list's last record has run (Vif1Thread::listFinished).
 void finishList();
 bool absorbing();
@@ -699,15 +1130,33 @@ public:
         uint8_t *at = append(Kind::Image, size, ~0u, ~0u, 0u);
         std::memcpy(at, data, size);
     }
+    // Image data left in guest memory (a list's hole): where, and the hash
+    // of the record made from it.
+    void imageElided(const Hole &hole)
+    {
+        const Elided elided{hole.bytes, hole.phys, hole.hash};
+        std::memcpy(append(Kind::ImageElided, sizeof(elided), ~0u, ~0u, 0u), &elided, sizeof(elided));
+    }
     // A VU1 program's mesh, with the quads of VU1 memory the producer reads
     // when `vu1Data` is given.
     void mesh(const GSNativeMesh &mesh, const uint8_t *vu1Data)
     {
-        const uint32_t vertices = static_cast<uint32_t>(mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+        // A retained mesh already defined goes without its vertices; its id
+        // rides in the record's cursor.
+        const MeshRetain retain = t_retain;
+        const uint32_t vertices = retain.id != 0u && !retain.define
+                                      ? 0u
+                                      : static_cast<uint32_t>(mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+        // Its own register writes behind everything else, their count in
+        // the record's address.
+        const uint32_t writes = t_meshWriteCount;
+        static_assert(sizeof(RegisterWrite) == 16u);
         const uint32_t size = static_cast<uint32_t>(sizeof(GSNativeMesh::Header)) + vertices +
-                              (vu1Data ? kVu1Bytes : 0u);
+                              (vu1Data ? kVu1Bytes : 0u) + writes * 16u;
         static_assert(kVu1Bytes == 16u * 16u, "the quads below");
-        uint8_t *at = append(Kind::Mesh, size, ~0u, ~0u, vu1Data ? 1u : 0u);
+        uint8_t *at = append(Kind::Mesh, size, writes, retain.id != 0u ? retain.id : ~0u, vu1Data ? 1u : 0u);
+        if (writes)
+            std::memcpy(at + size - writes * 16u, t_meshWrites, writes * 16u);
         std::memcpy(at, &mesh.header, sizeof(mesh.header));
         at += sizeof(mesh.header);
         if (vertices)
@@ -740,31 +1189,20 @@ public:
     }
 
 private:
-    // Bytes the records are written into whole: growing them leaves the new
-    // bytes as they are (std::vector<uint8_t> zeroes them, and each record
-    // was written twice).
-    template <typename T> struct NoInit : std::allocator<T>
-    {
-        template <typename U> struct rebind
-        {
-            using other = NoInit<U>;
-        };
-        NoInit() = default;
-        template <typename U> NoInit(const NoInit<U> &) noexcept {}
-        template <typename U> void construct(U *p) noexcept { ::new (static_cast<void *>(p)) U; }
-        template <typename U, typename... A> void construct(U *p, A &&...a)
-        {
-            ::new (static_cast<void *>(p)) U(std::forward<A>(a)...);
-        }
-    };
-    using Bytes = std::vector<uint8_t, NoInit<uint8_t>>;
-
+    // (The records are written into Bytes whole: each was written twice
+    // while growing zeroed them.)
     enum class Kind : uint32_t
     {
         Packet,
         Image,
         Mesh,
         ListEnd,
+        ImageElided,
+    };
+    struct Elided
+    {
+        uint32_t bytes, phys;
+        uint64_t hash;
     };
     struct Header
     {
@@ -855,14 +1293,28 @@ private:
                     case Kind::Image:
                         deliverImage(m_gs, data, header.size);
                         break;
+                    case Kind::ImageElided:
+                    {
+                        Elided elided;
+                        std::memcpy(&elided, data, sizeof(elided));
+                        deliverElidedImage(m_gs, elided.bytes, elided.phys, elided.hash);
+                        break;
+                    }
                     case Kind::Mesh:
                     {
+                        const uint32_t writes = header.address;
                         const uint32_t vertices = header.size - static_cast<uint32_t>(sizeof(GSNativeMesh::Header)) -
-                                                  (header.vu1 ? kVu1Bytes : 0u);
+                                                  (header.vu1 ? kVu1Bytes : 0u) - writes * 16u;
                         std::memcpy(&m_mesh.header, data, sizeof(m_mesh.header));
                         m_mesh.vertices.resize(vertices / sizeof(GSNativeMesh::Vertex));
                         if (vertices)
                             std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header), vertices);
+                        m_meshWrites.resize(writes);
+                        if (writes)
+                            std::memcpy(static_cast<void *>(m_meshWrites.data()), data + header.size - writes * 16u,
+                                        writes * 16u);
+                        t_meshWrites = m_meshWrites.data();
+                        t_meshWriteCount = writes;
                         // The quads back where VU1 memory has them (the rest
                         // of this copy is never read).
                         const uint8_t *quads = nullptr;
@@ -876,7 +1328,10 @@ private:
                             }
                             quads = m_vu1;
                         }
+                        t_retain = {header.cursor != ~0u ? header.cursor : 0u, vertices != 0u};
                         deliverMesh(m_gs, m_mesh, quads);
+                        t_retain = {};
+                        t_meshWriteCount = 0u;
                         break;
                     }
                     case Kind::ListEnd:
@@ -886,6 +1341,8 @@ private:
                         flushComposites();
                         if (g_stage)
                             g_stage->publish();
+                        if (vifwait::g_on)
+                            vifwait::add(vifwait::g_listDraw, vifwait::g_listSent.load());
                         finishList();
                         break;
                     }
@@ -934,6 +1391,7 @@ private:
     std::vector<Bytes> m_pool;   // guarded by m_mutex
     Bytes m_staged;              // the VIF1 thread's
     GSNativeMesh m_mesh;                        // the stage's
+    std::vector<RegisterWrite> m_meshWrites;    // the stage's: the mesh's own register writes
     alignas(16) uint8_t m_vu1[64u * 16u] = {};  // the stage's: a mesh's VU1 quads, in place
     size_t m_outstanding = 0u;                  // guarded by m_mutex
     bool m_stop = false;                        // guarded by m_mutex
@@ -947,7 +1405,9 @@ PS2Runtime *g_runtime = nullptr;
 // 11) the game thread had when it started it.
 struct List
 {
-    std::vector<uint8_t> data;
+    Bytes data;
+    // Spans of `data` left uncopied (gatherChain), in order.
+    std::vector<Hole> holes;
     bool dBit = false;
     bool tBit = false;
     // With RG_VU1_CAPTURE: where each piece of `data` came from, as
@@ -993,14 +1453,14 @@ public:
     // A buffer for the next list, with the capacity of one that has run:
     // allocating a list's megabytes afresh every time, and freeing them on
     // the other thread, was a measurable part of the game thread's send.
-    std::vector<uint8_t> takeBuffer()
+    Bytes takeBuffer()
     {
         std::lock_guard lock(m_mutex);
         if (m_pool.empty())
         {
             return {};
         }
-        std::vector<uint8_t> buffer = std::move(m_pool.back());
+        Bytes buffer = std::move(m_pool.back());
         m_pool.pop_back();
         return buffer;
     }
@@ -1178,7 +1638,10 @@ public:
                     native = m_nativeProgram;
                     if (gpu)
                     {
-                        rg::vu1native::buildMesh(*native, memory.getVU1Data(), top, m_nativePackets, m_nativeMesh);
+                        rg::vu1native::buildMesh(*native, memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
+                                                 &m_nativeBounds);
+                        if (countingMeshRepeats())
+                            noteMeshRepeat(m_nativeMesh, native->decode == rg::vu1native::Decode::Skinned);
                     }
                     else
                     {
@@ -1244,13 +1707,27 @@ public:
             }
             else
             {
-                for (const auto &packet : m_nativePackets)
+                const bool meshed = nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native);
+                // A mesh's own register packets ride with it as writes.
+                const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
+                                      packetsAsWrites(m_nativePackets, m_nativeWrites);
+                if (!asWrites)
+                    for (const auto &packet : m_nativePackets)
+                    {
+                        deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                    }
+                if (meshed)
                 {
-                    deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
-                }
-                if (nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native))
-                {
+                    if (retainingMeshes() && toDrawStage() && native->decode != rg::vu1native::Decode::Skinned)
+                        t_retain = retainOf(m_nativeMesh);
+                    if (asWrites)
+                    {
+                        t_meshWrites = m_nativeWrites.data();
+                        t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
+                    }
                     deliverMesh(m_runtime.gs(), m_nativeMesh, memory.getVU1Data());
+                    t_retain = {};
+                    t_meshWriteCount = 0u;
                 }
                 // What the VU1 would have left in its memory, where it did not run.
                 if (nativeMode() != rg::vu1native::Mode::Replace)
@@ -1259,7 +1736,8 @@ public:
                     // buildMesh read the mesh from, so the bounds come from it.
                     const bool built = nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native);
                     rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top,
-                                                      built ? &m_nativeMesh : nullptr);
+                                                      built ? &m_nativeMesh : nullptr,
+                                                      built ? &m_nativeBounds : nullptr);
                 }
             }
         }
@@ -1392,6 +1870,13 @@ private:
                 t_listData = m_current.data.data();
                 t_listSize = m_current.data.size();
                 t_listOrigins = &m_current.origins;
+                t_listOriginAt = 0u;
+                t_listHoles = &m_current.holes;
+                t_listHoleAt = 0u;
+                if (countingMeshRepeats())
+                    meshRepeatList();
+                if (retainingMeshes())
+                    retainList();
                 if (!m_current.data.empty())
                 {
                     memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
@@ -1420,6 +1905,8 @@ private:
             // The list's GS packets go over before it counts as done, so a
             // drain that sees it done waits for them too. With the draw
             // stage, the stage finishes the list.
+            if (vifwait::g_on)
+                vifwait::add(vifwait::g_listVif1, vifwait::g_listSent.load());
             if (staged)
             {
                 g_drawStage->endList();
@@ -1462,7 +1949,7 @@ private:
     std::deque<List> m_lists;
     List m_current; // the VIF1 thread's
     static constexpr size_t kPoolSize = 8u;
-    std::vector<std::vector<uint8_t>> m_pool; // guarded by m_mutex
+    std::vector<Bytes> m_pool; // guarded by m_mutex
     std::atomic<uint32_t> m_vpuStat{0u};
     // The VIF1 thread's: the running program's tag, and the tags by entry for
     // the current contents of the code memory (programTag).
@@ -1517,7 +2004,9 @@ private:
     uint32_t m_checkCount = 0u;
     rg::vu1native::Monitor m_nativeMonitor{nativeMode()};
     std::vector<std::vector<uint8_t>> m_nativePackets;
+    std::vector<RegisterWrite> m_nativeWrites; // a mesh's, in their place
     GSNativeMesh m_nativeMesh;
+    rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     std::vector<std::vector<uint8_t>> m_vu1Packets;
     std::vector<uint8_t> m_checkData;
     VU1State m_checkState{};
@@ -1669,6 +2158,8 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
             // A+D: a transfer's registers alone, its TRXDIR host to local?
             uint64_t bitbltbuf = 0u, trxreg = 0u, trxdir = ~0ull;
             uint32_t others = 0u;
+            thread_local std::vector<uint64_t> binds;
+            binds.clear();
             for (uint32_t at = pos + 16u; at + 16u <= end; at += 16u)
             {
                 uint64_t value = 0u;
@@ -1680,8 +2171,25 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     trxreg = value;
                 else if (reg == 0x53u)
                     trxdir = value;
+                else if (reg == producer::kBindRegister)
+                    binds.push_back(value);
                 else if (reg != 0x51u)
                     ++others;
+            }
+            if (!binds.empty())
+            {
+                // A texture binding marker (the texture hook's, resolved by
+                // the send): applied here, in the stream's order, and gone.
+                producer::bound(binds.data(), binds.size());
+                if (others == 0u && trxdir == ~0ull)
+                {
+                    drop = true;
+                    if (!copying)
+                    {
+                        kept.assign(data, data + pos);
+                        copying = true;
+                    }
+                }
             }
             if (trxdir != ~0ull)
             {
@@ -2020,7 +2528,8 @@ void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
     for (size_t i = 0; direct && i < writes.size(); ++i)
     {
         const uint8_t reg = writes[i].first;
-        direct = !(reg >= 0x50u && reg <= 0x53u) && reg != 0x04u && reg != 0x05u && reg != 0x0Cu && reg != 0x0Du;
+        direct = !(reg >= 0x50u && reg <= 0x53u) && reg != rg::nativeproducer::kBindRegister && reg != 0x04u &&
+                 reg != 0x05u && reg != 0x0Cu && reg != 0x0Du;
     }
     if (!direct)
     {
@@ -2186,14 +2695,31 @@ uint32_t listAddress(const uint8_t *data)
         return ~0u;
     }
     const uint32_t offset = static_cast<uint32_t>(data - t_listData);
-    auto it = std::upper_bound(t_listOrigins->begin(), t_listOrigins->end(), offset,
-                               [](uint32_t value, const auto &piece) { return value < piece.first; });
-    if (it == t_listOrigins->begin())
+    const auto &pieces = *t_listOrigins;
+    // The list is decoded front to back, so the piece is the last one found
+    // or one soon after it: stepped to from there. A search of the whole
+    // table for every packet (twice for a VU1 program's: its bytes, then the
+    // VIF cursor) was 8% of the VIF1 thread, in cache misses (2026-11-09).
+    size_t at = t_listOriginAt;
+    if (at < pieces.size() && pieces[at].first <= offset)
     {
-        return ~0u;
+        while (at + 1u < pieces.size() && pieces[at + 1u].first <= offset)
+        {
+            ++at;
+        }
     }
-    --it;
-    return it->second + (offset - it->first);
+    else
+    {
+        auto it = std::upper_bound(pieces.begin(), pieces.end(), offset,
+                                   [](uint32_t value, const auto &piece) { return value < piece.first; });
+        if (it == pieces.begin())
+        {
+            return ~0u;
+        }
+        at = static_cast<size_t>(it - pieces.begin()) - 1u;
+    }
+    t_listOriginAt = at;
+    return pieces[at].second + (offset - pieces[at].first);
 }
 
 // An effect built from its packets, as the producer's draws: then its
@@ -2488,6 +3014,9 @@ bool uploadOrFlush(const uint8_t *data, uint32_t size)
     uint32_t first, last;
     if (rg::nativefx::uploadPages(data, size, first, last))
         return true;
+    // A texture binding marker stands where a node's uploads did.
+    if (size >= 32u && data[24] == rg::nativeproducer::kBindRegister && (data[8] & 0xFu) == 0xEu)
+        return true;
     // A packet that only flushes the texture cache (TEXFLUSH: no state, no
     // drawing).
     if (size < 32u)
@@ -2710,6 +3239,27 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
             compositeOther("a mesh");
         }
     }
+    // The mesh's own register writes, where its packets went: the mirror
+    // and the converter's carried state, or as a packet when the packet's
+    // way has more to do (not absorbing, or image data due first).
+    if (t_meshWriteCount != 0u)
+    {
+        if (absorbing() && t_upload.imageBytes == 0u)
+        {
+            rg::native2d::observeWrites(t_meshWrites, t_meshWriteCount);
+            rg::drawstate::observeWrites(t_meshWrites, t_meshWriteCount);
+            g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
+        }
+        else
+        {
+            const std::vector<RegisterWrite> writes(t_meshWrites, t_meshWrites + t_meshWriteCount);
+            const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
+            const uint32_t count = t_meshWriteCount;
+            t_meshWriteCount = 0u;
+            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+            t_meshWriteCount = count;
+        }
+    }
     // Steps 4a and 4c of docs/NATIVE-PIPELINE.md: a VU1 program's mesh as a
     // native mesh draw, under the draw state the GS would draw it with; made
     // one, it does not go to the GS at all.
@@ -2718,7 +3268,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
         if (g_stage && !t_onVif1Thread)
             g_thread->drain();
         const GSDrawState state = rg::drawstate::current();
-        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, 0u))
+        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, 0u, t_retain.id))
             return;
         // Refused here only for a buffer the game never named (counted as a
         // target miss): with no GS behind the pipeline nothing can draw it,
@@ -2766,6 +3316,36 @@ void reportFinished(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 1u);
     }
+}
+
+} // namespace
+// Whether the texture hook writes binding markers in place of uploads
+// (docs/NATIVE-BOUNDARY.md): with the lists copied here (the send resolves
+// the markers), under the pipeline (which applies them), and no tool that
+// records the lists. RG_TEXTURE_BIND=0: uploads, withheld, as before.
+bool bindingTextures()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_TEXTURE_BIND");
+        return g_thread && uploadsTaken() && !g_capture && !rg::vu1replay::enabled() &&
+               !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
+namespace
+{
+// Whether a list's withheld texture uploads stay uncopied (gatherChain's
+// holes): with the draw stage, which takes a hole as a record of its own and
+// reads no byte of it, and no tool that reads the list's bytes whole.
+// RG_UPLOAD_ELIDE=0 copies them as before.
+bool elidingUploads()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_UPLOAD_ELIDE");
+        return drawStageOn() && uploadsTaken() && !g_capture && !rg::vu1replay::enabled() &&
+               !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
 }
 
 // sceDmaSend/SendI (chain) and SendN (normal) to VIF1 go to the thread;
@@ -2816,9 +3396,12 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         static uint32_t listNumber = 0u;
         list.number = ++listNumber;
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
-                    (g_capture || nativeEffects()) ? &list.origins : nullptr);
+                    (g_capture || nativeEffects()) ? &list.origins : nullptr,
+                    elidingUploads() ? &list.holes : nullptr, bindingTextures());
     }
     reportFinished(rdram, ctx, runtime);
+    if (vifwait::g_on)
+        vifwait::g_listSent.store(vifwait::nowNs());
     g_thread->submit(std::move(list));
     returnToCaller(ctx, 0);
 }
@@ -2903,7 +3486,9 @@ namespace
 {
 // A texture split over DIRECT packets continues in place, without the copy
 // behind a synthesized IMAGE tag.
-void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
+// What image data ends before it is looked at: an object's composite batch
+// and a held effect.
+void beforeImage(GS &gs)
 {
     // A held effect goes on first: a composite's head decided here sends
     // its packets.
@@ -2924,6 +3509,11 @@ void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
             compositeOther("an image");
         }
     }
+}
+
+void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
+{
+    beforeImage(gs);
     if (uploadsTaken())
     {
         // A withheld upload's rest goes no further; another's is
@@ -2947,6 +3537,75 @@ void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
         g_thread->drain();
     }
     gs.processImageContinuation(data, size);
+}
+
+// A hole's image data, on the draw stage: the rest of a withheld upload
+// whose record has the hole's hash is withheld as it is, no byte read (what
+// withheldContinuation and seeWithheld would do with them: the sent bytes
+// are the ones the record was hashed from, so the check passes). Anything
+// else (no upload being withheld, another record's, part of it already seen
+// as bytes) takes the bytes from guest memory now, later than the send
+// would have copied them, and goes the usual way; counted, and said once.
+void deliverElidedImage(GS &gs, uint32_t size, uint32_t phys, uint64_t hash)
+{
+    UploadWithhold &u = t_upload;
+    if (uploadsTaken() && u.imageBytes >= size && u.expectHash == hash && u.seen.empty())
+    {
+        beforeImage(gs);
+        u.imageBytes -= size;
+        u.expectBytes = 0u;
+        rg::nativeproducer::noteElided(size, false);
+        return;
+    }
+    rg::nativeproducer::noteElided(size, true);
+    static std::atomic<uint32_t> told{0u};
+    if (told.fetch_add(1u, std::memory_order_relaxed) < 4u)
+        std::fprintf(stderr,
+                     "[native-upload] an uncopied upload (%u bytes at %08x) was not the one being withheld: read from "
+                     "guest memory now\n",
+                     size, phys);
+    thread_local std::vector<uint8_t> bytes;
+    const uint8_t *ram = g_runtime->memory().getRDRAM();
+    bytes.assign(ram + phys, ram + phys + size);
+    deliverImage(gs, bytes.data(), size);
+}
+
+// A packet or image the VIF hands over from the list, against the list's
+// holes (the VIF1 thread's): the hole when the span is one's image data
+// whole (`image`), to go on as a record without bytes. Any other span that
+// touches a hole gets the hole's bytes first, read from guest memory now
+// (not expected: elidableUpload checks that the VIF hands the span to the
+// GIF whole; then only the image path not being primed leads here).
+const Hole *listHole(const uint8_t *data, uint32_t size, bool image)
+{
+    if (!t_listHoles || t_listHoles->empty() || !t_listData || data < t_listData || data >= t_listData + t_listSize)
+        return nullptr;
+    std::vector<Hole> &holes = *t_listHoles;
+    const uint32_t first = static_cast<uint32_t>(data - t_listData), last = first + size;
+    // The list is decoded front to back: holes behind this span are done.
+    size_t at = t_listHoleAt;
+    while (at < holes.size() && holes[at].offset + holes[at].bytes <= first)
+        ++at;
+    t_listHoleAt = at;
+    for (; at < holes.size() && holes[at].offset < last; ++at)
+    {
+        Hole &hole = holes[at];
+        if (hole.filled)
+            continue;
+        if (image && hole.offset == first && hole.bytes == size)
+            return &hole;
+        std::memcpy(const_cast<uint8_t *>(t_listData) + hole.offset, g_runtime->memory().getRDRAM() + hole.phys,
+                    hole.bytes);
+        hole.filled = true;
+        rg::nativeproducer::noteElided(hole.bytes, true);
+        static std::atomic<uint32_t> told{0u};
+        if (told.fetch_add(1u, std::memory_order_relaxed) < 4u)
+            std::fprintf(stderr,
+                         "[native-upload] an uncopied upload (%u bytes at %08x) was not handed over as image data: "
+                         "read from guest memory now\n",
+                         hole.bytes, hole.phys);
+    }
+    return nullptr;
 }
 } // namespace
 
@@ -3002,6 +3661,10 @@ void install(PS2Runtime &runtime)
         {
             return;
         }
+        if (t_listDecoder)
+        {
+            listHole(data, size, false);
+        }
         deliverPacket(gs, data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
@@ -3009,7 +3672,10 @@ void install(PS2Runtime &runtime)
     memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
         if (toDrawStage())
         {
-            g_drawStage->image(data, size);
+            if (const Hole *hole = listHole(data, size, true))
+                g_drawStage->imageElided(*hole);
+            else
+                g_drawStage->image(data, size);
             return;
         }
         deliverImage(gs, data, size);

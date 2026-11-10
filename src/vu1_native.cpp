@@ -1969,6 +1969,38 @@ void widenBounds(const GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
     }
 }
 
+// A mesh's depths (buildMesh's, gsNativeMeshDepth) and its bounds
+// (widenBounds) in one pass: both project the vertex with the same matrix,
+// and the depth is the bounds' z lane in whole units. The same operations in
+// the same order as the two apart, so the same bits; apart they were a
+// tenth of the VIF1 thread (2026-11-09).
+void depthsAndBounds(GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
+{
+#if defined(__clang__)
+#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
+#endif
+    const GSNativeMesh::Header &h = mesh.header;
+    const auto &m = h.matrix;
+    float *lo = &least.x, *hi = &most.x;
+    for (GSNativeMesh::Vertex &v : mesh.vertices)
+    {
+        float clip[4];
+        for (int i = 0; i < 4; ++i)
+            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+        const float q = gsNativeReciprocal(clip[3]);
+        const float z = clip[2] * q;
+        const float pz = rg::fmin(z * h.depthScale, h.depthMax);
+        const float lanes[4] = {clip[0] * q, clip[1] * q, pz,
+                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
+        for (int i = 0; i < 4; ++i)
+        {
+            lo[i] = rg::fmin(lo[i], lanes[i]);
+            hi[i] = rg::fmax(hi[i], lanes[i]);
+        }
+        v.depth = static_cast<float>((static_cast<uint32_t>(gsNativeFtoi(pz, 16.0f)) >> 4) & 0xFFFFFFu);
+    }
+}
+
 // `built`: the chunk as buildMesh made it from this same data memory, so as
 // not to read it again; null to read it here.
 void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most,
@@ -1989,7 +2021,8 @@ void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4
 
 } // namespace
 
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built)
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built,
+                        const Bounds *bounds)
 {
     if (program.kind == Kind::Overlay)
     {
@@ -2012,6 +2045,13 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, con
     }
     if (!program.depthBounds || !program.bounds)
     {
+        return;
+    }
+    if (bounds && bounds->made)
+    {
+        // buildMesh's, from this data memory as it still is.
+        std::memcpy(data + 98u * 16u, bounds->least, sizeof(bounds->least));
+        std::memcpy(data + 99u * 16u, bounds->most, sizeof(bounds->most));
         return;
     }
     const VuRounding rounding;
@@ -2165,8 +2205,10 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
-               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds)
 {
+    if (bounds)
+        bounds->made = false;
     if (!hasMesh(program))
     {
         buildChunk(program, data, top, packets);
@@ -2191,10 +2233,24 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
     putQuad(state, tag);
     putQuad(state, chunk.header[1]);
     putQuad(state, chunk.header[2]);
-    // The Z exactly as the program has it: the GPU rounds to nearest.
-    for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+    // The Z exactly as the program has it: the GPU rounds to nearest. With
+    // the bounds the program keeps, where they come from this same mesh
+    // (not a projector's, rewritten above): quads 98 and 99 widened by it.
+    if (bounds && program.depthBounds && program.bounds && program.kind != Kind::Projector)
     {
-        v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
+        const VuData vu(data);
+        Vec4 least = vu.quad(98), most = vu.quad(99);
+        depthsAndBounds(chunk.mesh, least, most);
+        std::memcpy(bounds->least, &least, sizeof(bounds->least));
+        std::memcpy(bounds->most, &most, sizeof(bounds->most));
+        bounds->made = true;
+    }
+    else
+    {
+        for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+        {
+            v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
+        }
     }
     mesh = std::move(chunk.mesh);
 }

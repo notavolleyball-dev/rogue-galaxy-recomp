@@ -16,6 +16,7 @@
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
+#include "vif1_thread.h"
 
 namespace rg::nativecapture
 {
@@ -153,20 +154,50 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             n = 1u;
         }
+        // The node as a binding marker (docs/NATIVE-BOUNDARY.md): entries
+        // gathered here, written at dst in place of the upload packets when
+        // every one of them can be bound.
+        namespace producer = rg::nativeproducer;
+        thread_local std::vector<producer::BindEntry> entries;
+        entries.clear();
+        // Not with the manager's own palette callback (which the function
+        // must call), nor a mode other than the draw lists', nor palettes
+        // counted from no address.
+        const bool callback = n > 0u && fn != 0u && mode == 0u;
+        bool palettesMade = false;
+        bool bind = rg::vif1::bindingTextures() && mode == 0u && !callback && !(n > 0u && clut == 0u && count > 0u);
         // The palettes, unless the node's manager uploads them through its
         // own callback (a transfer of a shape not known here): palette i
         // `stride` bytes after the first.
         if (n > 0u && clut != 0u && !(fn != 0u && mode == 0u))
         {
             const int32_t stride = readAt<int16_t>(tex + 0x30u);
-            const uint32_t entries = nodeBpp == 8 ? 256u : 16u;
-            const uint32_t paletteBytes = entries * ((cpsm & 0x3Fu) == 0u ? 4u : 2u);
+            const uint32_t paletteEntries = nodeBpp == 8 ? 256u : 16u;
+            const uint32_t paletteBytes = paletteEntries * ((cpsm & 0x3Fu) == 0u ? 4u : 2u);
+            const bool usable = (cpsm & 0x3Fu) == 0x00u || (cpsm & 0x3Fu) == 0x02u || (cpsm & 0x3Fu) == 0x0Au;
+            bind = bind && usable;
             for (uint32_t i = 0u; i < count; ++i)
             {
                 const uint32_t at = physical(clut + i * static_cast<uint32_t>(stride > 0 ? stride : int32_t(paletteBytes)));
-                rg::nativeproducer::palette(g_rdram + at, PS2_RAM_SIZE - at, (base + i * n) & 0x3FFFu, cpsm, entries);
+                if (bind && at + paletteBytes <= PS2_RAM_SIZE)
+                    entries.push_back({at, static_cast<uint16_t>(paletteEntries), 0u, producer::kBindRegister,
+                                       producer::kBindPalette, static_cast<uint16_t>((base + i * n) & 0x3FFFu),
+                                       static_cast<uint8_t>(cpsm), 1u, 0u});
+                else if (bind)
+                    bind = false;
+                if (!bind)
+                    break;
+            }
+            // Without a marker: the records, with the uploads to come.
+            palettesMade = !bind;
+            for (uint32_t i = 0u; !bind && i < count; ++i)
+            {
+                const uint32_t at = physical(clut + i * static_cast<uint32_t>(stride > 0 ? stride : int32_t(paletteBytes)));
+                producer::palette(g_rdram + at, PS2_RAM_SIZE - at, (base + i * n) & 0x3FFFu, cpsm, paletteEntries);
             }
         }
+        thread_local std::vector<producer::TextureLevel> levels;
+        levels.clear();
         for (uint32_t i = 0u; i < 4u; ++i)
         {
             const uint32_t mip = readAt<uint32_t>(tex + 0x50u + i * 4u);
@@ -189,7 +220,14 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             level.bufferWidth = preSwizzled ? (textureTbw > 1u ? textureTbw : 1u) : tbw;
             level.preSwizzled = preSwizzled;
             level.cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFu);
-            rg::nativeproducer::texture(level);
+            levels.push_back(level);
+            bind = bind && level.bufferWidth <= 0xFFu && producer::bindable(level);
+            if (bind)
+                entries.push_back({at, static_cast<uint16_t>(level.transferWidth),
+                                   static_cast<uint16_t>(level.transferHeight), producer::kBindRegister,
+                                   static_cast<uint8_t>(preSwizzled ? producer::kBindPreSwizzled : 0u),
+                                   static_cast<uint16_t>(level.tbp), static_cast<uint8_t>(texturePsm),
+                                   static_cast<uint8_t>(level.bufferWidth), static_cast<uint16_t>(level.cbp)});
             const int32_t k = bpp * (w * h) / 256 / 8;
             w >>= 1;
             h >>= 1;
@@ -197,6 +235,44 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             tbw >>= 1;
             textureTbw >>= 1;
         }
+        if (bind)
+        {
+            // The marker, and the function not run: a DMA cnt tag (the magic
+            // in its unused bits) with the VIFcodes NOP and DIRECT, a GIF tag
+            // of A+D writes, and the entries as those writes. The function's
+            // return is the words it wrote.
+            const uint32_t k = static_cast<uint32_t>(entries.size());
+            const uint32_t at = physical(dst);
+            if (k == 0u || at + (2u + k) * 16u > PS2_RAM_SIZE)
+            {
+                // (Nothing to upload: the function writes nothing either.)
+                setReturnS32(ctx, 0);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
+            const uint32_t head[8] = {(1u + k) | (producer::kBindTagMagic << 16) | (1u << 28), 0u, 0u,
+                                      0x50000000u | (1u + k), k | 0x8000u, 0x10000000u, 0xEu, 0u};
+            std::memcpy(g_rdram + at, head, sizeof(head));
+            std::memcpy(g_rdram + at + sizeof(head), entries.data(), size_t(k) * sizeof(producer::BindEntry));
+            setReturnS32(ctx, static_cast<int32_t>((2u + k) * 4u));
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        // Uploads after all: the palettes not yet made records (the marker
+        // was given up among the levels), then the levels.
+        if (!palettesMade && n > 0u && clut != 0u && !(fn != 0u && mode == 0u))
+        {
+            const int32_t stride = readAt<int16_t>(tex + 0x30u);
+            const uint32_t paletteEntries = nodeBpp == 8 ? 256u : 16u;
+            const uint32_t paletteBytes = paletteEntries * ((cpsm & 0x3Fu) == 0u ? 4u : 2u);
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                const uint32_t at = physical(clut + i * static_cast<uint32_t>(stride > 0 ? stride : int32_t(paletteBytes)));
+                producer::palette(g_rdram + at, PS2_RAM_SIZE - at, (base + i * n) & 0x3FFFu, cpsm, paletteEntries);
+            }
+        }
+        for (const producer::TextureLevel &level : levels)
+            producer::texture(level);
     }
     g_texBuildUploadOriginal(rdram, ctx, runtime);
 }

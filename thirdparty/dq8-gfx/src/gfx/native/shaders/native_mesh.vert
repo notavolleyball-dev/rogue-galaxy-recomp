@@ -47,6 +47,15 @@ struct DrawRow {
     // repeat).
     uvec4 region;
     uvec4 wrap;
+    // A retained mesh's cull (native_mesh_static.vert): the program's matrix
+    // to GS window coordinates, its guard band, x: the winding sign, y: the
+    // guard band test on, z: the backface test on, w: the chunk is clipped;
+    // and the cap of its vertex colors.
+    mat4 cullMatrix;
+    vec4 bandScale;
+    vec4 bandOffset;
+    vec4 cull;
+    vec4 colorMax;
 };
 layout(std430, set = 0, binding = 0) readonly buffer Draws {
     DrawRow draws[];
