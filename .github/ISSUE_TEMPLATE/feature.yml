@@ -2,12 +2,6 @@ name: Feature request
 description: An option, an improvement or something new.
 labels: ["enhancement"]
 body:
-  - type: markdown
-    attributes:
-      value: >-
-        Changes that make the game look or play differently from the console come
-        only as options, off by default.
-
   - type: checkboxes
     attributes:
       label: Before you post

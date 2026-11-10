@@ -1,14 +1,8 @@
 <!--
-Say what the change does and why, then answer the four items below.
+Say what the change does and why, then answer the items below.
 One concern per pull request; in a stack, say its place (2 of 3, based on #N).
 Name issues with "Refs #N", not "Fixes #N": an issue closes when a release ships its fix.
 -->
-
-### Does it change the default path?
-
-<!-- With every option at its default, does the picture, timing, speed or anything
-else players get change? "No", or what changes and the switch that brings the old
-behaviour back (an option or an environment variable). -->
 
 ### Tested on
 
