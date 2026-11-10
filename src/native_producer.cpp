@@ -23,6 +23,8 @@
 #include "flip_pacing.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -1278,6 +1280,54 @@ native::Id cameraOf(State &s, const float view[16], const float projection[16], 
     native::push(native::Camera(record));
     return record.id;
 }
+// RG_NATIVE_HIDE=hex,hex (debug): draws (2D pieces and effect ops) into or
+// reading from a buffer at one of these bases are dropped, to bisect which
+// pass a visual fault belongs to. A `z` suffix (2a00z) drops only the
+// depth-tested draws into that base (e.g. light volumes), nothing else; a
+// `t` suffix (2a40t) only the draws texturing from it, 3D meshes included.
+struct HiddenBase
+{
+    uint32_t base;
+    bool depthTestedOnly;
+    bool readsOnly;
+};
+const std::vector<HiddenBase> &hiddenBases()
+{
+    static const std::vector<HiddenBase> hidden = [] {
+        std::vector<HiddenBase> out;
+        const char *value = std::getenv("RG_NATIVE_HIDE");
+        for (const char *cursor = value ? value : ""; *cursor;)
+        {
+            char *end = nullptr;
+            const unsigned long b = std::strtoul(cursor, &end, 16);
+            if (end == cursor)
+                break;
+            const bool z = *end == 'z' || *end == 'Z';
+            const bool t = *end == 't' || *end == 'T';
+            if (z || t)
+                ++end;
+            out.push_back({static_cast<uint32_t>(b & 0x3FFFu), z, t});
+            cursor = *end == ',' ? end + 1 : end;
+        }
+        for (const HiddenBase &h : out)
+            std::fprintf(stderr, "[native] RG_NATIVE_HIDE: %04x%s\n", h.base, h.depthTestedOnly ? " (depth-tested draws into it)" : h.readsOnly ? " (draws texturing from it)" : "");
+        return out;
+    }();
+    return hidden;
+}
+// A draw into `target` (depth tested or not), reading `source` (or none).
+bool hiddenDraw(uint32_t target, bool depthTested, bool reads, uint32_t source)
+{
+    for (const HiddenBase &h : hiddenBases())
+    {
+        if (!h.readsOnly && (target & 0x3FFFu) == h.base && (depthTested || !h.depthTestedOnly))
+            return true;
+        if (reads && !h.depthTestedOnly && (source & 0x3FFFu) == h.base)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source)
@@ -1293,6 +1343,13 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         const char *v = std::getenv("RG_NATIVE_GUARD_CLIPPED");
         return v && std::strcmp(v, "0") != 0;
     }();
+    if (drawState && !hiddenBases().empty())
+    {
+        const GSContext &hc = drawState->context;
+        if (hiddenDraw(hc.frame.fbp * 32u, ((hc.test >> 16) & 1u) != 0u && ((hc.test >> 17) & 3u) >= 2u,
+                       drawState->prim.tme != 0u, hc.tex0.tbp0))
+            return true; // dropped
+    }
     GSNativeMesh::Header h = mesh.header;
     if (h.clips && !guardClipped)
         h.guardBand = 0u;
@@ -1304,6 +1361,11 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
     draw.depthScale = mesh.header.depthScale;
     draw.depthMax = mesh.header.depthMax;
+    // For the depth log: the program's matrix, to give the GS's Z.
+    draw.gsKnown = true;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            draw.gsMatrix[i * 4 + j] = mesh.header.matrix[i][j];
 
     // The triangles the program draws: a strip's every vertex from the
     // third on, a list's every third, less those the program culls (the
@@ -1367,6 +1429,18 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
                 skip = gsNativeMeshSkips(facingOnly, points.data(), k, -winding);
             }
         }
+        // RG_NATIVE_NO_CULL=1 (debug): nothing culled or guard-band
+        // skipped here, to tell triangles this rule drops from ones the
+        // depth test loses.
+        static const bool noCull = [] {
+            const char *v = std::getenv("RG_NATIVE_NO_CULL");
+            const bool on = v && *v && *v != '0';
+            if (on)
+                std::fprintf(stderr, "[native] RG_NATIVE_NO_CULL: no triangle culled\n");
+            return on;
+        }();
+        if (noCull)
+            skip = false;
         if (culls && !listCull)
             winding = -winding;
         const bool drawn = k >= 2u && (lists ? k % 3u == 2u : true);
@@ -1454,6 +1528,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     }
 
     bool known = materialOf(s, *drawState, draw.material);
+    // RG_NATIVE_OVERLAY_NO_DEPTH=1 (debug): blended or depth-unwritten
+    // meshes (lights on walls, ground layers) skip the depth test, to tell
+    // a lost depth test from a dropped triangle. Overlays will show through
+    // whatever stands in front of them.
+    static const bool overlayNoDepth = [] {
+        const char *v = std::getenv("RG_NATIVE_OVERLAY_NO_DEPTH");
+        const bool on = v && *v && *v != '0';
+        if (on)
+            std::fprintf(stderr, "[native] RG_NATIVE_OVERLAY_NO_DEPTH: overlays skip the depth test\n");
+        return on;
+    }();
+    if (overlayNoDepth && (draw.material.blending || !draw.material.depthWrite))
+        draw.material.depthTest = native::Compare::Always;
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     if (narrow(s, frameBase, c.frame.fbw))
@@ -1955,7 +2042,9 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
     s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
     ++s.counts.copiesMirrored;
 }
+
 } // namespace
+
 
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
                    uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height)
@@ -2055,6 +2144,10 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels)
         return false;
     }
     const GSContext &c = drawState->context;
+    if (!hiddenBases().empty() &&
+        hiddenDraw(c.frame.fbp * 32u, ((c.test >> 16) & 1u) != 0u && ((c.test >> 17) & 3u) >= 2u,
+                   drawState->prim.tme != 0u, c.tex0.tbp0))
+        return true; // dropped
     const GSNativeMesh::Header &h = mesh.header;
     native::MeshDraw draw;
     const uint32_t frameBase = c.frame.fbp * 32u;
@@ -2459,6 +2552,12 @@ bool effect(const GSNativeEffect &e)
         if (op.target >= e.bufferCount)
             return refuse(s.counts.opsNoTarget);
         const GSNativeEffect::Buffer &into = e.buffers[op.target];
+        if (!hiddenBases().empty() &&
+            hiddenDraw(into.base, false, op.source >= 0 && static_cast<uint32_t>(op.source) < e.bufferCount,
+                       op.source >= 0 && static_cast<uint32_t>(op.source) < e.bufferCount
+                           ? e.buffers[op.source].base
+                           : 0u))
+            continue;
         const native::Id target = targetFor(s, into.base, into.width ? into.width : std::max(into.fbw, 1u) * 64u,
                                             into.height, into.psm);
         if (target == 0u)

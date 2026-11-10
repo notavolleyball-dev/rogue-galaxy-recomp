@@ -950,7 +950,11 @@ public:
                 // What the VU1 would have left in its memory, where it did not run.
                 if (nativeMode() != rg::vu1native::Mode::Replace)
                 {
-                    rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
+                    // In the GPU mode the VU1 did not run: its memory is what
+                    // buildMesh read the mesh from, so the bounds come from it.
+                    const bool built = nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native);
+                    rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top,
+                                                      built ? &m_nativeMesh : nullptr);
                 }
             }
         }

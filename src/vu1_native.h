@@ -153,8 +153,9 @@ std::string describePieces(const uint8_t *code, uint32_t startPC);
 // may read: the bounds in quads 98 and 99 for the programs with
 // `depthBounds`. `apply` writes it where the VU1 did not run (skip, gpu);
 // `matches` says whether the VU1 left the same (check), from the data
-// memory before the run and after it.
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
+// memory before the run and after it. `built`, when given: the chunk as
+// buildMesh made it from this same data memory, not read again.
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built = nullptr);
 bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after);
 
 // The GS packets the program kicks for that chunk, in order.

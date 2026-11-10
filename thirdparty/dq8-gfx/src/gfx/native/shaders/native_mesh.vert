@@ -11,7 +11,8 @@
 layout(set = 1, binding = 0) uniform Draw {
     mat4 clip;     // model x view x projection
     mat4 viewport; // clip to the target's pixels (w kept)
-    vec4 target;   // the target's width and height in game pixels; z: fog per vertex (a window-space draw)
+    vec4 target;   // the target's width and height in game pixels; z: fog per vertex (a window-space draw);
+                   // w: added to the depth (an overlay pulled toward the camera)
     vec4 fog;      // F = clamp(fog.x + fog.w * w, at most fog.y, at least fog.z)
     vec4 depthRow; // reversed depth (w - z) / 2 from the position, made in double, with the program's depthScale
     vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
@@ -37,14 +38,14 @@ void main() {
     outColor = inColor;
     outFog = draw.target.z != 0.0 ? inFog : clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
     // Window pixels to SDL's normalized coordinates (y up), times w so the
-    // GPU's divide gives them back. The program caps its depth per vertex
-    // (depthMax); only in front of the eye, where the cap means a depth
-    // (behind it the GPU clips).
+    // GPU's divide gives them back.
+    // The program caps its depth per vertex (depthMax); only in front of
+    // the eye, where the cap means a depth (behind it the GPU clips).
     float depth = dot(draw.depthRow, vec4(inPosition, 1.0));
     if (draw.depthLimit.y != 0.0 && clip.w > 0.0)
         depth = min(depth, draw.depthLimit.x * clip.w);
     gl_Position = vec4(window.x * 2.0 / draw.target.x - window.w,
                        window.w - window.y * 2.0 / draw.target.y,
-                       depth,
+                       depth + draw.target.w * clip.w,
                        clip.w);
 }

@@ -10,6 +10,7 @@
 #include "native_mesh.vert.spv.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,61 @@ namespace dq8::gfx::native
 {
 namespace
 {
+// Depth log (debug): `touch build/run/depth-log-now` and the next
+// RG_NATIVE_DEPTH_LOG_FRAMES frames (30 unless set) go to
+// build/run/depthlog-<frame>.txt: each pass (target, depth target, cleared
+// or loaded) and each draw as drawn (material, camera, the depth pull, and
+// every triangle in the target's pixels with the depth the GPU gets, made
+// as the vertex shader makes it). tools/depthlog.py reads it.
+struct DepthLog
+{
+    FILE *file = nullptr;
+    uint32_t framesLeft = 0u;
+};
+DepthLog &depthLog()
+{
+    static DepthLog log;
+    return log;
+}
+
+// The integer Z the GS would have got for a corner (gs_types.h's
+// gsNativeMeshDepth: the same operations in the same order, no fused
+// multiply-add); a window-space draw's z is that Z already. NaN when unknown.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
+double gsDepthOf(const MeshDraw &d, const float p[3])
+{
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    if (!d.hasModel)
+        return p[2];
+    if (!d.gsKnown)
+        return std::nan("");
+    const float *m = d.gsMatrix;
+    const float z = p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14];
+    const float w = p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + m[15];
+    const float r = w != 0.0f ? 1.0f / w : std::copysign(3.402823466e38f, w);
+    const float pz = std::fmin(z * r * d.depthScale, d.depthMax);
+    const double scaled = double(pz) * 16.0;
+    const int32_t fixed = !(scaled > -2147483648.0) ? INT32_MIN
+                          : scaled >= 2147483647.0  ? INT32_MAX
+                                                    : int32_t(scaled);
+    return double((uint32_t(fixed) >> 4) & 0xFFFFFFu);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
+
+// v x M for the game's row-vector matrices, in double.
+void rowTimes(const float m[16], const double v[4], double out[4])
+{
+    for (int j = 0; j < 4; ++j)
+        out[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
+}
+
 // A vertex as the mesh shader takes it.
 struct GpuVertex
 {
@@ -34,7 +90,7 @@ struct DrawUniforms
     float viewport[16];
     float target[4];
     float fog[4];
-    float depthRow[4];   // reversed depth (w - z) / 2 straight from the position
+    float depthRow[4]; // reversed depth (w - z) / 2 straight from the position
     float depthLimit[4]; // x: the program's depthMax as this depth (times w); y: 1 when it applies
 };
 
@@ -64,7 +120,7 @@ struct MaterialUniforms
 // lost about half its pixels each frame where the GS has it hundreds of
 // units in front.
 void clipAndDepth(const float a[16], const float b[16], const float c[16], float clip[16], float depthRow[4],
-                  double depthScale, double depthConstant)
+                  double depthScale = 1.0, double depthConstant = 0.0)
 {
     double ab[16], abc[16];
     for (int i = 0; i < 4; ++i)
@@ -88,6 +144,16 @@ void clipAndDepth(const float a[16], const float b[16], const float c[16], float
     // Row vectors: clip_j = sum_i p_i M[i][j]; w is column 3, z column 2.
     for (int i = 0; i < 4; ++i)
         depthRow[i] = float(depthScale * 0.5 * (abc[i * 4 + 3] - abc[i * 4 + 2]) + depthConstant * abc[i * 4 + 3]);
+}
+
+void multiply(const float a[16], const float b[16], float out[16])
+{
+    float r[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] + a[i * 4 + 2] * b[2 * 4 + j] +
+                           a[i * 4 + 3] * b[3 * 4 + j];
+    std::memcpy(out, r, sizeof(r));
 }
 
 // The pipeline's state as one key: depth compare (3 bits), depth write (1),
@@ -517,7 +583,18 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         }
         mu.test[0] = static_cast<uint32_t>(m.alphaTest);
         mu.test[1] = m.alphaRef;
-        mu.test[2] = m.alphaFail == AlphaFail::Nothing ? 1u : 0u;
+        // RG_NATIVE_AFAIL_DISCARD=1 (debug): pixels failing the alpha test are
+        // dropped whatever AFAIL says. Here a failing pixel otherwise keeps
+        // every write, depth included, where the GS writes only some
+        // (FB_ONLY: colour, no depth; ZB_ONLY: depth only; RGB_ONLY: RGB).
+        static const bool afailDiscard = [] {
+            const char *v = std::getenv("RG_NATIVE_AFAIL_DISCARD");
+            const bool on = v && *v && *v != '0';
+            if (on)
+                std::fprintf(stderr, "[native-pipeline] RG_NATIVE_AFAIL_DISCARD: alpha-test failures dropped\n");
+            return on;
+        }();
+        mu.test[2] = (afailDiscard || m.alphaFail == AlphaFail::Nothing) ? 1u : 0u;
         mu.test[3] = m.fog ? 1u : 0u;
         mu.size[0] = m.textureWidth ? float(m.textureWidth) : ownW;
         mu.size[1] = m.textureHeight ? float(m.textureHeight) : ownH;
@@ -578,7 +655,90 @@ void Renderer::drawMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands,
         du.target[0] = targetW;
         du.target[1] = targetH;
         du.target[2] = d.hasModel ? 0.0f : 1.0f; // fog per vertex
+        // An overlay laid on a surface drawn before it (tests >=, writes no
+        // depth: a candle's light on a wall) is pulled toward the camera by
+        // a few of the GS's Z units. The GS gives both the same integer Z
+        // and the test passes; here each mesh's depth comes from its own
+        // matrices, (w - z) / 2 loses bits to cancellation, and the test
+        // failed whole triangles of the light (flickering wedges, worse up
+        // close). One Z unit is 1 / (2 |V22|) of this depth.
+        // RG_NATIVE_DECAL_UNITS=N sets how many (4 unless set; 0 off).
+        static const float decalUnits = [] {
+            const char *v = std::getenv("RG_NATIVE_DECAL_UNITS");
+            const float units = v && *v ? std::strtof(v, nullptr) : 4.0f;
+            std::fprintf(stderr, "[native-pipeline] overlays pulled forward by %g Z units (RG_NATIVE_DECAL_UNITS)\n",
+                         units);
+            return units;
+        }();
+        du.target[3] = 0.0f;
+        // Alpha-blended layers count too, depth written or not: the field's
+        // path and grass edges are their own meshes laid over the opaque
+        // ground, and where the GS's integer Z ties them the layer shows;
+        // float depth split those ties by the meshes' modelling (triangles
+        // of path flickering as the camera moved).
+        if (decalUnits != 0.0f && camera && camera->viewport[10] != 0.0f && (!m.depthWrite || m.blending) &&
+            m.depthTest == Compare::GreaterEqual)
+            du.target[3] = decalUnits / (2.0f * std::fabs(camera->viewport[10]));
         std::memcpy(du.fog, d.fog, sizeof(du.fog));
+
+        if (FILE *log = depthLog().file)
+        {
+            // The draw, then its triangles: x y depth per corner, the
+            // vertex shader's arithmetic in double (nan: a corner at or
+            // behind the eye, which the GPU clips).
+            uint64_t geo = 1469598103934665603ull;
+            for (const Vertex &v : d.vertices)
+                for (int i = 0; i < 3; ++i)
+                {
+                    uint32_t bits;
+                    std::memcpy(&bits, &v.position[i], 4);
+                    geo = (geo ^ bits) * 1099511628211ull;
+                }
+            geo = (geo ^ d.indices.size()) * 1099511628211ull;
+            std::fprintf(log,
+                         "D n=%zu tgt=%u dt=%u att=%d model=%d cam=%u obj=%llx src=%x gpass=%u fd=%d zt=%d zw=%d "
+                         "bl=%d sf=%d df=%d op=%d at=%d ar=%u af=%d tex=%u stex=%u cw=%x pull=%.9g v22=%.9g "
+                         "v32=%.9g sc=%d,%d,%d,%d geo=%llx gs=%d zs=%.9g zmax=%.9g tris=%zu\n",
+                         n, d.target, d.depthTarget, depthAttached ? 1 : 0, d.hasModel ? 1 : 0, d.camera,
+                         (unsigned long long)d.object, d.source, d.pass, d.floatDepth ? 1 : 0, int(m.depthTest),
+                         m.depthWrite ? 1 : 0, m.blending ? 1 : 0, int(m.srcFactor), int(m.dstFactor),
+                         int(m.blendOp), int(m.alphaTest), m.alphaRef, int(m.alphaFail), m.texture,
+                         m.sourceTarget, m.colorWrite, du.target[3], camera ? camera->viewport[10] : 0.0f,
+                         camera ? camera->viewport[14] : 0.0f, d.scissor.x0, d.scissor.y0, d.scissor.x1,
+                         d.scissor.y1, (unsigned long long)geo, (d.gsKnown || !d.hasModel) ? 1 : 0,
+                         d.depthScale, d.depthMax, d.indices.size() / 3u);
+            std::fputs("T", log);
+            for (size_t k = 0; k + 2 < d.indices.size(); k += 3)
+                for (int c = 0; c < 3; ++c)
+                {
+                    const uint32_t index = d.indices[k + c];
+                    if (index >= d.vertices.size())
+                    {
+                        std::fputs(" nan nan nan nan", log);
+                        continue;
+                    }
+                    const float *p = d.vertices[index].position;
+                    const double pos[4] = {p[0], p[1], p[2], 1.0};
+                    double clip[4], window[4];
+                    rowTimes(du.clip, pos, clip);
+                    rowTimes(du.viewport, clip, window);
+                    if (!(clip[3] > 0.0))
+                    {
+                        std::fputs(" nan nan nan nan", log);
+                        continue;
+                    }
+                    const double ndcX = (window[0] * 2.0 / du.target[0] - window[3]) / clip[3];
+                    const double ndcY = (window[3] - window[1] * 2.0 / du.target[1]) / clip[3];
+                    double row = du.depthRow[0] * pos[0] + du.depthRow[1] * pos[1] + du.depthRow[2] * pos[2] +
+                                 du.depthRow[3];
+                    if (du.depthLimit[1] != 0.0f)
+                        row = std::min(row, double(du.depthLimit[0]) * clip[3]);
+                    const double depth = (row + du.target[3] * clip[3]) / clip[3];
+                    std::fprintf(log, " %.3f %.3f %.9g %.0f", (ndcX + 1.0) * 0.5 * du.target[0],
+                                 (1.0 - ndcY) * 0.5 * du.target[1], depth, gsDepthOf(d, p));
+                }
+            std::fputc('\n', log);
+        }
 
         if (m.blending && (m.srcFactor == BlendFactor::Fixed || m.srcFactor == BlendFactor::InvFixed ||
                            m.dstFactor == BlendFactor::Fixed || m.dstFactor == BlendFactor::InvFixed))
@@ -627,6 +787,22 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     }
     if (!uploadMeshes(device, commands, error))
         return false;
+    {
+        DepthLog &log = depthLog();
+        if (!log.file && std::remove("build/run/depth-log-now") == 0)
+        {
+            const char *v = std::getenv("RG_NATIVE_DEPTH_LOG_FRAMES");
+            log.framesLeft = v && *v ? uint32_t(std::strtoul(v, nullptr, 10)) : 30u;
+            const std::string path =
+                "build/run/depthlog-" + std::to_string((unsigned long long)m_meshCounts.frames) + ".txt";
+            log.file = log.framesLeft ? std::fopen(path.c_str(), "w") : nullptr;
+            std::fprintf(stderr, "[depth-log] %s: %u frames to %s\n", log.file ? "started" : "could not start",
+                         log.framesLeft, path.c_str());
+        }
+        if (log.file)
+            std::fprintf(log.file, "F frame=%llu draws=%zu scale=%u\n", (unsigned long long)m_meshCounts.frames,
+                         m_frameMeshes.size(), scale);
+    }
     // RG_NATIVE_FRAME_DUMP=N: the N-th frame's draws, one line each.
     static const uint64_t dumpFrame = [] {
         const char *v = std::getenv("RG_NATIVE_FRAME_DUMP");
@@ -772,6 +948,12 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             const SDL_GPUViewport viewport{0.0f, 0.0f, float(gameW * scale), float(gameH * scale), 0.0f, 1.0f};
             SDL_SetGPUViewport(pass, &viewport);
             const GpuTarget &copied = m_gpuTargets[kFeedbackCopy]; // its texture may be the larger
+            if (FILE *log = depthLog().file)
+                std::fprintf(log, "P tgt=%u dt=%u depth=%s first=%zu last=%zu w=%u h=%u\n", target, depthId,
+                             !depthId                                         ? "none"
+                             : depthInfo.load_op == SDL_GPU_LOADOP_CLEAR ? "clear"
+                                                                         : "load",
+                             a, b, gameW, gameH);
             drawMeshes(device, commands, pass, a, b, target, depthId != 0u, float(gameW), float(gameH), scale,
                        copy, copied.width, copied.height);
             SDL_EndGPURenderPass(pass);
@@ -779,6 +961,12 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             depthInfo.load_op = SDL_GPU_LOADOP_LOAD;
             a = b;
         }
+    }
+    if (DepthLog &log = depthLog(); log.file && --log.framesLeft == 0u)
+    {
+        std::fclose(log.file);
+        log.file = nullptr;
+        std::fprintf(stderr, "[depth-log] done\n");
     }
     return true;
 }

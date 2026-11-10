@@ -245,6 +245,10 @@ struct MeshDraw
     // sit in front of the surface they lie on.
     float depthScale = 1.0f;
     float depthMax = 3.402823466e38f;
+    // Debug (the depth log): the program's matrix to GS window coordinates
+    // (row vectors), so the log can give the GS's integer Z beside ours.
+    bool gsKnown = false;
+    float gsMatrix[16] = {};
 };
 
 struct SpriteDraw

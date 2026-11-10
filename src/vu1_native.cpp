@@ -1940,19 +1940,26 @@ namespace
 {
 
 // The bounds a depth-and-bounds chunk leaves: quads 98 and 99 as they were,
-// widened lane by lane by each vertex's projected x, y, z and fog.
-void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most)
+// widened lane by lane by each vertex's projected x, y, z and fog. Only
+// those four of gsNativeMeshPoint, by the same operations in the same
+// order, so the same bits.
+void widenBounds(const GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
 {
-    const VuData vu(data);
-    least = vu.quad(98);
-    most = vu.quad(99);
-    Chunk chunk;
-    readChunk(program, vu, top, chunk);
-    for (const GSNativeMesh::Vertex &v : chunk.mesh.vertices)
+#if defined(__clang__)
+#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
+#endif
+    const GSNativeMesh::Header &h = mesh.header;
+    const auto &m = h.matrix;
+    float *lo = &least.x, *hi = &most.x;
+    for (const GSNativeMesh::Vertex &v : mesh.vertices)
     {
-        const GSNativeMeshPoint p = gsNativeMeshPoint(chunk.mesh.header, v);
-        const float lanes[4] = {p.px, p.py, p.pz, p.pf};
-        float *lo = &least.x, *hi = &most.x;
+        float clip[4];
+        for (int i = 0; i < 4; ++i)
+            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
+        const float q = gsNativeReciprocal(clip[3]);
+        const float z = clip[2] * q;
+        const float lanes[4] = {clip[0] * q, clip[1] * q, std::fmin(z * h.depthScale, h.depthMax),
+                                std::fmax(std::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
         for (int i = 0; i < 4; ++i)
         {
             lo[i] = std::fmin(lo[i], lanes[i]);
@@ -1961,9 +1968,27 @@ void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4
     }
 }
 
+// `built`: the chunk as buildMesh made it from this same data memory, so as
+// not to read it again; null to read it here.
+void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most,
+                 const GSNativeMesh *built = nullptr)
+{
+    const VuData vu(data);
+    least = vu.quad(98);
+    most = vu.quad(99);
+    if (built)
+    {
+        widenBounds(*built, least, most);
+        return;
+    }
+    Chunk chunk;
+    readChunk(program, vu, top, chunk);
+    widenBounds(chunk.mesh, least, most);
+}
+
 } // namespace
 
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built)
 {
     if (program.kind == Kind::Overlay)
     {
@@ -1990,7 +2015,11 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
     }
     const VuRounding rounding;
     Vec4 least, most;
-    boundsAfter(program, data, top, least, most);
+    // A projector's mesh is rewritten after the read (projectorMesh), and a
+    // program without a mesh has none: those read the chunk here.
+    if (built && (program.kind == Kind::Projector || !hasMesh(program)))
+        built = nullptr;
+    boundsAfter(program, data, top, least, most, built);
     std::memcpy(data + 98u * 16u, &least, sizeof(least));
     std::memcpy(data + 99u * 16u, &most, sizeof(most));
 }
