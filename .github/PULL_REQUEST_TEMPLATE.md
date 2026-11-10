@@ -2,7 +2,6 @@
 Say what the change does and why, then answer the four items below.
 One concern per pull request; in a stack, say its place (2 of 3, based on #N).
 Name issues with "Refs #N", not "Fixes #N": an issue closes when a release ships its fix.
-See CONTRIBUTING.md.
 -->
 
 ### Does it change the default path?

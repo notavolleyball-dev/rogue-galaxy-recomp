@@ -38,8 +38,7 @@ is in [docs/STATUS.md](docs/STATUS.md).
 **Found a problem?** Open an [issue](../../issues/new/choose): its form asks
 what you were doing, the version (F1 > Rogue Galaxy > About) and
 `build\last-run.log` (`install.log` for the install). The log of the run
-before is `build\last-run.prev.log`. Rules for issues and pull requests:
-[CONTRIBUTING.md](CONTRIBUTING.md).
+before is `build\last-run.prev.log`.
 
 ## Install (Windows)
 
