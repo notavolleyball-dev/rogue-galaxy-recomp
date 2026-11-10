@@ -131,6 +131,7 @@ add_executable(roguegalaxy
     vu1_native.cpp
     draw_state_mirror.cpp
     native_capture.cpp
+    guest_write_watch.cpp
     native_2d.cpp
     native_effects.cpp
     native_producer.cpp

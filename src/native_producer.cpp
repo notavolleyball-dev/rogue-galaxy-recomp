@@ -23,6 +23,7 @@
 #include "runtime/gs/gs_types.h"
 #include "native_effect.h"
 #include "draw_state_mirror.h"
+#include "guest_write_watch.h"
 #include "flip_pacing.h"
 
 #include <cmath>
@@ -256,6 +257,53 @@ uint64_t imageHash(const uint8_t *at, size_t size)
         h ^= h >> 31;
     }
     return h | 1u;
+}
+
+// A texture upload's source hash, reused while its guest RAM pages are
+// unwritten (rg::writewatch): the game sends the same textures from the
+// same memory every frame (~4.6 MB a frame in the field, 2026-11-09), and
+// hashing them was ~9% of the game thread. `hashed`: the bytes read.
+uint64_t sourceHash(const uint8_t *at, size_t size, size_t &hashed)
+{
+    hashed = 0u;
+    if (!rg::writewatch::enabled())
+    {
+        hashed = size;
+        return imageHash(at, size);
+    }
+    struct Seen
+    {
+        const uint8_t *at;
+        size_t size;
+        uint64_t hash, stamp;
+        uint32_t changes; // times found written since its last hash
+    };
+    // The texture hooks' thread's.
+    thread_local std::unordered_map<uint64_t, Seen> seen;
+    const uint64_t key = reinterpret_cast<uintptr_t>(at) ^ (uint64_t(size) * 0x9E3779B97F4A7C15ull);
+    const auto it = seen.find(key);
+    const bool same = it != seen.end() && it->second.at == at && it->second.size == size;
+    if (same && rg::writewatch::unchanged(at, size, it->second.stamp))
+        return it->second.hash;
+    hashed = size;
+    // Memory written again and again (a texture the game rewrites, or one
+    // sharing its pages with data that changes every frame) is hashed and
+    // not watched: watching it cost a fault and a protection change (with
+    // its TLB shootdown) every frame, more than the hash.
+    const uint32_t changes = same ? it->second.changes + 1u : 0u;
+    if (changes >= 2u)
+    {
+        it->second.changes = changes;
+        it->second.stamp = 0u;
+        return it->second.hash = imageHash(at, size);
+    }
+    // Watched first, then read: a write after the stamp is seen next time.
+    const uint64_t stamp = rg::writewatch::watch(at, size);
+    const uint64_t hash = imageHash(at, size);
+    if (seen.size() >= 65536u)
+        seen.clear();
+    seen[key] = {at, size, hash, stamp, changes};
+    return hash;
 }
 
 uint64_t keyOf(uint64_t hash, uint32_t a, uint32_t b, uint32_t c)
@@ -511,10 +559,11 @@ void texture(const TextureLevel &l)
         ++s.counts.refusedBytes;
         return;
     }
-    const uint64_t hash = imageHash(l.ram, bytes);
+    size_t hashed = 0u;
+    const uint64_t hash = sourceHash(l.ram, bytes, hashed);
     const uint64_t key = keyOf(hash, psm | (l.preSwizzled ? 0x100u : 0u), l.width, l.height);
     lock.lock();
-    s.counts.bytesHashed += bytes;
+    s.counts.bytesHashed += hashed;
     if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
     {
         ++s.counts.texturesKnown;

@@ -1,4 +1,5 @@
 #include "native_capture.h"
+#include "guest_write_watch.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -343,6 +344,7 @@ void install(PS2Runtime &runtime)
     if (!rg::nativeproducer::pipelineOn())
         return;
     g_rdram = runtime.memory().getRDRAM();
+    rg::writewatch::init(g_rdram, PS2_RAM_SIZE);
     if (!rg::timing::hookFunction(runtime, kSetFrameFromDesc, &setFrameFromDesc, g_setFrameFromDescOriginal) ||
         !rg::timing::hookFunction(runtime, kGetFrameTexDesc, &getFrameTexDesc, g_getFrameTexDescOriginal) ||
         !rg::timing::hookFunction(runtime, kGetDispFbTexDesc, &getDispFbTexDesc, g_getDispFbTexDescOriginal))
