@@ -642,10 +642,21 @@ What else changed:
   - colour reads also keep their pixels on the GPU, and a fade's captured
     frame is drawn from that copy at the renderer's resolution.
 
+**Step 2 (skipping the original), in part** (on `native-only/m5-geometry`):
+- A pass can stand at a marker the hook writes into the list (a cnt tag and
+  a DIRECT A+D write of its unit to `kPassRegister`), with the function not
+  run.
+- The glare, DoF, the colour filter and the bloom go so; the bloom's one
+  write outside its packets is made by the hook.
+- The others keep running for what they do outside their packets:
+  - refraction: its node and the allocator behind it;
+  - the shadow map's blur: the view pop and the light packet;
+  - the plane shadow: camera and light packets;
+  - CBlur: its texture loads;
+  - focus: the frames its call sets;
+  - the object layers: the models drawn into them.
+
 **Not done, carried over:**
-- **Step 2 (skipping the original).** Every hooked function still runs and
-  builds its packets, so its side effects stay; M6 removes the packet path
-  once nothing needs it.
 - **TexAnime** is plain 2D sprites into a texture target, so it moves with
   M4's 2D at its source.
 - **Lens flare and depth probe** (item 12): no route reached them. They
