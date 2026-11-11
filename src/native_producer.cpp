@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gfx/native/native_pipeline.h"
@@ -3087,7 +3088,7 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
 }
 
 bool piece(const rg::NativeMesh &mesh, const rg::DrawState *drawState, bool texels, uint8_t layer,
-           const std::vector<uint32_t> &indices)
+           const std::vector<uint32_t> &indices, uint32_t glyph)
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
@@ -3107,6 +3108,21 @@ bool piece(const rg::NativeMesh &mesh, const rg::DrawState *drawState, bool texe
     native::Draw2D draw;
     native::reuseMeshBuffers(draw);
     draw.source = kSource2d;
+    if (glyph != 0u)
+    {
+        // A glyph record (M4): its source names the glyph, for the
+        // renderer's labels and for what keys on glyphs.
+        draw.source = kSourceGlyph | (glyph & 0xFFFFu);
+        static std::mutex namedMutex;
+        static std::unordered_set<uint32_t> named;
+        std::lock_guard namedLock(namedMutex);
+        if (named.insert(draw.source).second)
+        {
+            char name[32];
+            std::snprintf(name, sizeof(name), "glyph %04x", glyph & 0xFFFFu);
+            native::nameSource(draw.source, name);
+        }
+    }
     draw.layer = static_cast<native::Layer>(std::min<uint8_t>(layer, uint8_t(native::Layer::Overlay)));
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's

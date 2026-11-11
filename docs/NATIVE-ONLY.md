@@ -820,7 +820,14 @@ Done:
   tags; see the commit). The counts above are the first real ones.
 
 Not done:
-- fonts as glyph records;
+- ~~fonts as glyph records~~ **in code:** `FontDrawGlyph` and
+  `GsPktSpriteUVRect` (its and its outline's sprites) are hooked; each glyph
+  sets its texture before its sprites, so they are a piece of their own,
+  and the piece whose texel rectangle is a glyph's carries the glyph's code
+  to its Draw2D record (`source` = `kSourceGlyph | code`, named in the
+  renderer's draw labels). Region packs look each glyph up by its own
+  rectangle (as before); keying packs by the code instead would rename
+  them, and is left for when a pack is made that way;
 - libgraph, **in code:** `sceGsPutDrawEnv`'s packet and every libgraph
   stub's register writes (`sceGsSwapDBuff`, `sceGsSetDefDBuff`,
   `sceGsResetGraph`, ... through the register sink) go to the draw state

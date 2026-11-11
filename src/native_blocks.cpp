@@ -66,6 +66,7 @@ struct KeptPiece
     bool texels = false;
     rg::DrawState state{};
     uint8_t layer = 0u;
+    uint32_t glyph = 0u; // a glyph record's code | 0x10000 (M4)
 };
 struct Block
 {
@@ -92,8 +93,69 @@ struct OpenBlock
     bool skip = false;
     bool made = false;
     bool effect = false; // inside a pass's call (its pass draws it)
+    // M4: the glyphs drawn in it (FontDrawGlyph, its outline): each sprite's
+    // texel rectangle (GsPktSpriteUVRect's) and the glyph's code | 0x10000.
+    struct Glyph
+    {
+        int32_t u0, v0, u1, v1;
+        uint32_t code;
+    };
+    std::vector<Glyph> glyphs;
 };
 std::vector<OpenBlock> g_open;
+
+// M4: fonts as glyph records. FontDrawGlyph_26de80(font, b, code, x, y,
+// rgba, alpha, scale) draws a glyph (and FontDrawGlyphOutline its border
+// copies) as sprites through GsPktSpriteUVRect_26eb30(b, rect, uv, z), uv
+// {u, v, w, h} in texels; each glyph sets its texture first, so its sprites
+// are a piece of their own, which carries the glyph's code to its record.
+constexpr uint32_t kFontDrawGlyph = 0x0026DE80u;
+constexpr uint32_t kGsPktSpriteUVRect = 0x0026EB30u;
+uint32_t g_glyphCode = 0u; // inside FontDrawGlyph: its code | 0x10000
+PS2Runtime::RecompiledFunction g_fontDrawGlyphOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_spriteUVRectOriginal = nullptr;
+
+void afterGlyph(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+{
+    g_glyphCode = 0u;
+}
+
+void fontDrawGlyph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    g_glyphCode = (getRegU32(ctx, 6) & 0xFFFFu) | 0x10000u;
+    rg::hooks::callThen(g_fontDrawGlyphOriginal, rdram, ctx, runtime, &afterGlyph, 0u);
+}
+
+void spriteUVRect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (g_glyphCode != 0u && !g_open.empty())
+    {
+        const uint32_t uv = getRegU32(ctx, 6);
+        int32_t q[4];
+        std::memcpy(q, g_rdram + physical(uv), sizeof(q));
+        g_open.back().glyphs.push_back({q[0], q[1], q[0] + q[2], q[1] + q[3], g_glyphCode});
+    }
+    g_spriteUVRectOriginal(rdram, ctx, runtime);
+}
+
+// The glyph whose sprites a piece is: its texel rectangle a glyph's.
+uint32_t glyphOf(const rg::NativeMesh &mesh, bool texels)
+{
+    if (!texels || g_open.empty() || g_open.back().glyphs.empty() || mesh.vertices.empty())
+        return 0u;
+    float u0 = mesh.vertices[0].u, u1 = u0, v0 = mesh.vertices[0].v, v1 = v0;
+    for (const rg::NativeMesh::Vertex &v : mesh.vertices)
+    {
+        u0 = std::min(u0, v.u);
+        u1 = std::max(u1, v.u);
+        v0 = std::min(v0, v.v);
+        v1 = std::max(v1, v.v);
+    }
+    for (const OpenBlock::Glyph &g : g_open.back().glyphs)
+        if (int32_t(u0) == g.u0 && int32_t(v0) == g.v0 && int32_t(u1) == g.u1 && int32_t(v1) == g.v1)
+            return g.code;
+    return 0u;
+}
 
 // The GIF packets in a stretch of a list the game wrote: DMA cnt tags, each
 // with its two VIFcodes; a DIRECT's data is GIF. False: something else (a
@@ -238,6 +300,7 @@ template <typename EachSpan> bool buildBlock(EachSpan &&eachSpan, Block &block, 
                 kept.texels = piece.texelUvs;
                 kept.state = g_state->current();
                 kept.layer = layer;
+                kept.glyph = glyphOf(kept.mesh, kept.texels);
             }
         }
     });
@@ -446,7 +509,9 @@ void install(PS2Runtime &runtime)
     if (!rg::timing::hookFunction(runtime, kDrawEnvWritePacket, &drawEnvWritePacket, g_envOriginal) ||
         !rg::timing::hookFunction(runtime, kDrawListBeginPrim, &beginPrim, g_beginOriginal) ||
         !rg::timing::hookFunction(runtime, kGsPktBegin, &pktBegin, g_pktBeginOriginal) ||
-        !rg::timing::hookFunction(runtime, kGsPktEnd, &pktEnd, g_pktEndOriginal))
+        !rg::timing::hookFunction(runtime, kGsPktEnd, &pktEnd, g_pktEndOriginal) ||
+        !rg::timing::hookFunction(runtime, kFontDrawGlyph, &fontDrawGlyph, g_fontDrawGlyphOriginal) ||
+        !rg::timing::hookFunction(runtime, kGsPktSpriteUVRect, &spriteUVRect, g_spriteUVRectOriginal))
     {
         std::fprintf(stderr, "[native-blocks] not hooked: the game's 2D is written and not drawn\n");
         return;
@@ -464,7 +529,7 @@ bool emit(uint32_t unit)
         return false;
     }
     for (const KeptPiece &piece : block.pieces)
-        rg::nativeproducer::piece(piece.mesh, &piece.state, piece.texels, piece.layer, piece.indices);
+        rg::nativeproducer::piece(piece.mesh, &piece.state, piece.texels, piece.layer, piece.indices, piece.glyph);
     const uint64_t emitted = ++g_emitted;
     if (emitted == 1u || emitted % 60000u == 0u)
         std::fprintf(stderr,

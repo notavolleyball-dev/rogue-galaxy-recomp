@@ -171,8 +171,11 @@ uint64_t retainedEpoch();
 // why).
 // `indices`: the mesh's triangles into mesh.vertices (empty: the vertices
 // are a triangle list themselves).
+// `glyph`: a font glyph's piece (M4: a glyph record), its code | 0x10000;
+// its Draw2D's source names the glyph (kSourceGlyph | code).
 bool piece(const rg::NativeMesh &mesh, const rg::DrawState *state, bool texels, uint8_t layer,
-           const std::vector<uint32_t> &indices = {});
+           const std::vector<uint32_t> &indices = {}, uint32_t glyph = 0u);
+constexpr uint32_t kSourceGlyph = 0x47000000u;
 
 // Step 5c: an object's head draws into the buffer at `base` (`fbw`) go to
 // the object layer instead, cleared over `box` (x0, y0, x1, y1 in the
