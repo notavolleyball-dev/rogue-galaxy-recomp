@@ -1064,6 +1064,23 @@ always ride as register writes). To watch: the game thread's frame time
 (the converter and the producer's meshes are on it now: `lists busy` in
 the stats).
 
+**Model draws at the emit call, step 1 in code** (`src/native_emit.*`):
+`ModelEmitDrawPacketsMaybe_14ec20` is hooked; at each call (outside an
+effect's) each item's and group's inputs are read from the game's
+structures (NATIVE-ONLY-NOTES.md, "Building model draws at Emit time"): the
+model matrix and mesh header from the item's packets p14/p18, the
+material's quads 82-87 from its packet (82 from the material when an
+animator set `t+6`). Markers on each side of the call's list output tell
+the list's run which call its chunks belong to (items by their base
+MSCAL 0, groups by their MSCAL A), and every model chunk compares its VU1
+memory with them: `[model-emit] ... the same N, differing M` (the first
+twelve in full). The draws still come from the list. Next, as the counts
+allow: the program from the microcode table, the GS state from the
+material and the draw environment, the geometry from the chain's spans
+(their layout is in the notes), then the call writes no packet and the
+draw is pushed from these. The sorted path (`ModelQueueSortedPackets`,
+drawn at the buckets' replay) and the shadow casters come after.
+
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
 sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
 with the tail's packets withheld, and the bounds it read (quads 98/99) are

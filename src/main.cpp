@@ -54,6 +54,7 @@
 #include "step_fixes.h"
 #include "native_capture.h"
 #include "native_blocks.h"
+#include "native_emit.h"
 #include "native_effects.h"
 #include "vif1_thread.h"
 #include "vu0_flags.h"
@@ -195,6 +196,7 @@ int run(int argc, char **argv)
     rg::nativecapture::install(runtime);
     rg::nativefx::install(runtime);
     rg::nativeblocks::install(runtime);
+    rg::nativeemit::install(runtime);
     // After the game's hooks, so a forced function another one replaced runs
     // through it, and before RG_TRACE, so a traced call that returns at once
     // shows the forced answer (an unwound one gets it later, at its resume).

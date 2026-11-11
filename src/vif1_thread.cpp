@@ -26,6 +26,7 @@
 #include "draw_state_mirror.h"
 #include "native_2d.h"
 #include "native_blocks.h"
+#include "native_emit.h"
 #include "native_effects.h"
 #include "native_producer.h"
 #include "gif_events.h"
@@ -788,6 +789,8 @@ public:
         // data memory before the VU1 changes it. The MSCAL names the program
         // (once per code image and entry), its MSCNTs run the chunks; or the
         // MSCAL is the chunk (drawsAtCall).
+        if (!resume)
+            rg::nativeemit::mscal(startPC);
         const rg::vu1native::Program *native = nullptr;
         bool marked = false; // an MSCNT standing for a chunk (M5 step 2): the VU1 never runs it
         {
@@ -848,6 +851,7 @@ public:
                     t_model.edge = 0u;
                     t_model.volume = false;
                     m_modelId = mark->chunk.id;
+                    rg::nativeemit::chunk(data);
                     m_particleMesh = false;
                     m_shadowMesh = false;
                     m_outlineMesh = false;
@@ -932,6 +936,7 @@ public:
                             rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
                         rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
                         rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
+                        rg::nativeemit::chunk(data);
                         t_model.active = true;
                         t_model.edge = 0u;
                         t_model.volume = false;
@@ -2360,6 +2365,12 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
             flushEffect();
         uint64_t unit = 0u;
         std::memcpy(&unit, data + 16u, sizeof(unit));
+        if ((unit >> 24) == 3u || (unit >> 24) == 4u)
+        {
+            // M6: an emit call's output begins or ends (src/native_emit.h).
+            rg::nativeemit::marker(static_cast<uint32_t>(unit));
+            return;
+        }
         if ((unit >> 24) == 2u)
         {
             // M4: a block the game did not write (src/native_gspkt.h).
