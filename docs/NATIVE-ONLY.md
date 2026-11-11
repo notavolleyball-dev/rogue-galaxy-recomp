@@ -94,34 +94,30 @@ stacked PRs at the end).
   - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
     and sent in the stream's order;
   - M6, early: the GS front end gets nothing any more (see M6).
-- **Now: the rest of M4** on `native-only/m4b-2d` (from M5's branch).
-  - In code: HUD size and the wide movie reshape the block's records (no
-    vertex or argument patches); libgraph's `sceGsPutDrawEnv` is state
-    and clears; a census names the draw tasks whose 2D the converter
-    still makes (`[native2d] pieces the converter made, by draw task`).
-  - The builder's map is in NATIVE-ONLY-NOTES.md; its shadow of each
-    block is made from the calls and compared with the bytes; an owner
-    whose shadows agree has its blocks drawn from the calls with no bytes
-    written (the guard is the comparison itself; effects' blocks never).
-    Blocks were never read before this branch (fixed here).
+- **Now: M4's rest and M6** on `native-only/m4b-2d` (from M5's branch).
+  - In code: no GsPkt block is written (every segment over scratch, the
+    sprite composites followed); composites and effects by markers only;
+    every model draw from a record or a captured stream, under the game
+    thread's draw state; nothing runs the VU1 for a draw; the list's
+    mirror and its 2D converter are deleted (M6's status has the list).
   - **For the play test of this branch**, the lines that say how far it
-    got: `[native-blocks]` (blocks read, the shadow's same / differing /
-    not followed, blocks the game did not write, lost: should stay 0),
-    `[native2d] pieces the converter made, by draw task` (what 2D is left
-    to move), `[native-env]` (libgraph's environment taken), `[vu1native]`
-    (chunks left to the VU1). Also the game thread's frame time (lists now
-    run on it).
+    got: `[native-blocks]` (blocks drawn from the builder's calls; lost
+    should stay 0), `[gs-packets]` (packets that still draw, not drawn, by
+    draw task: what 2D is left outside the builder), `[model-emit]`
+    (calls from records, written by why, captured streams and those that
+    could not be), `[vu1native]` (native chunks; not drawn, with why;
+    chunks outside a record or stream), `[composite]`, `[nativefx]`
+    (passes drawn and not), `[native-env]`. Also the game thread's frame
+    time (lists run on it).
+  - **Bisect note:** 906c33d does not build (fixed by f3bee42).
   - CSA palettes are drawn now (they were refused outright): a T4 whose
     TEX0 loads its CLUT reads its CBP's first 16 entries; one that does
     not reads the CBP CLUT's entries from 16 CSA on (a derived palette
     record); region packs name them by that window. A T8 reads its 256
     entries by the same rule.
-  - Next: fonts as glyph records, region packs' glyph variants, and
-    whatever the census names. (A block is now bounded by GsPktBegin
-    and GsPktEnd themselves, so the functions that frame their own block,
-    GfxBlitTexRect, GfxEndFrame, DrawListEmitFrameEnvMaybe,
-    DrawListClearScreen and GfxDrawPerfMeter, are blocks like the others,
-    skipped by the same rule; RefractionCaptureFrame's is an effect's.)
+  - Next: uploads at their hooks (the withholding and host capture go),
+    the libgraph stubs' register sink (patch 0034) as hooks, fonts as
+    glyph records.
 - **M6 steps 1-4 are in too** (on the same branch, as they needed no
   play data): the lists run on the game thread as they are sent (the
   VIF1 thread is gone); the draw path's types are src/'s own; the
@@ -1150,6 +1146,37 @@ drawn under them, not under the list's mirror. The list's mirror is left
 only for what the list still draws: model calls the game writes,
 outlines, particles, shadow volumes, the converter's pieces (blocks the
 shadow does not follow, 2D outside the builder) and uploads.
+
+**Since (all in code, on `native-only/m4b-2d`):**
+- **Outlines, particles and shadow volumes from records:** the list's run
+  and a record's chain draw a chunk alike (`Vif1Thread::drawChunk`,
+  `declineChunk` first for records too); `drawable()` admits every program
+  the native path draws.
+- **The sprite composites' blocks followed:** `GsPktDrawSprite` and
+  `GsPktAddTexSprite` no longer spoil a block: where a tag ends
+  (FinalizeTags, Close) the shadow takes the tag's data as the game wrote it
+  in the scratch segment (inline PACKED qwords, AddTexSprite's RGBAQ).
+- **The list's packets are register state:** a small GIF register reader
+  (`src/gs_writes.*`) reads what the list still carries (draw environments,
+  a mesh's state, uploads' registers); the 2D converter is off the list
+  (native_2d is the blocks' shadow builder alone), and a packet that still
+  draws is counted by draw task (`[gs-packets]`) and not drawn.
+  `gif_events` is trimmed to native_2d's decoder.
+- **vu1_native's builders give register writes,** not packets.
+- **Fewer written model calls:** Mode1 items skipped (they draw nothing),
+  an empty program slot resolved from the microcode cache at the emit call;
+  `[model-emit]` counts the written calls by why.
+- **Captured streams (marker kind 8):** what every other model emitter
+  writes (calls the game still writes, those inside effect calls such as
+  the composite's parts, the sorted path's written nodes,
+  `EffModelDrawNodes`, `EffQuadDrawNodes`) is taken out of the list where
+  the emitter returns, as the VIF stream the list would have carried, and
+  replayed at its marker through the runtime's VIF1 under the game
+  thread's registers there and its own writes.
+- **The list's mirror is deleted:** nothing draws under the list's state.
+  `draw_state_mirror` keeps the register file records carry (`Registers`)
+  and the game thread's tracker (`game()`); a chunk from neither a record
+  nor a stream is counted (`[vu1native] chunks in the list outside ...`).
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
 sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
