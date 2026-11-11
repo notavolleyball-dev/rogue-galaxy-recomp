@@ -852,7 +852,11 @@ Not done:
     `GsTextureCache` named it, from the indices and palette entries the
     producer holds, and drawn from the pack's picture.
   - Not done:
-    - the border and shadow versions of glyphs;
+    - ~~the border and shadow versions of glyphs~~ (in code with the glyph
+      records: `FontDrawGlyphOutline` draws them as offset copies of the
+      glyph's own texel rectangle in black or grey, sprites of the glyph's
+      piece, so the region's picture draws them, tinted as the game tints
+      them);
     - a region whose CLUT is offset by TEXCLUT (CSA is in code, below);
     - a T8 with a CT16 CLUT (its 512-entry window reads GS memory the
       producer does not hold).
