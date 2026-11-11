@@ -368,8 +368,12 @@ float fromBits(uint32_t bits)
 // to the same code), or 0 for another entry.
 uint32_t bonesOf(const Program &program, const VuData &vu, uint32_t top)
 {
+    // The skinning Bs' entry table (26a933a5, 542b235c, 89123290, 36d686cd
+    // alike): pairs 0, 2, 4, 6 branch to the 1-, 2-, 4- and 4-bone loops; an
+    // odd entry runs its pair's NOP and falls into the next branch (1: 2
+    // bones, 3 and 5: 4); 7 lands on a JR (nothing decoded, not drawn).
     const uint32_t entry = vu.half(76, 2) != 0u ? vu.half(top + 1u, 3) : 0u;
-    const uint32_t bones = entry == 0u ? 1u : entry == 2u ? 2u : entry == 4u || entry == 6u ? 4u : 0u;
+    const uint32_t bones = entry == 0u ? 1u : entry <= 2u ? 2u : entry <= 6u ? 4u : 0u;
     return bones <= program.maxBones ? bones : 0u;
 }
 

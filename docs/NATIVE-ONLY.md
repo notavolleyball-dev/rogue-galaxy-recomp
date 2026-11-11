@@ -939,8 +939,9 @@ recovers.
 - **Left, by name (the user's to agree; `[vu1native]` lines count each as
   "left to the VU1"):** chunks `declineChunk` refuses still run the VU1
   interpreter: a chunk whose A enters a plain B past its first entry
-  (quad 76.z and TOP+1.w both set; A jumps to pair 300 + TOP+1.w), a skinning B whose entry is not one
-  of 1, 2 or 4 bones, and PRIM neither strip nor list (a fan: the D
+  (quad 76.z and TOP+1.w both set; A jumps to pair 300 + TOP+1.w), a
+  skinning B entered at 7 or past its table (7 is a JR: the VU decodes
+  nothing; 1, 3 and 5 fall into the next branch and are drawn), and PRIM neither strip nor list (a fan: the D
   pieces' strip window of ADC over a fan's triangles). (Since: chunks of
   no whole triangle, edge or particle, and those of fewer vertices than a
   pipelined F piece reads, are the model stage's: it draws the whole ones
