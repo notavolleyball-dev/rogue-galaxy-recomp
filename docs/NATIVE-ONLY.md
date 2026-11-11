@@ -94,8 +94,11 @@ stacked PRs at the end).
     and sent in the stream's order.
   - M6, early: the GS front end gets nothing any more (see M6).
   - Left:
-    - M5: outlines and shadow volumes as records; model records at game
-      time (the Emit hook; see M5's notes), which M6 needs.
+    - M5: outlines and shadow volumes as records.
+    - M6: the records made at game time are still sent from the VIF1
+      stream (passes, blocks, model draws). Next: send them from the
+      gather in its order, and the VIF1 thread no longer decodes for the
+      graphics.
     - M4: fonts as glyph records, libgraph's paths, HUD size and
       widescreen as layer transforms, region packs (see M4's status),
       TexAnime.
@@ -697,6 +700,10 @@ first steps, as decided).
 Done:
 - **Layer tags.** Each 2D draw carries the layer of the draw task that
   wrote it.
+- **TexAnime** (`TexAnimeTableApplyMaybe_162f50`) draws through GsPkt
+  blocks and VRAM copies (`DrawListAddVramCopyFixed`): the blocks are made
+  on the game thread like any other, and the copies are the producer's
+  local-copy mirror.
 - **2D blocks at their source** (`src/native_blocks.*`). Each GsPkt block
   is read on the game thread when it ends, under a draw state the game
   thread follows itself (`rg::drawstate::Tracker`: the environments'
@@ -713,7 +720,6 @@ Not done:
   paths (still the converter's);
 - HUD size and widescreen as layer transforms (`hud_size` still patches the
   blocks' vertices, which the game thread then reads);
-- TexAnime;
 - **region packs.** Their names are the GS backend's hashes:
   - texels read from GS memory (`expand`: the region's indices row by row,
     after the key's width, height and PSM);
@@ -798,6 +804,16 @@ recovers.
   - The CPU raw path stays for `RG_MODEL_GPU=0` and for the programs the
     stage does not take (affine, raw color), and outlines and shadow
     volumes are still window packets.
+- **Step 3 in code too** (`src/native_models.*`):
+  - The game thread's gather reads every VIF1 list as the VIF would: its
+    own VU1 data and code memory and draw state; UNPACK, MPG, the base
+    program, DIRECT, and the double buffer.
+  - At each chunk the list no longer carries, it makes the chunk's draw
+    there: header, constants, bones, state packets.
+  - The VIF1 thread sends that draw.
+  - `[model-game]` lines count the draws and how many differ from what the
+    VIF1 thread's VU1 memory gives (should stay 0).
+  - `RG_MODEL_GAME_TIME=0` turns it off.
 - **Step 2 in code too:** a REF payload of chunks whose every MSCNT drew a
   known chunk is learned (by its guest address, size and the write watch's
   stamp). From then on the game thread's gather leaves it in guest memory
