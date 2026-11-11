@@ -179,8 +179,8 @@ struct StreamReader::Impl
         }
         else if (op == 0x50u || op == 0x51u)
             gs.observe(in, size);
-        else if ((op & 0x60u) == 0x60u)
-            unpack(cmd, in);
+        else if ((op & 0x60u) == 0x60u && !((imm >> 15) & 1u))
+            unpack(cmd, in); // (a TOPS-relative UNPACK is a chunk's input: not needed here)
         else if (op == 0x01u || op == 0x02u || op == 0x03u)
             run(cmd);
     }
