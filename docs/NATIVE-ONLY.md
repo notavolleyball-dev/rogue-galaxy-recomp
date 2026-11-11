@@ -715,6 +715,41 @@ recovers.
    M3's plane-shadow pass, particles as instanced quads, overlay sprites.
 7. **Clipping on the GPU**, so no chunk falls back to the compiled VU1.
 
+**How (decided 2026-11-11, from the notes in NATIVE-ONLY-NOTES.md, "M5").**
+The notes change the order of the steps above:
+- Ordinary meshes, skinned ones too, are VIF packets built once at load and
+  only CALLed each frame (`ModelMeshLinks`).
+- No EE code reads VU1 memory back. Quads 98/99 only feed the overlay
+  sprites, which M3 already draws from their arguments.
+- Every input a chunk's per-vertex program reads is in VU1 data memory by
+  its MSCNT: the chunk itself, then the matrix, header, palette, material,
+  view and light packets the list carried before it.
+
+So M5 goes in this order:
+1. **Chunks by identity, on the GPU.**
+   - The VIF1 thread hashes a strip chunk's input sections at its MSCNT. The
+     first time it sees a hash, it decodes the chunk's raw inputs once
+     (positions, normals, UVs, colors, bone slots and weights, as int
+     values) into a `ModelChunk` record the renderer keeps. Each triangle's
+     vertices carry its three corners, for the program's backface rule.
+   - Each draw is then a `MeshDraw` naming the chunk, with a snapshot of the
+     VU1 constants the program reads (`ModelConstants`) and the bone
+     palette.
+   - The renderer's model vertex stage (`native_model.vert`) runs B
+     (dequantize and skin), F (UV generation, wave, swell), C (the lighting
+     variants) and the existing transform, depth and fog. The CPU no longer
+     runs `readChunk` or `buildMesh` for these chunks.
+   - The guard-band skip goes, as planned; backfaces stay, judged on the
+     GPU from the corners.
+   - `RG_MODEL_GPU=0` is the CPU path, for triage, until it is deleted.
+2. **The list stops carrying geometry.** The game thread's gather leaves a
+   known chunk's bytes in guest memory (as uploads are elided), and the VIF1
+   thread neither copies nor UNPACKs them. It needs the chunk's identity
+   from the REF tag's address and the write watch.
+3. **Model-level records at game time** (M6, with the rest): the snapshot
+   comes from the Emit hook instead of VU1 memory, once nothing else needs
+   the VIF1 stream.
+
 Replaced and deleted: the raw chunk path (`RawVertex`, `rawHeader`,
 `setMeshCull`, `StaticVertex`, `native_mesh_static.vert`), giving standard
 indexed meshes and GPU culling. The PS2's guard-band skip goes; edges may
