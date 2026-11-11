@@ -28,7 +28,11 @@ namespace rg::nativeblocks
 namespace
 {
 constexpr uint32_t kDrawListBeginPrim = 0x00141B00u;
-constexpr uint32_t kDrawListEndPrim = 0x00141A20u;
+// GsPktBegin(b) and GsPktEnd(b) -> the block's first CNT tag (0: none): a
+// block's own bounds, whoever frames it (DrawListBeginPrim/EndPrim, or the
+// functions that inline them: GfxBlitTexRect, GfxEndFrame, ...).
+constexpr uint32_t kGsPktBegin = 0x0013F7E0u;
+constexpr uint32_t kGsPktEnd = 0x0013F790u;
 // DrawEnvWritePacket_157460(env, at): the draw environment's packet written
 // at `at`, its size in quadwords returned.
 constexpr uint32_t kDrawEnvWritePacket = 0x00157460u;
@@ -53,11 +57,6 @@ uint32_t g_blockOwner = 0u; // DrawListBeginPrim's return address
 // first ends the block; and whether a block ended inside another.
 std::vector<std::pair<uint32_t, uint32_t>> g_envs; // address, quadwords
 bool g_nested = false;
-// The draw context and its builder (NATIVE-ONLY-NOTES.md, "The GsPkt
-// builder"): +0xF0 the first GsPktOpen's CNT tag since GsPktBegin.
-constexpr uint32_t kDrawCtxPointer = 0x004810A4u;
-constexpr uint32_t kBuilder = 0x130u;
-constexpr uint32_t kBuilderFirstOpen = 0xF0u;
 
 // A block's pieces, kept by unit until the VIF1 thread reaches the block.
 struct KeptPiece
@@ -179,11 +178,25 @@ void drawEnvWritePacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 PS2Runtime::RecompiledFunction g_beginOriginal = nullptr;
-PS2Runtime::RecompiledFunction g_endOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_pktBeginOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_pktEndOriginal = nullptr;
+// The owner DrawListBeginPrim's caller gives the block GsPktBegin opens next.
+uint32_t g_pendingOwner = 0u;
 
+// DrawListBeginPrim: its caller is what owns the block (the hud's, the
+// movie's, ...), not DrawListBeginPrim itself.
 void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    const uint32_t owner = getRegU32(ctx, 31);
+    g_pendingOwner = getRegU32(ctx, 31);
+    g_beginOriginal(rdram, ctx, runtime);
+}
+
+// GsPktBegin: a block opens, its owner DrawListBeginPrim's caller or, for a
+// function that frames its block itself, the call site.
+void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t owner = g_pendingOwner != 0u ? g_pendingOwner : getRegU32(ctx, 31);
+    g_pendingOwner = 0u;
     if (g_depth > 0)
     {
         g_nested = true;
@@ -204,7 +217,7 @@ void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::gspkt::beginBlock(skip);
     g_envs.clear();
     g_blockOwner = owner;
-    g_beginOriginal(rdram, ctx, runtime);
+    g_pktBeginOriginal(rdram, ctx, runtime);
 }
 
 // The block's 2D from its GIF data (the DIRECTs' data in order, or the
@@ -392,7 +405,7 @@ void makeSkipped()
         ++g_lost;
 }
 
-void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+void afterEnd(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t)
 {
     const OpenBlock open = g_open.empty() ? OpenBlock{} : g_open.back();
     if (!g_open.empty())
@@ -403,7 +416,6 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
     thread_local std::vector<std::pair<uint32_t, uint32_t>> envs;
     envs.swap(g_envs);
     g_envs.clear();
-    const uint32_t envAt = envs.empty() ? 0u : envs.front().first;
     // An outer block that had one end inside it: its first Open was the
     // inner one's (GsPktBegin zeroes it), so its bytes are not read here.
     const bool nested = g_nested && g_depth == 0;
@@ -418,11 +430,11 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
     if (!open.made)
     {
         g_blockOwner = open.owner;
-        const uint32_t ctx =
-            g_rdram ? *reinterpret_cast<const uint32_t *>(g_rdram + physical(kDrawCtxPointer)) : 0u;
-        const uint32_t start = ctx != 0u ? *reinterpret_cast<const uint32_t *>(
-                                               g_rdram + physical(ctx + kBuilder + kBuilderFirstOpen)) : 0u;
-        const uint32_t end = envAt != 0u ? physical(envAt) : 0u;
+        // GsPktEnd's answer (the first Open's CNT tag) to past its RET (the
+        // memstack's top now).
+        const uint32_t start = getRegU32(ctx, 2);
+        const uint32_t top = rg::nativefx::listTop();
+        const uint32_t end = top != 0u ? physical(top) : 0u;
         if (!nested && g_state && start != 0u && end > physical(start) && end - physical(start) <= (1u << 20))
             readBlock(physical(start), end, shadowed ? &shadowBytes : nullptr);
         else if (start != 0u)
@@ -432,44 +444,10 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
         observeEnvironment(at, qwords);
 }
 
-// The functions that frame a block themselves (GsPktInit, GsPktBegin ...
-// GsPktEnd and the CALL tags inline; NATIVE-ONLY-NOTES.md, "Where the
-// builder lives"): the whole call is the block, read as DrawListEndPrim's
-// are, never skipped (they write their CALLs themselves). Not taken:
-// GfxEndFrame (it sends the frame's list before it returns) and
-// RefractionCaptureFrame (an effect's).
-constexpr uint32_t kFramingFunctions[] = {
-    0x00141000u, // GfxBlitTexRect
-    0x00142280u, // DrawListEmitFrameEnvMaybe
-    0x001423C0u, // DrawListClearScreen
-    0x001431C0u, // GfxDrawPerfMeter
-};
-constexpr size_t kFramingCount = sizeof(kFramingFunctions) / sizeof(kFramingFunctions[0]);
-PS2Runtime::RecompiledFunction g_framingOriginals[kFramingCount] = {};
-
-template <size_t I> void framingFunction(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    if (g_depth > 0)
-    {
-        g_nested = true;
-        if (!g_open.empty())
-            g_owners[g_open.back().owner].bad = true;
-    }
-    ++g_depth;
-    const bool effect = rg::nativefx::inEffectCall();
-    g_open.push_back({kFramingFunctions[I], false, false, effect, rg::nativefx::effectCallsBegun()});
-    rg::gspkt::beginBlock(false);
-    g_envs.clear();
-    g_blockOwner = kFramingFunctions[I];
-    rg::hooks::callThen(g_framingOriginals[I], rdram, ctx, runtime, &afterEnd, 0u);
-}
-
-template <size_t... I> bool hookFraming(PS2Runtime &runtime, std::index_sequence<I...>)
-{
-    return (rg::timing::hookFunction(runtime, kFramingFunctions[I], &framingFunction<I>, g_framingOriginals[I]) && ...);
-}
-
-void endPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+// GsPktEnd: a skipped block's 2D made from the shadow and its marker put
+// where its CALL would have gone (the caller writes the CALLs after this);
+// then, after it, a written block read.
+void pktEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (!g_open.empty() && g_open.back().skip && g_state)
     {
@@ -481,7 +459,7 @@ void endPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         makeSkipped();
         g_open.back().made = true;
     }
-    rg::hooks::callThen(g_endOriginal, rdram, ctx, runtime, &afterEnd, 0u);
+    rg::hooks::callThen(g_pktEndOriginal, rdram, ctx, runtime, &afterEnd, 0u);
 }
 
 // The kept block of `unit`, taken out (VIF1 thread).
@@ -543,14 +521,13 @@ void install(PS2Runtime &runtime)
     g_state = new rg::drawstate::Tracker();
     if (!rg::timing::hookFunction(runtime, kDrawEnvWritePacket, &drawEnvWritePacket, g_envOriginal) ||
         !rg::timing::hookFunction(runtime, kDrawListBeginPrim, &beginPrim, g_beginOriginal) ||
-        !rg::timing::hookFunction(runtime, kDrawListEndPrim, &endPrim, g_endOriginal))
+        !rg::timing::hookFunction(runtime, kGsPktBegin, &pktBegin, g_pktBeginOriginal) ||
+        !rg::timing::hookFunction(runtime, kGsPktEnd, &pktEnd, g_pktEndOriginal))
     {
         std::fprintf(stderr, "[native-blocks] not hooked: the VIF1 thread converts the 2D\n");
         return;
     }
     rg::gspkt::install(runtime);
-    if (!hookFraming(runtime, std::make_index_sequence<kFramingCount>{}))
-        std::fprintf(stderr, "[native-blocks] the functions that frame their own block: not all hooked\n");
     g_on = true;
 }
 

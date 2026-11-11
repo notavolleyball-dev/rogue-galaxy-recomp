@@ -117,11 +117,11 @@ stacked PRs at the end).
     record); region packs name them by that window. A T8 reads its 256
     entries by the same rule.
   - Next: fonts as glyph records, region packs' glyph variants, and
-    whatever the census names. (The functions that frame
-    their own block, GfxBlitTexRect, DrawListEmitFrameEnvMaybe,
-    DrawListClearScreen and GfxDrawPerfMeter, are blocks now too, read
-    and never skipped; GfxEndFrame is left, as it sends the list before it
-    returns, and RefractionCaptureFrame is an effect's.)
+    whatever the census names. (A block is now bounded by GsPktBegin
+    and GsPktEnd themselves, so the functions that frame their own block,
+    GfxBlitTexRect, GfxEndFrame, DrawListEmitFrameEnvMaybe,
+    DrawListClearScreen and GfxDrawPerfMeter, are blocks like the others,
+    skipped by the same rule; RefractionCaptureFrame's is an effect's.)
 - **M6 steps 1-4 are in too** (on the same branch, as they needed no
   play data): the lists run on the game thread as they are sent (the
   VIF1 thread is gone); the draw path's types are src/'s own; the
