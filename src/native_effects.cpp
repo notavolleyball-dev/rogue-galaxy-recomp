@@ -180,6 +180,53 @@ float readFloatAt(uint32_t address)
     return value;
 }
 
+// A name-table node's side: its width at +2, its height at +4 (s16).
+uint32_t nodeSide(uint32_t node, uint32_t at)
+{
+    if (node == 0u || !g_rdram)
+        return 0u;
+    int16_t v = 0;
+    std::memcpy(&v, g_rdram + physical(node + at), sizeof(v));
+    return v > 0 ? static_cast<uint32_t>(v) : 0u;
+}
+
+std::string readString(uint32_t address, size_t most = 128u)
+{
+    std::string out;
+    if (address == 0u || !g_rdram)
+        return out;
+    for (size_t i = 0; i < most; ++i)
+    {
+        const char c = static_cast<char>(g_rdram[physical(address + static_cast<uint32_t>(i))]);
+        if (c == 0)
+            break;
+        out.push_back(c);
+    }
+    return out;
+}
+
+// NameTableFindByName_159fb0(table, name, -1): the name with the table's
+// suffix (+0x1E4), hashed into one of 101 buckets at +0x30, each a list of
+// {entry, next} whose entry's name is at +8. The entry, or 0.
+uint32_t findByName(uint32_t table, uint32_t nameAt)
+{
+    if (table == 0u || nameAt == 0u)
+        return 0u;
+    const std::string name = readString(nameAt) + readString(table + 0x1E4u);
+    int32_t h = 0;
+    for (const char c : name)
+        h = ((((h & 0xFF) << 8) + static_cast<int32_t>(static_cast<int8_t>(c))) % 101) & 0xFF;
+    uint32_t node = read32(table + 0x30u + 4u * static_cast<uint32_t>(h));
+    for (int guard = 0; node != 0u && guard < 4096; ++guard)
+    {
+        const uint32_t entry = read32(node);
+        if (entry != 0u && readString(entry + 8u) == name)
+            return entry;
+        node = read32(node + 4u);
+    }
+    return 0u;
+}
+
 PS2Runtime::RecompiledFunction g_glareOriginal = nullptr;
 
 void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
@@ -242,15 +289,10 @@ void planeShadowEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t mask = a + 0x38D0u, blurred = a + 0x39B0u;
         request.workBases[0] = descriptorBase(mask);
         request.workBases[1] = descriptorBase(blurred);
-        const auto side = [](uint32_t node, uint32_t at) {
-            int16_t v = 0;
-            std::memcpy(&v, g_rdram + physical(node + at), sizeof(v));
-            return v > 0 ? static_cast<uint32_t>(v) : 0u;
-        };
-        request.workSizes[0][0] = side(mask, 2u);
-        request.workSizes[0][1] = side(mask, 4u);
-        request.workSizes[1][0] = side(blurred, 2u);
-        request.workSizes[1][1] = side(blurred, 4u);
+        request.workSizes[0][0] = nodeSide(mask, 2u);
+        request.workSizes[0][1] = nodeSide(mask, 4u);
+        request.workSizes[1][0] = nodeSide(blurred, 2u);
+        request.workSizes[1][1] = nodeSide(blurred, 4u);
         request.params[0] = readFloatAt(a + 0x3A18u);
         for (int c = 0; c < 3; ++c)
             request.params[1 + c] = readFloatAt(a + 0x3A20u + 4u * c);
@@ -280,14 +322,49 @@ void planeShadowBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 PS2Runtime::RecompiledFunction g_cblurOriginal = nullptr;
+uint32_t g_cblurUnit = 0u; // game thread
 
 void afterCBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::CBlur);
+    addRange(top, stackTop(), Effect::CBlur, g_cblurUnit);
+    g_cblurUnit = 0u;
 }
 
+// CBlurTexBlurMaybe_1789e0(obj): nothing unless obj+0; the trail P named at
+// obj+8 and its history Q at obj+0x28 (the draw context's name table,
+// ctx+0x3BA0); obj+0x6C picks the feedback blur over the history, obj+0x70
+// the history's strength; the blur's taps are the s32 tables at 0x47DFD0
+// (x) and 0x47DFE0 (y) (docs/NATIVE-ONLY-NOTES.md).
 void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t a = getRegU32(ctx, 4);
+    g_cblurUnit = 0u;
+    if (a != 0u && read32(a) != 0u)
+    {
+        const uint32_t table = read32(read32(kDrawCtxPointer) + 0x3BA0u);
+        const uint32_t p = findByName(table, a + 8u), q = findByName(table, a + 0x28u);
+        if (p != 0u && q != 0u)
+        {
+            rg::nativeproducer::PassRequest request;
+            request.kind = 4u; // native::PassKind::CBlur
+            request.workBases[0] = descriptorBase(p);
+            request.workBases[1] = descriptorBase(q);
+            request.workSizes[0][0] = nodeSide(p, 2u);
+            request.workSizes[0][1] = nodeSide(p, 4u);
+            request.workSizes[1][0] = nodeSide(q, 2u);
+            request.workSizes[1][1] = nodeSide(q, 4u);
+            request.params[0] = read32(a + 0x6Cu) != 0u ? 1.0f : 0.0f;
+            request.params[1] = float(int32_t(128.0f * readFloatAt(a + 0x70u))) / 128.0f;
+            request.params[2] = 255.0f / 128.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                // UVs of 16 + 8 tap sixteenths: a pixel and a half-tap.
+                request.params[3 + 2 * k] = 1.0f + float(static_cast<int32_t>(read32(0x47DFD0u + 4u * k))) * 0.5f;
+                request.params[4 + 2 * k] = 1.0f + float(static_cast<int32_t>(read32(0x47DFE0u + 4u * k))) * 0.5f;
+            }
+            g_cblurUnit = keepPass(request);
+        }
+    }
     rg::hooks::callThen(g_cblurOriginal, rdram, ctx, runtime, &afterCBlur, stackTop());
 }
 
@@ -413,14 +490,63 @@ void gameSceneTintApply(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 PS2Runtime::RecompiledFunction g_cblurDrawOriginal = nullptr;
+uint32_t g_cblurDrawUnit = 0u; // game thread
 
 void afterCBlurDraw(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::CBlurDraw);
+    addRange(top, stackTop(), Effect::CBlurDraw, g_cblurDrawUnit);
+    g_cblurDrawUnit = 0u;
 }
 
+// CBlurDrawMaybe_1784e0(obj, color, preset, small, dx, dy): nothing unless
+// obj+0 and not obj+0x68; the trail P named at obj+8, the sprite S at
+// obj+0x28 (small) or obj+0x48 (the frame's copy); the color's r, g, b, a
+// floats; dx and dy in the frame's pixels, scaled to S when small
+// (docs/NATIVE-ONLY-NOTES.md).
 void cblurDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t a = getRegU32(ctx, 4), color = getRegU32(ctx, 5);
+    const int32_t preset = static_cast<int32_t>(getRegU32(ctx, 6));
+    const bool small = getRegU32(ctx, 7) != 0u;
+    int32_t dx = static_cast<int32_t>(getRegU32(ctx, 8)), dy = static_cast<int32_t>(getRegU32(ctx, 9));
+    g_cblurDrawUnit = 0u;
+    if (a != 0u && color != 0u && read32(a) != 0u && read32(a + 0x68u) == 0u)
+    {
+        const uint32_t drawCtx = read32(kDrawCtxPointer);
+        const uint32_t table = read32(drawCtx + 0x3BA0u);
+        const uint32_t p = findByName(table, a + 8u), sprite = findByName(table, a + (small ? 0x28u : 0x48u));
+        const uint32_t env = read32(drawCtx + 0x270u);
+        const int32_t W = static_cast<int32_t>(read32(env + 4u)), H = static_cast<int32_t>(read32(env + 8u));
+        const int32_t w = static_cast<int32_t>(nodeSide(sprite, 2u)), h = static_cast<int32_t>(nodeSide(sprite, 4u));
+        if (p != 0u && sprite != 0u && env != 0u && W > 0 && H > 0)
+        {
+            if (small)
+            {
+                dx = dx * w / W;
+                dy = dy * h / H;
+            }
+            rg::nativeproducer::PassRequest request;
+            request.kind = 12u; // native::PassKind::CBlurDraw
+            request.workBases[0] = descriptorBase(p);
+            request.workBases[1] = descriptorBase(sprite);
+            request.workSizes[0][0] = nodeSide(p, 2u);
+            request.workSizes[0][1] = nodeSide(p, 4u);
+            request.workSizes[1][0] = static_cast<uint32_t>(w);
+            request.workSizes[1][1] = static_cast<uint32_t>(h);
+            request.params[0] = float(dx);
+            request.params[1] = float(dy);
+            request.params[2] = float(preset);
+            request.params[3] = small ? 1.0f : 0.0f;
+            for (int c = 0; c < 3; ++c)
+                request.params[4 + c] = float(int32_t(128.0f * readFloatAt(color + 4u * c))) / 128.0f;
+            request.params[7] = float(int32_t(64.0f * readFloatAt(color + 12u))) / 128.0f;
+            request.params[8] = float(W);
+            request.params[9] = float(H);
+            request.params[10] = float(static_cast<int32_t>(read32(env + 0x14u)));
+            request.params[11] = float(static_cast<int32_t>(read32(env + 0x18u)));
+            g_cblurDrawUnit = keepPass(request);
+        }
+    }
     rg::hooks::callThen(g_cblurDrawOriginal, rdram, ctx, runtime, &afterCBlurDraw, stackTop());
 }
 
@@ -1819,7 +1945,8 @@ bool isPass(Effect effect)
 {
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
            effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof ||
-           effect == Effect::Focus || effect == Effect::Shadow;
+           effect == Effect::Focus || effect == Effect::Shadow ||
+           effect == Effect::CBlur || effect == Effect::CBlurDraw;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

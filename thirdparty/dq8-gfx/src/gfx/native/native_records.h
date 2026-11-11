@@ -380,6 +380,10 @@ enum class PassKind : uint8_t
     // alpha, 4 colored), 5 the color clamp, 6-17 the blur's six offsets
     // (x, y) in pixels.
     PlaneShadow,
+    // CBlurTexBlurMaybe: the trail work[0] (P), its history work[1] (Q).
+    // params: 0 the feedback blur (else the history's), 1 the history's
+    // strength, 2 the color clamp, 3-10 the feedback's four taps (u, v) in
+    // texels.
     CBlur,
     // ScreenColorFilterMaybe: the frame's alpha rebuilt from its green, its
     // color then params 0-2 times that alpha. params 3: the green-to-alpha
@@ -401,6 +405,11 @@ enum class PassKind : uint8_t
     // pixels.
     ShadowMap,
     Flare,
+    // CBlurDrawMaybe: the trail work[0] (P), the sprite work[1] (S).
+    // params: 0-1 the shift (dx, dy), 2 the blend preset (the game's table
+    // at 0x449EF0), 3 S is small (a color, not the frame's copy), 4-7 the
+    // color, 8-9 the draw environment's size, 10-11 its frame's.
+    CBlurDraw,
 };
 
 struct Pass

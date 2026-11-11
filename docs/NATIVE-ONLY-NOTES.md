@@ -255,3 +255,47 @@ from the code.
 - **The hook emits:** a `Pass` (`PassKind::PlaneShadow`); the renderer
   clamps the mask and the copy through scratches (float targets don't clamp
   the way the GS's COLCLAMP did).
+
+### `CBlurTexBlurMaybe_1789e0` (M3)
+
+- **Arguments:** `a0` = an object. Nothing is drawn unless `+0` is
+  nonzero. The trail P is named at `+8` and its history Q at `+0x28`; both
+  are found in the draw context's name table (`ctx+0x3BA0`,
+  `NameTableFindByName_159fb0`: the name plus the table's suffix at
+  `+0x1E4`, hashed into 101 buckets at `+0x30`, each entry's name at `+8`).
+  `+0x6C` picks the feedback blur, `+0x70` (f) is the history's strength.
+  The taps are the s32 tables at `0x47DFD0` (x) and `0x47DFE0` (y), four
+  each.
+- **What it draws:**
+  - Without feedback, P into Q first (`GfxBlitTexRectPixelsAt_141810` is
+    (ctx, source, rect, destination, ...): Q keeps P as it was).
+  - On P, alpha kept (frame mask 1): an untextured `0xFF` sprite, then the
+    same sprite again as `Cs Ad` (A=Cs B=0 C=Ad D=0): P's color is its alpha
+    (the mask `CBlurDrawMaybe` wrote), doubled.
+  - Feedback: P onto itself, preset 9 (`Cs + Cd`), color `0x20`, eight
+    sprites at UV `16 + 8 tap` sixteenths (the four taps, twice).
+  - Otherwise: Q onto P, preset 9, color `128 strength`, UV one pixel over.
+  - P viewed as CT16, twice as tall, copied onto itself in eight-pixel
+    columns under frame mask 3 with TEXA `TA1 = 0x80`: its red and green
+    onto its blue and alpha. P's alpha is the trail.
+- **The hook emits:** a `Pass` (`PassKind::CBlur`). The renderer reads each
+  feedback tap from a copy of P as the tap before left it.
+
+### `CBlurDrawMaybe_1784e0` (M3)
+
+- **Arguments:** `a0` the object above (nothing unless `+0`, nor when
+  `+0x68`); `a1` a color (r, g, b, a floats); `a2` a blend preset; `a3`
+  small; `t0`, `t1` the shift (dx, dy). The sprite S is named at `+0x28`
+  when small, else at `+0x48`. When small, the shift is scaled from the
+  environment's size (`*(ctx+0x270)` `+4`, `+8`) to S's.
+- **What it draws:**
+  - Not small: the frame (`DrawEnvGetDispFbTexDesc_144a00`: the
+    environment's FRAME at `+0x54`, its size at `+0x14`, `+0x18`) copied
+    into S, W by H (`GfxBlitTexRectPixels_141710`).
+  - Small: S filled white, alpha 0x80.
+  - On S, alpha only (frame mask 2): 0 when shifted, then P's alpha at the
+    shift.
+  - On the frame, Z test ALWAYS without Z write, alpha kept (frame mask 1),
+    preset `a2`: S over the frame, color `128 (r, g, b)`, alpha `64 a`,
+    from `(-1 - dx, -2 - dy)` to `(W - dx - 1, H - dy - 2)`.
+- **The hook emits:** a `Pass` (`PassKind::CBlurDraw`).

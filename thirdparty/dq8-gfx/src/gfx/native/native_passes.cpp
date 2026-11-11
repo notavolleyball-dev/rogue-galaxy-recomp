@@ -32,6 +32,34 @@ Material spriteMaterial()
     return m;
 }
 
+// The game's blend presets (the table at 0x449EF0; GsPktSetBlendMode):
+// (A - B) C + D as the renderer's factors.
+Material presetBlend(Material m, int preset)
+{
+    m.blending = true;
+    m.blendOp = BlendOp::Add;
+    switch (preset)
+    {
+    case 1: m.srcFactor = BlendFactor::SrcAlpha, m.dstFactor = BlendFactor::InvSrcAlpha; break; // (Cs - Cd) As + Cd
+    case 2: m.srcFactor = BlendFactor::SrcAlpha, m.dstFactor = BlendFactor::One; break;         // Cs As + Cd
+    case 3:                                                                                      // Cd - Cs As
+        m.srcFactor = BlendFactor::SrcAlpha, m.dstFactor = BlendFactor::One;
+        m.blendOp = BlendOp::ReverseSubtract;
+        break;
+    case 5: m.srcFactor = BlendFactor::Zero, m.dstFactor = BlendFactor::One; break;         // Cd
+    case 6: m.srcFactor = BlendFactor::Zero, m.dstFactor = BlendFactor::SrcAlpha; break;    // Cd As
+    case 7: m.srcFactor = BlendFactor::Zero, m.dstFactor = BlendFactor::InvSrcAlpha; break; // Cd (1 - As)
+    case 8: m.srcFactor = BlendFactor::SrcAlpha, m.dstFactor = BlendFactor::Zero; break;    // Cs As
+    case 9: m.srcFactor = BlendFactor::One, m.dstFactor = BlendFactor::One; break;          // Cs + Cd
+    case 10:                                                                                 // Cd - Cs
+        m.srcFactor = BlendFactor::One, m.dstFactor = BlendFactor::One;
+        m.blendOp = BlendOp::ReverseSubtract;
+        break;
+    default: m.srcFactor = BlendFactor::One, m.dstFactor = BlendFactor::Zero; break; // 0, 4, 11: Cs
+    }
+    return m;
+}
+
 Material additive(Material m)
 {
     m.blending = true;
@@ -596,6 +624,114 @@ bool Renderer::expandPass(const Pass &pass)
             const float rgba[4] = {1.0f, 1.0f, 1.0f, pass.params[10]};
             passRect(frame, a, frameRect, uv, rgba, over);
         }
+        return true;
+    }
+    case PassKind::CBlur:
+    {
+        // CBlurTexBlurMaybe_1789e0. P's alpha is the trail's mask (CBlurDraw
+        // wrote it); its color becomes that mask (0xFF times its alpha),
+        // then either P's own taps added (feedback) or the history Q, P as
+        // it was before, added a pixel over at the strength; then P's red
+        // and green onto its blue and alpha, so its alpha is the trail.
+        const Id p = pass.work[0], q = pass.work[1];
+        float pw = 0.0f, ph = 0.0f, qw = 0.0f, qh = 0.0f;
+        if (!size(p, pw, ph) || !size(q, qw, qh))
+            return false;
+        const Id scratch = passScratch(7u, p);
+        if (scratch == 0u)
+            return false;
+        const bool feedback = pass.params[0] != 0.0f;
+        const float strength = pass.params[1], clampTo = pass.params[2];
+        const float whole[4] = {0.0f, 0.0f, pw, ph}, none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        Material plain = spriteMaterial();
+        plain.linear = false;
+        if (!feedback)
+            passRect(q, p, whole, whole, 1.0f, plain); // GfxBlitTexRectPixelsAt: P into Q
+        {
+            Material fill = spriteMaterial();
+            fill.colorWrite = 0x7u;
+            passRect(p, 0u, whole, none, clampTo, fill);
+            Material byAlpha = fill;
+            byAlpha.blending = true;
+            byAlpha.srcFactor = BlendFactor::DstAlpha; // A=Cs B=0 C=Ad D=0
+            byAlpha.dstFactor = BlendFactor::Zero;
+            passRect(p, 0u, whole, none, clampTo, byAlpha);
+        }
+        Material add = presetBlend(spriteMaterial(), 9);
+        add.colorWrite = 0x7u;
+        if (feedback)
+        {
+            // Eight of P's taps onto itself (the GS read what it had drawn:
+            // each tap from P as the one before left it).
+            for (int i = 0; i < 8; ++i)
+            {
+                Material copy = plain;
+                copy.colorClamp = clampTo;
+                passRect(scratch, p, whole, whole, 1.0f, copy);
+                const float u = pass.params[3 + 2 * (i % 4)], v = pass.params[4 + 2 * (i % 4)];
+                const float uv[4] = {u, v, pw + u, ph + v};
+                const float rgba[4] = {0x20 / 128.0f, 0x20 / 128.0f, 0x20 / 128.0f, 1.0f};
+                passRect(p, scratch, whole, uv, rgba, add);
+            }
+        }
+        else
+        {
+            const float uv[4] = {1.0f, 1.0f, pw + 1.0f, ph + 1.0f};
+            passRect(p, q, whole, uv, strength, add);
+        }
+        Material clamped = plain;
+        clamped.colorClamp = clampTo;
+        passRect(scratch, p, whole, whole, 1.0f, clamped);
+        Material swap = plain;
+        swap.function = TextureFunction::Decal;
+        swap.shuffle = ChannelShuffle::RedGreenToBlueAlpha;
+        passRect(p, scratch, whole, whole, 1.0f, swap);
+        return true;
+    }
+    case PassKind::CBlurDraw:
+    {
+        // CBlurDrawMaybe_1784e0. S is the frame's copy, or a small sprite
+        // made white; its alpha becomes the trail P's, shifted; S then laid
+        // over the frame by the call's preset, shifted back, the frame's
+        // alpha kept.
+        const Id frame = pass.frame, p = pass.work[0], sprite = pass.work[1];
+        float fw = 0.0f, fh = 0.0f, pw = 0.0f, ph = 0.0f, sw = 0.0f, sh = 0.0f;
+        if (!size(frame, fw, fh) || !size(p, pw, ph) || !size(sprite, sw, sh))
+            return false;
+        const float dx = pass.params[0], dy = pass.params[1];
+        const bool small = pass.params[3] != 0.0f;
+        const float W = pass.params[8], H = pass.params[9];
+        const float infoW = pass.params[10] > 0.0f ? pass.params[10] : fw;
+        const float infoH = pass.params[11] > 0.0f ? pass.params[11] : fh;
+        const float spriteRect[4] = {0.0f, 0.0f, sw, sh}, none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        Material plain = spriteMaterial();
+        if (!small)
+        {
+            // GfxBlitTexRectPixels: the frame into S, W by H.
+            const float from[4] = {0.0f, 0.0f, infoW, infoH}, to[4] = {0.0f, 0.0f, W, H};
+            passRect(sprite, frame, to, from, 1.0f, plain);
+        }
+        else
+        {
+            Material white = spriteMaterial();
+            passRect(sprite, 0u, spriteRect, none, 1.0f, white);
+        }
+        Material alphaOnly = spriteMaterial();
+        alphaOnly.colorWrite = 0x8u;
+        if (dx != 0.0f || dy != 0.0f)
+        {
+            const float rgba[4] = {1.0f, 1.0f, 1.0f, 0.0f};
+            passRect(sprite, 0u, spriteRect, none, rgba, alphaOnly);
+        }
+        {
+            const float rect[4] = {dx, dy, sw + dx, sh + dy}, uv[4] = {0.0f, 0.0f, pw, ph};
+            passRect(sprite, p, rect, uv, 1.0f, alphaOnly);
+        }
+        Material over = presetBlend(spriteMaterial(), int(pass.params[2]));
+        over.colorWrite = 0x7u;
+        const float rect[4] = {-1.0f - dx, -2.0f - dy, W - dx - 1.0f, H - dy - 2.0f};
+        const float rgba[4] = {pass.params[4], pass.params[5], pass.params[6], pass.params[7]};
+        passRect(frame, sprite, rect, spriteRect, rgba, over);
         return true;
     }
     case PassKind::PlaneShadow:
