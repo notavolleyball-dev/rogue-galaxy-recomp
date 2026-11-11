@@ -43,7 +43,7 @@ terms:
   deletes. A milestone that adds the new path but leaves the old one is half
   done.
 - **No permanent switches back to the old way.** The `gs-path-final` tag
-  and the reference captures are the comparison. An env switch that brings
+  is the comparison. An env switch that brings
   back deleted behavior is not added.
 - **Scope changes are the user's decision.** If the plan is wrong (a hook
   point does not exist, a function cannot be skipped), say so with the
@@ -56,11 +56,12 @@ terms:
 - **The emulated GS path is removed**, not kept as a fallback. This
   supersedes the direction of issue 10 (`aaec68f`), which kept the GS path as
   the default and the fallback (NATIVE-RENDERER.md, phase 5's status note).
-- **Snapshot: a tag plus reference captures.** Before anything is deleted,
-  the last commit with the GS path is tagged `gs-path-final`, and a fixed set
-  of reference frames is captured from it (M0). The game's data never
-  changes, so those captures remain a valid oracle permanently. Anything else
-  is answered by building the tag.
+- **Snapshot: a tag.** The last commit with the GS path is tagged
+  `gs-path-final`. When something looks wrong, the same save is loaded on a
+  build of the tag and compared by eye. There are no recorded reference
+  frames: input replay is not deterministic enough for pixel comparisons,
+  and chasing replay noise would cost more than it finds (decided
+  2026-11-11).
 - **Structure before features.** TAA, motion vectors, MSAA, UI at output
   resolution and ray tracing wait until this plan is done. The record
   contract (M2) carries what they will need (object identity, the previous
@@ -279,9 +280,12 @@ stays as it is, the only v1 holdover, listed in M2's done line).
    - side effects;
    - what the hook emits;
    - open points for a running game to settle.
-4. **Checked against references.** Every milestone states a framediff
-   tolerance and lists the differences it expects. A difference not listed
-   is a bug until explained.
+4. **Checked by counters and by play.** Every milestone states its checks
+   as log counters (tripwire hits, refusals, packets still converted,
+   chunks still run on the VU1), which do not depend on timing or input,
+   and lists the visible differences it expects. The user plays the
+   milestone and marks faults with F8. A visible difference not listed is a
+   bug until explained.
 5. **Delete as you go.** Each milestone deletes the code it makes dead,
    along with its env switches. No permanent A/B switches: the tag is the A.
 6. **The renderer stays clean.** From M2 on it receives no GS semantics
@@ -294,15 +298,14 @@ For each milestone, Claude provides:
 - the branch;
 - what changed and what was deleted;
 - build notes;
-- the routes to run;
-- the expected `[native-pipeline]` and `[native-producer]` counters;
-- the framediff command.
+- what to play (the scenes and effects the milestone touched);
+- the expected `[native-pipeline]` and `[native-producer]` counters.
 
 The user reports back:
 - build errors, verbatim;
-- `tools/native-check.sh NAME` output;
-- the framediff summary;
-- F8 bug marks for anything wrong ([BUG-MARKS.md](BUG-MARKS.md)).
+- `tools/native-check.sh NAME` output and the stats lines;
+- F8 bug marks for anything wrong ([BUG-MARKS.md](BUG-MARKS.md)), with a
+  note when the tag draws the same scene differently.
 
 A milestone is merged when its "Done when" holds.
 
@@ -310,10 +313,10 @@ A milestone is merged when its "Done when" holds.
 
 | | Milestone | Needs the game running for | Size |
 |---|---|---|---|
-| M0 | Groundwork: tag, references, tools, contract | the reference captures (once) | S |
+| M0 | Groundwork: tag, tools, compile check, contract | nothing | S |
 | M1 | Delete the GS backend; port texture packs | testing | M |
 | M2 | Record contract v2: no GS semantics in the renderer | testing | M-L |
-| M3 | Effects as renderer passes, from their parameters | testing, plus routes for the rare effects | L |
+| M3 | Effects as renderer passes, from their parameters | testing, including reaching the rare effects | L |
 | M4 | 2D at its source | testing | L |
 | M5 | Geometry off VU1 memory | testing | XL |
 | M6 | Remove the GS front end and the packet path | testing | M |
@@ -323,26 +326,6 @@ M1 to M6 run in order. Within M3 and M4, items are independent.
 ### M0: groundwork (no change to the game)
 
 **Claude, without the game** (branch `native-only/m0-plan`):
-- [done] `tools/run/reference.sh LABEL MODE [ROUTE...]` runs one build in
-  one mode (`gs` or `native`) over the reference routes, with the
-  deterministic setup of `native-run.sh`:
-  - `RG_INPUT_CLOCK=pad`, `RG_FPS=30`, scale 1x;
-  - a fresh copy of each route's memory card;
-  - default settings;
-  - `DQ8_GFX_SCREENSHOT_DIR` every N pad reads.
-
-  It writes `build/reference/<route>/<label>/frame_N.ppm`, the game's log and
-  a manifest. Captures come from the disc and are never committed. `EXE=`
-  points it at another build (the tag's).
-- [done] `tools/framediff.py A B`, or `--root build/reference LABEL_A
-  LABEL_B` for every route, compares capture sets:
-  - per frame: the pixels over the tolerance, the largest difference and the
-    box they sit in, plus a heat-map PNG with `--heatmaps`;
-  - per route: a summary;
-  - frames present in only one set;
-  - the exit status, for scripts.
-
-  Checked on synthetic frames.
 - [done] RGDecomp at its pinned commit in `build/rgdecomp`, and
   `tools/fninfo.py NAME_OR_ADDRESS`, which prints a function's map entry,
   callers and callees (main executable), RGDecomp's C and, with `--dis`, its
@@ -352,44 +335,16 @@ M1 to M6 run in order. Within M3 and M4, items are independent.
 - [in progress] The compile check, `tools/docker/compile-check.sh`: an
   x86_64 Arch Linux container on the development machine builds the
   checkout (`setup.py tools`, `recompile`, `build`) without running it. The
-  build trees live in the Docker volume `rg-build`. The submodules are
-  checked out.
+  build trees live in the Docker volume `rg-build`.
 - [done, for review] The record contract v2, above.
 
-**User, once, on Linux:**
-- The tag `gs-path-final` exists (done 2026-11-11, `8431766`).
-- Build the tag in a worktree of its own:
+**User:**
+- [done] The tag `gs-path-final` (`8431766`) is on origin; a build of it is
+  kept for side-by-side checks.
+- Review the record contract v2.
 
-      git worktree add ../rg-gs-path-final gs-path-final
-      cd ../rg-gs-path-final && git submodule update --init && ln -s "$OLDPWD/disc" disc
-      python setup.py tools && python setup.py recompile && python setup.py build
-
-- From this checkout (the script and the route cards in `build/run/`), capture
-  it twice:
-
-      EXE=../rg-gs-path-final/build/game/src/roguegalaxy tools/run/reference.sh tag-gs gs
-      EXE=../rg-gs-path-final/build/game/src/roguegalaxy tools/run/reference.sh tag-native native
-      python3 tools/framediff.py --root build/reference tag-gs tag-native --quiet
-
-  `tag-gs` is the oracle for what the game should look like; `tag-native` is
-  the baseline for what the native path draws today. The framediff between
-  them separates "native was already wrong" from regressions introduced
-  later. Also run `tag-native` a second time under another label, to confirm
-  that two runs give identical frames: every later "pixel for pixel" check
-  depends on it.
-- **Routes in the script:** walk, town, battle, gate, late (Zerard), title
-  (boot, the opening movie, the title screen). Each uses the memory cards
-  `tools/bench/walk.sh` and `tools/run/late-run.sh` keep in `build/run/`.
-  **Still needed from you:** an input script (`RG_INPUT` entries) for an
-  event with an item message and a battle dissolve, and for the item menu.
-  Routes for the rare effects (lens flare, shadow map, focus) follow once
-  M3's notes say how to reach them.
-
-**Done when:**
-- both capture sets exist and are reproducible;
-- framediff reads them;
-- the compile check builds the tag;
-- the user has reviewed the record contract v2.
+**Done when** the compile check builds the branch and the user has reviewed
+the record contract v2.
 
 ### M1: delete the GS backend
 
@@ -430,8 +385,8 @@ The native pipeline becomes the only path:
 - the F1 stats page.
 
 **Done when:**
-- every reference route matches the native baseline **pixel for pixel**
-  (nothing the native path draws has changed);
+- the game plays as on the tag's native pipeline (nothing the native path
+  draws has changed), with the tripwire's replacement never hit;
 - whole-texture packs load (one check on the user's pack);
 - `native-check.sh` is clean;
 - the GS memory is no longer allocated (the log says so).
@@ -457,10 +412,10 @@ producer, or into a renderer feature with a normal name:
 
 The raw chunk path is left as it is until M5, which replaces it.
 
-**Done when** the reference routes match the native baseline within a stated
-tolerance (float math moves edges by a level or two). The expected
-differences are listed, among them glare and bloom where alpha was over
-0x80. No `0x80` remains in the renderer library.
+**Done when** the game plays as before, apart from the differences listed
+here in advance (among them glare and bloom where alpha was over 0x80,
+which should now match the tag's GS path), and no `0x80` remains in the
+renderer library.
 
 ### M3: effects as passes
 
@@ -499,8 +454,8 @@ goes.
 **Done when:**
 - Salgin's first scene draws in at most about 25 render passes, with no
   feedback copies (stats line);
-- every reference route is within tolerance;
-- the producer's stats show no effect built from sprites.
+- the producer's stats show no effect built from sprites;
+- each ported effect, played, looks as on the tag.
 
 ### M4: 2D at its source
 
@@ -522,9 +477,8 @@ goes.
 - **The title screen's** 2D pieces of unknown source are found here.
 
 **Done when:**
-- the 2D converter receives no packet on any reference route except those
-  of the VU1 packet programs (counter);
-- every route is within tolerance;
+- the 2D converter receives no packet except those of the VU1 packet
+  programs (counter, over a play session with menus, battles and events);
 - the HUD size and widescreen options behave as on the tag;
 - region packs load.
 
@@ -569,9 +523,8 @@ indexed meshes and GPU culling. The PS2's guard-band skip goes; edges may
 differ slightly, and those differences are listed.
 
 **Done when:**
-- no draw runs the compiled VU1 on any reference route;
-- the VIF1 thread unpacks no model geometry;
-- every route is within tolerance;
+- no draw runs the compiled VU1 (counter, over a play session);
+- the VIF1 thread unpacks no model geometry (counter);
 - the field walk's frame time is measured against M4 (the game thread's
   list copy is the expected gain).
 
@@ -596,7 +549,6 @@ sends; for graphics, that should be nothing.
 **Done when:**
 - `src/` includes no GS header except the runtime's stubs that the game's
   waits need;
-- every reference route is within tolerance;
 - the user's playthrough route passes: title, Salgin, the first battles, a
   boss, menus, a save and a load, a movie.
 
@@ -609,10 +561,9 @@ materials from M5).
 
 ## Risks
 
-- **No live oracle.** References cover fixed routes only. Areas the routes
-  miss (later planets, rare effects) are first seen in play. Mitigations:
-  more routes as notes reveal where things are, F8 marks, and building the
-  tag to compare.
+- **No live oracle.** With the GS path gone, faults are found in play.
+  Mitigations: counters that catch whole classes of fault (anything refused
+  or left over), F8 marks, and the tag built to compare a scene by eye.
 - **Skipped originals with side effects that affect game logic**, not just
   the picture. Rule 2 (the two steps) and the store review in each note are
   the guard.
