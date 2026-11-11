@@ -236,6 +236,9 @@ struct State
     // Every palette record's colours (palettes are never evicted), for the
     // texture packs' hash of a palette.
     std::unordered_map<native::Id, std::shared_ptr<const std::vector<uint8_t>>> paletteColors;
+    // A palette's 16 entries from `first` (a CLUT window CSA selects), as a
+    // palette of its own: by (palette, first).
+    std::unordered_map<uint64_t, native::Id> paletteWindows;
     // Texture packs (texture_pack.h): by texture and palette ids, the pack's
     // picture made a texture record of its own (id), none, or still being
     // read; PCSX2's hashes of each, made once. Forgotten when the packs
@@ -1694,6 +1697,36 @@ void cutRegion(State &s, uint64_t clamp, native::Material &m);
 void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh, native::Material &m);
 namespace
 {
+// Locked. The 16 entries of palette `id` from `first` as a palette record
+// of their own (a CSA window); 0 when it has fewer.
+native::Id paletteWindow(State &s, native::Id id, uint32_t first)
+{
+    const uint64_t key = (uint64_t(id) << 32) | first;
+    if (const auto known = s.paletteWindows.find(key); known != s.paletteWindows.end())
+        return known->second;
+    const auto colors = s.paletteColors.find(id);
+    if (colors == s.paletteColors.end() || !colors->second)
+        return 0u;
+    // The entry size from the record's bytes: CT16 2, CT32 4 (256 or 16 entries).
+    const size_t bytes = colors->second->size();
+    const uint32_t entryBytes = (bytes == 256u * 2u || bytes == 16u * 2u) ? 2u : 4u;
+    if (bytes < size_t(first + 16u) * entryBytes)
+        return 0u;
+    auto window = std::make_shared<std::vector<uint8_t>>(colors->second->begin() + first * entryBytes,
+                                                         colors->second->begin() + (first + 16u) * entryBytes);
+    native::Palette record;
+    record.format = entryBytes == 2u ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
+    record.scale = texelScale(record.format);
+    record.id = s.nextPalette++;
+    record.entries = 16u;
+    s.paletteColors[record.id] = window;
+    record.colors = std::move(window);
+    s.paletteWindows[key] = record.id;
+    const native::Id made = record.id;
+    native::push(std::move(record));
+    return made;
+}
+
 bool materialOf(State &s, const GSDrawState &state, native::Material &m)
 {
     const GSContext &c = state.context;
@@ -2477,7 +2510,14 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
         return false;
     if (indexedPsm(psm))
     {
-        if (t.csa != 0u)
+        // A CLUT offset (CSA) reads 16 entries of the CLUT buffer from
+        // there: a T4 whose TEX0 loads its CLUT puts its CBP's first 16
+        // there (the window is those); one that does not reads what an
+        // earlier load left, taken as the CBP's 256-entry CLUT's entries
+        // from 16 CSA on (sub-palettes of one CLUT, the common use). A T8
+        // with an offset is not drawn.
+        const bool t4 = !(psm == kT8 || psm == 0x1Bu);
+        if (t.csa != 0u && !t4)
             return false;
         const uint32_t entries = (psm == kT8 || psm == 0x1Bu) ? 256u : 16u;
         const auto p = s.residentPalette.find(t.cbp);
@@ -2494,6 +2534,12 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
             m.palette = p->second;
         if (m.palette == 0u)
             return false;
+        if (t.csa != 0u && t.cld == 0u)
+        {
+            m.palette = paletteWindow(s, m.palette, 16u * t.csa);
+            if (m.palette == 0u)
+                return false;
+        }
     }
     return m.texture != 0u;
 }
@@ -2684,7 +2730,8 @@ void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh,
         return;
     const bool sixteen = cpsm == kCT16 || cpsm == kCT16S;
     const uint32_t entries = psm == kT4 ? 16u : (sixteen ? 512u : 256u);
-    if (t.csa != 0u || state.texclut.cou != 0u || state.texclut.cov != 0u || entries == 512u ||
+    // (A CSA window is m.palette already: materialOf's paletteWindow.)
+    if ((t.csa != 0u && psm != kT4) || state.texclut.cou != 0u || state.texclut.cov != 0u || entries == 512u ||
         colors->second->size() < size_t(entries) * (sixteen ? 2u : 4u))
     {
         ++s.counts.regionsUnhashable;

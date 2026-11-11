@@ -111,9 +111,13 @@ stacked PRs at the end).
     to move), `[native-env]` (libgraph's environment taken), `[vu1native]`
     (chunks left to the VU1). Also the game thread's frame time (lists now
     run on it).
-  - Next: fonts as glyph records, region packs' glyph variants (and CSA
-    palettes, which the producer refuses outright today: a glyph border
-    may be one), and whatever the census names. (The functions that frame
+  - CSA palettes are drawn now (they were refused outright): a T4 whose
+    TEX0 loads its CLUT reads its CBP's first 16 entries; one that does
+    not reads the CBP CLUT's entries from 16 CSA on (a derived palette
+    record); region packs name them by that window. A T8 with an offset
+    is still refused.
+  - Next: fonts as glyph records, region packs' glyph variants, and
+    whatever the census names. (The functions that frame
     their own block, GfxBlitTexRect, DrawListEmitFrameEnvMaybe,
     DrawListClearScreen and GfxDrawPerfMeter, are blocks now too, read
     and never skipped; GfxEndFrame is left, as it sends the list before it
@@ -808,7 +812,7 @@ Not done:
     producer holds, and drawn from the pack's picture.
   - Not done:
     - the border and shadow versions of glyphs;
-    - a region whose CLUT is offset (CSA, TEXCLUT);
+    - a region whose CLUT is offset by TEXCLUT (CSA is in code, below);
     - a T8 with a CT16 CLUT (its 512-entry window reads GS memory the
       producer does not hold).
   - The stats line counts `regions looked up`, `pictures made`,
