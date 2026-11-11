@@ -484,6 +484,31 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
         m_modelUploaded += bytes / uint32_t(sizeof(ModelVertex));
         m_modelPending.clear();
     }
+    // The model chunks drawn this once.
+    if (!m_transientVertices.empty())
+    {
+        const uint32_t bytes = static_cast<uint32_t>(m_transientVertices.size() * sizeof(ModelVertex));
+        if (!growBuffer(device, m_transientBuffer, m_transientCapacity, bytes, SDL_GPU_BUFFERUSAGE_VERTEX, error))
+            return false;
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        info.size = bytes;
+        SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &info);
+        void *mapped = transfer ? SDL_MapGPUTransferBuffer(device, transfer, false) : nullptr;
+        if (!mapped)
+        {
+            error = std::string("SDL_CreateGPUTransferBuffer(model chunks once): ") + SDL_GetError();
+            return false;
+        }
+        std::memcpy(mapped, m_transientVertices.data(), bytes);
+        SDL_UnmapGPUTransferBuffer(device, transfer);
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
+        const SDL_GPUTransferBufferLocation source{transfer, 0u};
+        const SDL_GPUBufferRegion destination{m_transientBuffer, 0u, bytes};
+        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        SDL_EndGPUCopyPass(copy);
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+    }
     // The frame's model rows and palettes (at least one of each: the
     // model stage's bindings are made for every pass).
     {
@@ -529,7 +554,7 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
         m_firstIndex.push_back(static_cast<uint32_t>(indices));
         vertices += vertexCount(d);
         indices += d.indices.size();
-        anyRetained = anyRetained || d.retained != 0u;
+        anyRetained = anyRetained || d.retained != 0u || d.hasModelRow;
     }
     if (indices == 0u && !anyRetained)
         return true;
@@ -642,7 +667,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
     {
         const MeshDraw &d = m_frameMeshes[n];
         DrawPlan &plan = m_drawPlans[n];
-        const Retained *const retained = retainedOf(d);
+        const Retained *const retained = retainedAt(n);
         if (d.retained != 0u && !retained)
             ++m_retainedMissing;
         if (retained ? retained->count == 0u : d.indices.empty())
@@ -921,7 +946,7 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
         const DrawPlan &d = m_drawPlans[n];
         // A retained mesh is a call of its own, from its own buffer, its row
         // the call's first instance.
-        const Retained *const retained = d.pipeline ? retainedOf(m_frameMeshes[n]) : nullptr;
+        const Retained *const retained = d.pipeline ? retainedAt(n) : nullptr;
         uint32_t count = retained ? retained->count : static_cast<uint32_t>(m_frameMeshes[n].indices.size());
         if (!d.pipeline || count == 0u)
         {
@@ -994,7 +1019,7 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
         }
         if (retained && retained->model)
         {
-            const SDL_GPUBufferBinding modelBinding{m_modelBuffer, 0u};
+            const SDL_GPUBufferBinding modelBinding{retained->transient ? m_transientBuffer : m_modelBuffer, 0u};
             SDL_BindGPUVertexBuffers(pass, 0, &modelBinding, 1);
             SDL_GPUBuffer *storage[3] = {m_drawBuffer, m_modelRowBuffer, m_paletteBuffer};
             SDL_BindGPUVertexStorageBuffers(pass, 0, storage, 3);
@@ -1086,6 +1111,23 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     m_drawTable.resize(count);
     m_modelRows.clear();
     m_paletteData.clear();
+    // The model chunks drawn this once: their triangles, for the frame.
+    m_transient.assign(count, Retained{});
+    m_transientVertices.clear();
+    for (size_t n = 0; n < count; ++n)
+    {
+        const MeshDraw &d = m_frameMeshes[n];
+        if (!d.hasModelRow || d.retained != 0u || d.modelInputs.empty())
+            continue;
+        const uint32_t triangles = modelTriangleCount(d.modelInputs.size(), d.modelList);
+        if (triangles == 0u)
+            continue;
+        const size_t at = m_transientVertices.size();
+        m_transientVertices.resize(at + size_t(triangles) * 3u);
+        modelTriangles(d.modelInputs, d.modelList, m_transientVertices.data() + at);
+        m_transient[n] = {static_cast<uint32_t>(at), triangles * 3u, true, true};
+        ++m_modelTransient;
+    }
     m_passPlans.clear();
     // The Clear records before the draw `upTo` (and at the end, all), each
     // a pass of its own, in order with the draws.
@@ -1317,12 +1359,12 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
     m_staticBuffer = nullptr;
     if (m_modelVertex)
         SDL_ReleaseGPUShader(device, m_modelVertex);
-    for (SDL_GPUBuffer *b : {m_modelBuffer, m_modelRowBuffer, m_paletteBuffer})
+    for (SDL_GPUBuffer *b : {m_modelBuffer, m_modelRowBuffer, m_paletteBuffer, m_transientBuffer})
         if (b)
             SDL_ReleaseGPUBuffer(device, b);
     m_modelVertex = nullptr;
-    m_modelBuffer = m_modelRowBuffer = m_paletteBuffer = nullptr;
-    m_modelRowCapacity = m_paletteCapacity = 0u;
+    m_modelBuffer = m_modelRowBuffer = m_paletteBuffer = m_transientBuffer = nullptr;
+    m_modelRowCapacity = m_paletteCapacity = m_transientCapacity = 0u;
     m_modelPending.clear();
     m_modelUsed = m_modelUploaded = 0u;
     // What the buffer held is gone with it: the producer starts again.

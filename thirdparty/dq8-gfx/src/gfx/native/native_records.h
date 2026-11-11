@@ -364,6 +364,10 @@ struct MeshDraw
     bool hasModelRow = false;
     ModelRow modelRow{};
     std::vector<float> palette;
+    // A model chunk drawn this once (with hasModelRow, no `retained`): its
+    // inputs ride with the draw (a strip, or a list with modelList).
+    std::vector<ModelInput> modelInputs;
+    bool modelList = false;
 };
 
 // What a 2D draw belongs to, for passes that treat the layers apart (the

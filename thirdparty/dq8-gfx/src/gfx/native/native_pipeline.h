@@ -91,6 +91,8 @@ struct ModelVertex
 };
 static_assert(sizeof(ModelVertex) == 176u, "tightly packed");
 constexpr uint32_t kModelVertices = 1u << 18; // 44 MiB
+uint32_t modelTriangleCount(size_t count, bool list);
+void modelTriangles(const std::vector<ModelInput> &in, bool list, ModelVertex *out);
 
 // Bumped when the renderer lets go of every retained mesh (its buffer
 // filled): the ids the producer handed out before are no longer drawn, and
@@ -411,7 +413,16 @@ private:
     {
         uint32_t first = 0, count = 0; // vertices
         bool model = false;            // a model chunk's, in m_modelBuffer (ModelVertex)
+        bool transient = false;        // this frame's alone, in m_transientBuffer
     };
+    // The frame mesh `n`'s: a retained mesh's or model chunk's, or a model
+    // chunk drawn this once (m_transient).
+    const Retained *retainedAt(size_t n) const
+    {
+        if (n < m_transient.size() && m_transient[n].count != 0u)
+            return &m_transient[n];
+        return n < m_frameMeshes.size() ? retainedOf(m_frameMeshes[n]) : nullptr;
+    }
     void retain(const RetainedMesh &mesh);
     const Retained *retainedOf(const MeshDraw &draw) const
     {
@@ -438,6 +449,12 @@ private:
     SDL_GPUBuffer *m_modelRowBuffer = nullptr, *m_paletteBuffer = nullptr;
     uint32_t m_modelRowCapacity = 0, m_paletteCapacity = 0;
     uint64_t m_modelDefined = 0, m_modelDrawn = 0, m_modelDrawnReported = 0;
+    // Model chunks drawn this once: their triangles, made per frame.
+    std::vector<Retained> m_transient;        // per frame mesh
+    std::vector<ModelVertex> m_transientVertices;
+    SDL_GPUBuffer *m_transientBuffer = nullptr;
+    uint32_t m_transientCapacity = 0;
+    uint64_t m_modelTransient = 0, m_modelTransientReported = 0;
     std::vector<GpuDraw> m_drawTable;   // per frame mesh
     std::vector<DrawPlan> m_drawPlans;  // per frame mesh
     std::vector<PassPlan> m_passPlans;

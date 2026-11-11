@@ -431,7 +431,8 @@ thread_local MeshRetain t_retain;
 // the first time, the program's constants and its bones for this draw.
 struct ModelPayload
 {
-    bool active = false, define = false, list = false;
+    // transient: drawn this once, its inputs with it (no id yet, or ever).
+    bool active = false, define = false, list = false, transient = false;
     std::vector<dq8::gfx::native::ModelInput> inputs;
     dq8::gfx::native::ModelRow row{};
     std::vector<float> palette;
@@ -1307,12 +1308,13 @@ public:
     // flags, its row, its palette, and its inputs when it defines them.
     void model(const ModelPayload &m)
     {
-        const uint32_t inputs = m.define ? static_cast<uint32_t>(m.inputs.size()) : 0u;
+        const uint32_t inputs = m.define || m.transient ? static_cast<uint32_t>(m.inputs.size()) : 0u;
         const uint32_t floats = static_cast<uint32_t>(m.palette.size());
         const uint32_t size = 16u + static_cast<uint32_t>(sizeof(m.row)) + floats * 4u +
                               inputs * static_cast<uint32_t>(sizeof(dq8::gfx::native::ModelInput));
         uint8_t *at = append(Kind::Model, size, ~0u, ~0u, 0u);
-        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u), inputs, floats, 0u};
+        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u) | (m.transient ? 4u : 0u), inputs,
+                                  floats, 0u};
         std::memcpy(at, head, sizeof(head));
         at += 16u;
         std::memcpy(at, &m.row, sizeof(m.row));
@@ -1535,6 +1537,7 @@ private:
                         m.active = true;
                         m.define = (head[0] & 1u) != 0u;
                         m.list = (head[0] & 2u) != 0u;
+                        m.transient = (head[0] & 4u) != 0u;
                         std::memcpy(&m.row, from, sizeof(m.row));
                         from += sizeof(m.row);
                         m.palette.resize(head[2]);
@@ -1857,6 +1860,7 @@ public:
                     m_nativeBounds.made = false;
                     t_model.active = true;
                     t_model.define = false;
+                    t_model.transient = false;
                     t_model.list = false;
                     m_modelId = mark->chunk.id;
                     native = m_nativeProgram;
@@ -1889,27 +1893,26 @@ public:
                 {
                     native = m_nativeProgram;
                     t_model.active = false;
-                    uint32_t modelId = 0u;
                     if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
                     {
-                        // M5: a chunk seen before goes to the model vertex
-                        // stage, its inputs once; no vertex is made here.
+                        // M5: the chunk goes to the model vertex stage. Seen
+                        // in two lists, it is kept under an id (its inputs
+                        // once); before that, or when its inputs change
+                        // from frame to frame (cloth), its inputs go with
+                        // this draw. No vertex is made here.
                         const uint8_t *data = memory.getVU1Data();
-                        modelId = modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
+                        const uint32_t modelId =
+                            modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
+                        t_model.transient = modelId == 0u;
                         if (modelId != 0u)
-                        {
                             learnChunk(*native, data, top, modelId);
-                            if (t_model.define)
-                                rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
-                            rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
-                            rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
-                            m_nativeBounds.made = false;
-                            t_model.active = true;
-                            m_modelId = modelId;
-                        }
-                    }
-                    if (gpu && modelId != 0u)
-                    {
+                        if (t_model.define || t_model.transient)
+                            rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
+                        rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
+                        rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
+                        m_nativeBounds.made = false;
+                        t_model.active = true;
+                        m_modelId = modelId;
                     }
                     else if (gpu)
                     {

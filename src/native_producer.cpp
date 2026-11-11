@@ -2162,11 +2162,17 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     std::memcpy(draw.rawHeader, &h, sizeof(h));
     std::memcpy(draw.rawColorMax, h.colorMax, sizeof(draw.rawColorMax));
     draw.rawColorScale = kUnit;
-    if (retained != 0u)
+    if (retained != 0u || chunkModel)
     {
         // The renderer draws it from its own buffer and judges the
-        // program's cull on the GPU (cullMesh's rule, from these).
+        // program's cull on the GPU (cullMesh's rule, from these). A model
+        // chunk drawn this once (no id) brings its inputs.
         draw.retained = retained;
+        if (chunkModel && retained == 0u && chunkModel->inputs)
+        {
+            draw.modelInputs = *chunkModel->inputs;
+            draw.modelList = chunkModel->list;
+        }
         std::memcpy(draw.cullMatrix, h.matrix, sizeof(draw.cullMatrix));
         std::memcpy(draw.bandScale, h.bandScale, sizeof(draw.bandScale));
         std::memcpy(draw.bandOffset, h.bandOffset, sizeof(draw.bandOffset));
