@@ -81,12 +81,24 @@ stacked PRs at the end).
 - **M4, first part** on `native-only/m4-2d` (from M3's branch): layer tags
   for 2D from the running draw task. The rest of M4 waits for M5 (see
   "Decisions").
-- **Now: M5** on `native-only/m5-geometry` (from M4's branch): geometry
-  off VU1 memory. Step 1 is in code (see M5's status): strip chunks are
-  drawn by the renderer's model vertex stage, with skinning, lighting and
-  UV generation on the GPU. Next: step 2 (the list stops carrying the
-  geometry), then the packet programs (outlines, shadow volumes,
-  particles) as records, then the CPU strip path's deletion once played.
+- **Now: M5, and M4's core,** on `native-only/m5-geometry` (from M4's
+  branch).
+  - M5:
+    - every strip chunk (projector and float-input programs included) is
+      drawn by the renderer's model vertex stage, with skinning, lighting
+      and UV generation on the GPU;
+    - known chunks no longer travel in the list (step 2);
+    - particles are a mesh the renderer projects;
+    - the retained static meshes are deleted.
+  - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
+    and sent in the stream's order.
+  - Left:
+    - M5: outlines and shadow volumes as records; model records at game
+      time (the Emit hook; see M5's notes), which M6 needs.
+    - M4: fonts as glyph records, libgraph's paths, HUD size and
+      widescreen as layer transforms, region packs (see M4's status),
+      TexAnime.
+    - M6.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -677,6 +689,42 @@ What else changed:
   `sceGifPk*` paths become target bindings and clears.
 - **The title screen's** 2D pieces of unknown source are found here.
 
+**Status (2026-11-11): its core in code, not play-tested** (layer tags
+on `native-only/m4-2d`; the rest on `native-only/m5-geometry`, after M5's
+first steps, as decided).
+
+Done:
+- **Layer tags.** Each 2D draw carries the layer of the draw task that
+  wrote it.
+- **2D blocks at their source** (`src/native_blocks.*`). Each GsPkt block
+  is read on the game thread when it ends, under a draw state the game
+  thread follows itself (`rg::drawstate::Tracker`: the environments'
+  packets and the blocks). Its pieces are kept by the block's packet range
+  and sent by the VIF1 thread in the stream's order.
+  - `[native-blocks]` lines count the blocks made, drawn, not found and
+    not read, and how often the VIF1 thread's mirror differs from the game
+    thread's at a block's end (should stay 0).
+  - `RG_NATIVE_BLOCKS=0` turns it off.
+
+Not done:
+- fonts as glyph records;
+- libgraph's `sceGsPutDrawEnv`/`sceGsSwapDBuff` clears and the `sceGifPk`
+  paths (still the converter's);
+- HUD size and widescreen as layer transforms (`hud_size` still patches the
+  blocks' vertices, which the game thread then reads);
+- TexAnime;
+- **region packs.** Their names are the GS backend's hashes:
+  - texels read from GS memory (`expand`: the region's indices row by row,
+    after the key's width, height and PSM);
+  - the CLUT window (`hashClutWindow`: 512 entries for a T8 with a CT16
+    CLUT, CSM and CSA applied).
+
+  Both are over a region the backend chose from each draw. The producer
+  holds the textures' indices and its palettes' entries, not GS memory;
+  matching every existing pack's name needs the tag's region rules
+  reproduced and checked against a pack the user has (gs-path-final's
+  `sdlgpu_textures.cpp`).
+
 **Done when:**
 - the 2D converter receives no packet except those of the VU1 packet
   programs (counter, over a play session with menus, battles and events);
@@ -739,6 +787,16 @@ recovers.
     - wrong UVs (F);
     - missing triangles (the backface rule).
   - `RG_MODEL_GPU=0` puts every chunk back on the CPU, to compare.
+- **Since step 1, also in code:**
+  - every strip chunk the model stage can draw goes to it (a chunk with
+    no id yet, or whose inputs change every frame, with its inputs);
+  - the float-input and projector programs, too;
+  - the particles as a world-space mesh;
+  - the retained static meshes (`native_mesh_static.vert`, `StaticVertex`,
+    `RG_MESH_RETAIN`) deleted.
+  - The CPU raw path stays for `RG_MODEL_GPU=0` and for the programs the
+    stage does not take (affine, raw color), and outlines and shadow
+    volumes are still window packets.
 - **Step 2 in code too:** a REF payload of chunks whose every MSCNT drew a
   known chunk is learned (by its guest address, size and the write watch's
   stamp). From then on the game thread's gather leaves it in guest memory
