@@ -70,9 +70,9 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 // The constants of a draw (vu1_native's modelRow), 40 vec4s:
 //  0: quad 77 (position scale), w: the C piece (Color: 0 vertex colors,
 //     1 material, 2 lit, 3 lit vertex colors, 4 lit point vertex colors,
-//     5 lit point)
+//     5 lit point, 6 the projector's: the base)
 //  1: quad 78 (normal scale), w: the F piece (Uv: 0 plain, 1 sphere map,
-//     2 reflection, 3 swell, 4 beam, 5 ramp, 6 wave)
+//     2 reflection, 3 swell, 4 beam, 5 ramp, 6 wave, 7 projected)
 //  2: quad 79 (UV scale) xy, z: the bones (0: not skinned), w: flags (1
 //     white, 2 87.y & 0x100, 4 skin the normals, 8 the inputs are floats:
 //     the position, normal and UV taken as they are)
@@ -85,8 +85,10 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //  30: the beam's shift x, y and centre x, y; 31: its scale, the swell's q,
 //     far and 1 / far; 32-35: the beam's columns (quads 72-75)
 //  36: the swell's lanes (quads 68-71 w); 37.x: the palette's base
+//  38-41: the projector's texture matrix (C 6 and F 7: the projected
+//     texture, its color the base)
 struct ModelRow {
-    vec4 q[40];
+    vec4 q[44];
 };
 layout(std430, set = 0, binding = 1) readonly buffer Models {
     ModelRow models[];
@@ -270,9 +272,16 @@ void main() {
         precise float dy = (0.0 - y * r) - M.q[30].w;
         uv = vec2(((dx * M.q[31].x + M.q[30].x) + 1.0) * 0.5, ((dy * M.q[31].x + M.q[30].y) + 1.0) * 0.5);
     }
+    if (uvKind == 7u) {
+        // The projector: the position through the texture matrix, divided.
+        vec4 t0 = M.q[38], t1 = M.q[39], t2 = M.q[40], t3 = M.q[41];
+        precise vec4 t = t0 * p.x + t1 * p.y + t2 * p.z + t3 * 1.0;
+        precise float tq = t.w != 0.0 ? 1.0 / t.w : ((floatBitsToUint(t.w) >> 31) != 0u ? -3.402823466e38 : 3.402823466e38);
+        uv = vec2(t.x * tq, t.y * tq);
+    }
     if ((flags & 1u) != 0u)
         color.rgb = vec3(128.0);
-    bool lit = colorKind >= 2u;
+    bool lit = colorKind >= 2u && colorKind <= 5u;
     bool normals = lit || uvKind == 1u || uvKind == 2u || uvKind == 5u || uvKind == 3u;
     if (normals) {
         precise vec3 n = decodeNormal(inNormal);

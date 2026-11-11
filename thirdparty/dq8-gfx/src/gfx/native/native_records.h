@@ -293,7 +293,7 @@ static_assert(sizeof(ModelInput) == 80u, "tightly packed");
 
 // What the model vertex stage reads for one draw, made per draw from the
 // VU1 constants (vu1_native's modelRow; the layout is native_model.vert's).
-constexpr uint32_t kModelRowQuads = 40u;
+constexpr uint32_t kModelRowQuads = 44u;
 struct ModelRow
 {
     float q[kModelRowQuads][4];

@@ -2273,7 +2273,8 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 
 bool modelOnGpu(const Program &program)
 {
-    return program.kind == Kind::Strip && hasMesh(program) && !program.rawColor && !program.affine;
+    return (program.kind == Kind::Strip || program.kind == Kind::Projector) && hasMesh(program) &&
+           !program.rawColor && !program.affine;
 }
 
 namespace
@@ -2384,6 +2385,19 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
     putQuad(state, chunk.header[2]);
     mesh.header = chunk.mesh.header;
     mesh.vertices.clear();
+    if (program.kind == Kind::Projector)
+    {
+        // projectorMesh's: its C culls and caps as the strip D pieces do.
+        const VuData vu(data);
+        GSNativeMesh::Header &h = mesh.header;
+        h.guardBand = 1u;
+        h.backface = 1u;
+        h.winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? 1.0f : -1.0f);
+        h.depthScale = vu.quad(87).z;
+        h.depthMax = vu.quad(1).y;
+        for (float &c : h.colorMax)
+            c = 255.0f;
+    }
 }
 
 uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top)
@@ -2461,6 +2475,23 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
     for (uint32_t i = 0; i < 4u; ++i)
         put(32u + i, beam.col[i].x, beam.col[i].y, beam.col[i].z, beam.col[i].w);
     put(36, swell.lane[0], swell.lane[1], swell.lane[2], swell.lane[3]);
+    if (program.kind == Kind::Projector)
+    {
+        // projectorMesh's: the texture matrix (the object's through the
+        // projector's, quads 30-33), and the color (128, 128, 128, alpha).
+        Vec4 projector[4];
+        for (uint32_t i = 0; i < 4u; ++i)
+            projector[i] = vu.quad(30u + i);
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            const Vec4 t = transform(projector, vu.quad(60u + i));
+            put(38u + i, t.x, t.y, t.z, t.w);
+        }
+        const float alpha = static_cast<float>(gsNativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f));
+        put(3, 128.0f, 128.0f, 128.0f, alpha);
+        row.q[0][3] = 6.0f; // C: the projector's color
+        row.q[1][3] = 7.0f; // F: the projected UVs
+    }
     // The bones the chunk uses: slot x is quads 896 - 4x to 899 - 4x.
     palette.clear();
     if (s.bones)
