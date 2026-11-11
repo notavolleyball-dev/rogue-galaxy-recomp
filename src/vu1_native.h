@@ -144,6 +144,11 @@ inline bool drawsAtCall(const Program &program)
 // code image.
 const Program *identify(const uint8_t *code, uint32_t startPC);
 
+// The base piece's run (MSCAL 0x000) on `data`, as the VU1 would leave it
+// (quads 64-75, 100-102, 111), its packets not made: for a copy of VU1 data
+// memory kept elsewhere (src/native_models.cpp).
+void baseProgram(uint8_t *data);
+
 // Why the chunk an MSCNT runs (its header at `top`, in quadwords) is left to
 // the VU1, or null when it is done natively. `clips`: what draws it clips
 // triangles itself (the GPU), so slot E's chunks are done too, for the

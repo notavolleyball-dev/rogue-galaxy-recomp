@@ -1840,6 +1840,11 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 
 } // namespace
 
+void baseProgram(uint8_t *data)
+{
+    runBase(data, nullptr);
+}
+
 const Program *identify(const uint8_t *code, uint32_t startPC)
 {
     if (startPC == kBaseEntry && matches(code, kBase))

@@ -27,6 +27,7 @@
 #include "native_2d.h"
 #include "native_blocks.h"
 #include "native_effects.h"
+#include "native_models.h"
 #include "native_producer.h"
 #include "gif_events.h"
 #include "guest_write_watch.h"
@@ -279,6 +280,8 @@ struct ModelMark
 {
     uint32_t offset = 0u;
     ModelChunkMeta chunk;
+    // M5 step 3: its draw, made on the game thread (src/native_models.h).
+    std::shared_ptr<rg::nativemodels::GameDraw> game;
 };
 struct LearnedSpan
 {
@@ -815,6 +818,8 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
         // then ends where the copy stops, like one that cannot be read.
         out.reserve(total);
         bool begun = false;
+        // M5 step 3: the game thread's reader of the stream (TTE lists).
+        const bool reading = tte && modelMarks && rg::nativemodels::enabled();
         for (const Span &span : spans)
         {
             if (origins)
@@ -825,6 +830,8 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
             {
                 holes->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, false, span.hash});
                 out.resize(out.size() + span.bytes);
+                if (reading)
+                    rg::nativemodels::reader().skip(span.bytes);
                 continue;
             }
             if (span.chunks)
@@ -837,7 +844,11 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                 {
                     const uint32_t mscnt = 0x17000000u;
                     std::memcpy(out.data() + at + i * 4u, &mscnt, 4u);
-                    modelMarks->push_back({static_cast<uint32_t>(at + i * 4u), (*span.chunks)[i]});
+                    const ModelChunkMeta &meta = (*span.chunks)[i];
+                    ModelMark mark{static_cast<uint32_t>(at + i * 4u), meta, nullptr};
+                    if (reading)
+                        mark.game = rg::nativemodels::reader().chunk(meta.header, meta.slots, meta.id);
+                    modelMarks->push_back(std::move(mark));
                 }
                 ++g_modelSpansElided;
                 g_modelChunksElided += span.chunks->size();
@@ -847,6 +858,8 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                 modelSpans->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, span.stamp});
             const size_t at = out.size();
             appendBytes(memory, out, span.address, span.bytes);
+            if (reading && out.size() > at)
+                rg::nativemodels::reader().read(out.data() + at, static_cast<uint32_t>(out.size() - at));
             if (!span.bind)
                 continue;
             if (!begun)
@@ -1424,6 +1437,23 @@ public:
                     rg::vu1native::modelHeader(*m_nativeProgram, data, top, m_nativePackets, m_nativeMesh);
                     rg::vu1native::modelRow(*m_nativeProgram, data, top, t_model.row, t_model.palette,
                                             mark->chunk.slots);
+                    m_gameDraw = nullptr;
+                    if (mark->game)
+                    {
+                        // Made on the game thread: what it says goes, and
+                        // where it differs from this memory's, counted.
+                        const rg::nativemodels::GameDraw &game = *mark->game;
+                        const bool same = std::memcmp(&game.row, &t_model.row, sizeof(game.row)) == 0 &&
+                                          game.palette == t_model.palette &&
+                                          std::memcmp(game.mesh.header.matrix, m_nativeMesh.header.matrix,
+                                                      sizeof(game.mesh.header.matrix)) == 0;
+                        noteGameDraw(same);
+                        t_model.row = game.row;
+                        t_model.palette = game.palette;
+                        m_nativePackets = game.packets;
+                        m_nativeMesh = game.mesh;
+                        m_gameDraw = mark->game;
+                    }
                     m_nativeBounds.made = false;
                     t_model.active = true;
                     t_model.define = false;
@@ -1538,7 +1568,14 @@ public:
                         t_meshWrites = m_nativeWrites.data();
                         t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
                     }
-                    if (m_particleMesh)
+                    if (m_gameDraw)
+                    {
+                        // The producer's quads (camera, model) as the game
+                        // thread read them.
+                        deliverMesh(m_runtime.gs(), m_nativeMesh, m_gameDraw->vu.data());
+                        m_gameDraw = nullptr;
+                    }
+                    else if (m_particleMesh)
                     {
                         // The corners are in world space: the model matrix
                         // the producer reads (quads 60-63) the identity.
@@ -1582,6 +1619,18 @@ public:
         while (m_markAt < marks.size() && marks[m_markAt].offset < offset)
             ++m_markAt;
         return m_markAt < marks.size() && marks[m_markAt].offset == offset ? &marks[m_markAt] : nullptr;
+    }
+    // M5 step 3's count: game-thread draws, and those differing from this
+    // thread's VU1 memory.
+    void noteGameDraw(bool same)
+    {
+        static uint64_t draws = 0u, differ = 0u;
+        ++draws;
+        if (!same)
+            ++differ;
+        if (draws % 60000u == 1u)
+            std::fprintf(stderr, "[model-game] draws made on the game thread %llu, differing from the VIF1 thread's %llu\n",
+                         (unsigned long long)draws, (unsigned long long)differ);
     }
     // An MSCNT that ran a chunk the list carried: inside a model span, it is
     // counted, and the span spoiled unless learnChunk names it.
@@ -1924,6 +1973,7 @@ private:
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
+    std::shared_ptr<rg::nativemodels::GameDraw> m_gameDraw; // the mark's, made on the game thread
     alignas(16) uint8_t m_particleQuads[64u * 16u] = {}; // its VU1 quads, the model the identity
     struct SpanLearning
     {
@@ -3197,6 +3247,10 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
             {
                 list.origins.emplace_back(0u, address);
             }
+            // (A normal send has no tags: the game thread's reader of the
+            // stream takes its bytes as they are, M5 step 3.)
+            if (rg::nativemodels::enabled() && !list.data.empty())
+                rg::nativemodels::reader().read(list.data.data(), static_cast<uint32_t>(list.data.size()));
         }
         catch (const std::exception &)
         {

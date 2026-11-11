@@ -134,6 +134,7 @@ add_executable(roguegalaxy
     native_2d.cpp
     native_effects.cpp
     native_blocks.cpp
+    native_models.cpp
     native_producer.cpp
     gif_events.cpp
     vu0_flags.cpp
