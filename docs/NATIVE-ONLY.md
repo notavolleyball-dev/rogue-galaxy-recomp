@@ -731,17 +731,19 @@ Not done:
   paths (still the converter's);
 - HUD size and widescreen as layer transforms (`hud_size` still patches the
   blocks' vertices, which the game thread then reads);
-- **region packs.** Their names are the GS backend's hashes:
-  - texels read from GS memory (`expand`: the region's indices row by row,
-    after the key's width, height and PSM);
-  - the CLUT window (`hashClutWindow`: 512 entries for a T8 with a CT16
-    CLUT, CSM and CSA applied).
-
-  Both are over a region the backend chose from each draw. The producer
-  holds the textures' indices and its palettes' entries, not GS memory;
-  matching every existing pack's name needs the tag's region rules
-  reproduced and checked against a pack the user has (gs-path-final's
-  `sdlgpu_textures.cpp`).
+- **region packs, in part.**
+  - Drawn again (`replaceRegion` in the producer): a UV sprite's texel
+    rectangle of an indexed texture is named as gs-path-final's
+    `GsTextureCache` named it, from the indices and palette entries the
+    producer holds, and drawn from the pack's picture.
+  - Not done:
+    - the border and shadow versions of glyphs;
+    - a region whose CLUT is offset (CSA, TEXCLUT);
+    - a T8 with a CT16 CLUT (its 512-entry window reads GS memory the
+      producer does not hold).
+  - The stats line counts `regions looked up`, `pictures made`,
+    `draws from one` and `not hashable here`.
+  - To confirm with a pack collected under the tag.
 
 **Done when:**
 - the 2D converter receives no packet except those of the VU1 packet

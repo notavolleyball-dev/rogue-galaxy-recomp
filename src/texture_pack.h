@@ -17,9 +17,11 @@
 // the renderer draws the picture in its place.
 //
 // The packs of 2D art by region (TEXELS_CLUT_WxH.png, collected with
-// RG_TEXTURE_DUMP: glyphs, labels, icons) are read and listed, but not drawn
-// until M4 of docs/NATIVE-ONLY.md gives the 2D its own records: the GS
-// backend that drew them is gone (decided 2026-11-11).
+// RG_TEXTURE_DUMP under the GS backend: glyphs, labels, icons) are drawn
+// again since M4 of docs/NATIVE-ONLY.md: the producer names a UV sprite's
+// region as the GS backend did (native_producer.cpp's replaceRegion) and
+// asks `whole` for it, the same table. Not the border and shadow versions,
+// nor a region whose CLUT is offset (CSA, TEXCLUT) or a T8's CT16 CLUT.
 namespace rg::texturePack
 {
 

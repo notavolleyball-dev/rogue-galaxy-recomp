@@ -123,6 +123,7 @@ struct Counts
     // Texture packs: pairs of a texture and a palette looked up, pictures
     // made records, pairs with none, and draws given a picture.
     uint64_t wholesAsked = 0, wholesMade = 0, wholesNone = 0, wholesDrawn = 0;
+    uint64_t regionsAsked = 0, regionsMade = 0, regionsDrawn = 0, regionsUnhashable = 0;
     // Tiles of sheets (region clamp and repeat) cut into textures of their own.
     uint64_t tilesCut = 0;
     // M3: post effects sent as passes, and those whose buffers were unknown.
@@ -249,6 +250,11 @@ struct State
     std::unordered_map<uint64_t, Whole> wholes;          // texture << 32 | palette
     std::unordered_map<native::Id, uint64_t> wholeOf;    // a picture's record -> its key
     std::unordered_map<native::Id, uint64_t> clutHashes; // palette id -> PCSX2's hash
+    // Region packs (M4): by the GS backend's region key, the pack's
+    // picture made a record (id), none, or still being read.
+    std::unordered_map<uint64_t, Whole> regions;
+    std::unordered_map<native::Id, uint64_t> regionOf; // a region picture's record -> its key
+    uint64_t regionGeneration = 0u;
     // Tiles cut from textures (cutRegion): by the texture's id and the GS's
     // CLAMP, the tile's own texture record; forgotten when either is evicted.
     std::map<std::pair<native::Id, uint64_t>, native::Id> cuts;
@@ -498,7 +504,10 @@ std::string statsLine()
                        ", refused (buffer unknown) " + d(n.passesRefused, r.passesRefused) +
                        " | texture packs: pairs looked up " + d(n.wholesAsked, r.wholesAsked) + ", pictures made " +
                        d(n.wholesMade, r.wholesMade) + ", none " + d(n.wholesNone, r.wholesNone) +
-                       ", draws from a picture " + d(n.wholesDrawn, r.wholesDrawn);
+                       ", draws from a picture " + d(n.wholesDrawn, r.wholesDrawn) + "; regions looked up " +
+                       d(n.regionsAsked, r.regionsAsked) + ", pictures made " + d(n.regionsMade, r.regionsMade) +
+                       ", draws from one " + d(n.regionsDrawn, r.regionsDrawn) + ", not hashable here " +
+                       d(n.regionsUnhashable, r.regionsUnhashable);
     s.reported = s.counts;
     return line;
 }
@@ -544,6 +553,12 @@ void forgetEvicted(State &s)
     for (const native::Id id : evicted)
     {
         // A texture pack's picture: looked up again at its next draw.
+        if (const auto region = s.regionOf.find(id); region != s.regionOf.end())
+        {
+            s.regions.erase(region->second);
+            s.regionOf.erase(region);
+            continue;
+        }
         if (const auto whole = s.wholeOf.find(id); whole != s.wholeOf.end())
         {
             s.wholes.erase(whole->second);
@@ -1683,6 +1698,7 @@ void texa16(native::Material &m, const GSTexaReg &texa)
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
 void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m);
 void cutRegion(State &s, uint64_t clamp, native::Material &m);
+void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh, native::Material &m);
 namespace
 {
 bool materialOf(State &s, const GSDrawState &state, native::Material &m)
@@ -2772,6 +2788,167 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
     ++s.counts.wholesDrawn;
 }
 
+// Locked. A region pack's picture (M4 of docs/NATIVE-ONLY.md; the 2D art by
+// region, TEXELS_CLUT_WxH, collected under the GS backend): a UV sprite's
+// texel rectangle of an indexed texture, named as gs-path-final's
+// GsTextureCache named it: the texels FNV-1a hashed after the texture's
+// size (2^TW, 2^TH) and PSM, row by row (T8 a byte a texel; T4 two texels
+// a byte, the low first), and the CLUT window after CPSM and CSM, each
+// entry's raw value in index order. Not for what reads GS memory the
+// producer does not hold (a CLUT offset by CSA or TEXCLUT, a T8's CT16 CLUT
+// of 512 entries): counted.
+void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh, native::Material &m)
+{
+    if (!rg::texturePack::active() || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u ||
+        mesh.vertices.empty())
+        return;
+    const GSTex0Reg &t = state.context.tex0;
+    const uint32_t psm = t.psm & 0x3Fu, cpsm = t.cpsm, csm = t.csm;
+    if (psm != kT8 && psm != kT4)
+        return;
+    const auto tex = s.texels.find(m.texture);
+    const auto colors = s.paletteColors.find(m.palette);
+    if (tex == s.texels.end() || !tex->second.data || colors == s.paletteColors.end() || !colors->second)
+        return;
+    const bool sixteen = cpsm == kCT16 || cpsm == kCT16S;
+    const uint32_t entries = psm == kT4 ? 16u : (sixteen ? 512u : 256u);
+    if (t.csa != 0u || state.texclut.cou != 0u || state.texclut.cov != 0u || entries == 512u ||
+        colors->second->size() < size_t(entries) * (sixteen ? 2u : 4u))
+    {
+        ++s.counts.regionsUnhashable;
+        return;
+    }
+    // The UVs' rectangle (spriteTexelRect's), in texels.
+    float u0 = mesh.vertices[0].u, u1 = u0, v0 = mesh.vertices[0].v, v1 = v0;
+    for (const GSNativeMesh::Vertex &v : mesh.vertices)
+    {
+        u0 = std::min(u0, v.u);
+        u1 = std::max(u1, v.u);
+        v0 = std::min(v0, v.v);
+        v1 = std::max(v1, v.v);
+    }
+    const uint32_t texW = 1u << std::min<uint32_t>(t.tw, 10u), texH = 1u << std::min<uint32_t>(t.th, 10u);
+    if (u0 < 0.0f || v0 < 0.0f)
+        return;
+    uint32_t x0 = uint32_t(u0), y0 = uint32_t(v0), x1 = uint32_t(std::ceil(u1)), y1 = uint32_t(std::ceil(v1));
+    if (x1 == texW + 1u)
+        x1 = texW;
+    if (y1 == texH + 1u)
+        y1 = texH;
+    const State::Kept &k = tex->second;
+    if (x1 <= x0 || y1 <= y0 || x1 > texW || y1 > texH || x1 > k.width || y1 > k.height)
+        return;
+    const uint32_t rw = x1 - x0, rh = y1 - y0;
+    constexpr uint64_t kSeed = 1469598103934665603ull, kPrime = 1099511628211ull;
+    const auto step = [&](uint64_t hash, uint64_t value) {
+        for (int b = 0; b < 8; ++b)
+            hash = (hash ^ ((value >> (b * 8)) & 0xFFull)) * kPrime;
+        return hash;
+    };
+    const auto bytes = [&](uint64_t hash, const uint8_t *data, size_t size) {
+        size_t i = 0;
+        for (; i + 8u <= size; i += 8u)
+        {
+            uint64_t word;
+            std::memcpy(&word, data + i, sizeof(word));
+            hash = (hash ^ word) * kPrime;
+        }
+        for (; i < size; ++i)
+            hash = (hash ^ data[i]) * kPrime;
+        return hash;
+    };
+    uint64_t texels = step(step(step(kSeed, texW), texH), psm);
+    thread_local std::vector<uint8_t> row;
+    for (uint32_t y = y0; y < y1; ++y)
+    {
+        row.resize(rw);
+        for (uint32_t x = 0; x < rw; ++x)
+        {
+            const size_t at = size_t(y) * k.width + (x0 + x);
+            row[x] = k.format == native::PixelFormat::Index4 ? (((*k.data)[at / 2u] >> ((at & 1u) * 4u)) & 0x0Fu)
+                                                             : (*k.data)[at];
+        }
+        if (psm == kT4)
+        {
+            const uint32_t pairs = (rw + 1u) / 2u;
+            for (uint32_t p = 0; p < pairs; ++p)
+                row[p] = uint8_t(row[p * 2u] | ((p * 2u + 1u < rw ? row[p * 2u + 1u] : 0u) << 4u));
+            texels = bytes(texels, row.data(), pairs);
+        }
+        else
+            texels = bytes(texels, row.data(), rw);
+    }
+    uint64_t clut = step(step(kSeed, cpsm), csm);
+    const uint8_t *entry = colors->second->data();
+    for (uint32_t i = 0; i < entries; ++i)
+    {
+        uint32_t value = 0u;
+        if (sixteen)
+            value = uint32_t(entry[i * 2u]) | (uint32_t(entry[i * 2u + 1u]) << 8);
+        else
+            std::memcpy(&value, entry + i * 4u, 4u);
+        clut = step(clut, value);
+    }
+    const uint64_t key = texels ^ (clut * 0x9E3779B97F4A7C15ull) ^ (uint64_t(rw) << 48) ^ (uint64_t(rh) << 32);
+    if (const uint64_t generation = rg::texturePack::generation(); generation != s.regionGeneration)
+    {
+        s.regions.clear();
+        s.regionOf.clear();
+        s.regionGeneration = generation;
+    }
+    State::Whole &w = s.regions[key];
+    if (w.id == 0u && !w.none)
+    {
+        if (!w.hashed)
+        {
+            w.hashed = true;
+            ++s.counts.regionsAsked;
+        }
+        rg::texturePack::Picture picture;
+        switch (rg::texturePack::whole(texels, clut, rw, rh, native::blockFormats(), picture))
+        {
+        case rg::texturePack::Lookup::Pending:
+            return;
+        case rg::texturePack::Lookup::None:
+            w.none = true;
+            return;
+        case rg::texturePack::Lookup::Ready:
+            break;
+        }
+        const uint32_t factor = picture.width / rw;
+        if (factor < 1u || factor > 16u || picture.width != rw * factor || picture.height != rh * factor ||
+            (picture.blocks != 0 && (picture.width % 4u || picture.height % 4u)))
+        {
+            w.none = true;
+            return;
+        }
+        native::Texture record;
+        record.scale = kTexelScale;
+        record.id = s.nextTexture++;
+        record.format = blockFormat(picture.blocks);
+        record.width = static_cast<uint16_t>(picture.width);
+        record.height = static_cast<uint16_t>(picture.height);
+        record.logicalWidth = static_cast<uint16_t>(rw);
+        record.logicalHeight = static_cast<uint16_t>(rh);
+        record.texels = std::make_shared<const std::vector<uint8_t>>(std::move(picture.data));
+        w.id = record.id;
+        w.nearest = picture.nearest;
+        s.regionOf[record.id] = key;
+        ++s.counts.regionsMade;
+        native::push(std::move(record));
+    }
+    if (w.id == 0u)
+        return;
+    // The region's picture, addressed from the region's corner.
+    m.texture = w.id;
+    m.palette = 0u;
+    m.texelOffset[0] += float(x0);
+    m.texelOffset[1] += float(y0);
+    m.clampU = m.clampV = true;
+    m.linear = !w.nearest;
+    ++s.counts.regionsDrawn;
+}
+
 // Locked. The GS's region clamp and region repeat (CLAMP's WMS and WMT 2
 // and 3: a tile of a sheet, a texture the game addresses through a mask) as
 // a texture record of its own: per axis, clamp keeps the texels from MIN to
@@ -3269,6 +3446,9 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             known = false; // a target's region: not fetched so
             why |= 2u;
         }
+        // M4: a region pack's picture of the art this draw takes (FST UVs).
+        if (texels && !region)
+            replaceRegion(s, *drawState, mesh, m);
         static constexpr native::TextureFunction functions[4] = {
             native::TextureFunction::Modulate, native::TextureFunction::Decal, native::TextureFunction::Highlight,
             native::TextureFunction::Highlight2};
