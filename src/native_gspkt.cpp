@@ -83,6 +83,7 @@ struct Shadow
     uint32_t nreg = 1u;
     bool opened = false; // a GsPktOpen ran in it (followed or not)
     bool discard = false; // a pass's block: never written, followed or not
+    bool tagOpen = false; // a tag opened (BeginPrimAD, OpenGifTag) and not yet ended
 };
 std::vector<Shadow> g_shadows;
 
@@ -232,6 +233,7 @@ void hookBeginPrimAD(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t b = getRegU32(ctx, 4);
         s->tagAt = s->bytes.size();
         s->packed = false;
+        s->tagOpen = true;
         putQword(*s, 0x1000000000008000ull, 0xEull);
         putAD(*s, read64(b + 0x70u), 0x00u);
     }
@@ -250,6 +252,7 @@ void hookOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t nreg = getRegU32(ctx, 8);
         s->tagAt = s->bytes.size();
         s->packed = true;
+        s->tagOpen = true;
         s->nreg = nreg;
         const uint32_t w[4] = {0x8000u, (nreg << 28) | (prim << 15) | 0x4000u, getRegU32(ctx, 6), getRegU32(ctx, 7)};
         const size_t at = s->bytes.size();
@@ -282,6 +285,7 @@ void hookFinalizeTags(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (Shadow *s = shadowFor(ctx))
     {
+        s->tagOpen = false;
         if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || !takeWritten(*s, getRegU32(ctx, 4)))
             s->broken = true; // it would patch the header's tag, or a stale one
         else
@@ -299,6 +303,7 @@ void hookClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // (The segment over scratch has +0xE8 1, but closes as written.)
     if (Shadow *s = shadowFor(ctx))
     {
+        s->tagOpen = false;
         if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed ||
             !takeWritten(*s, getRegU32(ctx, 4)))
             s->broken = true;
@@ -524,8 +529,11 @@ void install(PS2Runtime &runtime)
 
 void beginBlock(bool discard)
 {
-    // An outer block's builder is reset by the inner one's: it is spoiled.
-    if (!g_shadows.empty())
+    // A block inside another (DrawListAddTexLoad's TexAnime block): the
+    // builder is reset by the inner one, which has a shadow of its own, and
+    // the outer one goes on after it with new segments (every segment is
+    // over scratch). Only a tag the outer one left open is lost to it.
+    if (!g_shadows.empty() && g_shadows.back().tagOpen)
         g_shadows.back().broken = true;
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
