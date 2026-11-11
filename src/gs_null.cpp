@@ -32,7 +32,6 @@ enum Call : size_t
 {
     kSubmit,
     kSubmitMany,
-    kSubmitNativeMesh,
     kBeginTransfer,
     kUploadImage,
     kFlush,
@@ -49,7 +48,7 @@ enum Call : size_t
     kCallCount
 };
 constexpr std::array<const char *, kCallCount> kNames = {
-    "Submit",       "SubmitMany",       "SubmitNativeMesh", "BeginTransfer",
+    "Submit",       "SubmitMany",       "BeginTransfer",
     "UploadImage",  "Flush",            "TextureFlush",     "Sync",               "Present",
     "ClearFramebuffer", "ConsumeLocalToHostBytes", "ReadVram", "WriteVram",       "SnapshotVram",
     "GetTransferSnapshot", "PreparePresentation"};
@@ -95,7 +94,6 @@ public:
     void Reset() override {}
     void Submit(const GSPrimitiveBatch &) override { cross(kSubmit); }
     void SubmitMany(const GSPrimitiveBatch *const *, size_t) override { cross(kSubmitMany); }
-    void SubmitNativeMesh(const GSNativeMesh &, const GSDrawState &) override { cross(kSubmitNativeMesh); }
     void BeginTransfer(const GSTransferCommand &) override { cross(kBeginTransfer); }
     void UploadImage(const uint8_t *, uint32_t) override { cross(kUploadImage); }
     void Flush() override { cross(kFlush); }

@@ -1016,9 +1016,19 @@ camera tags for the GS backend's profiles, are gone. What of the
 runtime's GS `src/` still uses: the VU1 interpreter's own `GS` (its
 XGKICK), `GSRegisters` for SIGNAL, FINISH and LABEL, the libgraph stubs'
 register sink (patch 0034), the null backend (`gs_null.*`) and the
-presenter's front end (`graphics.cpp`). So patches 0019, 0020, 0021,
-0028, 0030 and 0031 have no user in `src/` now; dropping them needs the
-submodule checked out again (patches/README.md), left for the end.
+presenter's front end (`graphics.cpp`).
+
+**Step 3 in code: the GS-only runtime patches without a user are
+deleted:** 0019 (source tag), 0020 (source camera), 0021 (`GSNativeMesh`),
+0028 (its clip planes), 0030 (its backface lists) and 0031 (the draw
+registers); `gs_null`'s `SubmitNativeMesh` override with them. The rest of
+the series applies to a clean checkout of the submodule without them
+(checked 2026-11-11). **An existing checkout keeps them applied** until
+the submodule is checked out again: `git -C thirdparty/PS2Recomp checkout
+-- .`, delete `thirdparty/PS2Recomp/.rg-patches-applied`, then `cmake -S .
+-B build/game` (patches/README.md). Left of the plan's list: 0002, 0013,
+0015 (the threaded GS worker, which the null backend still sits behind)
+and 0034 (the libgraph stubs' register sink, still used).
 
 **Done early (2026-11-11, on `native-only/m5-geometry`):**
 - The VU1 parity tooling went with M5: check mode, `RG_VU1_REPLAY`,
