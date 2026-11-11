@@ -110,6 +110,10 @@ bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &
 // thread), a block's packet range marked with its unit, and the layer of
 // the draw task running now.
 uint32_t listTop();
+// A marker for `unit` at the draw list's write cursor (a cnt tag, NOP and
+// DIRECT 2, an A+D write of the unit to kPassRegister): the draw stage
+// sends what is kept under it there. False: no list being built.
+bool writeMarker(uint32_t unit);
 void markBlock(uint32_t start, uint32_t end, uint32_t unit);
 uint8_t currentLayer();
 

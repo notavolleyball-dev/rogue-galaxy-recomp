@@ -16,11 +16,12 @@ class PS2Runtime;
 // PACKED sprite composites that write their data themselves, raw writes,
 // a DMA call) has no shadow.
 //
-// Step one (now): the shadow is compared, byte for byte, with what the
-// game wrote, and counted in the [native-blocks] line; the block's 2D is
-// still read from the game's bytes. Step two, once the count says they
-// agree: the 2D from the shadow and the builder's emitters skipped, so the
-// game writes no 2D bytes at all.
+// The shadow is compared, byte for byte, with what the game wrote, and
+// counted in the [native-blocks] line. A block's owner (DrawListBeginPrim's
+// return address) whose shadows agreed with its bytes some times, and never
+// differed or went unfollowed, has its blocks skipped (beginBlock's
+// `skip`): their 2D comes from the shadow, and the game writes no 2D bytes
+// for them (src/native_blocks.cpp).
 namespace rg::gspkt
 {
 
@@ -30,7 +31,11 @@ void install(PS2Runtime &runtime);
 // A block begins (DrawListBeginPrim) and ends (after DrawListEndPrim): its
 // shadow, false when the block was written through something it does not
 // follow.
-void beginBlock();
+// With `skip`, the builder writes no block: each GsPktOpen is replaced by
+// a segment opened over scratch above the memstack's top (the setters
+// write there, nothing is allocated, GsPktEnd answers 0 so no CALL is
+// written), and the shadow is the block's only copy.
+void beginBlock(bool skip);
 bool endBlock(std::vector<uint8_t> &out);
 
 } // namespace rg::gspkt

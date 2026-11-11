@@ -100,10 +100,10 @@ stacked PRs at the end).
     and clears; a census names the draw tasks whose 2D the converter
     still makes (`[native2d] pieces the converter made, by draw task`).
   - The builder's map is in NATIVE-ONLY-NOTES.md; its shadow of each
-    block is made from the calls and compared with the bytes (step one;
-    step two, the 2D from the calls and no bytes written, waits for the
-    count to say they agree). Blocks were never read before this branch
-    (fixed here).
+    block is made from the calls and compared with the bytes; an owner
+    whose shadows agree has its blocks drawn from the calls with no bytes
+    written (the guard is the comparison itself). Blocks were never read
+    before this branch (fixed here).
   - Next: fonts as glyph records, region packs' glyph variants, the
     composites the shadow does not follow, and whatever the census names.
 - **M6's first step is in too** (on the same branch, as it needed no play
@@ -750,9 +750,18 @@ Done:
   (`GsPktDrawSprite`, `GsPktAddTexSprite`), raw writes or a DMA call (the
   overlay's VU1 call), and outer blocks with one nested in them. The 2D is
   still read from the bytes.
-  - **Step two, once "differing" stays 0 over a session:** the 2D from the
-    shadow, and the builder's emitters skipped (the block written only as
-    a marker in the list, as the passes are): the game writes no 2D bytes.
+  - **Step two, in code, guarded per owner:** an owner
+    (DrawListBeginPrim's return address) whose shadows agreed with its
+    bytes three times, and never differed or went unfollowed, has its
+    blocks skipped: each GsPktOpen opens a segment over scratch above the
+    memstack's top (the setters write there, nothing is allocated, no CALL
+    is written), the 2D is made from the shadow at DrawListEndPrim, and a
+    marker in the list where the CALL would have been brings it to the
+    draw stage, with the block's register writes for the stage's state.
+    The game writes no 2D bytes for those blocks. A skipped block written
+    through something the shadow does not follow is lost that once and
+    its owner goes back to writing (`lost` in the line; should stay 0).
+    The line's `blocks the game did not write` counts the rest.
 - **Fixed:** blocks were never read before (their range ended in RET
   tags; see the commit). The counts above are the first real ones.
 

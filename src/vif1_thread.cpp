@@ -2841,6 +2841,13 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             flushEffect();
         uint64_t unit = 0u;
         std::memcpy(&unit, data + 16u, sizeof(unit));
+        if ((unit >> 24) == 2u)
+        {
+            // M4: a block the game did not write (src/native_gspkt.h).
+            if (rg::nativeblocks::emit(static_cast<uint32_t>(unit)))
+                rg::nativeblocks::compare(static_cast<uint32_t>(unit));
+            return;
+        }
         countEffect(rg::nativefx::emitPassUnit(static_cast<uint32_t>(unit)), rg::nativefx::Effect::Glare,
                     "its pass was not kept", {});
         return;

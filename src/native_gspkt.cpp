@@ -80,6 +80,7 @@ struct Shadow
     size_t headerAt = SIZE_MAX; // the last GsPktOpen's header tag
     bool packed = false;
     uint32_t nreg = 1u;
+    bool skip = false;
 };
 std::vector<Shadow> g_shadows;
 
@@ -98,6 +99,11 @@ Shadow *shadowFor(const R5900Context *ctx)
     if (b == 0u || getRegU32(ctx, 4) != b)
         return nullptr;
     return &g_shadows.back();
+}
+
+void write32(uint32_t address, uint32_t value)
+{
+    std::memcpy(g_rdram + physical(address), &value, sizeof(value));
 }
 
 void putQword(Shadow &s, uint64_t lo, uint64_t hi)
@@ -186,6 +192,19 @@ void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             const size_t at = s->bytes.size();
             s->bytes.resize(at + 6u * 16u);
             std::memcpy(s->bytes.data() + at, g_rdram + physical(b + 0x10u), 6u * 16u);
+            if (s->skip)
+            {
+                // A segment over scratch: the setters write above the
+                // memstack's top, Close and Commit allocate nothing (+0xE8
+                // 1), the block's start (+0xF0) stays 0.
+                const uint32_t stack = read32(b);
+                const uint32_t top = read32(stack + 0x28u) + read32(stack + 0x2Cu) * 16u;
+                write32(b + 0xE8u, 1u);
+                write32(b + 0xECu, top);
+                write32(b + 0xF4u, top);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
         }
     }
     g_Open(rdram, ctx, runtime);
@@ -248,7 +267,8 @@ void hookClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (Shadow *s = shadowFor(ctx))
     {
         const uint32_t b = getRegU32(ctx, 4);
-        if (read32(b + 0xE8u) == 0u)
+        // (A skipped block's segment has +0xE8 1, but closes as written.)
+        if (s->skip || read32(b + 0xE8u) == 0u)
         {
             if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed)
                 s->broken = true;
@@ -482,13 +502,14 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-gspkt] %zu of %zu builder functions hooked\n", hooked, total);
 }
 
-void beginBlock()
+void beginBlock(bool skip)
 {
     // An outer block's builder is reset by the inner one's: it is spoiled.
     if (!g_shadows.empty())
         g_shadows.back().broken = true;
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
+    g_shadows.back().skip = skip;
 }
 
 bool endBlock(std::vector<uint8_t> &out)

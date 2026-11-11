@@ -1704,6 +1704,11 @@ uint32_t listTop()
     return stackTop();
 }
 
+bool writeMarker(uint32_t unit)
+{
+    return writePassMarker(unit);
+}
+
 void markBlock(uint32_t start, uint32_t end, uint32_t unit)
 {
     addRange(start, end, Effect::Block2D, unit);
