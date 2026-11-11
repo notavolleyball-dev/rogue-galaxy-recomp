@@ -116,10 +116,17 @@ from the code.
   constant at `0x47DF20`) through the matrix at `*(0x4810A4) + 0xF20 + 0x200`
   (`MtxMulPoint_13c890`), z / w truncated: the GS Z of a point at distance d
   in front of the camera.
+- **Settled since:** `MtxMulPoint_13c890` (VU0 macro: `ACC = row0 x`,
+  `+= row1 y`, `+= row2 z`, `out = ACC + row3 w`) is a row vector times the
+  matrix; the constant at `0x47DF20` is `(0, 0, 0, 1)`; so
+  `ProjectDepth(d) = (s32)((M32 - d M22) / (M33 - d M23))` with M at
+  `*(*(0x4810A4) + 0xF20) + 0x200`. The hook can compute it; the producer
+  turns it into the renderer's depth (`standardDepth`). The Z tests:
+  `GsPktEnableZTest(0)` is ALWAYS, `(1)` GEQUAL; `GsPktSetZTest(0, 1)` ALWAYS,
+  `(2)` GEQUAL, `(3)` GREATER (`GsTestSetZTest_156f40`); the last call wins.
 - **Blocking (to read next):** the ALPHA register a fresh primitive block
-  carries (`DrawListBeginPrim_141b00` / `GsPktBegin_13f7e0`'s template),
-  which decides how `128 scale` blends; `MtxMulPoint_13c890`'s convention
-  (row or column vector), to compute the Z in the hook. With those, the
+  carries (`DrawListBeginPrim_141b00` / `GsPktInit_13f7f0`'s template),
+  which decides how `128 scale` blends. With those, the
   pass is: the levels as blurred copies, each laid over the frame where
   the scene's depth is behind the level's distance (the renderer's depth
   from the producer's `standardDepth` of the two Z values), at the
@@ -177,3 +184,21 @@ from the code.
 - **The hook emits:** a `Pass` (`PassKind::ShadowMap`).
 - **Open:** the frame the border's line strip goes to is the one the
   environment pops back to; taken as the map (the blur follows its render).
+
+### `FocusFilterDrawMaybe_17c000` (M3, read in part)
+
+- **Arguments:** `a0` = an argument block: names of four buffers (A, A',
+  C, C', found in the draw context's name table by name; each pair the same
+  size), a texture to load at `+0`, distances at `+0x84` (f) and `+0x88`.
+- **What it draws first:** into the frame, alpha only (frame mask 2), an
+  untextured sprite of alpha 0x80; then four sprites with the Z test GEQUAL,
+  no Z write, alpha `128 col[i]` (col = 0.75, 0.35, 0.25, 0), at the GS Z
+  `ProjectDepth(sc[i])` (sc = 0.5 f, 0.667 f, f + 0.75 (f - f88), f): the
+  frame's alpha becomes a mask by depth band. Then the frame into A and into
+  C (preset 0: Cs), C's color set to `0x3C Ad` (A=Cs B=0 C=Ad D=0), both
+  copied into their partners (`GfxBlitTexRectPixelsAt_141810`), then blur
+  rounds along `(0, -1), (-1, 0), (0, 1), (1, 0)` (the rest of the function,
+  past this note, still to read) and the composite back.
+- **Needs:** a `Pass` depth target (the scene's) and Z thresholds the
+  producer turns into the renderer's depth; the pass mechanism has neither
+  yet.
