@@ -122,10 +122,24 @@ stacked PRs at the end).
     DrawListClearScreen and GfxDrawPerfMeter, are blocks now too, read
     and never skipped; GfxEndFrame is left, as it sends the list before it
     returns, and RefractionCaptureFrame is an effect's.)
-- **M6's first step is in too** (on the same branch, as it needed no play
-  data): the lists run on the game thread as they are sent; the VIF1
-  thread is gone (see M6). Two more M5 declines were ported there too
-  (the scroll F, the additive vertex colors).
+- **M6 steps 1-3 are in too** (on the same branch, as they needed no
+  play data): the lists run on the game thread as they are sent (the
+  VIF1 thread is gone); the draw path's types are src/'s own; the
+  GS-only runtime patches without a user (0019, 0020, 0021, 0028, 0030,
+  0031) and the overlay's packet builder are deleted. **After pulling,
+  check the submodule out again** (patches/README.md) so the deleted
+  patches leave the checkout. Two more M5 declines were ported here too.
+- **What M6 has left is one change of source:** the draw state still
+  comes from GS register writes (the mirror and the converter follow the
+  lists' packets: draw environments, the model materials' prebuilt
+  packets, uploads, the VU1 packet programs, unskipped blocks). Deleting
+  the mirror, `native_2d` and `gif_events` means every one of those
+  becomes a record from the game's own structures: the model draws from
+  `ModelPrepareDraw`/`ModelEmitDrawPackets` (NATIVE-ONLY-NOTES.md, "Model
+  draws", has their layout), materials from `MeshMaterial`, the draw
+  environment from `DrawEnv`, uploads from the texture load functions.
+  That is the next large piece, after the play test of this branch says
+  the blocks and the shadow agree.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
