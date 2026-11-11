@@ -109,8 +109,10 @@ stacked PRs at the end).
     (calls from records, written by why, captured streams and those that
     could not be), `[vu1native]` (native chunks; not drawn, with why;
     chunks outside a record or stream), `[composite]`, `[nativefx]`
-    (passes drawn and not), `[native-env]`. Also the game thread's frame
-    time (lists run on it).
+    (passes drawn and not), `[native-env]`, `[uploads]` (the list's
+    uploads by path, withheld / host / local copy, and by draw task: the
+    uploaders to hook next). Also the game thread's frame time (lists run
+    on it).
   - **Bisect note:** 906c33d does not build (fixed by f3bee42).
   - CSA palettes are drawn now (they were refused outright): a T4 whose
     TEX0 loads its CLUT reads its CBP's first 16 entries; one that does

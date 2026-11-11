@@ -1167,6 +1167,16 @@ constexpr bool uploadsTaken()
 // The transfer registers as the packets set them (this thread's).
 thread_local uint64_t t_bitbltbuf = 0u, t_trxpos = 0u, t_trxreg = 0u;
 
+// M6's census of the uploads the list still carries, by path and the draw
+// task that wrote them (below, with the packets' census).
+enum class UploadPath : uint8_t
+{
+    Withheld,   // a record the texture hook made, published here
+    Host,       // a host upload nobody made a record of (captured)
+    LocalCopy,  // a local-to-local copy (mirrored)
+};
+void countUpload(UploadPath path);
+
 // Step 3b.
 struct UploadWithhold
 {
@@ -1346,6 +1356,7 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     t_upload.dpsm = dpsm;
                     t_upload.width = rrw;
                     t_upload.height = rrh;
+                    countUpload(UploadPath::Withheld);
                     drop = true;
                     if (!copying)
                     {
@@ -1442,6 +1453,7 @@ void startCapture()
     if (bits == 0u || need == 0u || need > (16u << 20))
         return;
     c.active = true;
+    countUpload(UploadPath::Host);
     c.bitbltbuf = t_bitbltbuf;
     c.trxpos = t_trxpos;
     c.trxreg = t_trxreg;
@@ -1483,6 +1495,7 @@ void transferRegister(uint8_t reg, uint64_t value)
             t_capture.active = false;
         if ((value & 3u) == 2u)
         {
+            countUpload(UploadPath::LocalCopy);
             const uint64_t b = t_bitbltbuf;
             rg::nativeproducer::noteLocalCopy(
                 unsigned(b & 0x3FFFu), unsigned((b >> 16) & 0x3Fu), unsigned((b >> 24) & 0x3Fu),
@@ -1643,9 +1656,40 @@ void countUndrawn()
                  (unsigned long long)total, (unsigned long long)g_packetsState.load(), line.c_str());
 }
 
-// A packet on: its register writes to the draw-state mirror (and SIGNAL,
-// FINISH, LABEL); one with a transfer's registers or image data to the
-// upload path as it is.
+void countUpload(UploadPath path)
+{
+    static std::mutex mutex;
+    static std::unordered_map<uint32_t, uint64_t> byTask[3];
+    static uint64_t total = 0u, nextReport = 1u;
+    std::lock_guard lock(mutex);
+    byTask[static_cast<int>(path)][t_task] += 1u;
+    if (++total < nextReport)
+        return;
+    nextReport = total + 2000u;
+    static const char *const names[3] = {"withheld (hook's record)", "host (no record)", "local copies"};
+    std::string line;
+    for (int k = 0; k < 3; ++k)
+    {
+        std::vector<std::pair<uint64_t, uint32_t>> top;
+        for (const auto &[task, count] : byTask[k])
+            top.emplace_back(count, task);
+        std::sort(top.rbegin(), top.rend());
+        line += std::string(" | ") + names[k] + ":";
+        for (size_t i = 0; i < top.size() && i < 6u; ++i)
+        {
+            char item[48];
+            std::snprintf(item, sizeof(item), " %s%06x=%llu", top[i].second ? "TaskDraw@" : "no task@",
+                          top[i].second, (unsigned long long)top[i].first);
+            line += item;
+        }
+    }
+    std::fprintf(stderr, "[uploads] the list's uploads by path and draw task (%llu)%s\n", (unsigned long long)total,
+                 line.c_str());
+}
+
+// A packet on: its register writes to a captured stream's state (replaying
+// one) and SIGNAL, FINISH, LABEL; one with a transfer's registers or image
+// data to the upload path as it is.
 void sendPacket(const uint8_t *data, uint32_t size)
 {
     if (!data || size < 16u)
