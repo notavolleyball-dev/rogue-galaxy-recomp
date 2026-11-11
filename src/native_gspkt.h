@@ -37,5 +37,8 @@ void install(PS2Runtime &runtime);
 // written), and the shadow is the block's only copy.
 void beginBlock(bool skip);
 bool endBlock(std::vector<uint8_t> &out);
+// The open block has had a GsPktOpen (what is written from now on comes
+// after its first segment).
+bool opened();
 
 } // namespace rg::gspkt

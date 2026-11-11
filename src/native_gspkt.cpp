@@ -82,6 +82,7 @@ struct Shadow
     bool packed = false;
     uint32_t nreg = 1u;
     bool skip = false;
+    bool opened = false; // a GsPktOpen ran in it (followed or not)
 };
 std::vector<Shadow> g_shadows;
 
@@ -178,6 +179,8 @@ RG_GSPKT_HOOKS(RG_GSPKT_ORIGINAL)
 // GIF tag and five A+D qwords, as the builder holds them now.
 void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    if (!g_shadows.empty() && getRegU32(ctx, 4) == builder())
+        g_shadows.back().opened = true;
     if (Shadow *s = shadowFor(ctx))
     {
         const uint32_t b = getRegU32(ctx, 4);
@@ -513,6 +516,11 @@ void beginBlock(bool skip)
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
     g_shadows.back().skip = skip;
+}
+
+bool opened()
+{
+    return !g_shadows.empty() && g_shadows.back().opened;
 }
 
 bool endBlock(std::vector<uint8_t> &out)

@@ -113,10 +113,11 @@ stacked PRs at the end).
     run on it).
   - Next: fonts as glyph records, region packs' glyph variants (and CSA
     palettes, which the producer refuses outright today: a glyph border
-    may be one), the six functions that inline the block's begin and end
-    (GfxBlitTexRect, GfxEndFrame, DrawListEmitFrameEnvMaybe,
-    DrawListClearScreen, GfxDrawPerfMeter, RefractionCaptureFrame), and
-    whatever the census names.
+    may be one), and whatever the census names. (The functions that frame
+    their own block, GfxBlitTexRect, DrawListEmitFrameEnvMaybe,
+    DrawListClearScreen and GfxDrawPerfMeter, are blocks now too, read
+    and never skipped; GfxEndFrame is left, as it sends the list before it
+    returns, and RefractionCaptureFrame is an effect's.)
 - **M6's first step is in too** (on the same branch, as it needed no play
   data): the lists run on the game thread as they are sent; the VIF1
   thread is gone (see M6). Two more M5 declines were ported there too
