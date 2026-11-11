@@ -40,11 +40,20 @@ uint32_t physical(uint32_t address)
 }
 
 // The game thread's draw state (the draw environments and the blocks, in
-// the order the game writes them), and whether a block is being written.
+// the order the game writes them), and the blocks being written (they
+// nest: DrawListAddTexLoad can run TexAnime's block inside another).
 rg::drawstate::Tracker *g_state = nullptr;
-bool g_inBlock = false;
-uint32_t g_blockStart = 0u;
+int g_depth = 0;
 uint32_t g_blockOwner = 0u; // DrawListBeginPrim's return address
+// DrawListEndPrim's restore packet (DrawEnvWritePacket inside it), for
+// after the block's own bytes; and whether a block ended inside another.
+uint32_t g_envAt = 0u, g_envQwords = 0u;
+bool g_nested = false;
+// The draw context and its builder (NATIVE-ONLY-NOTES.md, "The GsPkt
+// builder"): +0xF0 the first GsPktOpen's CNT tag since GsPktBegin.
+constexpr uint32_t kDrawCtxPointer = 0x004810A4u;
+constexpr uint32_t kBuilder = 0x130u;
+constexpr uint32_t kBuilderFirstOpen = 0xF0u;
 
 // A block's pieces, kept by unit until the VIF1 thread reaches the block.
 struct KeptPiece
@@ -80,6 +89,9 @@ template <typename Visit> bool eachDirect(uint32_t start, uint32_t end, Visit &&
         std::memcpy(codes, g_rdram + physical(at + 8u), sizeof(codes));
         const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu);
         const uint32_t id = static_cast<uint32_t>((tag >> 28) & 7u);
+        // GsPktEnd's RET (no data) ends the block.
+        if (id == 6u && qwc == 0u && at + 16u == end)
+            return true;
         if (id != 1u)
             return false;
         const uint32_t payload = at + 16u, bytes = qwc * 16u;
@@ -114,8 +126,15 @@ PS2Runtime::RecompiledFunction g_envOriginal = nullptr;
 
 void afterEnv(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t at)
 {
-    if (!g_inBlock)
-        observeEnvironment(at, static_cast<uint32_t>(getRegU32(ctx, 2)));
+    const uint32_t qwords = static_cast<uint32_t>(getRegU32(ctx, 2));
+    if (g_depth > 0)
+    {
+        // DrawListEndPrim's restore: after the block's bytes are read.
+        g_envAt = at;
+        g_envQwords = qwords;
+        return;
+    }
+    observeEnvironment(at, qwords);
 }
 
 void drawEnvWritePacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -128,20 +147,47 @@ PS2Runtime::RecompiledFunction g_endOriginal = nullptr;
 
 void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    g_inBlock = true;
-    g_blockStart = rg::nativefx::listTop();
+    if (g_depth > 0)
+        g_nested = true;
+    ++g_depth;
+    g_envAt = g_envQwords = 0u;
     g_blockOwner = getRegU32(ctx, 31);
     g_beginOriginal(rdram, ctx, runtime);
 }
 
-// The block's bytes, read: its pieces with their states, kept; the range
-// marked. A block not of the shape expected is left to the VIF1 thread.
+// The block's bytes, read: from its first GsPktOpen to its GsPktEnd's RET
+// (the restore packet DrawListEndPrim writes after them is observed after
+// them, and stays out of the range): its pieces with their states, kept;
+// the range marked. A block not of the shape expected is left to the draw
+// stage's converter.
+void readBlock(uint32_t start, uint32_t end);
 void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    g_inBlock = false;
-    const uint32_t start = g_blockStart, end = rg::nativefx::listTop();
-    if (!g_state || start == 0u || end <= start || end - start > (1u << 20))
-        return;
+    --g_depth;
+    const uint32_t envAt = g_envAt, envQwords = g_envQwords;
+    g_envAt = g_envQwords = 0u;
+    // An outer block that had one end inside it: its first Open was the
+    // inner one's (GsPktBegin zeroes it), so its bytes are not read here.
+    const bool nested = g_nested && g_depth == 0;
+    if (g_depth <= 0)
+    {
+        g_depth = 0;
+        g_nested = false;
+    }
+    const uint32_t ctx = g_rdram ? *reinterpret_cast<const uint32_t *>(g_rdram + physical(kDrawCtxPointer)) : 0u;
+    const uint32_t start = ctx != 0u ? *reinterpret_cast<const uint32_t *>(
+                                           g_rdram + physical(ctx + kBuilder + kBuilderFirstOpen)) : 0u;
+    const uint32_t end = envAt != 0u ? physical(envAt) : 0u;
+    if (!nested && g_state && start != 0u && end > physical(start) && end - physical(start) <= (1u << 20))
+        readBlock(physical(start), end);
+    else if (start != 0u)
+        ++g_unread;
+    if (envAt != 0u)
+        observeEnvironment(envAt, envQwords);
+}
+
+void readBlock(uint32_t start, uint32_t end)
+{
     Block block;
     thread_local std::vector<rg::native2d::Piece> pieces;
     bool ok = true;

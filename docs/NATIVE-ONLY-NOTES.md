@@ -1462,3 +1462,772 @@ The current `native_mesh.vert` already does `clamp(fog.x + fog.w*clip.w, fog.z, 
 - Lights are per LightState record, not per frame: characters push their own (`Character2Draw*`), map nodes push
   copies (`NodeObjDrawLit`); quads 30-32 are also clobbered by the projector matrix. A shader input must follow
   the record active for each draw (the light packet CALLed before it), not a global.
+
+### The GsPkt builder: an exact map
+
+Static reading of `disc/SCUS_974.90` (tools/fninfo.py, tools/mipsdis.py) and
+RGDecomp's C where it exists (checked against the disassembly; RGDecomp's
+names for fields are not trusted). Nothing here was run. gp = 0x485170.
+Addresses in `(…)` are the instructions that show the claim.
+
+Register numbers used below (GS A+D addresses): PRIM 0x00, RGBAQ 0x01,
+ST 0x02, UV 0x03, XYZ2 0x05, TEX0_1 0x06, CLAMP_1 0x08, TEX1_1 0x14,
+PRMODECONT 0x1A, TEXA 0x3B, TEXFLUSH 0x3F, SCISSOR_1 0x40, ALPHA_1 0x42,
+TEST_1 0x47, FBA_1 0x4A, FRAME_1 0x4C, ZBUF_1 0x4E. Only context 1 is ever
+used (PRIM.CTXT is never set, see `+0x70`).
+
+---------------------------------------------------------------------------
+
+#### 0. Summary table
+
+"Emits" = what lands in the packet at the call. "State" = builder fields
+only, written to the packet later (by the function named in brackets).
+`b` = the builder (a0).
+
+| Function | Emits (GS regs / packet words) | State-only? | Notes |
+|---|---|---|---|
+| `DrawListBeginPrim_141b00` | nothing | yes | `b = ctx+0x130`; GsPktInit + GsPktBegin; returns b |
+| `DrawListEndPrim_141a20` | RET qword (via End); draw-env packet (RET 9 + DIRECT 9: FRAME, ZBUF, XYOFFSET, SCISSOR, PRMODECONT, COLCLAMP, DTHE, TEST_1); two DMA CALL tags into the list | no | |
+| `GsPktCtorMaybe_13fb80` | — | yes | static init only |
+| `GsPktInit_13f7f0` | — | yes | full reset of state from the draw env |
+| `GsPktBegin_13f7e0` | — | yes | `+4=1`, `+0xF0=0` |
+| `GsPktEnd_13f790` | DMA RET qword | no | returns block address |
+| `GsPktOpen_13f4a0` | CNT9/DIRECT9: GIF A+D{TEXFLUSH, PRMODECONT=1}, GIF A+D{ALPHA_1, TEST_1, ZBUF_1, FBA_1, FRAME_1} | no | the env snapshot point |
+| `GsPktOpenPrim_13f730` | Open + BeginPrimAD | no | sets PRIM type, Q=1.0 |
+| `GsPktBeginPrimAD_13f6b0` | CNT tag (open), GIF A+D tag (open), PRIM | no | PRIM snapshot point |
+| `GsPktSetPrimType_13f470` | BeginPrimAD | no | sets type, Q=1.0, `+0x114=0`; does NOT close the previous tag |
+| `GsPktOpenGifTag_13f3b0` | CNT tag (open), **PACKED GIF tag, PRE=1, PRIM, NREG/REGS given** | no | **non-A+D** |
+| `GsPktFinalizeTags_13f260` | patches the open CNT/DIRECT/GIF NLOOP | no | packed-aware |
+| `GsPktClose_13f5b0` | TEXFLUSH, patches tags (A+D NLOOP), commits | no | |
+| `GsPktCommit_13f190` | commits (no tag patch, no TEXFLUSH) | no | used after FinalizeTags |
+| `GsPktReserveQwords_13f230` | advances write pointer | no | returns old pointer: **raw writes** |
+| `GsPktPushQword_13f170` | one raw qword | no | **non-A+D** (packed data) |
+| `GsPktAddDmaCallTag_13f1f0` | one DMA CALL tag | no | **non-A+D** |
+| `GsPktRawWriteBeginStubMaybe_13f250` / `…EndStubMaybe_13f1e0` | nothing (`jr ra`) | — | markers only |
+| `GsPktWriteAD_13ec80` | A+D (reg=a1, data=a2) | no | regs used by callers: 0x40, 0x3B, 0x3F |
+| `GsPktSetTexture_13ec00` | A+D TEXFLUSH, TEX1_1, TEX0_1, CLAMP_1 | no | copies the texture node into `+0x78`; filter from `+0xE0` |
+| `GsPktSetTexa_13eca0` | A+D TEXA | no | |
+| `GsPktSetST_13ed10` / `GsPktSetSTVec_13ecc0` | A+D ST | no | also Q → `+0x110` |
+| `GsPktSetUV_13ed60` | A+D UV (texels ×16) | no | |
+| `GsPktSetUVFixed_13ed90` | A+D UV (already ×16) | no | |
+| `GsPktSetRGBAQ_13ee40` / `GsPktSetRGBAQVec_13edd0` | A+D RGBAQ (Q from `+0x110`) | no | |
+| `GsPktSetXYZ_13ef10`, `…VecI_13eeb0`, `…Pixel_13f110`, `…PixelVec_13ef70`, `…f_13f060`, `…fVec_13efe0` | A+D XYZ2 (+ `+0x120/+0x124`) | no | units differ, see §7 |
+| `GsPktDrawSprite_13ea30` | **PACKED** tag {RGBAQ, XYZ2, XYZ2}, SPRITE, 3 qwords | no | **non-A+D** |
+| `GsPktAddTexSprite_13e520` | A+D PRIM/tex/(RGBAQ) then **PACKED** {UV,XYZ2,UV,XYZ2} strips or {RGBAQ,UV,XYZ2,UV,XYZ2} | no | **non-A+D** |
+| `GsPktTileScreenSprites_177cf0` | **PACKED** {UV, XYZ2}, SPRITE, 64×32 tiles over the frame | no | **non-A+D** |
+| `GsPktSpriteUVRect_26eb30` | A+D UV, XYZ2, UV, XYZ2 | no | |
+| `GsPktSpriteSplitU_17adf0` | A+D (UV, XYZ2, UV, XYZ2) × n strips of 32 texels | no | |
+| `GsPktDrawLine3D_1cca80` | A+D RGBAQ, XYZ2, XYZ2 (if both ends project) | no | debug only |
+| `GsPktSetScissor_28c2e0` | OpenPrim(SPRITE) + A+D SCISSOR_1 + Close | no | full segment, no vertices |
+| `GsPktSetScissorDefault_28c2d0` | as SetScissor, offsets (3,3,1,1) | no | |
+| `GsPktSetScissorFull_26fe60` | OpenPrim(SPRITE) + SCISSOR_1 (0..w-1, 0..h-1) + Close | no | |
+| `GsPktSetScissorRows_26ff00` | OpenPrim(SPRITE) + SCISSOR_1 (0..w-1, y0..y1) + Close | no | |
+| `GsPktSetOriginMode_13e2f0` | — | yes (XYZ offsets now) | `+0x11C`, `+0x120`, `+0x124` |
+| `GsPktSetFog_13e370` | — | yes [BeginPrimAD/OpenGifTag] | PRIM.FGE |
+| `GsPktSetAntialias_13e390` | — | yes [same] | PRIM.AA1 |
+| `GsPktSetGouraud_13e3b0` | — | yes [same] | PRIM.IIP |
+| `GsPktSetTextured_13e400` | — | yes [same] | PRIM.TME |
+| `GsPktSetUseUV_13e3e0` | — | yes [same] | PRIM.FST |
+| `GsPktSetAlphaBlend_13e500` | — | yes [same] | PRIM.ABE |
+| `GsPktSetTexFilter_13e3d0` | — | yes [SetTexture] | `+0xE0` |
+| `GsPktSetFrameMask_13e420` | — | yes [Open] | FRAME_1.FBMSK, `+0x6C` |
+| `GsPktSetZWriteMask_13e430` | — | yes [Open] | ZBUF_1.ZMSK, `+0xE4` |
+| `GsPktSetZTest_13e450` | — | yes [Open] | TEST_1.ZTE/ZTST |
+| `GsPktEnableZTest_13e460` | — | yes [Open] | TEST_1 ZTST ALWAYS/GEQUAL |
+| `GsPktSetDestAlphaTest_13e4a0` | — | yes [Open] | TEST_1.DATE |
+| `GsPktSetDestAlphaMode_13e4b0` | — | yes [Open] | TEST_1.DATM (and DATE) |
+| `GsPktSetAlphaTestFunc_13e4c0` | — | yes [Open] | TEST_1.ATST/AREF |
+| `GsPktEnableAlphaTest_13e4d0` | — | yes [Open] | TEST_1.ATE |
+| `GsPktSetAlphaReg_13e4e0` | — | yes [Open] | ALPHA_1 raw |
+| `GsPktSetBlendMode_13e4f0` | — | yes [Open] | ALPHA_1 from preset table |
+| `GsPktDisableTests_13f9e0` | — | yes | |
+| `GsPktSetDefaultState_13fa80` | — | yes | |
+| `GsPktSetup2DState_26fdc0` | — | yes | font / message window state |
+| `GsPktSetupUiDrawState_2932b0` | — | yes | |
+| `GsPktSetup2DState_3892a0` | — | yes | insect-cage UI state |
+| `GsEnvInit_1573b0` | — | yes | env GIF tag + reg addresses + defaults |
+| `GsEnvSetDefaults_1572d0` | — | yes | |
+| `GsEnvSetDefaultsMaybe_1571d0` | — | yes | 3D materials only |
+| `GsEnvSetAlpha_157140` | — | yes | |
+| `GsEnvSetBlendPreset_157150` | — | yes | table at 0x449EF0 |
+| `GsEnvWritePacket_157190` | 6 qwords (env GIF tag + 5 A+D) | no | returns 6 |
+
+---------------------------------------------------------------------------
+
+#### 1. Where the builder lives, and what a block becomes
+
+- The draw context: `ctx = *(u32*)0x4810A4` (`GetDrawCtx_15de80`:
+  `lw v0,-0x40cc(gp)`).
+  - `ctx+0x00` s32: index of the current buffer.
+  - `ctx+0x04` u32: the draw list's write cursor (DMA chain; EndPrim
+    appends CALL tags here).
+  - `ctx+0x08 + 4*i`: per-buffer header pointer; the **packet memstack**
+    is `header + 8` (or 0 when the header is 0) (0x141b0c-0x141b2c).
+  - `ctx+0x130 .. +0x267`: **the builder** (one per context; every 2D
+    block uses this same object).
+  - `ctx+0x270`: pointer to the current draw environment (`DrawEnv`).
+- Memstack (`MemStackAllocQw_14d950(stack, n)`): `+0x20` lock (nonzero:
+  allocation returns 0), `+0x28` base address, `+0x2C` top (in qwords),
+  `+0x34` capacity (qwords; over it the function spins on `+0x54` and
+  returns 0). Returns `base + top*16` and advances top by n.
+- DrawEnv fields the builder uses: `+0x04` width (px), `+0x08` height,
+  `+0x0C` cx, `+0x10` cy (centre in GS primitive pixels, 2048-biased:
+  `DrawEnvSetCenter_157560` stores `p+0x800`), `+0x70` its GIF tag,
+  `+0x80` FRAME_1, `+0x90` ZBUF_1, `+0xA0` XYOFFSET_1, `+0xB0`
+  SCISSOR_1, `+0xC0` PRMODECONT, `+0xD0` COLCLAMP, `+0xE0` DTHE, `+0xF0`
+  TEST_1 (each data + address; the order is libgs's `sceGsDrawEnv1`, copied
+  from `sceGsDBuff+0x50` by `GfxSetVideoMode_1451f0` at 0x14580c-0x145898,
+  and `sceGsSetDefDrawEnv` writes addresses 0x4C,0x4E,0x18,0x40,0x1A,0x46,
+  0x45,0x47 in that order).
+
+##### The packet shape of one block (all on the memstack, contiguous)
+
+```
+GsPktOpen:         [CNT qwc=9 | VIF NOP | VIF DIRECT 9]
+                   [GIF A+D NLOOP=2 EOP]  (0, TEXFLUSH)  (1, PRMODECONT)
+                   [GIF A+D NLOOP=5 EOP]  ALPHA_1 TEST_1 ZBUF_1 FBA_1 FRAME_1   (GsEnvWritePacket)
+GsPktBeginPrimAD:  [CNT qwc=? | NOP | DIRECT ?]  <- +0xF8/+0xFC/+0x104/+0x108
+                   [GIF A+D NLOOP=? EOP]          <- +0x100
+                   (PRIM image, PRIM)
+                   … A+D setters …
+GsPktClose:        (0, TEXFLUSH), then the three ? patched, then committed
+   or
+GsPktOpenGifTag:   [CNT ? | NOP | DIRECT ?] [GIF PACKED PRE=1 PRIM NREG REGS NLOOP=?]
+                   … packed qwords …
+GsPktFinalizeTags: the ? patched (NLOOP = qwords / NREG); GsPktCommit commits
+…more Open … Close/Commit segments…
+GsPktEnd:          [RET qwc=0]
+```
+
+- Every sub-packet is a DMA **CNT** tag whose two VIF words are NOP and
+  DIRECT n (n = the same qword count): the whole block goes to VIF1 → GIF
+  PATH2, except the callouts in §9 (a CALL to a VU microcode upload, and a
+  VIF UNPACK + MSCAL).
+- `GsPktEnd` returns `+0xF0` = the address of the first Open's CNT tag
+  `& 0x0FFFFFFF`, or 0 when no Open happened since Begin.
+- `DrawListEndPrim` then (0x141a40-0x141ae4):
+  1. if that address is nonzero: writes `{0x50000000 (CALL, qwc 0), addr,
+     0, 0}` (the qword at gp-0x7330 = 0x47DE40 = `0x00000000_50000000`, word
+     1 replaced) at `ctx->+4`, advances `ctx->+4` by 16;
+  2. always (when the memstack exists): `DrawEnvWritePacket_157460(env,
+     top)` writes `{RET qwc 9 | NOP | DIRECT 9}` + the env's 9 qwords
+     (`env+0x70..+0xFF`: GIF tag, FRAME, ZBUF, XYOFFSET, SCISSOR,
+     PRMODECONT, COLCLAMP, DTHE, TEST_1) at the memstack top, allocates
+     its 10 qwords, and appends a second CALL to it.
+  So the list reads: … CALL block … CALL env-restore …; everything the
+  block changed in FRAME/ZBUF/SCISSOR/TEST/etc. is put back after it.
+  ALPHA_1, FBA_1, TEX0/TEX1/CLAMP, TEXA, PRMODE, FOGCOL are **not**
+  restored by that packet (ALPHA/FBA are set again by the next block's
+  Open; TEX*/TEXA are whatever was written last).
+- `DrawListBeginPrim(ctx)` (0x141b00): `GsPktInit(ctx+0x130, memstack,
+  *(ctx+0x270))`, `GsPktBegin(ctx+0x130)`, returns `ctx+0x130`.
+- Six functions inline the same Begin/End pair on `ctx+0x130` without
+  calling DrawListBeginPrim/EndPrim (a hook on those two misses them):
+  `RefractionCaptureFrame_13ffd0` (0x1401b8/0x1402b8),
+  `GfxBlitTexRect_141000` (0x141140/0x141324), `GfxEndFrame_141c20`
+  (0x141e84/0x141f7c), `DrawListEmitFrameEnvMaybe_142280`
+  (0x1422bc/0x1422f8), `DrawListClearScreen_1423c0` (0x142420/0x1424e8),
+  `GfxDrawPerfMeter_1431c0` (0x1432d0/0x143570). They write the same two
+  CALL tags themselves (e.g. 0x14132c-0x1413c0).
+- **Blocks nest.** `DrawListAddTexLoad_1418c0` → (texture has an
+  animation table) `TexAnimeTableApplyMaybe_162f50` (0x1419ec) →
+  `DrawListBeginPrim(ctx)` (0x162f88) … `DrawListEndPrim` (0x162fc8), on
+  the same builder. `ScreenFadeBlockDraw_177540` calls
+  `DrawListAddTexLoad` at 0x177618 inside its own block (begun 0x177588):
+  the inner GsPktInit resets every state the outer block had set
+  (0x177598-0x1775c8: Z test, alpha test, blend, Z mask) and the inner
+  GsPktBegin zeroes `+0xF0`. The inner block is a complete, separate
+  block (its CALL precedes the outer one in the list). A hook has to treat
+  BeginPrim as "reset the builder", not as "push".
+- Things the game allocates on the memstack between BeginPrim and the
+  first Open (e.g. DrawListAddTexLoad's upload, 0x14196c) sit before the
+  block and are called from the list before the block's CALL. Nothing may
+  allocate between a segment's Open and its Close/Commit (the segment is
+  written at the memstack top and allocated only at Close/Commit).
+
+---------------------------------------------------------------------------
+
+#### 2. The builder's layout (`b = ctx+0x130`, size 0x138)
+
+| Off | Type | Meaning | Written by | Read by |
+|---|---|---|---|---|
+| +0x00 | u32 | memstack pointer (0: no output) | Ctor (0), Init (a1) | Open, OpenPrim, Close, Commit, End |
+| +0x04 | s32 | "in a block": 1 after Begin, 0 after End | Init (0), Begin, End | no GsPkt function (open: any reader) |
+| +0x08..+0x0F | — | unused | — | — |
+| +0x10..+0x6F | GsEnv (0x60) | §3 | GsEnv*, GsTest*, GsZbuf*, GsFrame*, GsFba* | Open (copied verbatim) |
+| +0x10 | u128 | env GIF tag: A+D, NLOOP 5, EOP, NREG 1 | GsEnvInit | Open |
+| +0x20 / +0x28 | u64 / u64 | ALPHA_1 data / 0x42 | | |
+| +0x30 / +0x38 | u64 / u64 | TEST_1 data / 0x47 | | |
+| +0x40 / +0x48 | u64 / u64 | ZBUF_1 data / 0x4E | Init copies `env+0x90` | |
+| +0x50 / +0x58 | u64 / u64 | FBA_1 data / 0x4A | | |
+| +0x60 / +0x68 | u64 / u32 | FRAME_1 data / 0x4C | Init copies `env+0x80` (GsFrameSet) | |
+| +0x6C | s32 | frame-mask mode (-1 none; 0..4), in FRAME's address qword's high word (GS ignores it) | GsEnvSetDefaults (-1), GsFrameSetMaskMode | GsFrameSet |
+| +0x70 | u64 | **PRIM register image**: bits 0-2 type, 3 IIP, 4 TME, 5 FGE, 6 ABE, 7 AA1, 8 FST, 9 CTXT, 10 FIX | Ctor (0x100), Init, setters, OpenPrim/SetPrimType/OpenGifTag/AddTexSprite (type) | BeginPrimAD (whole u64 as PRIM data, 0x13f714), OpenGifTag (`& 0x7FF` into the tag, 0x13f41c) |
+| +0x78..+0xDF | tex node (0x68 = 13 u64) | a copy of the texture descriptor last passed to SetTexture; node `+0x38` TEX0 (= b+0xB0), `+0x40` TEX1 (b+0xB8), `+0x48` CLAMP (b+0xC0); the rest unused here | Init (NameTableNodeReset: TEX0=TEX1=0, CLAMP WMS=WMT=1), SetTexture (NameTableCopyNode + GsTex1SetFilter) | SetTexture |
+| +0xE0 | s32 | texture filter for the next SetTexture: 0 nearest, 1/2 linear (with mipmaps: 0 → MMIN 2, 1/2 → MMIN 5) | Ctor 1, Init 1, SetDefaultState 1, SetTexFilter | SetTexture → GsTex1SetFilter_15ac10 |
+| +0xE4 | s32 | Z-write-mask shadow (1 = ZMSK set) | Ctor 0, Init 1, SetZWriteMask, DisableTests 1, SetDefaultState 1 | SetZWriteMask only (re-reads it, 0x13e438) |
+| +0xE8 | s32 | 1 = no open segment / no memstack (Close and Commit do nothing); 0 = segment open | Ctor 1, Init 1, Open/OpenPrim (1, then 0 if `+0` ≠ 0) | Close, Commit. Never set back to 1 by Close/Commit |
+| +0xEC | u32 | segment start (memstack top at Open) | Open (0x13f4d8) | Close, Commit (allocation = `(F4-EC)/16`) |
+| +0xF0 | u32 | block start `& 0x0FFFFFFF` (first Open after Begin) | Begin (0), Open if 0 | End (return value) |
+| +0xF4 | u32 | **write pointer** | Open, BeginPrimAD, OpenGifTag, all emitters, FinalizeTags/Close (roll back) , ReserveQwords | everything that emits |
+| +0xF8 | u32 | current CNT tag address (roll-back point) | BeginPrimAD, OpenGifTag | FinalizeTags, Close |
+| +0xFC | u32 | same as +0xF8 (base of the DIRECT count; always equal) | same | same |
+| +0x100 | u32 | current GIF tag address | Open (its header tag), BeginPrimAD, OpenGifTag | FinalizeTags, Close |
+| +0x104 | u32 | CNT tag word 0 address (= +0xF8) | BeginPrimAD, OpenGifTag | FinalizeTags, Close |
+| +0x108 | u32 | VIF DIRECT word address (CNT tag + 0xC) | same | same |
+| +0x110 | f32 | **Q** for RGBAQ (bits stored raw in RGBAQ[63:32]) | Ctor 1.0, OpenPrim/SetPrimType/OpenGifTag/AddTexSprite 1.0, SetST/SetSTVec (q) | SetRGBAQ, SetRGBAQVec, AddTexSprite (0x13e5b8). **Init does not reset it** |
+| +0x114 | s32 | 1 = the open tag is PACKED (from OpenGifTag), 0 = A+D | OpenGifTag 1, SetPrimType 0, AddTexSprite 0 | FinalizeTags only (Close ignores it). OpenPrim/BeginPrimAD do not reset it |
+| +0x118 | s32 | NREG of the open PACKED tag | OpenGifTag (t0) | FinalizeTags (divisor, 0x13f390) |
+| +0x11C | s32 | origin mode: 1 none, 2 frame centre, other (0 = default) frame top-left | Ctor 0, Init 0, SetOriginMode | SetOriginMode, DrawSprite, AddTexSprite |
+| +0x120 | s32 | X offset (1/16 px) added by the A+D XYZ setters | Ctor, Init, SetOriginMode | SetXYZ* |
+| +0x124 | s32 | Y offset (1/16 px) | same | same |
+| +0x128 | s32 | `env->cx << 4` | Init (0x13f850) | SetOriginMode, DrawSprite, AddTexSprite |
+| +0x12C | s32 | `env->cy << 4` | Init | same |
+| +0x130 | s32 | `env->w << 4` | Init | same |
+| +0x134 | s32 | `env->h << 4` | Init | same |
+
+Origin offsets (`+0x120/+0x124`), from SetOriginMode (0x13e2f0) and the
+same inline formula in Init/DrawSprite/AddTexSprite:
+- mode 1: `(0, 0)`: coordinates are raw GS primitive coordinates.
+- mode 2: `(cx·16, cy·16)`: relative to the frame's centre.
+- any other (0, the default): `(cx·16 − trunc(w·16/2), cy·16 − trunc(h·16/2))`
+  = the draw env's XYOFFSET (for even w/h): relative to the frame's top
+  left. Signed division truncates toward zero (0x13e328-0x13e334).
+
+---------------------------------------------------------------------------
+
+#### 3. GsEnv (embedded at `b+0x10`; also used standalone by 3D materials)
+
+Layout (offsets relative to the GsEnv): `+0x00` GIF tag, then five A+D
+qwords: `+0x10` ALPHA_1, `+0x20` TEST_1, `+0x30` ZBUF_1, `+0x40` FBA_1,
+`+0x50` FRAME_1; `+0x5C` frame-mask mode. It is emitted only by
+`GsEnvWritePacket` (from GsPktOpen, and from DrawListWriteTexEnvPacket on a
+material's own GsEnv). **Changes to it after a segment's Open take effect at
+the next Open**, never mid-segment.
+
+##### `GsEnvInit_1573b0(env)` (164 bytes)
+- `sq zero,0(env)`; tag NLOOP=5 (0x1573e0), EOP=1 (byte 1 bit 7,
+  0x157408), NREG=1 (byte 7 high nibble, 0x157420), REGS0=0xE (A+D,
+  0x157430), FLG=0 (PACKED). Address words: `+0x18`=0x42, `+0x28`=0x47,
+  `+0x38`=0x4E, `+0x48`=0x4A, `+0x58`=0x4C (32-bit store; `+0x5C` is the
+  mask mode). Data: `+0x10`=0x44, `+0x20`=0x5000B (both overwritten next).
+  ZBUF/FBA/FRAME data low words are **not** initialized here.
+- Tail-calls `GsEnvSetDefaults`.
+- Callers: GsPktInit, MeshMaterialBuildPkt_14ac90 (3D), CameraRecInit_156940.
+
+##### `GsEnvSetDefaults_1572d0(env)` (224 bytes)
+- ALPHA = `*(u64*)0x449EF8` (preset 1, 0x44).
+- TEST: ATE=0, ATST=1 (ALWAYS), AREF=0, DATE=0, DATM=0, ZTE=1, ZTST=1
+  (ALWAYS). AFAIL untouched (0 from Init's 0x5000B).
+- ZBUF.ZMSK (`+0x34` bit 0) = 0; FBA (`+0x40` bit 0) = 0; `+0x5C` = −1.
+
+##### `GsEnvSetDefaultsMaybe_1571d0(env)` (256 bytes; 3D material path only)
+- Same ALPHA; TEST ATE=1, ATST=5 (GEQUAL), AREF=1, DATE=DATM=0, ZTE=1,
+  ZTST=2 (GEQUAL); FBA=0; `+0x5C`=−1; ZMSK untouched.
+
+##### `GsEnvSetAlpha_157140(env, const u64 *alpha)`
+- `env+0x10 = *alpha` (raw ALPHA_1 data).
+
+##### `GsEnvSetBlendPreset_157150(env, s32 i)`
+- If `0 <= i < 12`: `env+0x10 = ((u64*)0x449EF0)[i]`; else nothing.
+- The table (ALPHA_1 = A[1:0] B[3:2] C[5:4] D[7:6], FIX[39:32]; A/B/D: 0 Cs,
+  1 Cd, 2 zero; C: 0 As, 1 Ad, 2 FIX):
+
+| i | value | A B C D, FIX | result |
+|---|---|---|---|
+| 0 | 0x80_0000002A | 0 0 FIX Cs, 0x80 | Cs (no blend) |
+| 1 | 0x44 | Cs Cd As Cd | (Cs−Cd)·As + Cd — default |
+| 2 | 0x48 | Cs 0 As Cd | Cs·As + Cd (additive) |
+| 3 | 0x42 | 0 Cs As Cd | Cd − Cs·As (subtractive) |
+| 4 | 0x80_00000064 | Cs Cd FIX Cd, 0x80 | (Cs−Cd)·1 + Cd = Cs |
+| 5 | 0x4A | 0 0 As Cd | Cd (writes nothing visible) |
+| 6 | 0x89 | Cd 0 As 0 | Cd·As |
+| 7 | 0x46 | 0 Cd As Cd | Cd·(1−As) |
+| 8 | 0x88 | Cs 0 As 0 | Cs·As |
+| 9 | 0x80_00000068 | Cs 0 FIX Cd, 0x80 | Cs + Cd |
+| 10 | 0x80_00000062 | 0 Cs FIX Cd, 0x80 | Cd − Cs |
+| 11 | 0 | Cs Cs As Cs | Cs |
+
+##### `GsEnvWritePacket_157190(env, dst)` → 6
+- Six `lq/sq`: the tag and the five A+D qwords copied verbatim. Returns 6
+  (qwords), which GsPktOpen adds to `+0xF4` (0x13f584).
+
+##### The GsEnv field helpers (not GsPkt*, but they are what the setters call)
+
+| Function | Effect on the GsEnv |
+|---|---|
+| `GsTestSetAlphaTest_157100(e, en)` | ATE = (en ≠ 0) |
+| `GsTestSetAlphaFunc_1570c0(e, atst, aref)` | ATST = atst & 7, AREF = aref & 0xFF |
+| `GsTestSetAlphaFail_1570a0(e, f)` | AFAIL = f & 3 (3D only) |
+| `GsTestSetDate_156ff0(e, en)` | DATE = en & 1 |
+| `GsTestSetDestAlphaMode_157010(e, m)` | m=0: DATE=0, DATM=0; m=1: DATM=0; other: DATM=1 |
+| `GsTestSetZTest_156f40(e, m)` | ZTE=1 always; m=0 or 1: ZTST=1 ALWAYS; 2: GEQUAL; 3: GREATER; other: ZTST unchanged |
+| `GsZbufSetZMask_156ee0(e, m)` | m=0: ZMSK=0 (Z written); m=1: ZMSK=1; other: unchanged |
+| `GsZbufCopyBaseFmt_156ea0(e, zbuf*)` | ZBP and PSM from a ZBUF value, ZMSK kept (materials only) |
+| `GsFbaSetEnable_156e80(e, en)` | FBA = en & 1 |
+| `GsFrameSet_156e10(e, frame*)` | if `+0x5C == -1`: FRAME = *frame; else FRAME low word from *frame, FBMSK kept |
+| `GsFrameSetMaskMode_156cc0(e, m)` | `+0x5C = m`; FBMSK: 0 → 0; 1 → 0xFF000000 (alpha kept); 2 → 0x00FFFFFF (only alpha written); 3 → 0x0000FFFF; 4 → 0xFFFFFFFF (nothing written); other: `+0x5C = -1`, FBMSK unchanged |
+
+(The `mmi2` words in GsFrameSet/GsFrameSetMaskMode are PCPYLD; only mode 4's
+one, 0x156de4, changes the low 64 bits: it builds the 0xFFFFFFFF mask.)
+
+---------------------------------------------------------------------------
+
+#### 4. The state a block starts with (`GsPktInit_13f7f0(b, stack, env)`)
+
+In order (0x13f7f0-0x13f9d8):
+1. `+0x00 = stack`, `+0x04 = 0`, `+0xE8 = 1`.
+2. `NameTableNodeReset(b+0x78)`: TEX0 = TEX1 = 0, CLAMP = WMS 1 / WMT 1
+   (CLAMP), other node fields zeroed.
+3. `GsEnvInit(b+0x10)` (§3).
+4. ZBUF_1 = `env+0x90` (whole 64 bits, `DrawEnvGetZbufReg_157770`).
+5. FRAME_1 = `env+0x80` (whole, mask mode is −1).
+6. `+0x128..+0x134` = cx, cy, w, h ×16; origin mode 0 (top left) with its
+   offsets (the inline copy of SetOriginMode(0)).
+7. PRIM: ABE=0 (0x13f90c); later TME=0, FST=1, IIP=0, AA1=0, FGE=0. **Type
+   bits 0-2, CTXT and FIX are not touched** (type stays from the last use;
+   CTXT/FIX are 0 since the ctor's 0x100 and nothing sets them).
+8. ATE=1 (with ATST still ALWAYS); DATE=0; ZTE=1, ZTST=GEQUAL; `+0xE4=1`,
+   ZMSK=1; FBA=0; `+0xE0=1` (bilinear).
+
+So a fresh block's env registers are:
+- ALPHA_1 = 0x44; TEST_1 = 0x50003 (ATE 1, ATST ALWAYS, ZTE 1, ZTST GEQUAL);
+- ZBUF_1 = the env's with ZMSK=1; FBA_1 = 0; FRAME_1 = the env's (with its
+  FBMSK);
+- PRIM = type | FST (0x100 | type).
+
+Not reset by Init: `+0x110` (Q), `+0x114`, `+0x118`, `+0xEC..+0x108`,
+`+0xF0` (Begin zeroes it).
+
+`GsPktCtorMaybe_13fb80(b)` (StaticInit only): NameTableNodeCtor(b+0x78),
+`+0=0`, `+0xE8=1`, `+0x110=1.0f`, `+0x70=0x100`, `+0xE0=1`, `+0xE4=0`,
+`+0x11C=+0x120=+0x124=0`; returns b.
+
+`GsPktBegin_13f7e0(b)`: `+0x04 = 1`, `+0xF0 = 0`.
+
+`GsPktEnd_13f790(b)` → `+0xF0`: `+0x04 = 0`; `q = MemStackAllocQw(+0, 1)`;
+`q = {0x60000000, 0, 0, 0}` (RET); returns `+0xF0`. The RET is written even
+when nothing was opened (then nothing calls it).
+
+---------------------------------------------------------------------------
+
+#### 5. Framing functions
+
+##### `GsPktOpen_13f4a0(b)` (260 bytes)
+- `+0xE8 = 1`; if `+0x00 == 0` return. `+0xE8 = 0`.
+- `+0xEC = stack->base + stack->top*16`; if `+0xF0 == 0`: `+0xF0 = +0xEC &
+  0x0FFFFFFF`. `+0xF4 = +0xEC`.
+- Writes (0x13f51c-0x13f578):
+  - `{0x10000009, 0, 0, 0x50000009}`: CNT qwc 9; VIF NOP; VIF DIRECT 9.
+  - GIF tag `{0x00008002, 0x10000000, 0x0000000E, 0}`: NLOOP 2, EOP,
+    PACKED, NREG 1, A+D. `+0x100` = its address.
+  - A+D `(0, 0x3F)` TEXFLUSH; A+D `(1, 0x1A)` PRMODECONT.AC = 1.
+  - `GsEnvWritePacket(b+0x10, …)`: env tag + ALPHA_1, TEST_1, ZBUF_1,
+    FBA_1, FRAME_1 (values as they are in the builder now).
+- `+0xF4` += 6·16. Does not touch `+0xF8/+0xFC/+0x104/+0x108/+0x114`.
+- Callers (17): GsPktOpenPrim, shadow passes, ScreenTexOverlayDraw*,
+  ModelDrawOffscreenComposite, ScreenFadeBlockDraw.
+
+##### `GsPktOpenPrim_13f730(b, s32 type)` (96 bytes; 223 callers)
+- `+0xE8 = 1`; if `+0x00 == 0` return (type not stored). `+0xE8 = 0`;
+  PRIM type = `type & 7`; `+0x110 = 1.0f`; `GsPktOpen(b)`;
+  `GsPktBeginPrimAD(b)`.
+- Types passed (a1 constant at the call, scanned over all 223 sites): 6
+  SPRITE at 102 sites; 4 TRISTRIP 29 (menus, loading screen, minimap,
+  trails, DofFilter, sky band); 3 TRIANGLE 12 (HP gauges, minimap,
+  effect sprites, sun light); 5 TRIFAN 5 (sun flare/glare/light, clipped
+  Gouraud quad, rotated quad); 1 LINE 8 (debug wire shapes, cloth debug, guard effect);
+  2 LINESTRIP 7 (door cursor, save-menu frames, GfxEndFrame, ShadowMapBlur);
+  0 POINT 4 (`daddu a1,zero,zero`: AttackChainDraw ×2, TaskDrawMonography,
+  TaskDrawStatus — whether those really draw points is open); 4 sites pass
+  a register (DebugMenuWidgetDrawWindow, DrawListEndPlaneShadowPass ×2,
+  HpGaugeDrawBar).
+
+##### `GsPktBeginPrimAD_13f6b0(b)` (124 bytes)
+- `+0xF8 = +0xFC = +0xF4`; a zeroed qword (the CNT tag to patch);
+  `+0x104` = it, `+0x108` = it + 0xC.
+- `+0x100` = next qword: GIF `{0x8000, 0x10000000, 0xE, 0}` (NLOOP 0 to
+  patch, EOP, PACKED, NREG 1, A+D).
+- A+D `(b+0x70 as u64, 0x00)`: **PRIM**. `+0xF4` advanced 3 qwords.
+
+##### `GsPktSetPrimType_13f470(b, s32 type)` (40 bytes)
+- `+0x114 = 0`; type bits = `type & 7`; `+0x110 = 1.0f`; tail-calls
+  BeginPrimAD. **Does not finalize the tag already open**: callers call
+  GsPktFinalizeTags first, or call it right after GsPktOpen (whose header
+  needs no patch).
+- Callers: ScreenTexOverlayDrawMulti/Single, ScreenFadeBlockDraw.
+
+##### `GsPktOpenGifTag_13f3b0(b, s32 type, u32 regsLo, u32 regsHi, s32 nreg)` (180 bytes) — PACKED
+- `+0x114 = 1`; type bits = `type & 7`; `+0x110 = 1.0f`; `+0xF8 = +0xFC =
+  +0xF4`; zeroed CNT qword (`+0x104`, `+0x108` as above); `+0x118 = nreg`;
+  `+0x100` = the GIF tag: `w0 = 0x8000` (NLOOP 0 to patch, EOP), `w1 =
+  nreg<<28 | (PRIM & 0x7FF)<<15 | 0x4000` (FLG 0 PACKED, PRE 1, PRIM = the
+  whole image incl. type), `w2 = regsLo`, `w3 = regsHi`. (0x13f414-0x13f450)
+- Callers: AddTexSprite (regs 0x4343 n4; 0x43431 n5), DrawSprite (0x441
+  n3), TileScreenSprites (0x43 n2), ScreenFadeBlockDrawWipeStrips_177a70
+  (TRISTRIP, 0x43 n2).
+
+##### `GsPktFinalizeTags_13f260(b)` (336 bytes)
+- `qwc = (F4−F8)/16 − 1`, `vif = (F4−FC)/16 − 1`, `gif = (F4−[+0x100])/16 −
+  1` (signed /16 truncating).
+- If `qwc <= 0 || vif <= 0`: `F4 = F8` (drops the empty tag) and return.
+- `*[+0x104] = qwc | 0x10000000`; `*[+0x108] = vif | 0x50000000`;
+  `*[+0x100] (w0) = (+0x114 ? gif / +0x118 : gif) | 0x8000`.
+- No TEXFLUSH, no allocation, `+0x114` left as is.
+
+##### `GsPktClose_13f5b0(b)` (252 bytes; 221 callers)
+- If `+0xE8 != 0` return.
+- A+D `(0, 0x3F)` TEXFLUSH; then the same patch as FinalizeTags but always
+  with the A+D NLOOP (`gif | 0x8000`; ignores `+0x114`); roll back to F8
+  when empty; then `MemStackAllocQw(+0, (F4−EC)/16)`.
+- Leaves `+0xE8 = 0` and `+0xEC` unchanged (a second Close would append
+  and allocate again).
+- Convention in the game: OpenPrim … Close (A+D path); Open → SetPrimType
+  … FinalizeTags [→ OpenGifTag … FinalizeTags] → Commit (packed path).
+  Close after an OpenGifTag would corrupt the packed tag (it is never done).
+
+##### `GsPktCommit_13f190(b)` (68 bytes)
+- If `+0xE8 == 0`: `MemStackAllocQw(+0, (F4−EC)/16)`. Nothing else.
+
+##### `GsPktReserveQwords_13f230(b, n)` → old `+0xF4` (20 bytes)
+- `v0 = +0xF4`; `+0xF4 += n*16`. Used as `p = Reserve(0)`, write raw,
+  `Reserve(7)` (ScreenTexOverlayWriteSpriteMaybe, §9).
+
+##### `GsPktPushQword_13f170(b, const u128 *q)`
+- `*(u128*)F4 = *q; F4 += 16` (raw; the data qwords of a PACKED tag).
+
+##### `GsPktAddDmaCallTag_13f1f0(b, u32 addr)`
+- `*(u128*)F4 = {0x50000000, addr & 0x0FFFFFFF, 0, 0}` (DMA CALL, qwc 0);
+  F4 += 16. Only caller: ModelDrawOffscreenCompositeMaybe (0x16b180) with
+  0x445C60 (§9).
+
+##### `GsPktRawWriteBeginStubMaybe_13f250` / `GsPktRawWriteEndStubMaybe_13f1e0`
+- `jr ra; nop`. They bracket raw writes (ScreenTexOverlayWriteSprite,
+  ModelDrawOffscreenComposite); good hook points to know a raw stretch
+  starts and ends.
+
+---------------------------------------------------------------------------
+
+#### 6. State-only setters (no packet bytes)
+
+PRIM image bits (`b+0x70`, taken at the next BeginPrimAD / OpenGifTag /
+AddTexSprite; the PRIM already written in the open tag is not changed):
+
+| Function | Args | Effect |
+|---|---|---|
+| `GsPktSetGouraud_13e3b0` | (b, en) | IIP = en & 1 |
+| `GsPktSetTextured_13e400` | (b, en) | TME = en & 1 |
+| `GsPktSetFog_13e370` | (b, en) | FGE = en & 1 (one caller: SunFlareDrawQuadsMaybe 0x17b59c) |
+| `GsPktSetAlphaBlend_13e500` | (b, en) | ABE = en & 1 |
+| `GsPktSetAntialias_13e390` | (b, en) | AA1 = en & 1 |
+| `GsPktSetUseUV_13e3e0` | (b, en) | FST = en & 1 (1: UV, 0: STQ) |
+
+GsEnv (taken at the next GsPktOpen); each tail-calls the helper of §3 on
+`b+0x10`:
+
+| Function | Args | Effect |
+|---|---|---|
+| `GsPktSetBlendMode_13e4f0` | (b, preset) | ALPHA_1 = table[preset] if 0..11 |
+| `GsPktSetAlphaReg_13e4e0` | (b, const u64 *alpha) | ALPHA_1 = *alpha |
+| `GsPktEnableAlphaTest_13e4d0` | (b, en) | ATE = en ≠ 0 |
+| `GsPktSetAlphaTestFunc_13e4c0` | (b, atst, aref) | ATST, AREF |
+| `GsPktSetDestAlphaTest_13e4a0` | (b, en) | DATE |
+| `GsPktSetDestAlphaMode_13e4b0` | (b, m) | DATM (m=0 also clears DATE) |
+| `GsPktSetZTest_13e450` | (b, m) | ZTE=1; 0/1 ALWAYS, 2 GEQUAL, 3 GREATER |
+| `GsPktEnableZTest_13e460` | (b, en) | en=0: ZTest(0) ALWAYS; else ZTest(2) GEQUAL |
+| `GsPktSetZWriteMask_13e430` | (b, m) | `+0xE4 = m`; ZMSK per GsZbufSetZMask (0 writes Z, 1 not) |
+| `GsPktSetFrameMask_13e420` | (b, mode) | FBMSK per GsFrameSetMaskMode; `+0x6C = mode` |
+
+Others:
+
+| Function | Args | Effect |
+|---|---|---|
+| `GsPktSetTexFilter_13e3d0` | (b, f) | `+0xE0 = f` (used by the next SetTexture only) |
+| `GsPktSetOriginMode_13e2f0` | (b, m) | `+0x11C = m`; `+0x120/+0x124` per §2 |
+| `GsPktDisableTests_13f9e0` | (b) | ZTE=1 ZTST ALWAYS; `+0xE4=1`, ZMSK=1; ABE=0; ATE=0; DATE=0; TME=0 |
+| `GsPktSetDefaultState_13fa80` | (b) | ABE=0; ATE=1; DATE=0; ZTST GEQUAL; `+0xE4=1` ZMSK=1; FBA=0; TME=0; FST=1; `+0xE0=1`; IIP=0; AA1=0; FGE=0 (Init's tail; ALPHA/FRAME/origin untouched) |
+| `GsPktSetup2DState_26fdc0` | (b; returns if b == 0) | ABE=1; preset 1; ATE=1; ATST=6 GREATER, AREF=1; ZTST ALWAYS; ZWriteMask(0) → ZMSK=0, `+0xE4=0`; IIP=0; TME=1; `+0xE0=0` nearest; AA1=1. Callers: FontDrawText*, MesWinDraw* |
+| `GsPktSetupUiDrawState_2932b0` | (b; no null check) | preset 1; ABE=1; AA1=0; ATE=1 (ATST as it was); ZTST ALWAYS; TME=1; FST=1; origin 0; ZMSK=1; IIP=0. Callers: UiDrawWidgets, SaveMenu* |
+| `GsPktSetup2DState_3892a0` | (b; no null check) | ABE=1; AA1=0; ATE=1; ZTST ALWAYS; TME=1; FST=1; origin 1 (raw GS coords); `+0xE0=1`; ZMSK=1; IIP=0 (ALPHA not set). Callers: InsectCage* |
+
+Note `GsPktSetup2DState_26fdc0` leaves Z writes **on** (ZMSK=0) with Z test
+ALWAYS (0x26fe18: `SetZWriteMask(b, 0)`).
+
+---------------------------------------------------------------------------
+
+#### 7. A+D emitters
+
+Each writes one qword `{u64 data, u64 addr}` at `+0xF4` and adds 0x10,
+unless said otherwise. **No value is masked**: fields are sign-extended to
+64 bits and ORed (e.g. a negative X sets all bits above it, so Y and Z of
+that XYZ2 become 0xFFFF / 0xFFFFFFFF). A hook that reproduces the GS view
+must apply the same OR, or at least treat negative/oversized inputs as the
+GS would see them.
+
+| Function | Args (registers) | Units | Qword(s) |
+|---|---|---|---|
+| `GsPktWriteAD_13ec80` | a1 = reg (u64), a2 = data (u64) | raw | `(a2, a1)` |
+| `GsPktSetTexa_13eca0` | a1 = u64 | raw TEXA | `(a1, 0x3B)` |
+| `GsPktSetTexture_13ec00` | a1 = texture node* (may be 0) | — | if a1: NameTableCopyNode(b+0x78, a1) (13 u64); GsTex1SetFilter(b+0x78, +0xE0); then `(0, 0x3F)`, `(b+0xB8, 0x14)` TEX1_1, `(b+0xB0, 0x06)` TEX0_1, `(b+0xC0, 0x08)` CLAMP_1; F4 += 0x40. a1 = 0: nothing at all |
+| `GsPktSetST_13ed10` | f12 = s, f13 = t, f14 = q | floats | `(bits(s) \| bits(t)<<32, 0x02)`; `+0x110 = q` |
+| `GsPktSetSTVec_13ecc0` | a1 = float[3] {s, t, q} | floats | same |
+| `GsPktSetUV_13ed60` | a1 = u, a2 = v (s32) | texels | `(u<<4 \| (v<<4)<<16, 0x03)` |
+| `GsPktSetUVFixed_13ed90` | a1 = u, a2 = v (s32) | 1/16 texel | `(u \| v<<16, 0x03)` |
+| `GsPktSetRGBAQ_13ee40` | a1 r, a2 g, a3 b, t0 a (s32) | 0..255, 0x80 = 1 | `(r \| g<<8 \| b<<16 \| a<<24 \| bits(+0x110)<<32, 0x01)` |
+| `GsPktSetRGBAQVec_13edd0` | a1 = float[4] {r,g,b,a} | floats, VFTOI0 (truncate) | as SetRGBAQ |
+| `GsPktSetXYZ_13ef10` | a1 x, a2 y, a3 z (s32) | 1/16 px | `((x+ox) \| (y+oy)<<16 \| z<<32, 0x05)` |
+| `GsPktSetXYZVecI_13eeb0` | a1 = s32[3] {x,y,z} | 1/16 px | same |
+| `GsPktSetXYZPixel_13f110` | a1 x, a2 y, a3 z (s32) | pixels | `(((x<<4)+ox) \| ((y<<4)+oy)<<16 \| z<<32, 0x05)` |
+| `GsPktSetXYZPixelVec_13ef70` | a1 = s32[3] | pixels | same |
+| `GsPktSetXYZf_13f060` | f12 x, f13 y, f14 z | float px | x, y by VFTOI4 (×16, truncate), z by VFTOI0; then as SetXYZ |
+| `GsPktSetXYZfVec_13efe0` | a1 = float[4] {x,y,z,_} | float px | same (cop2 0x4b8a517d = VFTOI4.xy, 0x4a4a517c = VFTOI0.z) |
+
+`ox, oy` = `+0x120, +0x124`. All XYZ go to XYZ2 (vertex kick); none of the
+builder's functions writes XYZ3, XYZF2/3, FOG, FOGCOL, PRMODE, PABE,
+COLCLAMP, DTHE, XYOFFSET.
+
+RGBAQ's Q is `+0x110` at the time of the call: 1.0 after the last
+OpenPrim/SetPrimType/OpenGifTag, or the q of the last SetST/SetSTVec.
+
+Registers that callers write through `GsPktWriteAD` (all 28 sites, scanned
+for the a1 constant): SCISSOR_1 0x40 (scissor helpers, HpGauge*, Mes*,
+Menu*/TextClip scissor callbacks, FontSetScissor), TEXA 0x3B (DofFilter,
+ParticleSwirl, ScreenFadeBlockDraw ×3, SunFlareDrawQuads, TexAnime),
+TEXFLUSH 0x3F (TexAnimeTableApply).
+
+---------------------------------------------------------------------------
+
+#### 8. Composite helpers
+
+##### `GsPktSpriteUVRect_26eb30(b, s32 rect[4], s32 uv[4], s32 z)` (240 bytes)
+- rect = {x, y, w, h} in pixels, uv = {u, v, w, h} in texels (loaded with
+  `lwc1` but used as ints).
+- Emits: `SetUV(u, v)`, `SetXYZPixel(x, y, z)`, `SetUV(u+w, v+h)`,
+  `SetXYZPixel(x+w−1, y+h−1, z)`: four A+D qwords (UV, XYZ2, UV, XYZ2).
+  The XY end is inclusive (−1), the UV end is not.
+- The caller has opened a SPRITE. Callers: FontDrawGlyph_26de80,
+  FontDrawGlyphOutline_26e450.
+
+##### `GsPktSpriteSplitU_17adf0(b, x0 a1, y0 a2, x1 a3, y1 t0, u0 t1, v0 t2, u1 t3, v1 [sp+0])` (356 bytes)
+- All in 1/16 units (pixels and texels).
+- `du = u1−u0`, `n = du/512 (trunc) + (du % 512 != 0)` (512 = 32 texels).
+- For i in 0..n−1: `SetUVFixed(u0 + i·du/n, v0)`, `SetXYZ(x0 + i·dx/n, y0,
+  0)`, `SetUVFixed(u0 + (i+1)·du/n, v1)`, `SetXYZ(x0 + (i+1)·dx/n, y1, 0)`
+  (integer divisions, `dx = x1−x0`). Z is 0.
+- du ≤ 0: n = 0 (nothing), except −511 ≤ du < 0 gives n = 1 (one strip).
+- Callers: GlareFilterDrawMaybe only (8 sites).
+
+##### `GsPktDrawSprite_13ea30(b, const s32 rec[12])` (464 bytes) — PACKED
+- `OpenGifTag(b, 6 SPRITE, 0x441, 0, 3)`: REGS RGBAQ, XYZ2, XYZ2.
+- Writes `rec[0..3]` (RGBA, one s32 each; Q from the GS's current Q) as is;
+  then xyz0 = `rec[4..7]`, xyz1 = `rec[8..11]` (x, y 1/16 px; z; the 4th word
+  carries ADC in bit 15), x/y adjusted by the origin (mode 1 raw copy;
+  mode 2 `+cx16/+cy16`; else `+cx16 − w16/2`, `+cy16 − h16/2`).
+- `FinalizeTags` (NLOOP 1). Caller commits.
+- Callers: ShadowMapRender_146680, DrawListEndPlaneShadowPass_146cc0,
+  DrawListBeginPlaneShadowPass_147b80.
+
+##### `GsPktAddTexSprite_13e520(b, const rec*)` (1284 bytes) — A+D then PACKED
+Record: `+0x00` RGBA s32[4]; `+0x10` xyz0 s32[4]; `+0x20` xyz1 s32[4];
+`+0x30` split flag; `+0x40` texture node*; `+0x50` uv0 s32[4] (u, v in 1/16
+texel); `+0x60` uv1 s32[4].
+
+Path A, when `rec+0x30 != 0` and `x0−x1 == u0−u1` (1:1 texels):
+1. `+0x114=0`, type 6, Q=1.0, BeginPrimAD (PRIM), SetTexture(rec+0x40)
+   (TEXFLUSH, TEX1, TEX0, CLAMP), A+D RGBAQ from rec[0..3] with Q 1.0
+   (0x13e594-0x13e5d8), FinalizeTags.
+2. `OpenGifTag(b, 6, 0x4343, 0, 4)`: REGS UV, XYZ2, UV, XYZ2.
+3. Origin-adjusted xyz0/xyz1 (as DrawSprite). For `x = x0, u = u0` while
+   `x < x1`, step 0x200 (32 px / 32 texels): qwords `uv0' = {u, uv0.v,
+   uv0.w2, uv0.w3}`, `xyz0' = {x, xyz0.y, …}`, `uv1' = {min(u+0x200, u1),
+   uv1.v, …}`, `xyz1' = {min(x+0x200, x1), xyz1.y, …}` (0x13e790-0x13e7fc).
+4. FinalizeTags (NLOOP = strips).
+
+Path B otherwise:
+1. Same as A.1 but **without** the RGBAQ A+D (0x13e814-0x13e84c).
+2. `OpenGifTag(b, 6, 0x43431, 0, 5)`: REGS RGBAQ, UV, XYZ2, UV, XYZ2.
+3. Qwords: `rec+0x00`, `rec+0x50`, adjusted xyz0, `rec+0x60`, adjusted
+   xyz1. FinalizeTags (NLOOP 1).
+
+Callers: ShadowMapBlur_145b60, DrawListEndPlaneShadowPass_146cc0 (each
+followed by GsPktCommit).
+
+##### `GsPktTileScreenSprites_177cf0(b)` (480 bytes) — PACKED
+- `OpenGifTag(b, 6, 0x43, 0, 2)`: REGS UV, XYZ2.
+- `L = DrawEnvGetLeft(ctx)·16` (`cx − trunc(w/2)`), `T =
+  DrawEnvGetTop(ctx)·16`, from `GetDrawCtx()`'s env, **not** from the
+  builder's origin (differs from origin mode 0 by 8 for an odd w or h).
+- For x in 0, 64, … < w; y in 0, 32, … < h (pixels): PushQword UV `{x·16,
+  y·16, 0, 0}`, XYZ2 `{x·16+L, y·16+T, 0, 0}`, UV `{(x+64)·16, (y+32)·16,
+  0, 0}`, XYZ2 `{(x+64)·16+L, (y+32)·16+T, 0, 0}`. Tiles past the edge are
+  not clipped.
+- FinalizeTags. Callers: ScreenFadeBlockDraw (0x1777dc, 0x177850), after
+  its own Open/SetPrimType/SetTexture/RGBAQ/FinalizeTags; then Commit.
+
+##### `GsPktDrawLine3D_1cca80(b, float p0[3], float p1[3], float rgba[4])`
+- `ProjectToScreen_15d340` on both (matrix `*(0x4810A4)+0xF20 → +0x1C0`;
+  out = s32 {x·16, y·16, z, 0}, nonzero when inside 0..0xFFF and the depth
+  range). If both visible: SetRGBAQVec(rgba), SetXYZVecI(p0'),
+  SetXYZVecI(p1') (the builder offset is added on top). Returns the last
+  callee's v0 (meaningless). Callers: EvMapObjDebugDraw,
+  EvMapObjNodeDrawAxes (debug).
+
+##### `GsPktSetScissor_28c2e0(b, s32 rect[4], s32 enable, s32 ofs[4] or 0)` (332 bytes)
+- b == 0: nothing.
+- enable == 0: `OpenPrim(b, 6)`; `WriteAD(0x40, (w−1)<<16 | (h−1)<<48)` (w, h
+  of `GetDrawCtx()`'s env: 0..w−1, 0..h−1); `Close(b)`.
+- enable ≠ 0: `r = rect + ofs` (component-wise, ofs may be 0);
+  `OpenPrim(b, 6)`; `WriteAD(0x40, r.x | (r.x+r.w)<<16 | r.y<<32 |
+  (r.y+r.h)<<48)` (inclusive end, no −1; unmasked); `Close(b)`.
+- Side effects: a full segment (header with the env registers, PRIM =
+  SPRITE with the current bits, SCISSOR, TEXFLUSH); PRIM type becomes 6
+  and Q 1.0.
+
+##### `GsPktSetScissorDefault_28c2d0(b, rect, enable)`
+- Tail-calls SetScissor with `ofs = 0x47EB50` = {3, 3, 1, 1}.
+
+##### `GsPktSetScissorFull_26fe60(b)`
+- b == 0: nothing. `OpenPrim(b, 6)`, `WriteAD(0x40, (w−1)<<16 | (h−1)<<48)`,
+  `Close(b)`.
+
+##### `GsPktSetScissorRows_26ff00(b, s32 y0, s32 y1)`
+- b == 0: nothing. `OpenPrim(b, 6)`, `WriteAD(0x40, (w−1)<<16 | y0<<32 |
+  y1<<48)`, `Close(b)`. Caller: MesWinDraw_270cb0.
+
+The scissor lasts until the block's end: DrawListEndPrim's env packet
+writes SCISSOR_1 back.
+
+---------------------------------------------------------------------------
+
+#### 9. Writes that are not A+D qwords (the ones that matter most)
+
+1. **PACKED GIF tags** (`GsPktOpenGifTag`, PRE=1 with the PRIM image):
+   - `GsPktDrawSprite`: {RGBAQ, XYZ2, XYZ2} × 1, SPRITE.
+   - `GsPktAddTexSprite`: {UV, XYZ2, UV, XYZ2} × strips, or
+     {RGBAQ, UV, XYZ2, UV, XYZ2} × 1, SPRITE (after an A+D tag with PRIM,
+     the texture registers and maybe RGBAQ).
+   - `GsPktTileScreenSprites`: {UV, XYZ2} pairs, SPRITE.
+   - `ScreenFadeBlockDrawWipeStrips_177a70` (not GsPkt*, uses OpenGifTag +
+     PushQword): {UV, XYZ2} pairs, TRISTRIP (type 4), 17 iterations of 2
+     vertices (0x177cac: `slti v0,s0,0x11`).
+   In PACKED mode RGBAQ takes R/G/B/A from bits 0/32/64/96 of the qword
+   (Q from the GS's internal Q, not `+0x110`); UV from bits 0 and 32;
+   XYZ2 X bits 0-15, Y 32-47, Z 64-95, ADC bit 111.
+2. **Raw qwords via `GsPktPushQword`** (the packed data above).
+3. **A VU1 program call via `GsPktReserveQwords`**:
+   `ScreenTexOverlayWriteSpriteMaybe_16a890` writes 7 qwords after a
+   `ReserveQwords(0)` (0x16a914) and `ReserveQwords(7)` (0x16aa84):
+   `{CNT 6 | STCYCL 1,1 (0x01000101) | UNPACK V4-32 num 5 addr 0x8C
+   (0x6C05008C)}`, 5 data qwords (rect /16 as floats, centre offsets,
+   texel offsets, the sprite GIF tag `{0x8001, 0x40000000, 0x4343, 0}` =
+   NLOOP 1, EOP, NREG 4, UV XYZ2 UV XYZ2), then `{MSCAL 0x12C
+   (0x1400012C), 0, 0, FLUSH (0x11000000)}`. Quads 140/141 z, w lanes are
+   left as whatever was in memory. This is the VU1 overlay program already
+   described in docs/NATIVE-ONLY-NOTES.md (`ModelDrawOffscreenComposite`
+   section and "the reader of quads 98/99"). Callers:
+   ScreenTexOverlayDrawMulti/Single, inside segments built as Open →
+   SetPrimType(6) → SetTexture → SetRGBAQ → FinalizeTags → WriteSprite →
+   Commit.
+4. **A DMA CALL via `GsPktAddDmaCallTag`**:
+   `ModelDrawOffscreenCompositeMaybe` 0x16b168-0x16b190: Open (header),
+   CALL 0x445C60, Commit. 0x445C60 is `{RET qwc 0x1E | NOP | MPG num 0x3B
+   addr 0x12C (0x4A3B012C)}`: the overlay microprogram's upload.
+5. `GsPktWriteAD` with an arbitrary register (only 0x40/0x3B/0x3F are used).
+
+Everything else in the builder is A+D (PACKED tags with REGS = 0xE).
+
+---------------------------------------------------------------------------
+
+#### 10. What callers read back (what a hook that skips originals must keep)
+
+Return values used:
+- `DrawListBeginPrim` → the builder (`ctx+0x130`): every caller keeps it.
+- `GsPktEnd` → block address (`+0xF0`, 0 when no Open): DrawListEndPrim and
+  the six inline copies turn it into a CALL tag (no CALL when 0).
+- `GsPktReserveQwords` → the write pointer: ScreenTexOverlayWriteSprite
+  writes 7 qwords there, then advances with `Reserve(7)`; GsPktCommit then
+  allocates `(F4−EC)/16`. So `+0xF4` and `+0xEC` must be coherent for
+  these raw writers (or they must be kept on the original path).
+- `GsEnvWritePacket` → 6 (GsPktOpen advances by it; DrawListWriteTexEnvPacket
+  sizes its packet with it).
+- `GsPktCtorMaybe` → b (static init).
+- All other GsPkt* return nothing useful.
+
+Builder fields read by callers directly: none found. A scan of every
+function that calls a GsPkt* function, for loads/stores at the builder's
+field offsets through the registers they pass as a0 (and a broader scan
+for offsets 0xE0-0x134 on any base), found only unrelated structures and
+stack arrays. Callers read the frame's size/centre through the DrawEnv
+getters (`DrawEnvGetWidth/Height/CenterX/CenterY/Left/Top`), not from
+`+0x128..+0x134`. (Heuristic; a pointer stored and reloaded later would be
+missed: open in principle.)
+
+Builder state that later GsPkt calls depend on (keep coherent if any
+original still runs after a skipped one):
+- `+0x70` PRIM image (BeginPrimAD, OpenGifTag), the GsEnv (Open), `+0xE0`
+  (SetTexture), `+0x110` Q (RGBAQ), `+0x11C..+0x134` (XYZ setters,
+  DrawSprite, AddTexSprite), `+0xE8/+0xEC/+0xF0/+0xF4..+0x118` (framing),
+  `+0x00` (whether anything is written at all).
+- State persists across blocks only where Init does not reset it: PRIM type
+  bits, Q (`+0x110`), `+0x114/+0x118`.
+- The memstack top: the game's own allocations (DrawListEndPrim's env
+  packet, texture loads) assume Close/Commit allocated exactly what the
+  segments wrote.
+
+When the snapshot happens (for producing records):
+- Env registers (ALPHA_1, TEST_1, ZBUF_1, FBA_1, FRAME_1): at GsPktOpen
+  (OpenPrim, SetScissor*). A setter called after Open applies only from
+  the next Open.
+- PRIM: at BeginPrimAD (OpenPrim, SetPrimType, AddTexSprite) and
+  OpenGifTag.
+- TEX0/TEX1/CLAMP: at SetTexture (filter from `+0xE0` at that moment).
+  A block that never calls SetTexture uses whatever TEX0 the GS had (not
+  restored by the env packet).
+- TEXA: whenever SetTexa / WriteAD(0x3B) is called; never restored.
+- SCISSOR_1: SetScissor*/WriteAD(0x40); restored at the block's end.
+- Q: at each SetRGBAQ(Vec).
+- XYZ offsets: at each XYZ setter (`+0x120/+0x124` at that moment).
+
+---------------------------------------------------------------------------
+
+#### 11. Hazards for a hook
+
+- If `+0x00` is 0 (no memstack), Open/OpenPrim write nothing and leave
+  `+0xF4` stale, but every A+D setter still writes through `+0xF4` (into
+  an old packet). Close/Commit do nothing. End would call
+  `MemStackAllocQw(0, 1)`.
+- `MemStackAllocQw` returns 0 when the stack is locked (`+0x20`) or full;
+  GsPktEnd then writes its RET to address 0.
+- SetPrimType does not close the previous tag; OpenPrim does not reset
+  `+0x114`; Close ignores `+0x114` and always appends TEXFLUSH.
+- A segment's bytes are written at the memstack top before they are
+  allocated; any allocation between Open and Close/Commit would be
+  overwritten.
+- BeginPrim nests and resets the shared builder (§1).
+- A+D values are not masked (§7); PACKED XYZ2 is (16-bit fields).
+- Origin mode 0 vs DrawEnvGetLeft/Top differ by half a pixel for odd sizes
+  (TileScreenSprites vs everything else).
+
+---------------------------------------------------------------------------
+
+#### 12. Open
+
+- Whether anything reads builder `+0x04` (the "in a block" flag): no GsPkt
+  function does.
+- DrawEnv `+0xC0..+0xF0` naming rests on the libgs order (`sceGsDrawEnv1`:
+  FRAME, ZBUF, XYOFFSET, SCISSOR, PRMODECONT, COLCLAMP, DTHE, TEST_1) and on
+  the copy in GfxSetVideoMode. If it holds, `DrawEnvSetFrame_1575e0` clears
+  bit 0 of `+0xC0` (0x157708-0x15775c), i.e. PRMODECONT.AC = 0 in every env
+  restore packet after it (RGDecomp calls the field DTHE); GsPktOpen writes
+  PRMODECONT = 1 at the head of every segment, which would be why. Worth
+  one runtime look at the env packet's `+0xC8` address word.
+- The four `GsPktOpenPrim` sites whose type is a register, and the four
+  that pass 0 (POINT), see §5.
+- What VU1 program 0x12C draws exactly is in docs/NATIVE-ONLY-NOTES.md; not
+  re-derived here.
+
+---------------------------------------------------------------------------
+
+(The side note this map ended with, that `native_blocks` read past
+`GsPktEnd`'s RET and so read no block, was right; fixed on
+`native-only/m4b-2d`.)
