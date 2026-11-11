@@ -139,10 +139,18 @@ stacked PRs at the end).
   `ModelPrepareDraw`/`ModelEmitDrawPackets` (NATIVE-ONLY-NOTES.md, "Model
   draws", has their layout), materials from `MeshMaterial`, the draw
   environment from `DrawEnv`, uploads from the texture load functions.
-  That is the next large piece, in progress: the emit path's map (as the
-  GsPkt builder's was) is being written into NATIVE-ONLY-NOTES.md, then
-  the draws are built at the emit call and compared with the list's, as
-  the 2D blocks were, before the list stops carrying them.
+  In progress, on the model side: the emit path is mapped
+  (NATIVE-ONLY-NOTES.md), every model draw's inputs are read at the emit
+  call and compared with the list's (`[model-emit]`), and calls whose
+  meshes agreed are no longer written: they are drawn from their records
+  (state from the material's GsEnv and the draw environment, geometry
+  from the static spans). Left on that side: the sorted path, the
+  ModelMesh class (rebuilt every frame), and the view, camera and light
+  packets. Then the 2D's remaining sources, and the mirror, `native_2d`
+  and `gif_events` can go.
+  - **For the play test:** `[model-emit]` (the same / differing: should
+    be all the same; calls the game did not write: should grow), and
+    `[native-blocks]` as above.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
