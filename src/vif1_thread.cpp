@@ -665,7 +665,6 @@ public:
         // data memory before the VU1 changes it. The MSCAL names the program
         // (once per code image and entry), its MSCNTs run the chunks; or the
         // MSCAL is the chunk (drawsAtCall).
-        const rg::vu1native::Program *native = nullptr;
         {
             if (!resume)
             {
@@ -702,162 +701,167 @@ public:
             }
             t_vu1Source = programSource(m_nativeProgram);
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
-            {
-                // The chunks that clip (slot E) go to the GPU too: it clips
-                // in clip space.
-                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top);
-                if (reason)
-                {
-                    m_nativeMonitor.declined(*m_nativeProgram, reason);
-                }
-                else
-                {
-                    native = m_nativeProgram;
-                    t_model.active = false;
-                    m_particleMesh = false;
-                    m_shadowMesh = false;
-                    m_outlineMesh = false;
-                    if (native->kind == rg::vu1native::Kind::Shadow)
-                    {
-                        // M5: the shadow volumes to the model vertex stage,
-                        // twice (the facing ones' blend and the others').
-                        m_nativePackets.clear();
-                        m_shadowMesh = rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top,
-                                                                   m_shadowPackets, m_shadowMeshes, m_shadowInputs,
-                                                                   m_shadowRows, m_shadowPalette);
-                        if (!m_shadowMesh)
-                            m_nativeMonitor.dropped("shadow: its colours not set");
-                    }
-                    else if (native->kind == rg::vu1native::Kind::Outline &&
-                             rg::vu1native::outlineDraw(*native, memory.getVU1Data(), top, m_nativePackets,
-                                                        m_nativeMesh, t_model.inputs, t_model.edge, t_model.row,
-                                                        t_model.palette))
-                    {
-                        // M5: the outlines to the model vertex stage, which
-                        // tests each edge and draws its four lines.
-                        t_model.active = true;
-                        t_model.define = false;
-                        t_model.list = false;
-                        t_model.transient = true;
-                        t_model.volume = false;
-                        m_modelId = 0u;
-                        m_outlineMesh = true;
-                    }
-                    else if (native->kind == rg::vu1native::Kind::Particles)
-                    {
-                        // M5: the particles to the model vertex stage, which
-                        // makes each billboard in world space.
-                        rg::vu1native::particleMesh(memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
-                                                    t_model.inputs, t_model.row);
-                        t_model.palette.clear();
-                        t_model.active = true;
-                        t_model.define = false;
-                        t_model.list = true;
-                        t_model.transient = true;
-                        t_model.edge = 0u;
-                        t_model.volume = false;
-                        m_modelId = 0u;
-                        m_particleMesh = true;
-                    }
-                    else if (rg::vu1native::modelOnGpu(*native))
-                    {
-                        // M5: the chunk goes to the model vertex stage. Seen
-                        // in two lists, it is kept under an id (its inputs
-                        // once); before that, or when its inputs change
-                        // from frame to frame (cloth), its inputs go with
-                        // this draw. No vertex is made here.
-                        const uint8_t *data = memory.getVU1Data();
-                        const uint32_t modelId =
-                            modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
-                        t_model.transient = modelId == 0u;
-                        if (t_model.define || t_model.transient)
-                            rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
-                        rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
-                        rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
-                        t_model.active = true;
-                        t_model.edge = 0u;
-                        t_model.volume = false;
-                        m_modelId = modelId;
-                    }
-                    else
-                    {
-                        rg::vu1native::buildChunk(*native, memory.getVU1Data(), top, m_nativePackets);
-                    }
-                    m_nativeMonitor.native(*native);
-                }
-            }
+                drawChunk(*m_nativeProgram, memory.getVU1Data(), top);
+            else if (!m_nativeProgram)
+                m_nativeMonitor.dropped("a program identify() does not know");
             m_nativeMonitor.tick();
         }
-        if (!native && !m_nativeProgram)
-            m_nativeMonitor.dropped("a program identify() does not know");
-        if (native)
+        t_vu1Source = 0u;
+    }
+
+    // A chunk of a program the native programs know (the list's MSCNT, or a
+    // record's chain), with VU1 data memory as the VU1 would find it: drawn
+    // by the model vertex stage, or declined (counted, not drawn).
+    void drawChunk(const rg::vu1native::Program &program, uint8_t *data, uint32_t top)
+    {
+        const rg::vu1native::Program *native = &program;
+        // The chunks that clip (slot E) go to the GPU too: it clips in clip
+        // space.
+        if (const char *reason = rg::vu1native::declineChunk(program, data, top))
         {
+            m_nativeMonitor.declined(program, reason);
+            return;
+        }
+        t_model.active = false;
+        m_particleMesh = false;
+        m_shadowMesh = false;
+        m_outlineMesh = false;
+        if (native->kind == rg::vu1native::Kind::Shadow)
+        {
+            // M5: the shadow volumes to the model vertex stage,
+            // twice (the facing ones' blend and the others').
+            m_nativePackets.clear();
+            m_shadowMesh = rg::vu1native::shadowMeshes(*native, data, top,
+                                                       m_shadowPackets, m_shadowMeshes, m_shadowInputs,
+                                                       m_shadowRows, m_shadowPalette);
+            if (!m_shadowMesh)
             {
-                if (m_shadowMesh)
-                {
-                    // Each mesh after its packets, the model matrix the
-                    // identity (its corners are in world space).
-                    std::memcpy(m_particleQuads, memory.getVU1Data(), sizeof(m_particleQuads));
-                    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-                    std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
-                    for (int i = 0; i < 2; ++i)
-                    {
-                        for (const auto &packet : m_shadowPackets[i])
-                            deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-                        t_model.active = true;
-                        t_model.define = false;
-                        t_model.list = true;
-                        t_model.transient = true;
-                        t_model.edge = 0u;
-                        t_model.volume = true;
-                        t_model.inputs = m_shadowInputs;
-                        t_model.row = m_shadowRows[i];
-                        t_model.palette = m_shadowPalette;
-                        t_retain = {};
-                        deliverMesh(m_shadowMeshes[i], m_particleQuads);
-                        t_model.active = false;
-                        t_model.volume = false;
-                    }
-                    m_shadowMesh = false;
-                }
-                const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh || m_outlineMesh;
-                // A mesh's own register packets ride with it as writes.
-                const bool asWrites = meshed && packetsAsWrites(m_nativePackets, m_nativeWrites);
-                if (!asWrites)
-                    for (const auto &packet : m_nativePackets)
-                    {
-                        deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-                    }
-                if (meshed)
-                {
-                    if (t_model.active)
-                        t_retain = {m_modelId, false};
-                    if (asWrites)
-                    {
-                        t_meshWrites = m_nativeWrites.data();
-                        t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
-                    }
-                    if (m_particleMesh)
-                    {
-                        // The corners are in world space: the model matrix
-                        // the producer reads (quads 60-63) the identity.
-                        std::memcpy(m_particleQuads, memory.getVU1Data(), sizeof(m_particleQuads));
-                        const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-                        std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
-                        deliverMesh(m_nativeMesh, m_particleQuads);
-                    }
-                    else
-                        deliverMesh(m_nativeMesh, memory.getVU1Data());
-                    t_retain = {};
-                    t_model.active = false;
-                    t_meshWriteCount = 0u;
-                }
-                // What the VU1 would have left in its memory, where it did
-                // not run.
-                rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
+                m_nativeMonitor.dropped("shadow: its colours not set");
+                return;
             }
         }
-        t_vu1Source = 0u;
+        else if (native->kind == rg::vu1native::Kind::Outline &&
+                 rg::vu1native::outlineDraw(*native, data, top, m_nativePackets,
+                                            m_nativeMesh, t_model.inputs, t_model.edge, t_model.row,
+                                            t_model.palette))
+        {
+            // M5: the outlines to the model vertex stage, which
+            // tests each edge and draws its four lines.
+            t_model.active = true;
+            t_model.define = false;
+            t_model.list = false;
+            t_model.transient = true;
+            t_model.volume = false;
+            m_modelId = 0u;
+            m_outlineMesh = true;
+        }
+        else if (native->kind == rg::vu1native::Kind::Particles)
+        {
+            // M5: the particles to the model vertex stage, which
+            // makes each billboard in world space.
+            rg::vu1native::particleMesh(data, top, m_nativePackets, m_nativeMesh,
+                                        t_model.inputs, t_model.row);
+            t_model.palette.clear();
+            t_model.active = true;
+            t_model.define = false;
+            t_model.list = true;
+            t_model.transient = true;
+            t_model.edge = 0u;
+            t_model.volume = false;
+            m_modelId = 0u;
+            m_particleMesh = true;
+        }
+        else if (rg::vu1native::modelOnGpu(*native))
+        {
+            // M5: the chunk goes to the model vertex stage. Seen
+            // in two lists, it is kept under an id (its inputs
+            // once); before that, or when its inputs change
+            // from frame to frame (cloth), its inputs go with
+            // this draw. No vertex is made here.
+            const uint32_t modelId =
+                modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
+            t_model.transient = modelId == 0u;
+            if (t_model.define || t_model.transient)
+                rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
+            rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
+            rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
+            t_model.active = true;
+            t_model.edge = 0u;
+            t_model.volume = false;
+            m_modelId = modelId;
+        }
+        else
+        {
+            rg::vu1native::buildChunk(*native, data, top, m_nativePackets);
+        }
+        m_nativeMonitor.native(program);
+        if (m_shadowMesh)
+        {
+            // Each mesh after its packets, the model matrix the
+            // identity (its corners are in world space).
+            std::memcpy(m_particleQuads, data, sizeof(m_particleQuads));
+            const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
+            for (int i = 0; i < 2; ++i)
+            {
+                // Its packets as the mesh's own writes (a record's state takes them).
+                const bool shadowWrites = packetsAsWrites(m_shadowPackets[i], m_nativeWrites);
+                if (!shadowWrites)
+                    for (const auto &packet : m_shadowPackets[i])
+                        deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                t_meshWrites = m_nativeWrites.data();
+                t_meshWriteCount = shadowWrites ? static_cast<uint32_t>(m_nativeWrites.size()) : 0u;
+                t_model.active = true;
+                t_model.define = false;
+                t_model.list = true;
+                t_model.transient = true;
+                t_model.edge = 0u;
+                t_model.volume = true;
+                t_model.inputs = m_shadowInputs;
+                t_model.row = m_shadowRows[i];
+                t_model.palette = m_shadowPalette;
+                t_retain = {};
+                deliverMesh(m_shadowMeshes[i], m_particleQuads);
+                t_model.active = false;
+                t_model.volume = false;
+                t_meshWriteCount = 0u;
+            }
+            m_shadowMesh = false;
+        }
+        const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh || m_outlineMesh;
+        // A mesh's own register packets ride with it as writes.
+        const bool asWrites = meshed && packetsAsWrites(m_nativePackets, m_nativeWrites);
+        if (!asWrites)
+            for (const auto &packet : m_nativePackets)
+            {
+                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            }
+        if (meshed)
+        {
+            if (t_model.active)
+                t_retain = {m_modelId, false};
+            if (asWrites)
+            {
+                t_meshWrites = m_nativeWrites.data();
+                t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
+            }
+            if (m_particleMesh)
+            {
+                // The corners are in world space: the model matrix
+                // the producer reads (quads 60-63) the identity.
+                std::memcpy(m_particleQuads, data, sizeof(m_particleQuads));
+                const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
+                deliverMesh(m_nativeMesh, m_particleQuads);
+            }
+            else
+                deliverMesh(m_nativeMesh, data);
+            t_retain = {};
+            t_model.active = false;
+            t_meshWriteCount = 0u;
+        }
+        // What the VU1 would have left in its memory, where it did not run.
+        rg::vu1native::applyMemoryEffects(program, data, top);
     }
 
     // M6: a model emit call the game did not write (src/native_emit.h),
@@ -951,7 +955,11 @@ private:
                     wl = (imm >> 8) & 0xFFu;
                 }
                 else if (op == 0x17u)
-                    drawUnwrittenChunk(program, data, top);
+                {
+                    t_vu1Source = programSource(&program);
+                    drawChunk(program, data, top);
+                    t_vu1Source = 0u;
+                }
                 else if ((op & 0x60u) == 0x60u)
                 {
                     const uint32_t vn = (op >> 2) & 3u, vl = op & 3u, n = num == 0u ? 256u : num;
@@ -997,37 +1005,6 @@ private:
         }
     }
 
-    // One chunk of an unwritten call, as the list's run draws a model chunk.
-    void drawUnwrittenChunk(const rg::vu1native::Program &program, uint8_t *data, uint32_t top)
-    {
-        const rg::vu1native::Program *native = &program;
-        t_vu1Source = programSource(native);
-        const uint32_t modelId = modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
-        t_model.transient = modelId == 0u;
-        if (t_model.define || t_model.transient)
-            rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
-        rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
-        rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
-        t_model.active = true;
-        t_model.edge = 0u;
-        t_model.volume = false;
-        const bool asWrites = packetsAsWrites(m_nativePackets, m_nativeWrites);
-        if (!asWrites)
-            for (const auto &packet : m_nativePackets)
-                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-        t_retain = {modelId, false};
-        if (asWrites)
-        {
-            t_meshWrites = m_nativeWrites.data();
-            t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
-        }
-        deliverMesh(m_nativeMesh, data);
-        t_retain = {};
-        t_model.active = false;
-        t_meshWriteCount = 0u;
-        t_vu1Source = 0u;
-        m_nativeMonitor.native(*native);
-    }
 public:
     // The tag of the program starting at pair `startPC`: the entry and a hash
     // of the 1 KiB of microcode from it, which names the program whatever else

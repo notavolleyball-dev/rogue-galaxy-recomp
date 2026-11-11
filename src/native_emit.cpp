@@ -300,11 +300,11 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
     }
 }
 
-// A call whose every item's mesh is a ModelMeshLinks (static chains), and
-// every group a strip or projector program the microcode table names, is
-// drawn from its record: the game writes nothing for it. Others (the
-// ModelMesh class, rebuilt every frame; a program the table leaves to what
-// is resident) are written as the game writes them.
+// A call whose every item's mesh is a ModelMeshLinks (static chains) or a
+// ModelMesh (rebuilt here), and every group a program the table names and
+// the native programs draw, is drawn from its record: the game writes
+// nothing for it. Others (a program the table leaves to what is resident,
+// or one identify() does not know) are written as the game writes them.
 std::atomic<uint64_t> g_unwrittenCalls{0u}, g_writtenCalls{0u};
 
 // Where a call's marker goes: each group's draw registers, the game
@@ -331,9 +331,16 @@ bool drawable(const Call &call)
         if (vtable != kMeshLinks && vtable != kMesh)
             return false;
         for (const Group &group : item.groups)
-            if (!group.programKnown || !group.program || !rg::vu1native::modelOnGpu(*group.program) ||
-                !group.stateKnown || !group.chunksKnown)
+        {
+            if (!group.programKnown || !group.program || !group.stateKnown || !group.chunksKnown)
                 return false;
+            // What the list's run draws natively: strips and projectors (the
+            // model vertex stage's), outlines, particles, shadow volumes.
+            const rg::vu1native::Kind kind = group.program->kind;
+            if (!rg::vu1native::modelOnGpu(*group.program) && kind != rg::vu1native::Kind::Outline &&
+                kind != rg::vu1native::Kind::Particles && kind != rg::vu1native::Kind::Shadow)
+                return false;
+        }
     }
     return true;
 }
