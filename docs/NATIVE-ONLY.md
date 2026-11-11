@@ -70,10 +70,11 @@ stacked PRs at the end).
   presenter (`sdlgpu_presenter.*`) replaces the backend; whole-texture packs
   work from the producer (`src/pcsx2_hash.*`). Not yet play-tested: see
   "Handoff" in M1 below for what to check.
-- **M2 is next**, on `native-only/m2-contract` from M1's branch. The record
-  contract v2 has not been reviewed by the user; per the instruction above
-  M2 goes ahead on the draft as written, and a review that changes it is
-  applied on top.
+- **M2 is done in code** on `native-only/m2-contract` (from M1's branch;
+  see M2's status for what changed and the points kept differently from
+  the draft contract, for the user's review).
+- **M3 is next**, on `native-only/m3-passes` from M2's branch: effects as
+  passes, in M3's order, each with a note in NATIVE-ONLY-NOTES.md first.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -492,6 +493,49 @@ here in advance (among them glare and bloom where alpha was over 0x80,
 which should now match the tag's GS path), and no `0x80` remains in the
 renderer library.
 
+**Status (2026-11-11): done in code, not play-tested**, on
+`native-only/m2-contract` (from M1's branch), each commit compile-checked:
+1. the v2 record set: `Draw2D` (the producer's window-space draws, with a
+   layer tag, Scene until M4), `Pass` (designed; M3 fills it), `Clear` (the
+   producer clears the scene at each frame's start and a depth target at
+   its first use in a frame; the renderer no longer does on its own),
+   `Present`'s target and rectangle honored; `SpriteDraw`, `Readback`,
+   `DepthQuery`, `gsMatrix` and the depth log (it compared with the GS's Z)
+   deleted;
+2. float units: RGBA16F targets, `Texture::scale`, float material fields,
+   float fog, a resolve pass at `Present::scale`; colour reads in floats;
+3. standard cameras (reversed-Z projection over a viewport rectangle) and
+   the depth terms (`depthScale`, `depthBias`, `depthCap`, `decalBias`)
+   made by the producer; 2D depth made by the producer;
+4. tiles of sheets (region clamp and repeat) cut into textures of their
+   own by the producer; plain clamp or repeat and a texel offset in the
+   renderer.
+
+`grep 0x80` over `thirdparty/dq8-gfx/src/gfx/native` finds nothing.
+
+**Kept differently from the draft contract, for the user to decide** (see
+"Outside this plan" for the reasoning):
+- The destination-alpha test stays a read of a copy of the target (a
+  stencil bit needs the shader to write stencil, which SDL GPU does not
+  offer, or the same copy to make it).
+- A source read without its alpha (TEXA, AEM) stays a material field
+  (`sourceAlpha`, `alphaZeroOnBlack`) for textures and targets alike:
+  baking it into textures would remove no renderer code, as targets need
+  it anyway.
+- `Draw2D` positions are the target's pixels (the scene's are its 640x448)
+  rather than a virtual space with an orthographic camera.
+- The channel shuffle (CBlur's green-to-alpha) stays until M3 makes CBlur
+  a pass.
+- `MeshDraw::object` and `previousModel` are not filled yet: the producer
+  has no object identity before M5's model-level hook (a retained chunk's
+  id is shared by every instance of the mesh).
+
+**Expected differences from M1** (to look for when play-testing): glare,
+bloom and anything blended by an alpha or a fixed factor over 0x80 is
+brighter where the GS was brighter (it was clamped at 0x80 before); colors
+no longer truncated to whole bytes between steps (smoother gradients);
+tiles of sheets drawn with filtering when the game asks for it.
+
 ### M3: effects as passes
 
 For each effect: a note, then a hook that emits a `Pass` and discards the
@@ -667,4 +711,15 @@ materials from M5).
 Ideas and fixes that came up during the work but belong to no milestone.
 They wait until the plan is done, or until the user moves one in.
 
-(None yet.)
+- **Destination-alpha test as stencil (M2, deferred to the user).** The
+  draft contract has the destination-alpha test become a stencil bit set
+  where alpha >= 1. Setting it per pixel needs the fragment shader to
+  write the stencil value (shader stencil export), which SDL GPU does not
+  expose; without it, each alpha-writing draw would need a second pass
+  that reads a copy of the target to set the bit, which is the copy the
+  renderer takes today. Kept as the copy read. Proposal: keep it; revisit
+  if SDL GPU gains stencil export.
+- **TEXA baked into texels (M2, deferred to the user).** Kept as the
+  material's `sourceAlpha` and `alphaZeroOnBlack`, which a target read
+  needs anyway (a buffer read through the GS's CT24 view); baking it into
+  texture copies would add textures and remove no renderer code.
