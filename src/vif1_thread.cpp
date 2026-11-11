@@ -3210,8 +3210,18 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
         if (rg::nativefx::flipPacket(data, size, effect, withheld))
         {
             g_thread->drain();
-            rg::nativeproducer::noteEffect(effect);
-            const bool drawn = rg::nativeproducer::effect(effect);
+            // M3: the flip's copy as a pass, the frame copied whole into the
+            // display buffer (32 sprites before).
+            bool drawn = false;
+            if (effect.opCount != 0u && effect.ops[0].target < effect.bufferCount && effect.ops[0].source >= 0 &&
+                static_cast<uint32_t>(effect.ops[0].source) < effect.bufferCount)
+            {
+                rg::nativeproducer::PassRequest request;
+                request.kind = 7u; // native::PassKind::Capture
+                request.frameBase = effect.buffers[effect.ops[0].source].base;
+                request.workBases[0] = effect.buffers[effect.ops[0].target].base;
+                drawn = rg::nativeproducer::pass(request);
+            }
             if (drawn)
             {
                 for (const std::vector<uint8_t> &packet : withheld)
