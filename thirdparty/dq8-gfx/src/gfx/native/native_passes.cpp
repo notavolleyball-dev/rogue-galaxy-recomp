@@ -323,6 +323,20 @@ bool Renderer::expandPass(const Pass &pass)
         passRect(frame, 0u, whole, none, rgba, tint);
         return true;
     }
+    case PassKind::Capture:
+    {
+        // The frame copied whole into work[0], scaled to its size,
+        // unblended (RefractionCaptureFrame_13ffd0: the picture the
+        // refraction materials sample).
+        const Id frame = pass.frame, into = pass.work[0];
+        float fw = 0.0f, fh = 0.0f, w = 0.0f, h = 0.0f;
+        if (!size(frame, fw, fh) || !size(into, w, h))
+            return false;
+        const float rect[4] = {0.0f, 0.0f, w, h};
+        const float uv[4] = {0.0f, 0.0f, fw, fh};
+        passRect(into, frame, rect, uv, 1.0f, spriteMaterial());
+        return true;
+    }
     default:
         return false;
     }

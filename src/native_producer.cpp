@@ -3620,7 +3620,12 @@ bool pass(const PassRequest &request)
     {
         if (request.workBases[i] == 0u)
             continue;
-        const auto at = s.targetAt.find(request.workBases[i]);
+        auto at = s.targetAt.find(request.workBases[i]);
+        if (at == s.targetAt.end() && request.workSizes[i][0] != 0u && request.workSizes[i][1] != 0u)
+        {
+            declare(s, request.workBases[i], request.workSizes[i][0], request.workSizes[i][1], kCT32, 0);
+            at = s.targetAt.find(request.workBases[i]);
+        }
         record.work[i] = at != s.targetAt.end() ? at->second : 0u;
         if (record.work[i] == 0u)
             record.frame = 0u;

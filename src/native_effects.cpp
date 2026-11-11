@@ -415,13 +415,34 @@ void shadowMapBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 PS2Runtime::RecompiledFunction g_refractionOriginal = nullptr;
 
+uint32_t g_refractionCtx = 0u, g_refractionSide = 0u; // game thread
+
+// After RefractionCaptureFrame_13ffd0(ctx, shift): its node at ctx+0x3BD8 is
+// a square of 1 << shift texels whose TBP (ctx+0x3C10, 14 bits) the call
+// just set; the frame was drawn into it whole, unblended. That node is what
+// the refraction materials sample, so the call runs; its pass is made here,
+// once the buffer's base is known (docs/NATIVE-ONLY-NOTES.md).
 void afterRefraction(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Refraction);
+    uint32_t unit = 0u;
+    if (g_refractionCtx != 0u && g_refractionSide != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 7u; // native::PassKind::Capture
+        uint16_t tbp = 0u;
+        std::memcpy(&tbp, g_rdram + physical(g_refractionCtx + 0x3C10u), sizeof(tbp));
+        request.workBases[0] = static_cast<uint32_t>(tbp & 0x3FFFu) & ~31u;
+        request.workSizes[0][0] = request.workSizes[0][1] = g_refractionSide;
+        unit = keepPass(request);
+    }
+    addRange(top, stackTop(), Effect::Refraction, unit);
 }
 
 void refractionCaptureFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    g_refractionCtx = getRegU32(ctx, 4);
+    const uint32_t shift = getRegU32(ctx, 5);
+    g_refractionSide = shift < 12u ? 1u << shift : 0u;
     rg::hooks::callThen(g_refractionOriginal, rdram, ctx, runtime, &afterRefraction, stackTop());
 }
 
@@ -1624,7 +1645,8 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 
 bool isPass(Effect effect)
 {
-    return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter;
+    return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
+           effect == Effect::Refraction;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

@@ -211,6 +211,9 @@ struct PassRequest
     uint8_t kind = 0;
     uint32_t frameBase = 0;
     uint32_t workBases[4] = {};
+    // A work buffer the game never declared (it set its frame directly):
+    // declared at this size (CT32), when given.
+    uint32_t workSizes[4][2] = {};
     float params[16] = {};
 };
 bool pass(const PassRequest &request);

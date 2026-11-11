@@ -138,3 +138,20 @@ from the code.
   B=0 C=Ad D=0), color `(r, g, b, 0x80)`.
 - **The hook emits:** a `Pass` (`PassKind::ColorFilter`); the call runs and
   its packets are replaced (as the glare's).
+
+### `RefractionCaptureFrame_13ffd0` (1108 bytes; M3; from the disassembly, no RGDecomp source)
+
+- **Arguments:** `a0` = the draw context, `a1` = a shift. Caller:
+  `CharaDrawTranslucentPass_1f8250+0x43c`.
+- **Writes outside the packet stack:** the node at `ctx+0x3BD8` (reset,
+  then an image of `1 << a1` square, CT32, its TBP at `ctx+0x3C10` set to
+  a word of `*(ctx+0x3BA0) + 4` less the image's size in blocks), a byte at
+  `ctx+0x3C14`, and `ctx+0x270` (moved back by 0x190 when past
+  `ctx+0x280`). The refraction materials sample that node: the call keeps
+  running.
+- **What it draws:** the frame (its own descriptor) into the node, one
+  sprite, UVs the frame's whole, positions the node's whole, color 0x80,
+  blend off (`GsPktSetAlphaBlend(4)` writes its low bit), no alpha test.
+- **The hook emits:** after the call, a `Pass` (`PassKind::Capture`) into
+  the node's buffer (declared at its size if the game never declared it).
+- **Open:** the filter (the frame descriptor's TEX1; taken as bilinear).

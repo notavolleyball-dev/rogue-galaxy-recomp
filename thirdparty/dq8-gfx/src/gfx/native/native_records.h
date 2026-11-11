@@ -374,6 +374,8 @@ enum class PassKind : uint8_t
     // shuffle's scale (ChannelShuffle::GreenToAlpha).
     ColorFilter,
     Fade,
+    // The frame copied whole into work[0], scaled to its size (the
+    // refraction's picture).
     Capture,
     TexAnime,
     Focus,
