@@ -37,22 +37,12 @@ set(PS2X_BUILD_STUDIO OFF)
 set(PS2X_BUILD_RUNTIME ON)
 set(PS2X_ENABLE_DEBUG_UI OFF)
 
-# VU1 microprograms compiled to C++ ahead of time, from two places:
-# build/vu1-manifest, which setup.py recompile rebuilds from
-# config/<version>/vu1-programs.txt and the user's disc, and build/vu1-profile,
-# what local runs recorded with PS2_VU_PROGRAM_PROFILE. Both are game code:
-# they stay in build/ and are never committed.
-set(RG_VU1_PROFILES "${CMAKE_CURRENT_SOURCE_DIR}/build/vu1-manifest;${CMAKE_CURRENT_SOURCE_DIR}/build/vu1-profile"
-    CACHE STRING "VU1 program directories to compile into the runtime, where they exist")
-set(rg_vu1_found)
-foreach(dir IN LISTS RG_VU1_PROFILES)
-    if(EXISTS "${dir}/entries.txt")
-        list(APPEND rg_vu1_found "${dir}")
-    endif()
-endforeach()
-set(PS2X_VU_PROGRAM_PROFILES "${rg_vu1_found}" CACHE STRING
+# VU1 microprograms are not compiled into the runtime (M6 of
+# docs/NATIVE-ONLY.md): nothing runs the VU1 for a draw, the native programs
+# draw every chunk. build/vu1-manifest (setup.py recompile) is still expanded
+# for the VU tools (tools/vu1).
+set(PS2X_VU_PROGRAM_PROFILES "" CACHE STRING
     "Local VU1 program profile directories to compile; never distributed" FORCE)
-message(STATUS "VU1 programs: ${rg_vu1_found}")
 
 # VU blocks: what the interpreter still ran, recorded with
 # PS2_VU_AOT_PROFILE=FILE (VU0 micro programs above all, which the whole-

@@ -32,7 +32,7 @@ Maintainers: `make-hashes` regenerates hashes.json from a known-good dump;
 `maps --rgdecomp <checkout>` regenerates the function maps; `vu1-manifest`
 describes a VU1 program recording (build/vu1-profile) as
 config/<version>/vu1-programs.txt, which `recompile` expands from the user's
-disc; `vu-blocks-manifest` does the same for the VU block recordings
+disc for the VU tools (tools/vu1; not compiled into the game); `vu-blocks-manifest` does the same for the VU block recordings
 (build/vu-blocks) as config/<version>/vu-blocks.txt.
 """
 
@@ -670,9 +670,9 @@ def expand_vu1_manifest(version: str, disc: Path) -> None:
 
     The manifest (config/<version>/vu1-programs.txt) names where each compiled
     routine's microcode sits in the game files, with a checksum; no game data.
-    The result goes to build/vu1-manifest, which CMake compiles into the
-    runtime along with build/vu1-profile, anything recorded locally with
-    PS2_VU_PROGRAM_PROFILE.
+    The result goes to build/vu1-manifest, for the VU tools (tools/vu1): the
+    game no longer compiles it in, nothing runs the VU1 for a draw
+    (docs/NATIVE-ONLY.md, M6).
     """
     manifest = config_dir(version) / "vu1-programs.txt"
     if not manifest.is_file():
