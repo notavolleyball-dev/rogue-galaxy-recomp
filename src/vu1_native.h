@@ -162,10 +162,9 @@ bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
 void baseProgram(uint8_t *data);
 
 // Why the chunk an MSCNT runs (its header at `top`, in quadwords) is left to
-// the VU1, or null when it is done natively. `clips`: what draws it clips
-// triangles itself (the GPU), so slot E's chunks are done too, for the
-// programs with a mesh (hasMesh) only.
-const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips = false);
+// the VU1, or null when it is done natively. Slot E's chunks are done too
+// for the programs with a mesh (hasMesh): the GPU clips them.
+const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top);
 
 // Which of the pieces this file knows the code at `startPC` has, slot by
 // slot, for rg_vu1_oracle --inventory: "A F B:plain C:vertex colors D:guard

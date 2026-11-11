@@ -838,8 +838,8 @@ recovers.
     projector's, particles' and strip programs' packet builders,
     `RawVertex`, `MeshDraw::raw`/`rawHeader`, `setMeshCull`/`cullMesh`,
     the bounds kept in quads 98/99 (only the overlay B read them, and M3's
-    ObjectLayer pass replaced it), `RG_MODEL_GPU`, `RG_MESH_REPEAT` and the
-    VU1 mode switch. Every VU1 mesh the producer takes is the model
+    ObjectLayer pass replaced it), `RG_MODEL_GPU`, `RG_MESH_REPEAT`,
+    `RG_VU1_CLIP_ON_GPU` and the VU1 mode switch. Every VU1 mesh the producer takes is the model
     stage's; `buildChunk` is left for the overlay, the base piece, and the
     outline and shadow fallbacks.
 - **Step 3 in code too** (`src/native_models.*`):

@@ -1549,12 +1549,10 @@ std::string describePieces(const uint8_t *code, uint32_t startPC)
     return out + color + " " + finish;
 }
 
-const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top, bool clips)
+const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top)
 {
     const VuData vu(data);
-    // Only a mesh carries the planes: a program buildMesh sends as packets
-    // (the affine D, the float-colour D) would go out unclipped.
-    clips = clips && hasMesh(program);
+    const bool clips = hasMesh(program);
     if (program.kind == Kind::Overlay || program.kind == Kind::Base)
         return nullptr;
     if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)

@@ -160,28 +160,6 @@ thread_local size_t t_listSize = 0u;
 thread_local const std::vector<std::pair<uint32_t, uint32_t>> *t_listOrigins = nullptr;
 // The piece of t_listOrigins the last listAddress found (listAddress).
 thread_local size_t t_listOriginAt = 0u;
-// Whether the GPU path takes the chunks slot E clips: unless
-// RG_VU1_CLIP_ON_GPU=0, which keeps them on the VU1. It was off without the
-// native pipeline: the field walk of October 29 lost the near wall's texture
-// and part of the ledge with them on the GPU (the clipper's new vertices
-// take a depth made of each corner's capped, clamped one, which is not
-// linear outside E's planes). The pipeline has no GS to draw the VU1's
-// packets: they would reach it as 2D pieces, their texture interpolated
-// across the screen without perspective (textures twist in front of the
-// camera). Read at first use, after the menu's setting.
-struct GpuClips
-{
-    operator bool() const
-    {
-        static const bool on = [] {
-            const char *gpu = std::getenv("RG_VU1_CLIP_ON_GPU");
-            if (gpu && *gpu)
-                return std::strcmp(gpu, "0") != 0;
-            return true;
-        }();
-        return on;
-    }
-} g_gpuClips;
 const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
 } // namespace
 namespace
@@ -1318,13 +1296,9 @@ public:
             }
             else if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
-                // The chunks that clip (slot E) go to the GPU unless
-                // RG_VU1_CLIP_ON_GPU=0: the mesh carries E's near and far
-                // planes and the shader clips there (gl_ClipDistance), so no
-                // driver is left to cut at the eye on its own. In check mode
-                // they go to the VU1.
-                const char *reason =
-                    rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, g_gpuClips);
+                // The chunks that clip (slot E) go to the GPU too: it clips
+                // in clip space.
+                const char *reason = rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top);
                 if (reason)
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
