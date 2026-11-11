@@ -1232,10 +1232,15 @@ shadow does not follow, 2D outside the builder) and uploads.
   source at the marker). Its inline twin (GsBuildImageUploadPkt) has no
   caller that runs (TexBuildUploadPkt's mode is always 0). Local copies
   (TexAnime's DrawListAddVramCopy) are A+D register writes the list's run
-  mirrors in order, as a marker would. Left: host capture and withholding
-  for an upload written some other way, which `[uploads]` would name
-  (`host (no record)`, `withheld`); play data decides whether those paths
-  can be deleted.
+  mirrors in order, as a marker would. The movie's frames
+  (GsUploadImage16Blocks, a GIF-channel packet of macroblock uploads) are a
+  host marker too, the frame assembled at it. Withholding and the list's
+  uncopied payloads are deleted (no record waits for a transfer).
+  **Host capture and the local-copy mirror stay, by the plan's own rule
+  ("if the census shows no user"): each has a user found in the code** —
+  the font pages' load (MesFontLoad → FixedTexUploadImpl: its own
+  GIF-channel packet of uploads by reference, sent by sceDmaSend at load)
+  and TexAnime's VRAM copies. `[uploads]` names any other.
 - **The playthrough route** (the user's).
 
 
