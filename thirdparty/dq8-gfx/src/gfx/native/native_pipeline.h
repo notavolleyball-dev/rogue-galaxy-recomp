@@ -410,6 +410,7 @@ private:
     struct Retained
     {
         uint32_t first = 0, count = 0; // vertices
+        bool model = false;            // a model chunk's, in m_modelBuffer (ModelVertex)
     };
     void retain(const RetainedMesh &mesh);
     const Retained *retainedOf(const MeshDraw &draw) const
@@ -425,6 +426,18 @@ private:
     uint32_t m_staticUsed = 0, m_staticUploaded = 0;
     std::vector<uint8_t> m_staticPending;
     uint64_t m_retainedDefined = 0, m_retainedDrawn = 0, m_retainedMissing = 0, m_retainedResets = 0;
+    // Model chunks (M5): their triangles as ModelVertex in their own buffer,
+    // drawn by native_model.vert; each draw's constants (ModelRow) and its
+    // bones' matrices in two storage buffers made each frame.
+    SDL_GPUBuffer *m_modelBuffer = nullptr;
+    SDL_GPUShader *m_modelVertex = nullptr;
+    uint32_t m_modelUsed = 0, m_modelUploaded = 0;
+    std::vector<uint8_t> m_modelPending;
+    std::vector<ModelRow> m_modelRows;  // the frame's
+    std::vector<float> m_paletteData;   // the frame's, 16 floats a bone
+    SDL_GPUBuffer *m_modelRowBuffer = nullptr, *m_paletteBuffer = nullptr;
+    uint32_t m_modelRowCapacity = 0, m_paletteCapacity = 0;
+    uint64_t m_modelDefined = 0, m_modelDrawn = 0, m_modelDrawnReported = 0;
     std::vector<GpuDraw> m_drawTable;   // per frame mesh
     std::vector<DrawPlan> m_drawPlans;  // per frame mesh
     std::vector<PassPlan> m_passPlans;

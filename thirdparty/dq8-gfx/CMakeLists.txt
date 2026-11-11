@@ -46,6 +46,7 @@ foreach(shader IN ITEMS
         "native_view.frag;frag;kNativeViewFragSpirv"
         "native_mesh.vert;vert;kNativeMeshVertSpirv"
         "native_mesh_static.vert;vert;kNativeMeshStaticVertSpirv"
+        "native_model.vert;vert;kNativeModelVertSpirv"
         "native_mesh.frag;frag;kNativeMeshFragSpirv"
         "native_resolve.vert;vert;kNativeResolveVertSpirv"
         "native_resolve.frag;frag;kNativeResolveFragSpirv")

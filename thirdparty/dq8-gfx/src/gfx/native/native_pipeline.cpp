@@ -358,6 +358,53 @@ void retainedReset()
 // definitions may not.
 void Renderer::retain(const RetainedMesh &d)
 {
+    if (!d.model.empty())
+    {
+        // A model chunk (M5): its triangles, each vertex with the three
+        // corners' positions, bones and weights, as the static ones below.
+        const uint32_t count = static_cast<uint32_t>(d.model.size());
+        const uint32_t triangles = d.list ? count / 3u : (count >= 2u ? count - 2u : 0u);
+        if (m_modelUsed + triangles * 3u > kModelVertices)
+        {
+            m_retained.clear();
+            m_staticPending.clear();
+            m_staticUsed = m_staticUploaded = 0u;
+            m_modelPending.clear();
+            m_modelUsed = m_modelUploaded = 0u;
+            ++m_retainedResets;
+            g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
+        }
+        if (triangles == 0u || triangles * 3u > kModelVertices)
+            return;
+        const size_t at = m_modelPending.size();
+        m_modelPending.resize(at + size_t(triangles) * 3u * sizeof(ModelVertex));
+        auto *out = reinterpret_cast<ModelVertex *>(m_modelPending.data() + at);
+        for (uint32_t k = 2u; k < count; ++k)
+        {
+            if (d.list && k % 3u != 2u)
+                continue;
+            const float parity = d.list || (k - 1u) % 2u == 0u ? 1.0f : -1.0f;
+            const ModelInput *corner[3] = {&d.model[k - 2u], &d.model[k - 1u], &d.model[k]};
+            for (int i = 0; i < 3; ++i, ++out)
+            {
+                for (int c = 0; c < 3; ++c)
+                {
+                    std::memcpy(out->position[c], corner[c]->position, sizeof(out->position[c]));
+                    std::memcpy(out->bones[c], corner[c]->bones, sizeof(out->bones[c]));
+                    std::memcpy(out->weights[c], corner[c]->weights, sizeof(out->weights[c]));
+                }
+                std::memcpy(out->normal, corner[i]->normal, sizeof(out->normal));
+                std::memcpy(out->uv, corner[i]->uv, sizeof(out->uv));
+                std::memcpy(out->color, corner[i]->color, sizeof(out->color));
+                out->corner = float(i);
+                out->parity = parity;
+            }
+        }
+        m_retained[d.id] = {m_modelUsed, triangles * 3u, true};
+        m_modelUsed += triangles * 3u;
+        ++m_modelDefined;
+        return;
+    }
     const uint32_t count = static_cast<uint32_t>(d.raw.size());
     const uint32_t triangles = d.list ? count / 3u : (count >= 2u ? count - 2u : 0u);
     if (m_staticUsed + triangles * 3u > kStaticVertices)
@@ -366,6 +413,8 @@ void Renderer::retain(const RetainedMesh &d)
         m_retained.clear();
         m_staticPending.clear();
         m_staticUsed = m_staticUploaded = 0u;
+        m_modelPending.clear();
+        m_modelUsed = m_modelUploaded = 0u;
         ++m_retainedResets;
         g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -1208,11 +1257,14 @@ std::string Renderer::statsLine()
             std::to_string(m_retained.size()) + " (" + std::to_string(m_staticUsed) + " vertices, defined so far " +
             std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
             ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
-            std::to_string(m_retainedResets) + ") | clears of part of a target (not drawn, so far) " +
+            std::to_string(m_retainedResets) + ") | model chunks: defined so far " + std::to_string(m_modelDefined) +
+            " (" + std::to_string(m_modelUsed) + " vertices), draws " + d(m_modelDrawn, m_modelDrawnReported) +
+            " | clears of part of a target (not drawn, so far) " +
             std::to_string(m_clearsRefused) + " | passes drawn (so far) " + std::to_string(m_passesDrawn) +
             ", refused " + std::to_string(m_passesRefused);
     m_evictedReported = m_evicted;
     m_refusedReported = m_refused;
+    m_modelDrawnReported = m_modelDrawn;
     const Readiness &now = m_readiness, &was = m_readinessReported;
     line += " | readiness of " + d(now.meshDraws, was.meshDraws) + " mesh draws: R1 camera+model " +
             d(now.cameraAndModel, was.cameraAndModel) + ", R2 object " + d(now.objectIdentity, was.objectIdentity) +
