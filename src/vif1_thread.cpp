@@ -2132,27 +2132,44 @@ bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
     return true;
 }
 
-// The libgraph stubs: the lists in flight first, then the stub.
+// sceGsSwapDBuff's address (kGsWaiters): its draw environment taken from
+// its arguments.
+constexpr uint32_t kSceGsSwapDBuff = 0x00108F38u;
+
+// The libgraph stubs: the lists in flight first, then the stub. The stubs
+// keep what they do to the privileged registers (the display) and the
+// game's memory; the draw state they set is taken from their arguments
+// (sceGsPutDrawEnv's packet, below; sceGsSwapDBuff's buffer, here), and
+// their own writes into the runtime's GS front end, which draws nothing,
+// are not read (M6: no register sink, patch 0034).
 template <size_t Index>
 void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_thread->drain();
-    // The stub's register writes (its draw environments, and the clear
-    // sprite) are taken instead of written to the GS (patch 0034): as state
-    // and clears (takeEnvironment); anything else through the converter as
-    // one A+D packet. The GS's own clear shortcut is dropped.
-    thread_local GS::RegisterSink writes;
-    writes.clear();
-    GS::setRegisterSink(&writes);
+    if (g_gsWaiters[Index].first == kSceGsSwapDBuff)
+    {
+        // sceGsSwapDBuff(db, which): its sceGsDBuff's draw environment
+        // `which` (eight register pairs at +96 or +336, after the two
+        // display environments and a GIF tag; the buffer's clear is
+        // sceGsSwapDBuffDc's, not this one's).
+        const uint32_t at = (getRegU32(ctx, 4) + ((getRegU32(ctx, 5) & 1u) ? 336u : 96u)) & (PS2_RAM_SIZE - 1u);
+        if (uint64_t(at) + 8u * 16u <= PS2_RAM_SIZE)
+        {
+            std::vector<std::pair<uint8_t, uint64_t>> pairs;
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                uint64_t q[2];
+                std::memcpy(q, rdram + at + i * 16u, sizeof(q));
+                pairs.emplace_back(static_cast<uint8_t>(q[1] & 0xFFu), q[0]);
+            }
+            if (!takeEnvironment(pairs))
+            {
+                const std::vector<uint8_t> packet = rg::gswrites::packet(pairs);
+                sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            }
+        }
+    }
     g_gsWaiters[Index].second(rdram, ctx, runtime);
-    GS::setRegisterSink(nullptr);
-    if (writes.empty())
-        return;
-    const std::vector<std::pair<uint8_t, uint64_t>> pairs(writes.begin(), writes.end());
-    if (takeEnvironment(pairs))
-        return;
-    const std::vector<uint8_t> packet = rg::gswrites::packet(pairs);
-    sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
 }
 
 template <size_t... I>
@@ -2184,7 +2201,12 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const bool ad = flg == 0u && nreg == 1u && (tag[1] & 0xFu) == 0xEu;
     if (!ad || nloop == 0u || nloop > 64u || uint64_t(at) + 16u + nloop * 16u > PS2_RAM_SIZE)
     {
+        // Not an A+D packet: read by its tags (as far as the stub reads,
+        // a tag and eight quadwords), then the stub.
         ++g_drawEnvsLeft;
+        g_thread->drain();
+        if (uint64_t(at) + 9u * 16u <= PS2_RAM_SIZE)
+            sendPacket(rdram + at, 9u * 16u);
         g_putDrawEnv(rdram, ctx, runtime);
         return;
     }
@@ -2199,7 +2221,10 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_thread->drain();
     if (!takeEnvironment(writes))
     {
+        // Writes of another shape (a textured sprite, a transfer): as a
+        // packet of them, then the stub.
         ++g_drawEnvsLeft;
+        sendPacket(rdram + at, 16u + nloop * 16u);
         g_putDrawEnv(rdram, ctx, runtime);
         return;
     }
