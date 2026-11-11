@@ -24,12 +24,11 @@
 #include "gfx/native/native_records.h"
 #include "vu1_native.h"
 #include "draw_state_mirror.h"
-#include "native_2d.h"
 #include "native_blocks.h"
 #include "native_emit.h"
 #include "native_effects.h"
 #include "native_producer.h"
-#include "gif_events.h"
+#include "gs_writes.h"
 #include "guest_write_watch.h"
 #include "ps2_runtime.h"
 #include "ps2_syscalls.h"
@@ -308,24 +307,19 @@ thread_local uint32_t t_meshWriteCount = 0u;
 // transfer, image data): they then go as packets.
 bool packetsAsWrites(const std::vector<std::vector<uint8_t>> &packets, std::vector<RegisterWrite> &writes)
 {
-    thread_local std::vector<rg::gif::GifEvent> events;
     writes.clear();
     for (const std::vector<uint8_t> &packet : packets)
     {
-        rg::gif::GifState state;
-        events.clear();
-        bool whole = true, image = false;
-        whole = rg::gif::eachPacket(packet.data(), static_cast<uint32_t>(packet.size()), [&](uint32_t at, uint32_t size) {
-            image |= rg::gif::decodeGifPacket(packet.data() + at, size, state, events).imageQwords != 0u;
-        });
-        if (!whole || image)
+        const size_t from = writes.size();
+        const rg::gswrites::Read read =
+            rg::gswrites::read(packet.data(), static_cast<uint32_t>(packet.size()), writes);
+        if (!read.whole || read.image || read.vertices)
             return false;
-        for (const rg::gif::GifEvent &e : events)
+        for (size_t i = from; i < writes.size(); ++i)
         {
-            if (e.kind != rg::gif::GifEvent::Kind::Register || (e.reg >= 0x50u && e.reg <= 0x54u) ||
-                e.reg == rg::nativeproducer::kBindRegister || e.reg >= 0x60u)
+            const uint8_t reg = writes[i].first;
+            if ((reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister || reg >= 0x60u)
                 return false;
-            writes.emplace_back(e.reg, e.value);
         }
     }
     return true;
@@ -914,7 +908,6 @@ public:
                 put(86u, group.q86);
                 put(87u, group.q87);
                 put(88u, rg::nativeemit::Quad{});
-                rg::native2d::observeWrites(group.writes.data(), group.writes.size());
                 applyWrites(group.writes);
                 regs = group.regs;
                 regs.write(baseWrites.data(), baseWrites.size());
@@ -1568,9 +1561,6 @@ void watchTransfers(const uint8_t *data, uint32_t size, bool absorbToo = false)
     }
 }
 
-// (native2D, below.)
-bool native2D();
-
 // Step 6 of docs/NATIVE-PIPELINE.md, finished: under the pipeline (with its
 // 2D on), what is left of a packet after the converter and the upload
 // withholding no longer goes to the GS. The renderer draws from records, the
@@ -1633,14 +1623,8 @@ void sendRaw(const uint8_t *data, uint32_t size)
     }
 }
 
-// Register writes the 2D converter made, as sendRaw would take them in an
-// A+D packet, without making and decoding one: under the pipeline's absorb
-// that is the draw-state mirror (and its carried vertex state) and SIGNAL,
-// FINISH and LABEL. Anything else a packet would do with them (a transfer's
-// registers, a withheld image's data due at the packet's start, a vertex
-// kick, the GS itself) goes the packet's way.
-std::atomic<uint64_t> g_writesDirect{0u}, g_writesAsPackets{0u};
-// sendWrites' direct way: the mirror, then SIGNAL, FINISH and LABEL.
+// Register writes, as an A+D packet of them would be taken: the draw-state
+// mirror, then SIGNAL, FINISH and LABEL.
 void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 {
     rg::drawstate::observeWrites(writes.data(), writes.size());
@@ -1648,58 +1632,29 @@ void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
     for (const auto &[reg, value] : writes)
         absorbRegister(reg, value);
 }
-void sendWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
-{
-    bool direct = uploadsTaken() && absorbing() && t_upload.imageBytes == 0u;
-    for (size_t i = 0; direct && i < writes.size(); ++i)
-    {
-        const uint8_t reg = writes[i].first;
-        direct = !(reg >= 0x50u && reg <= 0x53u) && reg != rg::nativeproducer::kBindRegister && reg != 0x04u &&
-                 reg != 0x05u && reg != 0x0Cu && reg != 0x0Du;
-    }
-    if (!direct)
-    {
-        g_writesAsPackets.fetch_add(1u, std::memory_order_relaxed);
-        const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
-        sendRaw(packet.data(), static_cast<uint32_t>(packet.size()));
-        return;
-    }
-    g_writesDirect.fetch_add(1u, std::memory_order_relaxed);
-    applyWrites(writes);
-}
 
 
-// The native pipeline's 2D (src/native_2d.h); read at first use, after the
-// menu's setting.
-bool native2D()
-{
-    static const bool on = rg::native2d::enabled();
-    return on;
-}
-std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_piecesMade{0u}, g_piecesToGs{0u},
-    g_piecesDropped{0u}, g_packetsRegisterOnly{0u};
-
-// Step 5b: a converter mesh as the producer's window-space draw, under the
-// draw state the packets before it left (the PRIM write just before it
-// among them); one it refuses goes to the GS, or, with no GS behind the
-// pipeline, where the absorbed packets go (the producer's line says why).
-// The layer of the packet being delivered (deliverPacketAt).
+// The layer and the draw task of the packet being delivered (deliverPacketAt).
 thread_local uint8_t t_layer = 0u;
-// M4's census: the draw task whose packets are being delivered, and the
-// pieces the converter still makes, by task (M4 is done when only the VU1
-// packet programs' reach it). A line every 20000 pieces.
 thread_local uint32_t t_task = 0u;
-void countConverted(size_t pieces)
+
+// M6: a packet the list still carries is register state and uploads; the
+// game's 2D comes from its blocks' records (src/native_blocks.h), its models
+// from theirs. A packet that still draws (a block the shadow could not
+// follow, 2D written outside the GsPkt builder) is not drawn: counted by the
+// draw task that wrote it, a line every 2000 (what is left to move).
+std::atomic<uint64_t> g_packetsState{0u};
+void countUndrawn()
 {
     static std::mutex mutex;
     static std::unordered_map<uint32_t, uint64_t> byTask;
     static uint64_t total = 0u, nextReport = 1u;
     std::lock_guard lock(mutex);
-    byTask[t_task] += pieces;
-    total += pieces;
+    byTask[t_task] += 1u;
+    total += 1u;
     if (total < nextReport)
         return;
-    nextReport = total + 20000u;
+    nextReport = total + 2000u;
     std::vector<std::pair<uint64_t, uint32_t>> top;
     for (const auto &[task, count] : byTask)
         top.emplace_back(count, task);
@@ -1712,95 +1667,32 @@ void countConverted(size_t pieces)
                       (unsigned long long)top[i].first);
         line += item;
     }
-    std::fprintf(stderr, "[native2d] pieces the converter made, by draw task (%llu):%s\n", (unsigned long long)total,
-                 line.c_str());
+    std::fprintf(stderr, "[gs-packets] packets that draw, not drawn, by draw task (%llu; state-only %llu):%s\n",
+                 (unsigned long long)total, (unsigned long long)g_packetsState.load(), line.c_str());
 }
 
-void deliverPiece(const rg::native2d::Piece &piece)
-{
-    if (!t_onVif1Thread)
-    {
-        g_thread->drain(); // the lists in flight first, as for the GS
-    }
-    const rg::DrawState state = rg::drawstate::current();
-    if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs, t_layer, piece.indices))
-    {
-        ++g_piecesMade;
-        return;
-    }
-    // Refused (the producer's line says why): there is no GS to draw it.
-    ++g_piecesDropped;
-}
-
-// A packet on to the GS. Under the native pipeline's 2D its primitives
-// become the producer's draws and only the rest goes on (src/native_2d.h).
+// A packet on: its register writes to the draw-state mirror (and SIGNAL,
+// FINISH, LABEL); one with a transfer's registers or image data to the
+// upload path as it is.
 void sendPacket(const uint8_t *data, uint32_t size)
 {
-    if (native2D() && data && size >= 16u)
+    if (!data || size < 16u)
+        return;
+    thread_local std::vector<rg::gswrites::Write> writes;
+    writes.clear();
+    const rg::gswrites::Read read = rg::gswrites::read(data, size, writes);
+    if (read.kicks)
+        countUndrawn();
+    bool transfer = read.image || !read.whole;
+    for (const auto &[reg, value] : writes)
+        transfer |= (reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister;
+    if (transfer || t_upload.imageBytes != 0u)
     {
-        // Most packets draw nothing (a mesh's register writes, an upload's
-        // tags): under absorb they skip the converter's pieces (no withheld
-        // image data may be due first).
-        if (absorbing() && t_upload.imageBytes == 0u)
-        {
-            thread_local std::vector<std::pair<uint8_t, uint64_t>> writes;
-            writes.clear();
-            const rg::native2d::Quick quick = rg::native2d::quick(data, size, writes);
-            if (quick != rg::native2d::Quick::No)
-            {
-                ++g_packetsRegisterOnly;
-                if (quick == rg::native2d::Quick::Writes)
-                    applyWrites(writes);
-                else
-                    sendRaw(data, size);
-                return;
-            }
-        }
-        thread_local std::vector<rg::native2d::Piece> pieces;
-        const rg::native2d::Span one{data, size};
-        std::string why;
-        if (rg::native2d::build(&one, 1u, pieces, why))
-        {
-            const size_t meshes = static_cast<size_t>(std::count_if(pieces.begin(), pieces.end(), [](const rg::native2d::Piece &p) {
-                return !p.isPacket() && !p.isWrites();
-            }));
-            if (meshes != 0u)
-                countConverted(meshes);
-            // Under absorb a packet without meshes goes as its pieces too:
-            // its register writes reach the mirror without a second decode.
-            for (const rg::native2d::Piece &piece : pieces)
-            {
-                if (piece.isWrites())
-                    sendWrites(piece.writes);
-                else if (piece.isPacket())
-                    sendRaw(piece.bytes(), piece.size());
-                else
-                    deliverPiece(piece);
-            }
-            const uint64_t count = ++g_packetsConverted;
-            if (count == 1u || count % 100000u == 0u)
-                std::fprintf(stderr, "[native2d] packets converted: %llu (pieces made %llu, to the GS %llu, dropped %llu), %llu refused, "
-                             "%llu without draws\n",
-                             static_cast<unsigned long long>(count),
-                             static_cast<unsigned long long>(g_piecesMade.load()),
-                             static_cast<unsigned long long>(g_piecesToGs.load()),
-                             static_cast<unsigned long long>(g_piecesDropped.load()),
-                             static_cast<unsigned long long>(g_packetsRefused.load()),
-                             static_cast<unsigned long long>(g_packetsRegisterOnly.load()));
-            return;
-        }
-        ++g_packetsRefused;
-        static std::mutex toldMutex;
-        static std::vector<std::string> told;
-        std::lock_guard lock(toldMutex);
-        if (told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
-        {
-            told.push_back(why);
-            std::fprintf(stderr, "[native2d] a packet stays a packet: %s\n", why.c_str());
-        }
-        rg::native2d::observe(data, size);
+        sendRaw(data, size);
+        return;
     }
-    sendRaw(data, size);
+    ++g_packetsState;
+    applyWrites(writes);
 }
 
 std::atomic<uint64_t> g_effectsNative{0u};
@@ -1999,14 +1891,13 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
     {
         if (absorbing() && t_upload.imageBytes == 0u)
         {
-            rg::native2d::observeWrites(t_meshWrites, t_meshWriteCount);
             rg::drawstate::observeWrites(t_meshWrites, t_meshWriteCount);
             g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
         }
         else
         {
             const std::vector<RegisterWrite> writes(t_meshWrites, t_meshWrites + t_meshWriteCount);
-            const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
+            const std::vector<uint8_t> packet = rg::gswrites::packet(writes);
             const uint32_t count = t_meshWriteCount;
             t_meshWriteCount = 0u;
             sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
@@ -2242,7 +2133,6 @@ bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
             z = static_cast<uint32_t>(value >> 32);
             if (++corners == 2)
             {
-                rg::native2d::observeWrites(pending.data(), pending.size());
                 applyWrites(pending);
                 rg::drawstate::game().observeWrites(pending.data(), pending.size());
                 pending.clear();
@@ -2257,7 +2147,6 @@ bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
             break;
         }
     }
-    rg::native2d::observeWrites(pending.data(), pending.size());
     applyWrites(pending);
     rg::drawstate::game().observeWrites(pending.data(), pending.size());
     if (++g_envWritesTaken == 1u)
@@ -2284,7 +2173,7 @@ void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const std::vector<std::pair<uint8_t, uint64_t>> pairs(writes.begin(), writes.end());
     if (takeEnvironment(pairs))
         return;
-    const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
+    const std::vector<uint8_t> packet = rg::gswrites::packet(pairs);
     sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
 }
 

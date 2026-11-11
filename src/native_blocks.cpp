@@ -436,11 +436,7 @@ float vertexY(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v)
 
 bool enabled()
 {
-    static const bool on = [] {
-        const char *value = std::getenv("RG_NATIVE_BLOCKS");
-        return !(value && std::strcmp(value, "0") == 0) && rg::native2d::enabled();
-    }();
-    return on;
+    return true; // (RG_NATIVE_BLOCKS went in M6: no converter takes them on the list)
 }
 
 void install(PS2Runtime &runtime)
@@ -454,7 +450,7 @@ void install(PS2Runtime &runtime)
         !rg::timing::hookFunction(runtime, kGsPktBegin, &pktBegin, g_pktBeginOriginal) ||
         !rg::timing::hookFunction(runtime, kGsPktEnd, &pktEnd, g_pktEndOriginal))
     {
-        std::fprintf(stderr, "[native-blocks] not hooked: the VIF1 thread converts the 2D\n");
+        std::fprintf(stderr, "[native-blocks] not hooked: the game's 2D is written and not drawn\n");
         return;
     }
     rg::gspkt::install(runtime);

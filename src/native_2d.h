@@ -8,23 +8,15 @@
 
 #include "native_types.h"
 
-// The native pipeline's 2D (docs/NATIVE-PIPELINE.md, step 5b): every GIF
-// packet on its way to the GS goes through the converter first. Its
-// primitives (sprites, triangles, strips, fans; points and lines as thin
-// quads) become meshes in the GS's window coordinates, a triangle list
-// each, for rg::nativeproducer::piece; what is left of the packet (its
-// register writes, uploads) goes on to the GS as packets, in order with
-// the meshes. Each mesh is preceded by a PRIM write of its attributes, so
-// the draw-state mirror (src/draw_state_mirror.h) holds the mesh's draw
-// state when the mesh comes.
-//
-// The converter carries the GS's vertex state from packet to packet, per
-// sending thread (the VIF1 thread and the game thread take turns at the
-// GS). Only with the native pipeline on; RG_NATIVE_2D=0 turns it off.
+// The 2D of a GsPkt block's shadow (src/native_gspkt.h, the GIF stream the
+// block would have carried, made on the game thread): its primitives
+// (sprites, triangles, strips, fans; points and lines as thin quads) become
+// meshes in the GS's window coordinates, a triangle list each, for
+// rg::nativeproducer::piece, in order with its register writes. M6: no
+// packet the game sends goes through it any more (src/gs_writes.h reads
+// those as register state).
 namespace rg::native2d
 {
-
-bool enabled();
 
 struct Piece
 {
@@ -59,30 +51,5 @@ struct Span
 // meshes. False, with `why`, when they hold something the converter cannot
 // express (a reserved primitive type): then they go on as they are.
 bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::string &why);
-
-// Packets that draw nothing, the most common kind, taken as build takes
-// them without its pieces. Writes: register writes alone, with no transfer
-// register; the draw-state mirror's writes into `writes` (build's one writes
-// piece). Raw: they go to sendRaw as they are (a transfer's registers, an
-// upload's IMAGE tag in a packet of its own), as build's pieces would.
-// No: anything else (a vertex, an upload among other packets); nothing done.
-enum class Quick : uint8_t
-{
-    No,
-    Writes,
-    Raw,
-};
-Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, uint64_t>> &writes);
-
-// Register writes as one A+D packet (PACKED, NLOOP of them, EOP).
-std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes);
-
-// A packet going to the GS as it is (not through build): the vertex state
-// the converter carries follows it, as the GS's does.
-void observe(const uint8_t *data, uint32_t size);
-// Register writes that reach the draw-state mirror without a packet (a VU1
-// mesh's own, carried with the mesh): what quick() keeps of a packet of
-// them, the carried PRIM, PRMODECONT and PRMODE and the strip under way.
-void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
 
 } // namespace rg::native2d

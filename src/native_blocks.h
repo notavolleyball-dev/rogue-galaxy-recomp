@@ -8,26 +8,27 @@
 class PS2Runtime;
 
 // M4 of docs/NATIVE-ONLY.md: the game's 2D at its source. Every GsPkt block
-// the game writes (DrawListBeginPrim to DrawListEndPrim, 126 call sites) is
-// read on the game thread when it ends, from the bytes it wrote, under the
-// draw state the game thread follows itself (rg::drawstate::Tracker: the
-// draw environments' packets and the blocks, in the game's order): its
-// primitives become the 2D converter's pieces there, each with its state
-// and the running draw task's layer, kept by the unit of the block's packet
-// range. The VIF1 thread, reaching the range, sends the pieces to the
-// producer in the stream's order (as it does a pass) and the packets on
-// with their kicks withheld: the VIF1 thread's converter no longer sees
-// the blocks. RG_NATIVE_BLOCKS=0: the VIF1 thread converts them, as before.
+// the game builds (GsPktBegin to GsPktEnd: DrawListBeginPrim's, and the
+// functions that frame their blocks themselves) is made on the game thread
+// from its shadow (src/native_gspkt.h), under the draw state the game
+// thread follows (rg::drawstate::game(): the draw environments' packets
+// and the blocks, in the game's order): its primitives become pieces there,
+// each with its state and the running draw task's layer, kept under a unit
+// whose marker goes in the draw list where the block's CALL would have
+// been. The game writes none of the block. The list's run, reaching the
+// marker, sends the pieces to the producer in the stream's order. A block
+// inside a pass's call is not drawn (the pass is); a composite's head
+// begins its object layer (rg::nativefx::compositeBegin).
 namespace rg::nativeblocks
 {
 
-// After loadELF(), with the native effects (their ranges carry the units).
+// After loadELF(), with the native effects (their markers are written
+// alike).
 void install(PS2Runtime &runtime);
 bool enabled();
 
-// The VIF1 thread (or the draw stage), at a block's range: its pieces to the
-// producer. False: no pieces kept for `unit` (the converter takes the
-// packets).
+// The list's run, at a block's marker: its pieces to the producer. False:
+// no pieces kept for `unit`.
 bool emit(uint32_t unit);
 
 // A block's drawn pieces as made (window pixels, the GS's XYOFFSET in), for

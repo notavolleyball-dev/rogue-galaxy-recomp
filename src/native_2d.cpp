@@ -12,20 +12,6 @@ namespace rg::native2d
 {
 namespace
 {
-std::vector<uint8_t> adPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
-{
-    std::vector<uint8_t> packet(16u + writes.size() * 16u);
-    // NLOOP writes, EOP, PACKED, one register: A+D.
-    const uint64_t tag[2] = {static_cast<uint64_t>(writes.size()) | (1ull << 15) | (1ull << 60), 0xEull};
-    std::memcpy(packet.data(), tag, sizeof(tag));
-    for (size_t i = 0; i < writes.size(); ++i)
-    {
-        const uint64_t pair[2] = {writes[i].second, writes[i].first};
-        std::memcpy(packet.data() + 16u + i * 16u, pair, sizeof(pair));
-    }
-    return packet;
-}
-
 rg::NativeMesh::Header screenHeader()
 {
     rg::NativeMesh::Header header{};
@@ -35,10 +21,8 @@ rg::NativeMesh::Header screenHeader()
     header.triangleList = 1u;
     return header;
 }
-// What the GS would carry from one packet to the next, mirrored per thread:
-// the GIF vertex state, a strip or fan under way, PRMODECONT and PRMODE.
-// build keeps it for what it converts, observe for what goes to the GS
-// as it is.
+// What the GS would carry from one block to the next (game thread): the GIF
+// vertex state, a strip or fan under way, PRMODECONT and PRMODE.
 struct Carried
 {
     rg::gif::GifState state;
@@ -49,113 +33,6 @@ struct Carried
 };
 thread_local Carried t_carried;
 } // namespace
-
-std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
-{
-    return adPacket(writes);
-}
-
-bool enabled()
-{
-    return true; // (RG_NATIVE_2D went in M6: there is no GS to send 2D to)
-}
-
-void observe(const uint8_t *data, uint32_t size)
-{
-    Carried &carried = t_carried;
-    thread_local std::vector<rg::gif::GifEvent> events;
-    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
-        events.clear();
-        rg::gif::decodeGifPacket(data + at, piece, carried.state, events);
-        for (const rg::gif::GifEvent &e : events)
-        {
-            if (e.kind == rg::gif::GifEvent::Kind::Register)
-            {
-                if (e.reg == 0x1Au)
-                    carried.attributesFromPrim = (e.value & 1u) != 0u;
-                else if (e.reg == 0x1Bu)
-                    carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
-                else if (e.reg != 0x00u)
-                    continue;
-            }
-            // A PRIM write, or a vertex the GS queued itself: whatever strip
-            // the converter had under way is not the GS's any more.
-            carried.queue.clear();
-            carried.queuePrim = 0xFFFFu;
-        }
-    });
-}
-
-Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, uint64_t>> &writes)
-{
-    Carried &carried = t_carried;
-    // Decoded against a copy of the carried vertex state, kept only if the
-    // packets are taken.
-    rg::gif::GifState state = carried.state;
-    thread_local std::vector<rg::gif::GifEvent> events;
-    events.clear();
-    uint32_t packets = 0u;
-    bool image = false;
-    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
-        ++packets;
-        image |= rg::gif::decodeGifPacket(data + at, piece, state, events).imageQwords != 0u;
-    });
-    if (packets == 0u || (image && packets != 1u))
-        return Quick::No;
-    bool transfer = false;
-    for (const rg::gif::GifEvent &e : events)
-    {
-        if (e.kind != rg::gif::GifEvent::Kind::Register)
-            return Quick::No;
-        // (A texture binding goes where a transfer's registers go: sendRaw.)
-        transfer |= (e.reg >= 0x50u && e.reg <= 0x54u) || e.reg == rg::nativeproducer::kBindRegister;
-    }
-    carried.state = state;
-    if (image)
-    {
-        carried.queue.clear(); // build's upload piece: its events are the GS's alone
-        return Quick::Raw;
-    }
-    // As build's register events: PRMODECONT, PRMODE, and a PRIM write ends
-    // any strip under way.
-    for (const rg::gif::GifEvent &e : events)
-    {
-        if (e.reg == 0x1Au)
-            carried.attributesFromPrim = (e.value & 1u) != 0u;
-        else if (e.reg == 0x1Bu)
-            carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
-        else if (e.reg == 0x00u)
-        {
-            carried.queue.clear();
-            carried.queuePrim = 0xFFFFu;
-        }
-    }
-    if (transfer)
-        return Quick::Raw;
-    for (const rg::gif::GifEvent &e : events)
-        writes.emplace_back(e.reg, e.value);
-    return Quick::Writes;
-}
-
-void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
-{
-    Carried &carried = t_carried;
-    thread_local std::vector<rg::gif::GifEvent> events;
-    events.clear();
-    for (size_t i = 0; i < count; ++i)
-    {
-        rg::gif::applyRegister(writes[i].first, writes[i].second, carried.state, events);
-        if (writes[i].first == 0x1Au)
-            carried.attributesFromPrim = (writes[i].second & 1u) != 0u;
-        else if (writes[i].first == 0x1Bu)
-            carried.prmode = static_cast<uint16_t>(writes[i].second & 0x7F8u);
-        else if (writes[i].first == 0x00u)
-        {
-            carried.queue.clear();
-            carried.queuePrim = 0xFFFFu;
-        }
-    }
-}
 
 bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::string &why)
 {

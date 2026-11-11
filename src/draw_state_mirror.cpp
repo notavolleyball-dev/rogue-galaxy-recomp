@@ -4,7 +4,7 @@
 #include <mutex>
 #include <vector>
 
-#include "gif_events.h"
+#include "gs_writes.h"
 
 
 namespace rg::drawstate
@@ -147,43 +147,24 @@ void writeTo(DrawRegisters &r, rg::PrimReg &prim, uint8_t reg, uint64_t value)
 }
 } // namespace
 
-// The vertex state a packet leaves for the next, per sending thread.
-thread_local rg::gif::GifState t_carried;
-
 void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
 {
     if (count == 0u)
         return;
-    thread_local std::vector<rg::gif::GifEvent> events;
-    events.clear();
-    for (size_t i = 0; i < count; ++i)
-        rg::gif::applyRegister(writes[i].first, writes[i].second, t_carried, events);
     std::lock_guard lock(g_mirror.mutex);
-    for (const rg::gif::GifEvent &e : events)
-        if (e.kind == rg::gif::GifEvent::Kind::Register)
-            g_mirror.regs.write(e.reg, e.value);
+    g_mirror.regs.write(writes, count);
 }
 
 void observe(const uint8_t *data, uint32_t size)
 {
     if (!data || size < 16u)
         return;
-    rg::gif::GifState &carried = t_carried;
-    thread_local std::vector<rg::gif::GifEvent> events;
-    events.clear();
-    // Every GIF packet in the bytes, not only the first: the GS reads on
-    // past an EOP (a GsPkt block's draw environment follows its primitives'
-    // EOP), as the converter does.
-    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
-        rg::gif::decodeGifPacket(data + at, piece, carried, events);
-    });
+    thread_local std::vector<rg::gswrites::Write> writes;
+    writes.clear();
+    rg::gswrites::read(data, size, writes);
     std::lock_guard lock(g_mirror.mutex);
-    for (const rg::gif::GifEvent &e : events)
-        if (e.kind == rg::gif::GifEvent::Kind::Register)
-            g_mirror.regs.write(e.reg, e.value);
+    g_mirror.regs.write(writes.data(), writes.size());
 }
-
-
 
 rg::DrawState current()
 {
@@ -229,8 +210,7 @@ rg::DrawState Registers::state() const
 struct Tracker::Impl
 {
     Registers regs;
-    rg::gif::GifState carried;
-    std::vector<rg::gif::GifEvent> events;
+    std::vector<rg::gswrites::Write> writes;
 };
 
 Tracker::Tracker() : m_impl(new Impl) {}
@@ -244,24 +224,14 @@ void Tracker::observe(const uint8_t *data, uint32_t size)
     if (!data || size < 16u)
         return;
     Impl &t = *m_impl;
-    t.events.clear();
-    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
-        rg::gif::decodeGifPacket(data + at, piece, t.carried, t.events);
-    });
-    for (const rg::gif::GifEvent &e : t.events)
-        if (e.kind == rg::gif::GifEvent::Kind::Register)
-            t.regs.write(e.reg, e.value);
+    t.writes.clear();
+    rg::gswrites::read(data, size, t.writes);
+    t.regs.write(t.writes.data(), t.writes.size());
 }
 
 void Tracker::observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
 {
-    Impl &t = *m_impl;
-    t.events.clear();
-    for (size_t i = 0; i < count; ++i)
-        rg::gif::applyRegister(writes[i].first, writes[i].second, t.carried, t.events);
-    for (const rg::gif::GifEvent &e : t.events)
-        if (e.kind == rg::gif::GifEvent::Kind::Register)
-            t.regs.write(e.reg, e.value);
+    m_impl->regs.write(writes, count);
 }
 
 rg::DrawState Tracker::current() const

@@ -3,6 +3,7 @@
 
 #include <cfenv>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +18,7 @@
 #endif
 
 #include "gfx/native/native_records.h"
-#include "gif_events.h"
+#include "gs_writes.h"
 #define XXH_INLINE_ALL
 #include "xxhash.h"
 
@@ -831,16 +832,15 @@ bool shadowMeshFrom(const Program &program, const uint8_t *data, uint32_t top,
     float rgba[2][4];
     for (int i = 0; i < 2; ++i)
     {
-        rg::gif::GifState a, b;
-        std::memset(a.rgba, 0x00, sizeof(a.rgba));
-        std::memset(b.rgba, 0xFF, sizeof(b.rgba));
-        std::vector<rg::gif::GifEvent> events;
-        rg::gif::decodeGifPacket(state[i].data(), static_cast<uint32_t>(state[i].size()), a, events);
-        rg::gif::decodeGifPacket(state[i].data(), static_cast<uint32_t>(state[i].size()), b, events);
-        if (std::memcmp(a.rgba, b.rgba, sizeof(a.rgba)) != 0)
+        // The last RGBAQ the packet writes (none: not drawn).
+        std::vector<rg::gswrites::Write> writes;
+        rg::gswrites::read(state[i].data(), static_cast<uint32_t>(state[i].size()), writes);
+        const auto last = std::find_if(writes.rbegin(), writes.rend(),
+                                       [](const rg::gswrites::Write &w) { return w.first == rg::gswrites::kRgbaq; });
+        if (last == writes.rend())
             return false;
         for (int l = 0; l < 4; ++l)
-            rgba[i][l] = float(a.rgba[l]);
+            rgba[i][l] = float((last->second >> (8 * l)) & 0xFFu);
     }
     const uint32_t count = vu.half(top, 1);
     Vec4 model[4], away[4], camera[4], window[4], light[4], view[4], world[4];

@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-#include "gif_events.h"
+#include "gs_writes.h"
 #include "native_producer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -1500,33 +1500,17 @@ thread_local std::vector<uint8_t> t_flipEnvironment;
 // sprites; nothing else the game sends from its thread looks so.
 bool isFlipCopy(const uint8_t *data, uint32_t size)
 {
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
-    rg::gif::decodeGifPacket(data, size, state, events);
+    std::vector<rg::gswrites::Write> writes;
+    const rg::gswrites::Read read = rg::gswrites::read(data, size, writes);
     bool alpha = false, test = false, prmode = false, sprite = false;
-    for (const rg::gif::GifEvent &event : events)
+    for (const auto &[reg, value] : writes)
     {
-        if (event.kind == rg::gif::GifEvent::Kind::Register)
-        {
-            alpha |= event.reg == kAlpha && event.value == 0x8000000064ull;
-            test |= event.reg == kTest && event.value == 0x20002ull;
-            prmode |= event.reg == kPrmode && event.value == 0x110ull;
-            continue;
-        }
-        sprite |= (event.prim & 7u) == 6u && event.drawing;
+        alpha |= reg == kAlpha && value == 0x8000000064ull;
+        test |= reg == kTest && value == 0x20002ull;
+        prmode |= reg == kPrmode && value == 0x110ull;
+        sprite |= reg == rg::gswrites::kPrim && (value & 7u) == 6u;
     }
-    return alpha && test && prmode && sprite;
-}
-
-bool writesFrame(const std::vector<uint8_t> &packet)
-{
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
-    rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, events);
-    for (const rg::gif::GifEvent &event : events)
-        if (event.kind == rg::gif::GifEvent::Kind::Register && (event.reg == kFrame || event.reg == kFrame + 1u))
-            return true;
-    return false;
+    return alpha && test && prmode && sprite && read.kicks;
 }
 } // namespace
 
@@ -1589,19 +1573,16 @@ bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &
     // The copy reads TEX0's buffer (the frame) into FRAME's (the display
     // buffer): the last of each, context 1 or 2.
     source = target = 0u;
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
+    std::vector<rg::gswrites::Write> writes;
     if (!t_flipEnvironment.empty())
-        rg::gif::decodeGifPacket(t_flipEnvironment.data(), static_cast<uint32_t>(t_flipEnvironment.size()), state, events);
-    rg::gif::decodeGifPacket(data, size, state, events);
-    for (const rg::gif::GifEvent &event : events)
+        rg::gswrites::read(t_flipEnvironment.data(), static_cast<uint32_t>(t_flipEnvironment.size()), writes);
+    rg::gswrites::read(data, size, writes);
+    for (const auto &[reg, value] : writes)
     {
-        if (event.kind != rg::gif::GifEvent::Kind::Register)
-            continue;
-        if (event.reg == kFrame || event.reg == kFrame + 1u)
-            target = static_cast<uint32_t>(event.value & 0x1FFu) << 5u;
-        else if (event.reg == kTex0 || event.reg == kTex0 + 1u)
-            source = static_cast<uint32_t>(event.value & 0x3FFFu);
+        if (reg == kFrame || reg == kFrame + 1u)
+            target = static_cast<uint32_t>(value & 0x1FFu) << 5u;
+        else if (reg == kTex0 || reg == kTex0 + 1u)
+            source = static_cast<uint32_t>(value & 0x3FFFu);
     }
     t_flipEnvironment.clear();
     const bool known = target != 0u || source != 0u;
