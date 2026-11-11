@@ -57,11 +57,7 @@ std::vector<uint8_t> registerPacket(const std::vector<std::pair<uint8_t, uint64_
 
 bool enabled()
 {
-    static const bool on = [] {
-        const char *value = std::getenv("RG_NATIVE_2D");
-        return !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
+    return true; // (RG_NATIVE_2D went in M6: there is no GS to send 2D to)
 }
 
 void observe(const uint8_t *data, uint32_t size)

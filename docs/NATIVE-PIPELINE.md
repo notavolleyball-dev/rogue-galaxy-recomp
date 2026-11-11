@@ -95,7 +95,7 @@ game built them. Every reference is an id (`native_records.h`):
   just before it, so the mirror holds the mesh's state when it comes. The
   GS draws nothing of a converted packet. A piece the producer refuses
   (counted by why in its stats line) goes to the GS as a native mesh.
-  `RG_NATIVE_2D=0` turns the converter off.
+  `The converter is always on (M6).
 - **Object layers** (step 5c): stage E's per-object composites
   (`ModelDrawOffscreenComposite`) draw each character into an offscreen
   buffer (its head: a clear, the model) and lay it over the frame (its
