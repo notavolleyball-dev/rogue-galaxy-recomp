@@ -332,8 +332,12 @@ std::atomic<uint64_t> g_unwrittenCalls{0u}, g_writtenCalls{0u};
 // Where a call's marker goes: each group's draw registers, the game
 // thread's with its writes applied, in order (the game thread's then as
 // the list's would be after them).
+void syncGlobals();
+Globals currentGlobals();
 void captureState(Call &call)
 {
+    syncGlobals();
+    call.globals = currentGlobals();
     rg::drawstate::Tracker &game = rg::drawstate::game();
     for (Item &item : call.items)
         for (Group &group : item.groups)
@@ -413,6 +417,7 @@ struct Stream
     uint32_t unit = 0u;
     std::vector<uint8_t> bytes;
     rg::drawstate::Registers regs{};
+    Globals globals;
 };
 std::deque<Stream> g_streams; // under g_mutex
 std::atomic<uint64_t> g_captured{0u}, g_captureFailed{0u};
@@ -547,6 +552,156 @@ template <typename Visit> void eachDirect(const std::vector<uint8_t> &bytes, Vis
     }
 }
 
+// The VU1 state the list puts in quads 0-59 (the view packet's 0-19, the
+// camera's 24-28, the lights' 30-51), followed on the game thread as the
+// list is written: before a marker, the list from where it was last read
+// to its cursor (CALLs followed, as the DMA would) and each absolute V4-32
+// UNPACK into those quads applied. DrawListFrameBegin starts the reading
+// over at the frame's list; VU1 memory keeps the last frame's meanwhile.
+Globals g_globals;
+uint32_t g_listRead = 0u, g_listDctx = 0u;
+std::atomic<uint64_t> g_globalsTaken{0u}; // view, camera and light CALLs taken out
+
+void applyGlobals(const std::vector<uint8_t> &bytes)
+{
+    size_t pos = 0u;
+    uint32_t cl = 1u, wl = 1u;
+    while (pos + 4u <= bytes.size())
+    {
+        uint32_t cmd;
+        std::memcpy(&cmd, bytes.data() + pos, 4u);
+        pos += 4u;
+        const uint32_t op = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+        if (op == 0x01u)
+        {
+            cl = std::max(imm & 0xFFu, 1u);
+            wl = std::max((imm >> 8) & 0xFFu, 1u);
+        }
+        else if (op == 0x20u)
+            pos += 4u;
+        else if (op == 0x30u || op == 0x31u)
+            pos += 16u;
+        else if (op == 0x4Au)
+            pos += (num == 0u ? 256u : num) * 8u;
+        else if (op == 0x50u || op == 0x51u)
+            pos += (imm == 0u ? 65536u : imm) * 16u;
+        else if ((op & 0x60u) == 0x60u)
+        {
+            const uint32_t vn = (op >> 2) & 3u, vl = op & 3u, write = num == 0u ? 256u : num;
+            const uint32_t bits = (vl == 3u && vn == 3u) ? 16u : (vn + 1u) * (vl == 3u ? 16u : (32u >> vl));
+            uint32_t source = write;
+            if (cl < wl)
+                source = (write / wl) * cl + std::min(write % wl, cl);
+            const size_t size = ((source * ((bits + 7u) / 8u)) + 3u) & ~size_t(3u);
+            // V4-32 to an absolute address, no mask, one quad a vector.
+            if ((op & 0x7Fu & ~0x10u) == 0x6Cu && !(op & 0x10u) && !(imm & 0x8000u) && cl == wl &&
+                pos + size <= bytes.size())
+                for (uint32_t i = 0; i < write; ++i)
+                {
+                    const uint32_t q = (imm & 0x3FFu) + i;
+                    if (q >= 60u)
+                        break;
+                    std::memcpy(g_globals.quads[q].data(), bytes.data() + pos + i * 16u, 16u);
+                    g_globals.known |= 1ull << q;
+                }
+            pos += size;
+        }
+    }
+}
+
+// Whether a CALLed packet only sets that VU1 state (the view, camera and
+// light packets): absolute V4-32 UNPACKs into quads 0-59, and NOP, STCYCL,
+// FLUSH.
+bool globalsOnly(const std::vector<uint8_t> &bytes)
+{
+    size_t pos = 0u;
+    bool any = false;
+    while (pos + 4u <= bytes.size())
+    {
+        uint32_t cmd;
+        std::memcpy(&cmd, bytes.data() + pos, 4u);
+        pos += 4u;
+        const uint32_t op = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+        if (op == 0x00u || op == 0x01u || op == 0x10u || op == 0x11u || op == 0x13u)
+            continue;
+        const uint32_t n = num == 0u ? 256u : num;
+        if (op != 0x6Cu || (imm & 0x8000u) || (imm & 0x3FFu) + n > 60u || pos + n * 16u > bytes.size())
+            return false;
+        pos += n * 16u;
+        any = true;
+    }
+    return any;
+}
+
+// The list written since it was last read, up to the cursor. The view,
+// camera and light packets' CALLs are taken out of it (an empty cnt in
+// their place): records and streams carry that state.
+void syncGlobals()
+{
+    const uint32_t dctx = read32(kDrawCtxPointer);
+    if (dctx == 0u)
+        return;
+    const uint32_t cursor = read32(dctx + 4u);
+    if (dctx != g_listDctx || g_listRead == 0u || cursor < g_listRead || cursor - g_listRead > (4u << 20))
+    {
+        g_listDctx = dctx;
+        g_listRead = cursor; // (nothing known to read from: from here)
+        return;
+    }
+    thread_local std::vector<uint8_t> bytes;
+    bytes.clear();
+    uint32_t at = g_listRead;
+    while (at < cursor)
+    {
+        const uint64_t tag = read64(at);
+        const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu), id = static_cast<uint32_t>((tag >> 28) & 7u);
+        const uint32_t addr = static_cast<uint32_t>(tag >> 32) & 0x7FFFFFF0u;
+        appendFrom(bytes, at + 8u, 8u);
+        if (id == 1u)
+        {
+            appendFrom(bytes, at + 16u, qwc * 16u);
+            at += 16u + qwc * 16u;
+        }
+        else if (id == 5u)
+        {
+            appendFrom(bytes, at + 16u, qwc * 16u);
+            thread_local std::vector<uint8_t> callee;
+            callee.clear();
+            if (!(addr & 0x70000000u) && gatherCallee(addr, callee, 1))
+            {
+                if (qwc == 0u && globalsOnly(callee))
+                {
+                    applyGlobals(bytes);
+                    bytes.clear();
+                    applyGlobals(callee);
+                    write32(at, 0x10000000u); // cnt, no data, NOP NOP
+                    write32(at + 4u, 0u);
+                    write32(at + 8u, 0u);
+                    write32(at + 12u, 0u);
+                    ++g_globalsTaken;
+                }
+                else
+                    bytes.insert(bytes.end(), callee.begin(), callee.end());
+            }
+            at += 16u + qwc * 16u;
+        }
+        else if ((id == 3u || id == 4u) && !(addr & 0x70000000u))
+        {
+            appendFrom(bytes, addr, qwc * 16u);
+            at += 16u;
+        }
+        else
+            break; // (the list goes on elsewhere: read from the cursor on)
+    }
+    applyGlobals(bytes);
+    g_listRead = cursor;
+}
+
+Globals currentGlobals()
+{
+    return g_globals;
+}
+
 // Where an emitter's call began: the list's cursor, and the snapshot of the
 // game thread's state there.
 struct CaptureStart
@@ -557,6 +712,7 @@ std::vector<CaptureStart> g_captureStarts;
 
 CaptureStart beginCapture()
 {
+    syncGlobals(); // (what the list holds before the emitter's own stretch)
     CaptureStart start;
     start.dctx = read32(kDrawCtxPointer);
     start.cursor = start.dctx != 0u ? read32(start.dctx + 4u) : 0u;
@@ -578,9 +734,13 @@ void endCapture(const CaptureStart &start)
         return; // (left in the list as written)
     }
     stream.regs = rg::drawstate::game().registers();
+    stream.globals = g_globals;
+    // The stretch's own view, camera and light packets (it replays them).
+    applyGlobals(stream.bytes);
     // The GS state it sets, on the game thread's as where it was written.
     eachDirect(stream.bytes, [](const uint8_t *data, uint32_t size) { rg::drawstate::game().observe(data, size); });
     write32(start.dctx + 4u, start.cursor);
+    g_listRead = start.cursor;
     g_units = (g_units + 1u) & 0xFFFFFFu;
     g_units = g_units == 0u ? 1u : g_units;
     stream.unit = g_units | (kStream << 24);
@@ -924,10 +1084,12 @@ void report()
                 why += std::string(" ") + kWhyNames[k] + "=" + std::to_string(c);
         std::fprintf(stderr,
                      "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu "
-                     "(emit calls by why:%s), records not found %llu; emitters' output captured %llu (not %llu)\n",
+                     "(emit calls by why:%s), records not found %llu; emitters' output captured %llu (not %llu); "
+                     "view, camera and light packets taken out of the list %llu\n",
                      (unsigned long long)n, (unsigned long long)g_writtenCalls.load(),
                      why.empty() ? " none" : why.c_str(), (unsigned long long)g_unknown.load(),
-                     (unsigned long long)g_captured.load(), (unsigned long long)g_captureFailed.load());
+                     (unsigned long long)g_captured.load(), (unsigned long long)g_captureFailed.load(),
+                     (unsigned long long)g_globalsTaken.load());
     }
 }
 } // namespace
@@ -958,7 +1120,13 @@ bool takeUnwritten(uint32_t unit, Call &out)
     return false;
 }
 
-bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs)
+void listBegun(uint32_t start)
+{
+    g_listDctx = read32(kDrawCtxPointer);
+    g_listRead = start;
+}
+
+bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs, Globals &globals)
 {
     std::lock_guard lock(g_mutex);
     for (auto it = g_streams.begin(); it != g_streams.end(); ++it)
@@ -966,6 +1134,7 @@ bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Regis
         {
             bytes = std::move(it->bytes);
             regs = it->regs;
+            globals = it->globals;
             g_streams.erase(it);
             return true;
         }

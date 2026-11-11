@@ -1,4 +1,5 @@
 #include "native_effects.h"
+#include "native_emit.h"
 
 #include <algorithm>
 #include <array>
@@ -107,6 +108,10 @@ PS2Runtime::RecompiledFunction g_frameBeginOriginal = nullptr;
 
 void afterFrameBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
+    // The frame's list starts at the cursor (src/native_emit.h follows the
+    // VU1 state it puts).
+    if (const uint32_t dctx = read32(kDrawCtxPointer); dctx != 0u)
+        rg::nativeemit::listBegun(read32(dctx + 4u));
     // The stack's base and its capacity in quadwords.
     const uint32_t stack = frameStack();
     if (stack != 0u)

@@ -771,12 +771,24 @@ public:
     {
         std::vector<uint8_t> bytes;
         rg::drawstate::Registers regs;
-        if (!rg::nativeemit::takeStream(unit, bytes, regs) || bytes.empty())
+        rg::nativeemit::Globals globals;
+        if (!rg::nativeemit::takeStream(unit, bytes, regs, globals) || bytes.empty())
             return;
+        putGlobals(globals);
         rg::drawstate::Registers *const outer = t_streamRegs;
         t_streamRegs = &regs;
         m_runtime.memory().processVIF1Data(bytes.data(), static_cast<uint32_t>(bytes.size()));
         t_streamRegs = outer;
+    }
+
+    // The view, camera and light quads as the list had them where the
+    // record was made (src/native_emit.h's Globals), in VU1 memory.
+    void putGlobals(const rg::nativeemit::Globals &globals)
+    {
+        uint8_t *data = m_runtime.memory().getVU1Data();
+        for (uint32_t q = 0; q < 60u; ++q)
+            if (globals.known & (1ull << q))
+                std::memcpy(data + q * 16u, globals.quads[q].data(), 16u);
     }
 
     void drawUnwritten(uint32_t unit)
@@ -784,6 +796,7 @@ public:
         rg::nativeemit::Call call;
         if (!rg::nativeemit::takeUnwritten(unit, call))
             return;
+        putGlobals(call.globals);
         PS2Memory &memory = m_runtime.memory();
         uint8_t *data = memory.getVU1Data();
         const uint8_t *rdram = memory.getRDRAM();

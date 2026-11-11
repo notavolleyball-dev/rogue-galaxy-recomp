@@ -69,9 +69,19 @@ struct Item
     // quads: `bones` x 4 from p1C+0x20 to quad `paletteAt`).
     uint32_t base = 0u, p1C = 0u, paletteAt = 0u, bones = 0u;
 };
+// M6: the VU1 state every model program reads besides its own call's (the
+// view, camera and light packets: quads 0-59), as the list had put it where
+// a record's or a stream's marker goes: the quads set so far (`known`, a bit
+// a quad) and their values. Put in VU1 memory before the record draws.
+struct Globals
+{
+    std::array<Quad, 60> quads{};
+    uint64_t known = 0u;
+};
 struct Call
 {
     uint32_t unit = 0u;
+    Globals globals;
     std::vector<Item> items;
     // One node of the sorted path (one item, one group): its item's
     // packets may or may not be CALLed before it (they are only when they
@@ -84,7 +94,10 @@ bool takeUnwritten(uint32_t unit, Call &out);
 // A captured stream's marker (kind 8) reached: what the emitter wrote, as
 // the VIF stream the list would have carried there, and the draw registers
 // the game thread had where it wrote it.
-bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs);
+bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs, Globals &globals);
+// DrawListFrameBegin (game thread, src/native_effects.cpp): the frame's list
+// begins at `start` (the VU1 state goes on from the last frame's).
+void listBegun(uint32_t start);
 
 // After loadELF(), with the native effects (the markers are theirs).
 void install(PS2Runtime &runtime);
