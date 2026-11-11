@@ -6,6 +6,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "draw_state_mirror.h"
@@ -41,6 +42,9 @@ constexpr uint32_t kMeshLinks = 0x00470010u;
 // (its GetGroupPkts, vtable +0x18, runs BuildUnpackPkt); the hook runs that
 // itself before reading the record.
 constexpr uint32_t kMesh = 0x00470040u;
+// ModelMeshMode1 (the PrimBatch class): inside a model it emits an empty
+// chain, so its item draws nothing (NATIVE-ONLY-NOTES.md, 4.4).
+constexpr uint32_t kMeshMode1 = 0x004701C0u;
 
 uint32_t physical(uint32_t address)
 {
@@ -91,7 +95,12 @@ Quad unaligned(uint32_t address)
 // code is resident) or not an MPG.
 constexpr uint32_t kProgramTable = 0x00491280u;
 constexpr uint32_t kEmptyPacket = 0x00436CA0u;
-bool programOf(uint32_t dctx, uint32_t t, uint32_t itemFlags, const rg::vu1native::Program *&out)
+// `resident`: a slot the table leaves empty runs what is resident, the
+// piece the microcode cache (dctx+0x3C48, six slots) says the list loaded
+// last; for a call drawn where it is emitted (the sorted path's records are
+// made at the queue, not where they are drawn).
+bool programOf(uint32_t dctx, uint32_t t, uint32_t itemFlags, const rg::vu1native::Program *&out,
+               bool resident = false)
 {
     const uint32_t type = g_rdram[physical(t + 0x0Au)] | (uint32_t(g_rdram[physical(t + 0x0Bu)]) << 8);
     if (type >= 12u)
@@ -106,13 +115,16 @@ bool programOf(uint32_t dctx, uint32_t t, uint32_t itemFlags, const rg::vu1nativ
     const int32_t d = (s16(t + 0x1Au) + ((itemFlags & 8u) ? 2 : 0)) | (read32(dctx + 0x3CCCu) ? 4 : 0);
     if (c < 0 || c >= 8 || d < 0 || d >= 8)
         return false;
-    const uint32_t slots[6] = {read32(row), read32(row + 4u), read32(row + 8u),
+    uint32_t slots[6] = {read32(row), read32(row + 4u), read32(row + 8u),
                                read32(read32(row + 0x300u) + 4u * (itemFlags & 3u)),
                                read32(read32(row + 0x304u) + 4u * uint32_t(c)),
                                read32(read32(row + 0x308u) + 4u * uint32_t(d))};
     uint64_t key = 0x9E3779B97F4A7C15ull;
-    for (const uint32_t slot : slots)
+    for (uint32_t k = 0; k < 6u; ++k)
     {
+        uint32_t &slot = slots[k];
+        if ((slot == 0u || slot == kEmptyPacket) && resident)
+            slot = read32(dctx + 0x3C48u + 4u * k);
         if (slot == 0u || slot == kEmptyPacket)
             return false;
         key = (key ^ slot) * 0x100000001B3ull;
@@ -210,7 +222,7 @@ bool chunksOf(uint32_t chain, std::vector<std::array<Quad, 2>> &out)
 
 // The call's items and groups, from inst a0, req a2 (read after the call:
 // ModelMesh's groups are rebuilt by it).
-void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
+void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false, bool resident = false)
 {
     const uint32_t key = read32(req + 0x40u);
     const uint32_t meshes = read32(read32(req + 0x0Cu) + 4u);
@@ -226,8 +238,8 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
             continue;
         const uint32_t mesh = read32(meshes + 4u * read32(it + 0x08u));
         const uint32_t itemFlags = read32(it + 0x0Cu);
-        if (mesh == 0u)
-            continue;
+        if (mesh == 0u || read32(mesh + 0x50u) == kMeshMode1)
+            continue; // (Mode1: nothing drawn)
         Item &item = call.items.emplace_back();
         item.mesh = mesh;
         item.p14 = p14;
@@ -263,7 +275,7 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
             out.q84 = readQuad(pkt + 0x30u);
             out.q86 = readQuad(pkt + 0x50u);
             out.q87 = readQuad(pkt + 0x60u);
-            out.programKnown = programOf(dctx, t, itemFlags, out.program);
+            out.programKnown = programOf(dctx, t, itemFlags, out.program, resident);
             const uint32_t env = t + 0x14u;
             out.alpha = read64(env + 0x10u);
             out.test = read64(env + 0x20u);
@@ -321,28 +333,58 @@ void captureState(Call &call)
         }
 }
 
-bool drawable(const Call &call)
+// Why a call is written by the game (counted in [model-emit]).
+enum Why : uint8_t
+{
+    kDrawable,
+    kNoItems,
+    kMeshClass,
+    kProgramSlot,
+    kProgramUnknown,
+    kNoMaterial,
+    kChunks,
+    kProgramKind,
+    kRebuild,
+    kWhyCount,
+};
+const char *const kWhyNames[kWhyCount] = {"drawn",          "no items",        "mesh class", "program slot empty",
+                                          "program unknown", "no material",     "chain",      "program kind",
+                                          "ModelMesh rebuild"};
+std::atomic<uint64_t> g_why[kWhyCount];
+
+Why whyWritten(const Call &call)
 {
     if (call.items.empty())
-        return false;
+        return kNoItems;
     for (const Item &item : call.items)
     {
         const uint32_t vtable = read32(item.mesh + 0x50u);
         if (vtable != kMeshLinks && vtable != kMesh)
-            return false;
+            return kMeshClass;
         for (const Group &group : item.groups)
         {
-            if (!group.programKnown || !group.program || !group.stateKnown || !group.chunksKnown)
-                return false;
+            if (!group.stateKnown)
+                return kNoMaterial;
+            if (!group.programKnown)
+                return kProgramSlot;
+            if (!group.program)
+                return kProgramUnknown;
+            if (!group.chunksKnown)
+                return kChunks;
             // What the list's run draws natively: strips and projectors (the
             // model vertex stage's), outlines, particles, shadow volumes.
             const rg::vu1native::Kind kind = group.program->kind;
             if (!rg::vu1native::modelOnGpu(*group.program) && kind != rg::vu1native::Kind::Outline &&
                 kind != rg::vu1native::Kind::Particles && kind != rg::vu1native::Kind::Shadow)
-                return false;
+                return kProgramKind;
         }
     }
-    return true;
+    return kDrawable;
+}
+
+bool drawable(const Call &call)
+{
+    return whyWritten(call) == kDrawable;
 }
 
 PS2Runtime::RecompiledFunction g_emitOriginal = nullptr;
@@ -424,7 +466,7 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
     {
         Call call;
         call.unit = g_units | (kUnwritten << 24);
-        predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster);
+        predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster, true);
         // ModelMesh items: their chunks rebuilt first, the record read again.
         bool rebuilt = true;
         for (const Item &item : call.items)
@@ -432,10 +474,12 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
             {
                 rebuilt = rebuildMeshes(rdram, ctx, runtime, getRegU32(ctx, 5), getRegU32(ctx, 6));
                 call.items.clear();
-                predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster);
+                predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster, true);
                 break;
             }
-        if (rebuilt && drawable(call) && rg::nativefx::writeMarker(call.unit))
+        const Why why = rebuilt ? whyWritten(call) : kRebuild;
+        ++g_why[why];
+        if (why == kDrawable && rg::nativefx::writeMarker(call.unit))
         {
             ++g_unwrittenCalls;
             captureState(call);
@@ -632,11 +676,17 @@ void report()
 {
     const uint64_t n = g_unwrittenCalls.load();
     if (n == 1u || n % 60000u == 0u)
+    {
+        std::string why;
+        for (uint32_t k = kDrawable + 1u; k < kWhyCount; ++k)
+            if (const uint64_t c = g_why[k].load())
+                why += std::string(" ") + kWhyNames[k] + "=" + std::to_string(c);
         std::fprintf(stderr,
-                     "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu, "
-                     "records not found %llu\n",
+                     "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu "
+                     "(emit calls by why:%s), records not found %llu\n",
                      (unsigned long long)n, (unsigned long long)g_writtenCalls.load(),
-                     (unsigned long long)g_unknown.load());
+                     why.empty() ? " none" : why.c_str(), (unsigned long long)g_unknown.load());
+    }
 }
 } // namespace
 
