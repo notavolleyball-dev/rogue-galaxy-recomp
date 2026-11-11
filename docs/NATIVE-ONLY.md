@@ -92,6 +92,7 @@ stacked PRs at the end).
     - the retained static meshes are deleted.
   - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
     and sent in the stream's order.
+  - M6, early: the GS front end gets nothing any more (see M6).
   - Left:
     - M5: outlines and shadow volumes as records; model records at game
       time (the Emit hook; see M5's notes), which M6 needs.
@@ -855,6 +856,14 @@ differ slightly, and those differences are listed.
   list copy is the expected gain).
 
 ### M6: remove the GS front end and the packet path
+
+**Done early (2026-11-11, on `native-only/m5-geometry`):**
+- The VU1 parity tooling went with M5: check mode, `RG_VU1_REPLAY`,
+  `RG_VU1_HARVEST`, `RG_VU1_CAPTURE` and the oracle.
+- Every path into the runtime's GS front end went: the GIF stage
+  (`GifStage`, `RG_GIF_THREAD`), `meshToGs`, `sendRaw`'s and
+  `deliverImage`'s GS tails, `RG_NATIVE_ABSORB` and `RG_NATIVE_2D`.
+- Packets still feed the draw-state mirror and SIGNAL, FINISH and LABEL.
 
 The cleanup that M1 to M5 make possible. What goes:
 - the Draw stage's packet path;
