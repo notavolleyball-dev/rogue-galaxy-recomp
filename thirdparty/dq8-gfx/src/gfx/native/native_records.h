@@ -92,14 +92,17 @@ struct Target
 // may drop one older than twice that behind the newest it was sent.
 constexpr uint32_t kCameraWindow = 4096u;
 
-// Row vectors, as the game's VU1 data memory holds them.
+// Row vectors. The projection is a standard one: to clip space with x and
+// y in [-w, w] (y up) over the viewport, and z in [0, w], reversed (w is
+// the near plane). The viewport is the rectangle of the target the clip
+// space covers, in the target's pixels at the game's size.
 struct Camera
 {
     Id id = 0;
     float view[16] = {};
     float projection[16] = {};
-    float viewport[16] = {}; // the game's projection-to-window transform
-    float jitter[2] = {};    // in output pixels, for a temporal pass
+    float viewport[4] = {}; // x, y, width, height
+    float jitter[2] = {};   // in output pixels, for a temporal pass
 };
 
 // Blending: color = Cs * src + Cd * dst (or their difference, by op), with
@@ -214,6 +217,9 @@ struct Material
     // Depth grows toward the camera (reversed): Greater passes a nearer pixel.
     Compare depthTest = Compare::Always;
     bool depthWrite = false;
+    // Added to the depth (times w): an overlay laid on a surface drawn
+    // before it, pulled toward the camera so their depths do not fight.
+    float decalBias = 0.0f;
     uint8_t colorWrite = 0xF; // bits R, G, B, A
     bool cullBack = false;
     bool fog = false;
@@ -268,7 +274,6 @@ struct MeshDraw
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices; // triangles; empty: vertices are a strip
     bool hasNormals = false;
-    bool floatDepth = false; // depth written as float (linear or reversed), not the game's integers
     // With material.fog: the fog factor F = clamp(fog[0] + fog[3] * w, at
     // most fog[1], at least fog[2]), w the clip-space w; 1 is no fog,
     // toward fogColor (in the draw's units) as F falls to 0.
@@ -279,13 +284,13 @@ struct MeshDraw
     // TAA), when the producer knows it.
     bool hasPreviousModel = false;
     float previousModel[16] = {};
-    // With hasModel: the program's window depth is the camera's, times
-    // depthScale, capped at depthMax per vertex (Z = min(Zwin * depthScale,
-    // depthMax), the game's integer Z). The game draws decals (lights on
-    // walls, layers on the ground) at a depthScale a little over 1 so they
-    // sit in front of the surface they lie on.
+    // With hasModel: the depth is the camera's d (clip z / w), made
+    // depthScale d + depthBias, then capped at depthCap per vertex (in
+    // front of the eye). The game draws decals (lights on walls, layers on
+    // the ground) slightly in front of the surface they lie on this way.
     float depthScale = 1.0f;
-    float depthMax = 3.402823466e38f;
+    float depthBias = 0.0f;
+    float depthCap = 3.402823466e38f;
     // Instead of vertices and indices: a VU1 chunk as the program left it.
     // The renderer makes its triangles on its own thread through the cull
     // the producer set (setMeshCull, which reads rawHeader, the producer's

@@ -51,20 +51,11 @@ struct GpuVertex
 static_assert(sizeof(GpuVertex) == 44u, "tightly packed");
 
 // a x b x c in double, rounded once: the clip matrix of a model under a
-// camera, and the reversed-depth row taken from it before rounding.
-// (w - z) / 2 computed in the shader from a float matrix loses most of its
-// bits to cancellation (w and z are nearly equal over most of the scene),
-// and two meshes on one surface (a wall and the light laid on it, terrain
-// layers) then got different depths and fought.
-//
-// The program's depthScale S multiplies the window depth Z = V22 z/w + V32
-// (V the camera's viewport). With d = (1 - z/w) / 2 that is
-// d' = S d + (1 - S)(1 + V32 / V22) / 2, the constant times w folded into
-// the row. Without it a decal (S = 1.01) tied the surface it lies on and
-// lost about half its pixels each frame where the GS has it hundreds of
-// units in front.
+// camera, and the depth row taken from it before rounding, scaled and
+// biased (MeshDraw::depthScale, depthBias). Two meshes on one surface (a
+// wall and the light laid on it, terrain layers) get the same depth so.
 void clipAndDepth(const float a[16], const float b[16], const float c[16], float clip[16], float depthRow[4],
-                  double depthScale = 1.0, double depthConstant = 0.0)
+                  double depthScale = 1.0, double depthBias = 0.0)
 {
     double ab[16], abc[16];
     for (int i = 0; i < 4; ++i)
@@ -85,9 +76,10 @@ void clipAndDepth(const float a[16], const float b[16], const float c[16], float
         }
     for (int i = 0; i < 16; ++i)
         clip[i] = float(abc[i]);
-    // Row vectors: clip_j = sum_i p_i M[i][j]; w is column 3, z column 2.
+    // Row vectors: clip_j = sum_i p_i M[i][j]; w is column 3, z column 2
+    // (the standard projection's depth, d w).
     for (int i = 0; i < 4; ++i)
-        depthRow[i] = float(depthScale * 0.5 * (abc[i * 4 + 3] - abc[i * 4 + 2]) + depthConstant * abc[i * 4 + 3]);
+        depthRow[i] = float(depthScale * abc[i * 4 + 2] + depthBias * abc[i * 4 + 3]);
 }
 
 void multiply(const float a[16], const float b[16], float out[16])
@@ -562,11 +554,9 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         if (const auto it = m_cameras.find(d.camera); d.camera != 0u && it != m_cameras.end())
             camera = &it->second;
         const Material &m = d.material;
-        // A 3D draw needs its camera; a window-space one only to map its
-        // depth when it tests it. One that only writes depth (test ALWAYS:
-        // the menus' text, with no 3D drawn yet) writes a constant without
-        // one.
-        if (d.hasModel ? !camera : (m.depthTest != Compare::Always && !camera))
+        // A 3D draw needs its camera; a 2D one's depth is the renderer's
+        // already.
+        if (d.hasModel && !camera)
         {
             ++m_meshCounts.noCamera;
             continue;
@@ -717,72 +707,44 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = d.fogColor[i];
 
+        // The vertex shader's row-vector matrices: `clip` to clip space,
+        // `viewport` from there to the target's (x and y over the whole
+        // target, y up), and the depth's row from the position.
         if (d.hasModel)
         {
-            // The program's depthScale and depthMax (see clipAndDepth). The
-            // cap is per vertex, before interpolation, as the program's.
-            const double v22 = camera->viewport[10], v32 = camera->viewport[14];
-            const bool scaled = d.depthScale != 1.0f && v22 != 0.0;
-            const double s = scaled ? double(d.depthScale) : 1.0;
-            clipAndDepth(d.model, camera->view, camera->projection, du.clip, du.depthRow, s,
-                         scaled ? (1.0 - s) * (1.0 + v32 / v22) * 0.5 : 0.0);
-            if (v22 != 0.0 && d.depthMax < 3.0e38f)
+            // Standard clip space over the camera's rectangle of the target.
+            clipAndDepth(d.model, camera->view, camera->projection, du.clip, du.depthRow, d.depthScale, d.depthBias);
+            if (d.depthCap < 3.0e38f)
             {
-                du.depthLimit[0] = float((1.0 - (double(d.depthMax) - v32) / v22) * 0.5);
+                du.depthLimit[0] = d.depthCap;
                 du.depthLimit[1] = 1.0f;
             }
-            std::memcpy(du.viewport, camera->viewport, sizeof(du.viewport));
+            const float *r = camera->viewport;
+            const float rw = r[2] > 0.0f ? r[2] : targetW, rh = r[3] > 0.0f ? r[3] : targetH;
+            du.viewport[0] = rw / targetW;                          // x' = a x + b w
+            du.viewport[12] = (2.0f * r[0] + rw) / targetW - 1.0f;
+            du.viewport[5] = rh / targetH;                          // y' = c y + e w
+            du.viewport[13] = 1.0f - (2.0f * r[1] + rh) / targetH;
+            du.viewport[10] = du.viewport[15] = 1.0f;
         }
         else
         {
-            // Window space: x and y are the target's pixels, w is 1. The
-            // game's window depth is linear in the projection's z / w
-            // (Zgs = V22 * z / w + V32, V the camera's viewport), so the
-            // clip z the vertex shader turns into reversed depth is
-            // (Zgs - V32) / V22. With no camera, depth is unused.
+            // Window space: x and y are the target's pixels, z the depth
+            // already, w 1.
             for (int i = 0; i < 4; ++i)
-                du.clip[i * 5] = du.viewport[i * 5] = 1.0f;
-            du.clip[10] = 0.0f;
-            if (camera && camera->viewport[10] != 0.0f)
-            {
-                du.clip[10] = 1.0f / camera->viewport[10];
-                du.clip[14] = -camera->viewport[14] / camera->viewport[10];
-                // (w - z) / 2 with w = 1 and z = (Zgs - V32) / V22, in double.
-                const double v22 = camera->viewport[10], v32 = camera->viewport[14];
-                du.depthRow[2] = float(-0.5 / v22);
-                du.depthRow[3] = float(0.5 * (1.0 + v32 / v22));
-            }
-            else
-                du.depthRow[3] = 0.5f; // (1 - 0) / 2, as before
+                du.clip[i * 5] = 1.0f;
+            du.viewport[0] = 2.0f / targetW;
+            du.viewport[12] = -1.0f;
+            du.viewport[5] = -2.0f / targetH;
+            du.viewport[13] = 1.0f;
+            du.viewport[10] = du.viewport[15] = 1.0f;
+            du.depthRow[2] = 1.0f;
             ++m_meshCounts.window;
         }
         du.target[0] = targetW;
         du.target[1] = targetH;
         du.target[2] = d.hasModel ? 0.0f : 1.0f; // fog per vertex
-        // An overlay laid on a surface drawn before it (tests >=, writes no
-        // depth: a candle's light on a wall) is pulled toward the camera by
-        // a few of the GS's Z units. The GS gives both the same integer Z
-        // and the test passes; here each mesh's depth comes from its own
-        // matrices, (w - z) / 2 loses bits to cancellation, and the test
-        // failed whole triangles of the light (flickering wedges, worse up
-        // close). One Z unit is 1 / (2 |V22|) of this depth.
-        // RG_NATIVE_DECAL_UNITS=N sets how many (4 unless set; 0 off).
-        static const float decalUnits = [] {
-            const char *v = std::getenv("RG_NATIVE_DECAL_UNITS");
-            const float units = v && *v ? std::strtof(v, nullptr) : 4.0f;
-            std::fprintf(stderr, "[native-pipeline] overlays pulled forward by %g Z units (RG_NATIVE_DECAL_UNITS)\n",
-                         units);
-            return units;
-        }();
-        du.target[3] = 0.0f;
-        // Alpha-blended layers count too, depth written or not: the field's
-        // path and grass edges are their own meshes laid over the opaque
-        // ground, and where the GS's integer Z ties them the layer shows;
-        // float depth split those ties by the meshes' modelling (triangles
-        // of path flickering as the camera moved).
-        if (decalUnits != 0.0f && camera && camera->viewport[10] != 0.0f && (!m.depthWrite || m.blending) &&
-            m.depthTest == Compare::GreaterEqual)
-            du.target[3] = decalUnits / (2.0f * std::fabs(camera->viewport[10]));
+        du.target[3] = m.decalBias;
         std::memcpy(du.fog, d.fog, sizeof(du.fog));
 
 

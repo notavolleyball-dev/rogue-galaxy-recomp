@@ -1676,8 +1676,85 @@ native::Id depthTarget(State &s, uint32_t base, uint32_t colorBase, native::Id c
     return firstUse(record.id);
 }
 
-// Locked. The camera's id, a record sent when it is new.
-native::Id cameraOf(State &s, const float view[16], const float projection[16], const float viewport[16])
+// The game's window depth Z (GS units) through a camera's window transform
+// (Z = v22 z/w + v32) as the renderer's depth d = (1 - z/w) / 2: reversed,
+// 1 at the near plane. 0.5 without a camera.
+float standardDepth(float z, float v22, float v32)
+{
+    return v22 != 0.0f ? float(0.5 * (1.0 - (double(z) - v32) / v22)) : 0.5f;
+}
+
+// RG_NATIVE_DECAL_UNITS=N: an overlay laid on a surface drawn before it
+// (tests >=, writes no depth or blends: a candle's light on a wall, the
+// field's path and grass edges over the ground) is pulled toward the camera
+// by N of the GS's Z units (4 unless set; 0 off). The GS gives both the same
+// integer Z and the test passes; here each mesh's depth comes from its own
+// matrices, and the overlay lost whole triangles to the surface. One Z unit
+// is 1 / (2 |v22|) of the renderer's depth.
+float decalBias(const native::Material &m, float v22)
+{
+    static const float units = [] {
+        const char *v = std::getenv("RG_NATIVE_DECAL_UNITS");
+        const float n = v && *v ? std::strtof(v, nullptr) : 4.0f;
+        std::fprintf(stderr, "[native-producer] overlays pulled forward by %g Z units (RG_NATIVE_DECAL_UNITS)\n", n);
+        return n;
+    }();
+    if (units == 0.0f || v22 == 0.0f || !(!m.depthWrite || m.blending) || m.depthTest != native::Compare::GreaterEqual)
+        return 0.0f;
+    return units / (2.0f * std::fabs(v22));
+}
+
+// The game's camera as the renderer's (native_records.h): `projection` (its
+// clip space, VU quads 8-11) and `window` (clip to the target's pixels and
+// GS Z, made from quads 4-7) folded into one standard projection over the
+// target's `width` by `height`, its z the reversed depth (w - z) / 2 of the
+// game's clip space, made in double so a wall and a light laid on it get
+// the same depth.
+void standardProjection(const float projection[16], const float window[16], float width, float height,
+                        float out[16])
+{
+    double pw[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+        {
+            double sum = 0.0;
+            for (int k = 0; k < 4; ++k)
+                sum += double(projection[i * 4 + k]) * double(window[k * 4 + j]);
+            pw[i * 4 + j] = sum;
+        }
+    for (int i = 0; i < 4; ++i)
+    {
+        const double *r = pw + i * 4;
+        out[i * 4 + 0] = float(r[0] * 2.0 / width - r[3]);  // x' = 2x / W - w
+        out[i * 4 + 1] = float(r[3] - r[1] * 2.0 / height); // y' = w - 2y / H (y up)
+        out[i * 4 + 2] = float(0.5 * (double(projection[i * 4 + 3]) - double(projection[i * 4 + 2])));
+        out[i * 4 + 3] = projection[i * 4 + 3];
+    }
+}
+
+// Locked. The game's size of the target `id`, as declared.
+bool declaredSize(const State &s, native::Id id, float &width, float &height)
+{
+    for (const auto &[base, t] : s.targets)
+        if (t.id == id)
+        {
+            width = t.width;
+            height = t.height;
+            return true;
+        }
+    for (const auto &[key, t] : s.views)
+        if (t.id == id)
+        {
+            width = t.width;
+            height = t.height;
+            return true;
+        }
+    return false;
+}
+
+// Locked. The camera's id, a record sent when it is new: `projection` is
+// standard (standardProjection), `viewport` its rectangle of the target.
+native::Id cameraOf(State &s, const float view[16], const float projection[16], const float viewport[4])
 {
     uint64_t hash = 1469598103934665603ull;
     const auto mix = [&](const float *m) {
@@ -1690,7 +1767,12 @@ native::Id cameraOf(State &s, const float view[16], const float projection[16], 
     };
     mix(view);
     mix(projection);
-    mix(viewport);
+    for (int i = 0; i < 4; ++i)
+    {
+        uint32_t bits;
+        std::memcpy(&bits, &viewport[i], 4u);
+        hash = (hash ^ bits) * 1099511628211ull;
+    }
     const auto at = s.cameraIds.find(hash);
     if (at != s.cameraIds.end())
         return at->second;
@@ -1905,10 +1987,6 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     native::MeshDraw draw;
     native::reuseMeshBuffers(draw);
     draw.source = source;
-    // The program scales its window depth and caps it (VU quad 87.z, quad
-    // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
-    draw.depthScale = mesh.header.depthScale;
-    draw.depthMax = mesh.header.depthMax;
 
     // The chunk as the program left it: the renderer culls it (cullMesh,
     // on its thread) and makes its GPU vertices from these.
@@ -1996,14 +2074,10 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     const float ofy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
     if (split)
     {
+        // The camera is made below, once the target's size is known.
         foldOffset(viewport, ofx, ofy);
-        draw.camera = cameraOf(s, view, projection, viewport);
-        s.lastCamera = draw.camera;
-        s.lastDepthScale = viewport[10];
-        s.lastDepthOffset = viewport[14];
         draw.hasModel = true;
         std::memcpy(draw.model, model, sizeof(draw.model));
-        draw.floatDepth = true;
         ++s.counts.meshesSplit;
     }
     else
@@ -2053,6 +2127,32 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     }
     if (draw.material.depthTest != native::Compare::Always || draw.material.depthWrite)
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
+    if (split)
+    {
+        // The camera over the target, its depth standard (reversed). The
+        // program scales its window depth and caps it (VU quad 87.z, quad
+        // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces; in
+        // the renderer's depth that is a scale, a bias and a cap.
+        const float v22 = viewport[10], v32 = viewport[14];
+        float width = 640.0f, height = 448.0f;
+        declaredSize(s, draw.target, width, height);
+        float standard[16];
+        standardProjection(projection, viewport, width, height, standard);
+        const float rect[4] = {0.0f, 0.0f, width, height};
+        draw.camera = cameraOf(s, view, standard, rect);
+        s.lastCamera = draw.camera;
+        s.lastDepthScale = v22;
+        s.lastDepthOffset = v32;
+        const float scaleBy = mesh.header.depthScale;
+        if (scaleBy != 1.0f && v22 != 0.0f)
+        {
+            draw.depthScale = scaleBy;
+            draw.depthBias = float((1.0 - double(scaleBy)) * (1.0 + double(v32) / v22) * 0.5);
+        }
+        if (v22 != 0.0f && mesh.header.depthMax < 3.0e38f)
+            draw.depthCap = standardDepth(mesh.header.depthMax, v22, v32);
+        draw.material.decalBias = decalBias(draw.material, v22);
+    }
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
     draw.fogColor[0] = float(drawState->fogR) * kUnit;
     draw.fogColor[1] = float(drawState->fogG) * kUnit;
@@ -2941,6 +3041,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     {
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
         draw.camera = s.lastCamera;
+        m.decalBias = decalBias(m, s.lastDepthScale);
     }
 
     // build2D's encoding: a fogged piece has w = 1 + F / 255 with x, y (and
@@ -2960,7 +3061,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         const float w = fogged && in.z != 0.0f ? in.z : 1.0f;
         out.position[0] = in.x / w - ofx;
         out.position[1] = in.y / w - ofy;
-        out.position[2] = in.depth >= 0.0f ? in.depth : 0.0f;
+        out.position[2] = standardDepth(in.depth >= 0.0f ? in.depth : 0.0f, s.lastDepthScale, s.lastDepthOffset);
         out.uv[0] = fogged && texels ? in.u / w : in.u;
         out.uv[1] = fogged && texels ? in.v / w : in.v;
         out.color[0] = in.r * kUnit;
@@ -3269,6 +3370,7 @@ bool effect(const GSNativeEffect &e)
             const uint32_t zbp = static_cast<uint32_t>(op.zbuf & 0x1FFu) * 32u;
             draw.depthTarget = depthTarget(s, zbp, e.buffers[op.target].base, draw.target);
             draw.camera = s.lastCamera;
+            m.decalBias = decalBias(m, s.lastDepthScale);
         }
         const float x0 = op.rect[0], y0 = op.rect[1], x1 = op.rect[2], y1 = op.rect[3];
         const float z0 = static_cast<float>(op.z[0]), z1 = static_cast<float>(op.z[1]);
@@ -3286,7 +3388,7 @@ bool effect(const GSNativeEffect &e)
             native::Vertex &out = draw.vertices[v];
             out.position[0] = corners[v][0];
             out.position[1] = corners[v][1];
-            out.position[2] = corners[v][2];
+            out.position[2] = standardDepth(corners[v][2], s.lastDepthScale, s.lastDepthOffset);
             out.uv[0] = corners[v][3];
             out.uv[1] = corners[v][4];
             for (int ch = 0; ch < 4; ++ch)

@@ -432,8 +432,8 @@ void Renderer::count(const MeshDraw &draw)
     if (draw.object != 0u)
         ++r.objectIdentity;
     if (const auto t = m_targets.find(draw.target);
-        t != m_targets.end() && t->second.role == TargetRole::SceneColor && draw.floatDepth)
-        ++r.sceneFloatDepth;
+        t != m_targets.end() && t->second.role == TargetRole::SceneColor && draw.hasModel && draw.camera != 0u)
+        ++r.sceneFloatDepth; // a camera's depth is float, reversed
     if (draw.material.known)
         ++r.materialKnown;
     if (draw.hasNormals)

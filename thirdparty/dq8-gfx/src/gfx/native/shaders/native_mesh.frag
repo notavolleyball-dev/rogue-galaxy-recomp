@@ -11,13 +11,13 @@ layout(set = 2, binding = 1) uniform sampler2D palette;
 // One draw's row; Renderer::GpuDraw is its C++ twin (std430).
 struct DrawRow {
     // The vertex stage's.
-    mat4 clip;     // model x view x projection
-    mat4 viewport; // clip to the target's pixels (w kept)
+    mat4 clip;     // model x view x projection (standard), or the target's pixels for a 2D draw
+    mat4 viewport; // clip space over the camera's rectangle to clip space over the whole target
     vec4 target;   // the target's width and height in game pixels; z: fog per vertex (a window-space draw);
-                   // w: added to the depth (an overlay pulled toward the camera)
+                   // w: added to the depth times w (Material::decalBias)
     vec4 fog;      // F = clamp(fog.x + fog.w * w, at most fog.y, at least fog.z)
-    vec4 depthRow; // reversed depth (w - z) / 2 from the position, made in double, with the program's depthScale
-    vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
+    vec4 depthRow; // the depth times w from the position, made in double (scaled and biased)
+    vec4 depthLimit; // x: MeshDraw::depthCap; y: 1 when it applies
     // The fragment stage's.
     // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)

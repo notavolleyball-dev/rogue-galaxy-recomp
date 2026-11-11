@@ -2,24 +2,24 @@
 
 // The native pipeline's mesh draw (Rogue Galaxy: added; the game's
 // docs/NATIVE-PIPELINE.md step 4b). Object space through model x view x
-// projection to clip space (the game's projection: GL's -w..w in z), then
-// the camera's viewport to the target's pixels. Depth is written reversed,
-// 1 at the near plane and 0 at the far, as a float.
+// projection to the camera's standard clip space (z the reversed depth: 1
+// at the near plane, 0 at the far), then over the whole target. A 2D draw's
+// positions are the target's pixels and its z the depth already.
 //
-// Matrices are the game's row vectors, sent as they are: GLSL's column-major
-// reading makes `m * v` the game's `v * m`.
+// Matrices are row vectors, sent as they are: GLSL's column-major reading
+// makes `m * v` the row vector's `v * m`.
 // The draw's uniforms: the frame's draw table, one row per draw, found by
 // the draw id each vertex carries (neighbouring draws are one GPU call).
 // One draw's row; Renderer::GpuDraw is its C++ twin (std430).
 struct DrawRow {
     // The vertex stage's.
-    mat4 clip;     // model x view x projection
-    mat4 viewport; // clip to the target's pixels (w kept)
+    mat4 clip;     // model x view x projection (standard), or the target's pixels for a 2D draw
+    mat4 viewport; // clip space over the camera's rectangle to clip space over the whole target
     vec4 target;   // the target's width and height in game pixels; z: fog per vertex (a window-space draw);
-                   // w: added to the depth (an overlay pulled toward the camera)
+                   // w: added to the depth times w (Material::decalBias)
     vec4 fog;      // F = clamp(fog.x + fog.w * w, at most fog.y, at least fog.z)
-    vec4 depthRow; // reversed depth (w - z) / 2 from the position, made in double, with the program's depthScale
-    vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
+    vec4 depthRow; // the depth times w from the position, made in double (scaled and biased)
+    vec4 depthLimit; // x: MeshDraw::depthCap; y: 1 when it applies
     // The fragment stage's.
     // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
@@ -90,15 +90,10 @@ void main() {
     outUv = inUv;
     outColor = inColor;
     outFog = draw.target.z != 0.0 ? inFog : clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
-    // Window pixels to SDL's normalized coordinates (y up), times w so the
-    // GPU's divide gives them back.
     // The program caps its depth per vertex (depthMax); only in front of
     // the eye, where the cap means a depth (behind it the GPU clips).
     float depth = dot(draw.depthRow, vec4(inPosition, 1.0));
     if (draw.depthLimit.y != 0.0 && clip.w > 0.0)
         depth = min(depth, draw.depthLimit.x * clip.w);
-    gl_Position = vec4(window.x * 2.0 / draw.target.x - window.w,
-                       window.w - window.y * 2.0 / draw.target.y,
-                       depth + draw.target.w * clip.w,
-                       clip.w);
+    gl_Position = vec4(window.x, window.y, depth + draw.target.w * clip.w, clip.w);
 }

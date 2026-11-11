@@ -259,8 +259,8 @@ private:
         float viewport[16];
         float target[4];
         float fog[4];
-        float depthRow[4];   // reversed depth (w - z) / 2 straight from the position
-        float depthLimit[4]; // x: the program's depthMax as this depth (times w); y: 1 when it applies
+        float depthRow[4];   // the depth (times w) straight from the position, scaled and biased
+        float depthLimit[4]; // x: MeshDraw::depthCap (times w); y: 1 when it applies
         // The fragment stage's.
         uint32_t mode[4];
         uint32_t test[4];
