@@ -1030,6 +1030,11 @@ the submodule is checked out again: `git -C thirdparty/PS2Recomp checkout
 0015 (the threaded GS worker, which the null backend still sits behind)
 and 0034 (the libgraph stubs' register sink, still used).
 
+**And:** the overlay B's packet builder (`runOverlay`) is deleted: its
+sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
+with the tail's packets withheld, and the bounds it read (quads 98/99) are
+no longer kept. Its MSCAL is still recognized, so the VU1 does not run it.
+
 **Done early (2026-11-11, on `native-only/m5-geometry`):**
 - The VU1 parity tooling went with M5: check mode, `RG_VU1_REPLAY`,
   `RG_VU1_HARVEST`, `RG_VU1_CAPTURE` and the oracle.

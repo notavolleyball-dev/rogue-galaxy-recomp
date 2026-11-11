@@ -168,13 +168,13 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
 std::string describePieces(const uint8_t *code, uint32_t startPC);
 
 // What the program leaves in VU1 data memory that a later run reads, where
-// the VU1 did not run: the overlay's and base piece's runs, the outline's
-// count at quad 1023.
+// the VU1 did not run: the base piece's run, the outline's count at quad
+// 1023.
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 
-// The GS packets the program kicks for that chunk, in order: the programs
-// the model vertex stage does not draw (the overlay, the base piece) and
-// the fallback of a shadow chunk whose packets set no RGBAQ.
+// The GS packets the program kicks for that chunk, in order: the base
+// piece's FOGCOL, and the fallback of a shadow chunk whose packets set no
+// RGBAQ (the overlay's: none, its sprites are an ObjectLayer pass).
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets);
 

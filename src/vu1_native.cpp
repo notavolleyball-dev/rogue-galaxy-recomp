@@ -50,7 +50,7 @@
 // longer makes a vertex. The other programs (Kind) are written out below,
 // each by itself: the outlines, shadow volumes and particles for the same
 // stage (outlineDraw, shadowMeshes, particleMesh), buildShadow as the
-// shadows' packet fallback, runOverlay and runBase for what
+// shadows' packet fallback, runBase for what
 // they leave in VU1 memory.
 // The arithmetic runs in the VU's rounding (toward zero), set around each
 // entry point (VuRounding): the compiler must not move float work across it.
@@ -1230,69 +1230,6 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
     }
 }
 
-// The overlay B (6e42dac6), run by its own MSCAL: screen sprites over the
-// bounds the last depth-and-bounds program left in quads 98 and 99, one
-// pixel wider each way, within the rectangle of quads 140 and 141, in
-// columns of 32 pixels. Each column is the GIF tag of quad 144 (two
-// sprites' UV, XYZF2: the corners plus quad 142, plus 143.xy) in one of two
-// buffers, 145 and 165, kicked in turn; then 144, made an empty EOP tag, is
-// kicked to end. Nothing is kicked when the box is empty. It runs on `data`
-// as the VU1 would, leaving what it leaves there, and appends its packets
-// to `packets` if given.
-void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
-{
-    const VuData vu(data);
-    const auto store = [data](uint32_t q, const void *bytes) { std::memcpy(data + q * 16u, bytes, 16u); };
-    std::memcpy(data + 145u * 16u, data + 144u * 16u, 16u);
-    std::memcpy(data + 165u * 16u, data + 144u * 16u, 16u);
-    const uint32_t end = 0x8000u;
-    std::memcpy(data + 144u * 16u, &end, 4u);
-
-    const Vec4 lo = vu.quad(98), hi = vu.quad(99), rectLo = vu.quad(140), rectHi = vu.quad(141);
-    const Vec4 a{rg::fmax(rectLo.x, lo.x - 1.0f), rg::fmax(rectLo.y, lo.y - 1.0f), rg::fmax(rectLo.z, lo.z), 0.0f};
-    const Vec4 b{rg::fmin(rectHi.x, hi.x + 1.0f), rg::fmin(rectHi.y, hi.y + 1.0f), rg::fmin(rectHi.z, hi.z), 0.0f};
-    if (b.x - a.x < 0.0f || b.y - a.y < 0.0f)
-    {
-        return;
-    }
-    const Vec4 offset = vu.quad(142);
-    const Vec4 xyOffset{vu.quad(143).x, vu.quad(143).y, 0.0f, 0.0f};
-    float left = (b.x - a.x) - 1.0f;
-    Vec4 from = a;
-    uint32_t tag = 145u, other = 165u;
-    for (;;)
-    {
-        const Vec4 to{rg::fmin(from.x + 32.0f, b.x), b.y, b.z, b.w};
-        const Vec4 corners[4] = {{from.x + offset.x, from.y + offset.y, from.z + offset.z, from.w + offset.w},
-                                 {from.x + xyOffset.x, from.y + xyOffset.y, from.z + xyOffset.z, from.w + xyOffset.w},
-                                 {to.x + offset.x, to.y + offset.y, to.z + offset.z, to.w + offset.w},
-                                 {to.x + xyOffset.x, to.y + xyOffset.y, to.z + xyOffset.z, to.w + xyOffset.w}};
-        for (uint32_t i = 0; i < 4u; ++i)
-        {
-            const uint32_t fixed[4] = {static_cast<uint32_t>(rg::nativeFtoi(corners[i].x, 16.0f)),
-                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].y, 16.0f)),
-                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].z, 16.0f)),
-                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].w, 16.0f))};
-            store(tag + 1u + i, fixed);
-        }
-        if (packets)
-        {
-            packets->push_back(gifPacket(vu, tag));
-        }
-        left -= 32.0f;
-        from.x += 32.0f;
-        std::swap(tag, other);
-        if (left < 0.0f)
-        {
-            break;
-        }
-    }
-    if (packets)
-    {
-        packets->push_back(gifPacket(vu, 144));
-    }
-}
-
 } // namespace
 
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
@@ -1523,12 +1460,6 @@ namespace
 
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 {
-    if (program.kind == Kind::Overlay)
-    {
-        const VuRounding rounding;
-        runOverlay(data, nullptr);
-        return;
-    }
     if (program.kind == Kind::Base)
     {
         const VuRounding rounding;
@@ -1558,9 +1489,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
     }
     if (program.kind == Kind::Overlay)
     {
-        std::vector<uint8_t> copy(data, data + 1024u * 16u);
+        // The overlay B's sprites are drawn only inside a composite's tail,
+        // by M3's ObjectLayer pass from the overlay calls' arguments (the
+        // tail's packets withheld): nothing to send, nothing it leaves is
+        // read.
         packets.clear();
-        runOverlay(copy.data(), &packets);
         return;
     }
     if (program.kind == Kind::Base)
