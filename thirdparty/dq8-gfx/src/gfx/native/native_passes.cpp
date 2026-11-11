@@ -61,6 +61,14 @@ Id Renderer::passScratch(uint32_t slot, Id like)
 void Renderer::passRect(Id target, Id source, const float rect[4], const float uv[4], float color,
                         const Material &material)
 {
+    // The game's sprites draw at alpha 0x80: 1.
+    const float rgba[4] = {color, color, color, 1.0f};
+    passRect(target, source, rect, uv, rgba, material);
+}
+
+void Renderer::passRect(Id target, Id source, const float rect[4], const float uv[4], const float rgba[4],
+                        const Material &material)
+{
     MeshDraw draw;
     reuseMeshBuffers(draw);
     draw.target = target;
@@ -86,9 +94,8 @@ void Renderer::passRect(Id target, Id source, const float rect[4], const float u
         v.position[2] = 0.0f;
         v.uv[0] = corners[k][2];
         v.uv[1] = corners[k][3];
-        for (float &c : v.color)
-            c = color;
-        v.color[3] = 1.0f; // the game's sprites draw at alpha 0x80
+        for (int c = 0; c < 4; ++c)
+            v.color[c] = rgba[c];
     }
     draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
     draw.source = 0x50415353u; // 'PASS'
@@ -211,6 +218,76 @@ bool Renderer::expandPass(const Pass &pass)
             const float rect[4] = {0.0f, 0.0f, fw, fh};
             const float uv[4] = {1.0f, 1.0f, bw - 1.0f, bh - 1.0f};
             passRect(frame, b, rect, uv, strength, additive(spriteMaterial()));
+        }
+        return true;
+    }
+    case PassKind::Bloom:
+    {
+        // BloomExtractBlurMaybe_179360. a: the frame's pixels of alpha under
+        // 1 as grey (their alpha), blurred into b and back into a by four
+        // diagonal half-strength copies each way, then added onto the
+        // frame's color at params 1-3 (its alpha kept). params 0: the blur's
+        // offset in sixteenths of a pixel.
+        const Id frame = pass.frame, a = pass.work[0], b = pass.work[1];
+        float fw = 0.0f, fh = 0.0f, aw = 0.0f, ah = 0.0f, bw = 0.0f, bh = 0.0f;
+        if (!size(frame, fw, fh) || !size(a, aw, ah) || !size(b, bw, bh))
+            return false;
+        const auto clearTo = [&](Id id) {
+            Clear clear;
+            clear.target = id;
+            clear.color = true;
+            m_clears.emplace_back(m_meshes.size(), clear);
+        };
+        // 1. a: where the frame's alpha is under 1, its alpha (half a pixel
+        // up and left, nearest); then a's alpha as its color (Cs Ad, 1).
+        clearTo(a);
+        {
+            Material m = spriteMaterial();
+            m.linear = false;
+            m.alphaTest = Compare::Less;
+            m.alphaReference = 1.0f;
+            m.alphaFail = AlphaFail::Nothing;
+            const float rect[4] = {-0.5f, -0.5f, aw - 0.5f, ah - 0.5f};
+            const float uv[4] = {0.0f, 0.0f, fw, fh};
+            const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            passRect(a, frame, rect, uv, black, m);
+            Material grey = spriteMaterial();
+            grey.blending = true;
+            grey.srcFactor = BlendFactor::DstAlpha;
+            grey.dstFactor = BlendFactor::Zero;
+            const float whole[4] = {0.0f, 0.0f, aw, ah};
+            const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            passRect(a, 0u, whole, none, 1.0f, grey);
+        }
+        // 2. a into b, then b into a: each cleared, then four copies of the
+        // other at half strength (Cs + Cd), three quarters of a pixel up and
+        // left and the offset along each diagonal.
+        {
+            const float v = pass.params[0] / 16.0f;
+            const float ox[4] = {v, v, -v, -v}, oy[4] = {v, -v, v, -v};
+            const Id order[2][2] = {{a, b}, {b, a}};
+            for (const auto &step : order)
+            {
+                const Id from = step[0], into = step[1];
+                float w = 0.0f, h = 0.0f;
+                size(into, w, h);
+                clearTo(into);
+                const float uv[4] = {0.0f, 0.0f, w, h};
+                for (int k = 0; k < 4; ++k)
+                {
+                    const float rect[4] = {-0.75f + ox[k], -0.75f + oy[k], w - 0.75f + ox[k], h - 0.75f + oy[k]};
+                    passRect(into, from, rect, uv, 0.5f, additive(spriteMaterial()));
+                }
+            }
+        }
+        // 3. a onto the frame, added, its alpha not written.
+        {
+            Material m = additive(spriteMaterial());
+            m.colorWrite = 0x7u;
+            const float rect[4] = {0.0f, 0.0f, fw, fh};
+            const float uv[4] = {0.0f, 0.0f, aw, ah};
+            const float rgba[4] = {pass.params[1], pass.params[2], pass.params[3], pass.params[4]};
+            passRect(frame, a, rect, uv, rgba, m);
         }
         return true;
     }

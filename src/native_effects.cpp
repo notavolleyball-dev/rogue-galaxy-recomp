@@ -251,14 +251,35 @@ void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 PS2Runtime::RecompiledFunction g_bloomOriginal = nullptr;
+uint32_t g_bloomUnit = 0u; // game thread
 
 void afterBloom(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Bloom);
+    addRange(top, stackTop(), Effect::Bloom, g_bloomUnit);
+    g_bloomUnit = 0u;
 }
 
+// BloomExtractBlurMaybe_179360(obj): obj +0 and +4 the two buffers'
+// descriptors, +0x10, +0x14, +0x18 the color (times 64) and +0x1C the alpha
+// (times 128) it is added at, +0x20 the blur's offset (times 16). It also
+// clears a word of the draw context (`ctx->f270->f80.hi`), which is why
+// the call still runs (docs/NATIVE-ONLY-NOTES.md).
 void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t obj = getRegU32(ctx, 4);
+    g_bloomUnit = 0u;
+    if (obj != 0u && read32(obj) != 0u && read32(obj + 4u) != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 1u; // native::PassKind::Bloom
+        request.workBases[0] = descriptorBase(read32(obj));
+        request.workBases[1] = descriptorBase(read32(obj + 4u));
+        request.params[0] = float(static_cast<int32_t>(16.0f * readFloatAt(obj + 0x20u)));
+        for (int c = 0; c < 3; ++c)
+            request.params[1 + c] = float(static_cast<int32_t>(64.0f * readFloatAt(obj + 0x10u + 4u * c))) / 128.0f;
+        request.params[4] = float(static_cast<int32_t>(128.0f * readFloatAt(obj + 0x1Cu))) / 128.0f;
+        g_bloomUnit = keepPass(request);
+    }
     rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
 }
 
@@ -1594,7 +1615,7 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 
 bool isPass(Effect effect)
 {
-    return effect == Effect::Glare;
+    return effect == Effect::Glare || effect == Effect::Bloom;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

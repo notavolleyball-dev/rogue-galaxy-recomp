@@ -70,3 +70,27 @@ from the code.
   The sprites are filtered (the work buffers' descriptors are read
   bilinear; unconfirmed).
 - **Open:** whether the frame is always the scene when the glare runs.
+
+### `BloomExtractBlurMaybe_179360` (1976 bytes; M3)
+
+- **Arguments:** `a0` = an object: `+0`, `+4` the two buffers' descriptors
+  (a, b); `+0x10`, `+0x14`, `+0x18` the color it is added at (floats, times
+  64), `+0x1C` its alpha (times 128), `+0x20` the blur's offset (times 16).
+  Caller: `TaskDrawTBox_3387a0+0x124`.
+- **Writes:** besides the packet stack, `ctx->f270->f80.hi = 0` (a word of
+  the draw context's frame record): the call keeps running for it.
+- **What it draws** (sixteenths of a pixel; 0x80 = 1):
+  1. a cleared to 0; the frame onto a at `-8`, nearest (`GsPktSetTexFilter
+     0`), color `(0, 0, 0, 0x80)`, alpha test LESS than 0x80; then an
+     untextured sprite over a, `Cs Ad` (A=Cs B=0 C=Ad D=0), color 0x80: a's
+     color becomes its alpha (the frame's alpha where it was under 0x80,
+     else 0), its alpha 0x80;
+  2. b cleared, four sprites of a onto b at `-12 ± v` along both diagonals,
+     color 0x40, preset 9 (`Cs + Cd`); then a cleared and the same from b;
+     `v = (s32)(16 x20)`;
+  3. a onto the frame, preset 9, frame mask 1 (FBMSK `0xFF000000`: alpha
+     kept), color `((s32)(64 x10), (s32)(64 x14), (s32)(64 x18),
+     (s32)(128 x1C))`.
+- **The hook emits:** a `Pass` (`PassKind::Bloom`), as the glare's.
+- **Open:** the filter of the blur's sprites (not set in their blocks; taken
+  as bilinear).

@@ -361,6 +361,10 @@ enum class PassKind : uint8_t
     // strength laid over the frame, 4 the color clamp (what the game's
     // blends clamp to).
     Glare,
+    // BloomExtractBlurMaybe: work[0] the frame's alpha under 1 as grey, then
+    // blurred, work[1] its partner. params: 0 the blur's offset in
+    // sixteenths of a pixel, 1-3 the color it is added onto the frame at,
+    // 4 its alpha.
     Bloom,
     DepthOfField,
     PlaneShadow,

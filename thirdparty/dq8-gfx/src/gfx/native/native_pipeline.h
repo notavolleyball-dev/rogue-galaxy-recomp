@@ -206,6 +206,8 @@ private:
     // (each channel), with `material`'s blend, tests and filter.
     void passRect(Id target, Id source, const float rect[4], const float uv[4], float color,
                   const Material &material);
+    void passRect(Id target, Id source, const float rect[4], const float uv[4], const float rgba[4],
+                  const Material &material);
     // A target of the renderer's own for a pass (a ping-pong partner),
     // declared like `like` the first time.
     Id passScratch(uint32_t slot, Id like);
