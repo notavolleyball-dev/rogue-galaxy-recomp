@@ -759,6 +759,8 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
 constexpr uint8_t kXyzf2 = 0x04u, kXyz2 = 0x05u, kXyzf3 = 0x0Cu, kXyz3 = 0x0Du, kAd = 0x0Eu;
 
+} // namespace
+
 // The packet with every drawing kick made a plain vertex write: XYZ2 and
 // XYZF2 as XYZ3 and XYZF3, PACKED ones with ADC set.
 void withholdKicks(std::vector<uint8_t> &bytes)
@@ -814,6 +816,9 @@ void withholdKicks(std::vector<uint8_t> &bytes)
         }
     }
 }
+
+namespace
+{
 
 // --- Sprites -------------------------------------------------------------
 

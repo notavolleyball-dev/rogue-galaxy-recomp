@@ -2795,6 +2795,13 @@ void flushEffect()
         const bool sent = rg::nativefx::emitPass(t_held.effect, t_held.unit);
         countEffect(sent, t_held.effect, "its pass was not sent (its parameters or buffers unknown)",
                     t_held.packets);
+        // Its uploads and register writes still go on, its draws not.
+        for (std::vector<uint8_t> &packet : t_held.packets)
+        {
+            rg::nativefx::withholdKicks(packet);
+            if (t_held.gs)
+                sendPacket(*t_held.gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        }
         t_held.effect = rg::nativefx::Effect::None;
         t_held.unit = 0u;
         t_held.packets.clear();
