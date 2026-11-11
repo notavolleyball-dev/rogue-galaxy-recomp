@@ -156,6 +156,10 @@ constexpr DecodePiece kDecodes[] = {
     // entries as 26a933a5's (1, 2, 4 bones).
     {{0x0960u, 0x0e58u, 0x8912329060d1df1eull}, Decode::Skinned, 4, true, false},
     {{0x0960u, 0x0f98u, 0x36d686cd420c9469ull}, Decode::Skinned, 4, true, true},
+    // The unskinned float meshes' B (the table's B[0] for the strip types,
+    // NATIVE-ONLY-NOTES.md "The program a group draws with"): a bare JR,
+    // the EE's floats taken as they are.
+    {{0x0960u, 0x0978u, 0x857fbbc2794f6128ull}, Decode::Plain, 0, true, false},
 };
 
 // The outline program's A (header with PRIM 1, lines; calls B, then C) and
