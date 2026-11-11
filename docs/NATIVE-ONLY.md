@@ -59,8 +59,8 @@ The only place the current state and the next step are written. Rewrite it
 **State (2026-11-11, branch `native-only/m0-plan`).** M0 is done apart from
 the user's review of the record contract v2. M2 waits on that review; M1
 does not. The compile check built the branch (the tag's code) in full on
-2026-11-11: about 1 h 15 min under emulation from scratch, with 32
-warnings. After a change to `src/` only, use `compile-check.sh build`.
+2026-11-11, with 32 warnings. A full build under emulation is slow
+(not timed). After a change to `src/` only, use `compile-check.sh build`.
 
 **Next: M1, in this order.** Branch `native-only/m1-gs-backend` from
 `native-only/m0-plan`.
