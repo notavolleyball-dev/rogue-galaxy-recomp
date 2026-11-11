@@ -54,6 +54,10 @@ What each page here is for, by who it is for. New to the project? Start with
 Start with [NATIVE-RENDERER.md](NATIVE-RENDERER.md): it says where things
 stand and what each of the others is for.
 
+- [NATIVE-ONLY.md](NATIVE-ONLY.md): the current work plan (2026-11-11): removing
+  the GS path and the renderer's dependence on GS packets and VU1 memory,
+  milestones M0 to M6; function notes in
+  [NATIVE-ONLY-NOTES.md](NATIVE-ONLY-NOTES.md).
 - [NATIVE-BOUNDARY.md](NATIVE-BOUNDARY.md): work left between the native CPU and
   the native GPU sides (textures sent every frame, geometry derived every
   frame), and the plan.

@@ -1,0 +1,515 @@
+# Native-only rendering: removing the GS and VU1 coupling
+
+The work plan for drawing the game without the emulated GS and without
+deriving the renderer's input from GS packets or VU1 data memory. Written
+2026-11-11. This page is what to work from. [NATIVE-RENDERER.md](NATIVE-RENDERER.md),
+[NATIVE-PIPELINE.md](NATIVE-PIPELINE.md), [NATIVE-BOUNDARY.md](NATIVE-BOUNDARY.md)
+and [VU1-NATIVE.md](VU1-NATIVE.md) stay as the record of what exists and
+why. Analyses of individual game functions go in
+[NATIVE-ONLY-NOTES.md](NATIVE-ONLY-NOTES.md), one section per function.
+
+## Decisions (2026-11-11)
+
+- **The emulated GS path is removed**, not kept as a fallback. This
+  supersedes the direction of issue 10 (`aaec68f`), which kept the GS path as
+  the default and the fallback (NATIVE-RENDERER.md, phase 5's status note).
+- **Snapshot: a tag plus reference captures.** Before anything is deleted,
+  the last commit with the GS path is tagged `gs-path-final`, and a fixed set
+  of reference frames is captured from it (M0). The game's data never
+  changes, so those captures remain a valid oracle permanently. Anything else
+  is answered by building the tag.
+- **Structure before features.** TAA, motion vectors, MSAA, UI at output
+  resolution and ray tracing wait until this plan is done. The record
+  contract (M2) carries what they will need (object identity, the previous
+  transform, normals, jitter), so none of them forces a rewrite later.
+- **Static analysis first.** The executable and overlays are in `disc/`
+  (gitignored). Function bodies are read with `tools/mipsdis.py`, RGDecomp's C
+  (the commit pinned in `config/SCUS_974.90/funcmap.toml`), and
+  `tools/rgcpu`'s dataflow analysis for arguments. The running game is used
+  to confirm, not to discover.
+- **One branch per milestone**, `native-only/mN-<name>`. Claude writes the
+  code; the user builds, plays and reports (see "Handoff").
+- **Platforms:** Windows, Linux and later Android, all through SDL GPU with
+  SPIR-V. macOS is not a target: the native shaders are SPIR-V only, and
+  the guest code assumes x86 rounding.
+
+## Where we start
+
+Measured or read 2026-11-11 at `8431766`.
+
+**Renderer library** (`thirdparty/dq8-gfx/src/gfx/native`, 3,811 lines). It
+has no GS types, and the build enforces that. It does still encode GS
+semantics:
+
+- alpha with 0x80 as 1.0, stored in RGBA8 targets, so anything above 0x80
+  saturates;
+- integer-style color math (`floor` in the texture function and fog);
+- the GS integer Z (`depthScale`, `depthMax`, `depthRow`, `gsMatrix`);
+- the destination-alpha test (done with a whole-target copy);
+- CLAMP region modes, with no filtering when a region is used;
+- TEXA's fixed alpha and AEM;
+- the CBlur channel shuffle;
+- texture sizes taken from TEX0;
+- fog as an F value from 0 to 255;
+- the raw VU1 chunk path, which replays the program's cull on the GPU
+  (`rawHeader`, `setMeshCull`, `StaticVertex`, `native_mesh_static.vert`);
+- 2D in the GS's window coordinates;
+- feedback handled by copying the whole target once per self-reading draw.
+
+The `SpriteDraw`, `Effect`, `FrameBegin`, `Readback` and `DepthQuery`
+records are never pushed. `Present.target` is ignored.
+
+**Backend** (`thirdparty/dq8-gfx`). About 17,600 lines are GS-only:
+- the GS draw path in `sdlgpu_backend.cpp` (about 4,300 lines);
+- `sdlgpu_targets.*` (2,297) and `sdlgpu_textures.*` (1,777);
+- `gfx/gs/*` (1,972);
+- the GS shaders;
+- `xxhash.h` (6,773).
+
+About 8,500 lines are shared: the presenter, window, input, FSR, and the F1
+menu (5,041). The native renderer depends on the GS side in five places:
+- `SdlGpuDevice::create` fails without the GS shaders;
+- the backend is a `GSRasterBackend`;
+- scale changes go through the GS target cache;
+- FSR and the sides use `gs_reinterpret.vert`;
+- the raw path carries the runtime's `GSNativeMesh::Header`.
+
+**Producer** (`src/`). Under `RG_NATIVE_PIPELINE=1` nothing reaches the GS
+backend; it sits behind the tripwire. But every input the renderer gets,
+except textures, targets and the present, is still derived from GS-shaped
+data:
+
+| Input | Comes from today |
+|---|---|
+| Every material (blend, tests, texture, clamp, TEXA, fog color, scissor, target) | The draw-state mirror (`src/draw_state_mirror.*`), fed by GIF packets and libgraph's register writes |
+| 2D (HUD, menus, text, fades, particles' packets) | The GIF converter (`src/native_2d.*`) |
+| Effects | Their sprites, rebuilt from the packet ranges the hooks recorded (`src/native_effects.*`). Only the color filter is built from its arguments |
+| Object layers (stage E) | Clear boxes and tail sprites read from packets |
+| Meshes and cameras | VU1 data memory filled by VIF1 UNPACK (`src/vu1_native.cpp`, `nativeproducer::mesh`) |
+| Texture bindings | GIF A+D markers applied in stream order (`withholdUploads`) |
+
+The plumbing for these is in `src/vif1_thread.cpp`: the Draw stage, upload
+withholding, host captures, the absorber, held effects and the object
+composites, about 1,500 of its 3,823 lines.
+
+**Features that live in the GS backend and would be lost with it:**
+- **Texture packs** (`src/texture_pack.cpp`). Both kinds are answered by
+  `sdlgpu_textures.cpp`: whole-texture packs, in PCSX2's format, keyed by an
+  XXH3 hash of the GS blocks and the palette; and region packs, for UV-sprite
+  regions such as font glyphs and labels.
+- **`src/hud_size.cpp` and `src/widescreen.cpp`.** These rewrite packet
+  vertices, so they stop working once 2D no longer comes from packets.
+
+**Counts from the executable** (main ELF; overlays not counted):
+
+| What | Count |
+|---|---|
+| `GsPkt*` functions | 65 |
+| Calls to them | 3,394, from 161 functions |
+| Calls to `DrawListBeginPrim` | 126 |
+| Calls to `ModelPrepareDrawMaybe` | 7, from 6 functions |
+| Calls to `ModelEmitDrawPacketsMaybe` | 5 |
+
+`ModelBuildSkinMtxPacketMaybe` is called only from `ModelPrepareDrawMaybe`,
+so skinning matrices are built per draw on the EE. `MeshMaterialBuildPkt` is
+called at load (from `ModelBuildMeshes`, `EffModelResInitFromMds` and
+`EffQuadResInitFromMds`), so material packets are prebuilt. This suggests the
+static mesh packets are prebuilt as well; M5 confirms it.
+
+## The end state
+
+```
+game (recompiled, unchanged logic)
+ ├─ model draws ─ hook ModelPrepareDraw / ModelEmitDrawPackets ─► MeshDraw {mesh id, model, previous model,
+ │                                                                skin palette, material id, camera}
+ ├─ effect functions ─ hooked, original skipped ─────────────────► Pass {kind, parameters, targets by role}
+ ├─ 2D blocks, GsPkt builders, fonts ─ hooked ───────────────────► Draw2D {layer tag, virtual 640x448 space}
+ ├─ textures, targets, flip ─ hooks (as today) ──────────────────► Texture, Palette, Target, Present
+ └─ DMA chains ─ still built by the game; nothing on them is drawn from
+                                  │
+                       native::push (in game order)
+                                  ▼
+       renderer: scene → passes → 2D → present (FSR, filters, menu)
+```
+
+**Gone:**
+- on the backend side: the GS backend, `dq8_gfx_gs`, the GS shaders and the
+  tripwire;
+- in the producer: the GS front end on the draw path, the GIF decode
+  (`gif_events`), the draw-state mirror, the 2D converter, effects rebuilt from
+  sprites, upload withholding and bind markers, the absorber, and the Draw
+  stage's packet path;
+- on the VU1 side: the compiled VU1 for draws, VIF1 UNPACK of geometry, and
+  the raw chunk path;
+- runtime patches 0002, 0013, 0015, 0019, 0020, 0021, 0028, 0030, 0031 and
+  0034 (each checked as it goes).
+
+**Stays:**
+- the recompiled game;
+- SDL GPU;
+- the presenter, FSR, display filters and the F1 menu;
+- the write watch;
+- the texture, target and flip hooks;
+- the readbacks the game makes (lens-flare depth, screen captures), answered
+  by the renderer;
+- a stub that answers the game's SIGNAL, FINISH and LABEL waits.
+
+## Rules for every milestone
+
+1. **The game stays playable** at the end of every milestone, on the native
+   path. From M1 on there is no other path.
+2. **Two steps per hook** (the VU1 plan's method). First, *replace the
+   output*: the original runs and its packets are discarded. Then, *skip the
+   original*, only once its side effects are listed and reproduced. A side
+   effect is any store the function or its callees make outside the frame's
+   packet stack (`DrawCtx` at 0x4918B0, stacks at ctx+8).
+3. **Notes before code.** Each hooked function gets a section in
+   NATIVE-ONLY-NOTES.md before its hook is written. Use this template:
+   - address and size;
+   - arguments (rgcpu's IN set, plus what RGDecomp's C names);
+   - structures read and written, with offsets;
+   - callees;
+   - side effects;
+   - what the hook emits;
+   - open points for a running game to settle.
+4. **Checked against references.** Every milestone states a framediff
+   tolerance and lists the differences it expects. A difference not listed
+   is a bug until explained.
+5. **Delete as you go.** Each milestone deletes the code it makes dead,
+   along with its env switches. No permanent A/B switches: the tag is the A.
+6. **The renderer stays clean.** From M2 on it receives no GS semantics
+   either (no 0x80 alpha, no integer Z, no region clamp). The library
+   boundary stays enforced by the build.
+
+## Handoff
+
+For each milestone, Claude provides:
+- the branch;
+- what changed and what was deleted;
+- build notes;
+- the routes to run;
+- the expected `[native-pipeline]` and `[native-producer]` counters;
+- the framediff command.
+
+The user reports back:
+- build errors, verbatim;
+- `tools/native-check.sh NAME` output;
+- the framediff summary;
+- F8 bug marks for anything wrong ([BUG-MARKS.md](BUG-MARKS.md)).
+
+A milestone is merged when its "Done when" holds.
+
+## Milestones
+
+| | Milestone | Needs the game running for | Size |
+|---|---|---|---|
+| M0 | Groundwork: tag, references, tools, contract | the reference captures (once) | S |
+| M1 | Delete the GS backend; port texture packs | testing | M |
+| M2 | Record contract v2: no GS semantics in the renderer | testing | M-L |
+| M3 | Effects as renderer passes, from their parameters | testing, plus routes for the rare effects | L |
+| M4 | 2D at its source | testing | L |
+| M5 | Geometry off VU1 memory | testing | XL |
+| M6 | Remove the GS front end and the packet path | testing | M |
+
+M1 to M6 run in order. Within M3 and M4, items are independent.
+
+### M0: groundwork (no change to the game)
+
+**Claude, without the game:**
+- `tools/run/reference.sh`: runs a build over the reference routes with the
+  deterministic setup `native-run.sh` uses:
+  - `RG_INPUT_CLOCK=pad`, `RG_FPS=30`, scale 1x;
+  - the bench memory card;
+  - `DQ8_GFX_SCREENSHOT_DIR` at fixed pad reads.
+
+  It writes `build/reference/<route>/<build>/frame_N.ppm`, plus the stats
+  lines. Captures come from the disc and are never committed.
+- `tools/framediff.py`: compares two capture directories.
+  - Per frame, it reports the pixels over a tolerance, the maximum
+    difference, and a heat-map PNG.
+  - Per route, it gives a summary.
+  - It can be tested on synthetic images, without the game.
+- Get RGDecomp at its pinned commit into a gitignored folder, and add a
+  `tools/fninfo.py ADDR` that prints, for one function:
+  - its disassembly;
+  - its callers;
+  - rgcpu's IN set;
+  - the matching C from RGDecomp.
+
+  This is the basis of every note.
+- A compile check Claude can run here: an x86_64 Linux build in Docker, so
+  a branch compiles before it is handed over. This needs the PS2Recomp and
+  imgui submodules checked out.
+- **The record contract v2** written into this page (M2's design), for
+  review before any code depends on it.
+
+**User, once:**
+- Create the tag `gs-path-final` at the commit the plan starts from.
+- Run `reference.sh` on the tag twice:
+  - **GS path**: the oracle for what the game should look like;
+  - **native pipeline**: the baseline for what the native path draws today.
+
+  Comparing the two separates "native was already wrong" from regressions
+  introduced later.
+- **Routes:**
+  - the field walk;
+  - the town square;
+  - the battle bench;
+  - the boss gate;
+  - an event with an item message and a battle dissolve;
+  - the item menu;
+  - the title screen;
+  - a movie;
+  - Zerard's plaza.
+
+  Add routes later for the rare effects (lens flare, shadow map, focus), once
+  M3's notes say how to reach them.
+
+**Done when** both capture sets exist, framediff reads them, and the
+compile check builds the tag.
+
+### M1: delete the GS backend
+
+The native pipeline becomes the only path:
+- `RG_NATIVE_PIPELINE`, `RG_NATIVE_RENDERER` and the F1 switch are removed;
+- `RG_VU1_NATIVE` defaults to `gpu`, and the user-facing modes are removed;
+- `check` and the oracle stay until M5.
+
+**Texture packs first.**
+- Whole-texture packs: the producer computes PCSX2's hash (XXH3 over the GS
+  block layout and the palette) when it makes a texture record. It already
+  knows the layout from its unswizzle code; this needs a hash of the guest
+  bytes in GS block order. The replacement texels are sent as the record's
+  texels at a larger size. Move `xxhash.h` to the game or the native
+  library.
+- Region packs (UV-sprite regions: font glyphs, labels): see question 1.
+
+**Deleted:**
+- the backend's GS sections;
+- `sdlgpu_targets.*` and `sdlgpu_textures.*`;
+- `dq8_gfx_gs`;
+- the GS shaders, keeping `gs_reinterpret.vert` under a new name;
+- the dual-source SDL patch;
+- `src/gs_tripwire.*`, replaced by a null `GSRasterBackend` that keeps the
+  tripwire's log line, since anything that reaches it is a bug;
+- `depth_reads.*`;
+- the GS half of `flip_pacing.*`;
+- `debug/gs_census.*` and `debug/gs_timing.*`;
+- `RG_SELFTEST=gs`;
+- the GS-only `RG_GS_*` and `DQ8_GFX_*` switches (the list is in the
+  producer inventory of 2026-11-11; recheck at the time).
+
+**Reworked:**
+- the presenter, as an interface of its own, not a `GSRasterBackend`;
+- `SdlGpuDevice::create` without the GS shaders;
+- scale changes;
+- the stats line, with a home outside `reportStats`;
+- the F1 stats page.
+
+**Done when:**
+- every reference route matches the native baseline **pixel for pixel**
+  (nothing the native path draws has changed);
+- whole-texture packs load (one check on the user's pack);
+- `native-check.sh` is clean;
+- the GS memory is no longer allocated (the log says so).
+
+### M2: record contract v2
+
+The renderer receives plain, modern data. Each GS semantic moves to the
+producer, or into a renderer feature with a normal name:
+
+| Today | v2 |
+|---|---|
+| Alpha with 0x80 as 1.0; targets clamp above it | Normalized float alpha. Scene and offscreen targets RGBA16F, so values up to 2.0 survive (this fixes glare where alpha > 0x80). Textures stay 8-bit, with the scale applied at sampling |
+| `floor` in the color math | Float math. The texture functions as a normal combine enum |
+| Integer Z, `depthScale`, `depthMax`, `gsMatrix` | Reversed float depth from the projection. Decals carry a `decalBias` material field. `gsMatrix` and the depth log go |
+| Destination-alpha test via a target copy | A stencil bit, written where alpha ≥ 1, then tested |
+| CLAMP region modes | The producer cuts the region into its own texture and uses ordinary wrap |
+| TEXA, AEM | Baked into the texels at decode. A target read without alpha gets an `opaqueSource` flag |
+| Fog F from 0 to 255 | A float fog factor and color |
+| 2D in GS window coordinates, `hasModel=false` | Every draw has a camera. 2D gets an orthographic camera over a virtual 640x448 space with a layer tag (scene, HUD, menu, fade, text) |
+| `Present.target` ignored | Honored. Clears become explicit records |
+| Unused records | `Effect` becomes `Pass` (designed here, built in M3). The rest are deleted |
+| Missing | `MeshDraw.object` and `previousModel` filled where known; `Camera.jitter`; normals; mip levels. Carried now, so later features add no fields |
+
+The raw chunk path is left as it is until M5, which replaces it.
+
+**Done when** the reference routes match the native baseline within a stated
+tolerance (float math moves edges by a level or two). The expected
+differences are listed, among them glare and bloom where alpha was over
+0x80. No `0x80` remains in the renderer library.
+
+### M3: effects as passes
+
+For each effect: a note, then a hook that emits a `Pass` and discards the
+original's packets (step 1), then a hook that skips the original once its
+side effects are reproduced (step 2), then a renderer pass at parity. Order
+by cost (GS-PERFORMANCE.md) and by how often each effect appears:
+
+1. Flip copy (`GfxFlipBuffersMaybe`): present the scene; no copy.
+2. Glare (159 sprites a frame).
+3. Plane shadow: the begin and end hooks; volumes with add and subtract,
+   then 36 blur adds. The volumes come from a VU1 packet program; their pass
+   takes them as geometry.
+4. Bloom.
+5. Depth of field.
+6. Object layers (stage E). Hook `ModelDrawOffscreenCompositeAtMaybe`, whose
+   arguments are already known (a0 settings: +0x20, +0x24, +0x50, +0x5C,
+   +0x64; f12, f13). The layer becomes a pass with its box computed from the
+   object's bounds, not from a clear sprite.
+7. CBlur. It keeps 64x64 state between frames as a renderer-owned
+   persistent target, and needs its work-texture registration reproduced.
+8. Refraction capture.
+9. Color filter, which is already built from its arguments.
+10. Fades and screen captures. The capture stays on the GPU when the only
+    reader is the next frame's draw; otherwise `sceGsExecStoreImage` keeps
+    being answered.
+11. TexAnime: a render-to-texture of 174 sprites a frame. It becomes a
+    texture-animation pass, or a CPU compose into the texture record.
+12. Focus, shadow map and its blur, lens flare and the depth probe. These
+    need routes first: none of the probed routes reached them.
+
+The `RG_NATIVE_<EFFECT>` switches, `native_effect.h`, the sprite builder and
+the held-effect plumbing in `vif1_thread.cpp` are deleted as their last user
+goes.
+
+**Done when:**
+- Salgin's first scene draws in at most about 25 render passes, with no
+  feedback copies (stats line);
+- every reference route is within tolerance;
+- the producer's stats show no effect built from sprites.
+
+### M4: 2D at its source
+
+- **Hooks.** Hook the `DrawListBeginPrim` and `DrawListEndPrim` blocks
+  (126 call sites) and the `GsPkt*` state and vertex setters, so a block
+  produces `Draw2D` records directly, with no GIF encoding. Two facts set the
+  approach:
+  - the builder's fields the game reads back (+0x70 PRIM, +0xF4 write
+    pointer, and any others the notes find) are kept consistent;
+  - `hud_size.cpp` and `widescreen.cpp` become transforms of the 2D layer
+    (anchoring and 4:3 safe areas) instead of vertex patches.
+- **Fonts.** `FontDrawGlyph`, `FontDrawGlyphOutline` and the gaiji glyphs
+  become glyph records. Region packs return here, keyed by glyph and region
+  rather than by a texel hash.
+- **Layer tags** come from the block's owner and the running `TaskDraw*`
+  (62 of them).
+- **libgraph.** `sceGsPutDrawEnv`, `sceGsSwapDBuff`'s clear and the
+  `sceGifPk*` paths become target bindings and clears.
+- **The title screen's** 2D pieces of unknown source are found here.
+
+**Done when:**
+- the 2D converter receives no packet on any reference route except those
+  of the VU1 packet programs (counter);
+- every route is within tolerance;
+- the HUD size and widescreen options behave as on the tag;
+- region packs load.
+
+### M5: geometry off VU1 memory
+
+The largest piece. It mostly needs the model format, which the static work
+recovers.
+
+1. **Notes:**
+   - `ModelMeshBuildFromResMaybe`, `ModelMeshBuildUnpackPktMaybe`,
+     `MeshMaterialBuildPkt`, the `ModelRes*` getters and the
+     `VertexDecode*`/`UvDecode*` decoders (the resource format);
+   - `ModelPrepareDrawMaybe` and `ModelEmitDrawPacketsMaybe` (what a draw
+     sends);
+   - `ModelBuildSkinMtxPacketMaybe` (the bone palette);
+   - `DrawListAddLightPacket` (the lights).
+
+   Check each against the piece decoders in `src/vu1_native.cpp`, which
+   already know the VU1's side of the format.
+2. **Meshes by identity.** Key meshes at their source (the prebuilt packet's
+   address and write-watch stamp), so the VIF1 thread skips UNPACK, decode
+   and hash. This is NATIVE-BOUNDARY.md issue 2, steps 1-3: the part the game
+   thread feels.
+3. **The model-level hook.** A draw becomes {mesh id, model matrix, previous
+   model, camera, material id from the prebuilt material, skin palette}, and
+   no geometry rides the DMA chain. Two things are reproduced:
+   - the VU1 memory side effects the game reads, chiefly the bounds in quads
+     98/99, computed from an object-space box;
+   - the base slot's per-frame matrix products, if anything reads them.
+4. **Skinning in the vertex shader** (1, 2 or 4 bones; the palette that
+   lands at VU1 quads 900+ today).
+5. **Lighting and UV generation on the GPU.** Lighting from the C pieces:
+   directional, point and ambient light. UV generation from the F pieces:
+   scroll, sphere map, reflection, wave, ramp and beam.
+6. **The packet programs as records:** outlines as lines, shadow volumes for
+   M3's plane-shadow pass, particles as instanced quads, overlay sprites.
+7. **Clipping on the GPU**, so no chunk falls back to the compiled VU1.
+
+Replaced and deleted: the raw chunk path (`RawVertex`, `rawHeader`,
+`setMeshCull`, `StaticVertex`, `native_mesh_static.vert`), giving standard
+indexed meshes and GPU culling. The PS2's guard-band skip goes; edges may
+differ slightly, and those differences are listed.
+
+**Done when:**
+- no draw runs the compiled VU1 on any reference route;
+- the VIF1 thread unpacks no model geometry;
+- every route is within tolerance;
+- the field walk's frame time is measured against M4 (the game thread's
+  list copy is the expected gain).
+
+### M6: remove the GS front end and the packet path
+
+The cleanup that M1 to M5 make possible. What goes:
+- the Draw stage's packet path;
+- the draw-state mirror and `native_2d`;
+- `gif_events`;
+- upload withholding and bind markers (bindings become direct calls in
+  order);
+- the absorber, reduced to the SIGNAL/FINISH/LABEL stub;
+- the host-capture and local-copy mirroring, if the census shows no user;
+- the GS-only runtime patches;
+- `vu1_native`'s packet builders, the compiled VU1 programs for draws, the
+  `.vu1r` oracle and the harvest mode;
+- the GS-related `include`s in `src/`.
+
+What the VIF1 thread still does is whatever the notes find the game still
+sends; for graphics, that should be nothing.
+
+**Done when:**
+- `src/` includes no GS header except the runtime's stubs that the game's
+  waits need;
+- every reference route is within tolerance;
+- the user's playthrough route passes: title, Salgin, the first battles, a
+  boss, menus, a save and a load, a movie.
+
+## After this (not in scope)
+
+TAA and motion vectors (object identity and previous transforms exist from
+M2 and M5), UI at output resolution (layer tags from M4), MSAA, HDR bloom,
+shadow-map resolution, and ray tracing (world-space meshes with normals and
+materials from M5).
+
+## Risks
+
+- **No live oracle.** References cover fixed routes only. Areas the routes
+  miss (later planets, rare effects) are first seen in play. Mitigations:
+  more routes as notes reveal where things are, F8 marks, and building the
+  tag to compare.
+- **Skipped originals with side effects that affect game logic**, not just
+  the picture. Rule 2 (the two steps) and the store review in each note are
+  the guard.
+- **The model format** may take longer than the rest put together. M5 comes
+  after M1 to M4, which deliver most of the cleanup and the GPU and power
+  gain without it.
+- **Turnaround.** Without a running game here, every behavior check is a
+  round trip. The compile check in M0 keeps build errors off that loop.
+- **A permanent fork of dq8-gfx.** Accepted already (NATIVE-RENDERER.md,
+  "Risks").
+
+## Open questions
+
+1. **Region texture packs** (font and UI regions) are answered by the GS
+   backend's texture cache. Porting them before M1 means matching UV-sprite
+   regions on converted packets, which M4 replaces anyway. **Proposal:**
+   whole-texture packs are ported in M1; region packs are off from M1 until
+   M4 brings them back on glyph and region records. Acceptable?
+2. **The Docker compile check** (M0) downloads a Linux toolchain and checks
+   out the two submodules on this machine. Acceptable?
+3. **Which OS do you test on?** The run scripts are Linux-only; on Windows,
+   `reference.sh` needs a `.bat` twin.
+4. **The tag:** `gs-path-final` at which commit, and pushed to which remote?

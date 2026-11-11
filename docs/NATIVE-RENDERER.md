@@ -6,6 +6,10 @@ with a renderer that knows what it is drawing: models with their matrices,
 named effect buffers, and a 2D layer. Proposed 2026-10-28, for review; nothing
 here is implemented except where a section says so.
 
+**2026-11-11: superseded as the work plan by [NATIVE-ONLY.md](NATIVE-ONLY.md)**,
+which removes the GS path instead of keeping it as the fallback (phase 5's
+status note below). This page stays as the record of the original plan.
+
 ## Status (2026-11-03)
 
 The emulated GS path draws everything by default. Phase 1 is built for every
