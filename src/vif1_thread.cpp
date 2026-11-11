@@ -200,17 +200,6 @@ template <typename T> struct NoInit : std::allocator<T>
 };
 using Bytes = std::vector<uint8_t, NoInit<uint8_t>>;
 
-// A span of a list left uncopied (gatherChain): a texture upload's data the
-// producer already holds a record of, from guest memory unwritten since the
-// record's hash. `offset` and `bytes` are its place in the list, `phys` where
-// it is in guest RAM, `hash` the record's.
-struct Hole
-{
-    uint32_t offset = 0u, bytes = 0u, phys = 0u;
-    bool filled = false; // read from guest memory after all (listHole)
-    uint64_t hash = 0u;
-};
-
 // Model chunks kept by the renderer (M5 of docs/NATIVE-ONLY.md): a chunk
 // whose inputs the VIF1 thread saw in two lists gets an id; its inputs go
 // to the renderer once, and every later draw names it.
@@ -307,9 +296,6 @@ thread_local const rg::drawstate::Registers *t_recordRegs = nullptr;
 thread_local rg::drawstate::Registers *t_streamRegs = nullptr;
 thread_local uint32_t t_meshWriteCount = 0u;
 
-// The VIF1 thread's list's holes, and the first not yet passed (listHole).
-thread_local std::vector<Hole> *t_listHoles = nullptr;
-thread_local size_t t_listHoleAt = 0u;
 
 // Bytes from local memory or scratchpad, wrapping as the runtime's DMA does.
 void appendBytes(PS2Memory &memory, Bytes &out, uint32_t address, uint32_t bytes)
@@ -405,63 +391,18 @@ void walkChain(PS2Memory &memory, uint32_t tadr, bool tie, Visitor &&visit)
 // the size alone read every tag again (thousands a frame, 2% of the game
 // thread in a battle).
 //
-// With `holes`, a texture upload's data is not copied at all when nothing
-// downstream reads it (elidableUpload): the game sends some 4.4 MiB of
-// textures a frame in the field, the same ones from the same memory, and
-// under the native pipeline every byte of them was copied here, copied
-// again to the draw stage, and dropped there, the producer having made its
-// record of each from the same memory already (2026-11-09: 5% of the game
-// thread, 7% of the VIF1 thread). The span keeps its place in the list,
-// unwritten, and is named in `holes`.
-constexpr uint32_t kElideMin = 2048u;
-
-// Whether a ref tag's payload is such an upload: the tag's own two VIFcodes
-// are NOP and a DIRECT of exactly the payload, so the VIF hands the span to
-// the GIF and nothing else decodes it; and it is guest RAM the producer
-// hashed for a texture record and no write has reached since
-// (rg::nativeproducer::sourceUnchanged), so the bytes a copy would take now
-// are the record's. `phys`, `hash`: where it is and that record's hash.
-bool elidableUpload(PS2Memory &memory, uint32_t tagAddress, uint32_t data, uint32_t qwc, uint32_t &phys,
-                    uint64_t &hash)
-{
-    try
-    {
-        if (memory.isScratchpad(tagAddress) || memory.isScratchpad(data))
-            return false;
-        const uint32_t tagPhys = memory.translateAddress(tagAddress);
-        phys = memory.translateAddress(data);
-        const uint32_t bytes = qwc * 16u;
-        if (tagPhys + 16u > PS2_RAM_SIZE || static_cast<uint64_t>(phys) + bytes > PS2_RAM_SIZE)
-            return false;
-        uint32_t codes[2];
-        std::memcpy(codes, memory.getRDRAM() + tagPhys + 8u, sizeof(codes));
-        const uint32_t opcode = codes[1] >> 24;
-        if ((codes[0] >> 24) != 0u || (opcode != 0x50u && opcode != 0x51u) || (codes[1] & 0xFFFFu) != qwc)
-            return false;
-        return rg::nativeproducer::sourceUnchanged(memory.getRDRAM() + phys, bytes, hash);
-    }
-    catch (const std::exception &)
-    {
-        return false;
-    }
-}
-
-//
 // With `binds`, a texture binding marker (the texture hook's, in place of a
 // node's uploads: docs/NATIVE-BOUNDARY.md) is resolved in the copy: each
 // entry's source becomes its record's id, now, when the PS2's DMA would
 // read the pixels.
 void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &out,
-                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr, std::vector<Hole> *holes = nullptr,
-                 bool binds = false)
+                 std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr, bool binds = false)
 {
     out.clear();
-    // Each piece, in order; `hash` set: left uncopied, at `phys`. send() runs
-    // on the game thread alone.
+    // Each piece, in order. send() runs on the game thread alone.
     struct Span
     {
-        uint32_t address, bytes, phys;
-        uint64_t hash;
+        uint32_t address, bytes;
         bool bind;
     };
     thread_local std::vector<Span> spans;
@@ -471,22 +412,15 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
         if (tte)
         {
             // With TTE every tag supplies two VIFcodes before its payload.
-            spans.push_back({tagAddress + 8u, 8u, 0u, 0u, false});
+            spans.push_back({tagAddress + 8u, 8u, false});
             total += 8u;
         }
         if (qwc != 0u)
         {
-            uint32_t phys = 0u;
-            uint64_t hash = 0u;
-            // A reference's payload (not the tag's own), large enough to
-            // be worth the lookup.
-            if (!(holes && tte && qwc * 16u >= kElideMin && data != tagAddress + 16u &&
-                  elidableUpload(memory, tagAddress, data, qwc, phys, hash)))
-                hash = 0u;
             // A marker: a cnt tag with the magic in its unused bits.
             const bool bind = binds && tte && qwc >= 2u && ((tagLow >> 28) & 0x7u) == 1u &&
                               ((tagLow >> 16) & 0x3FFu) == rg::nativeproducer::kBindTagMagic;
-            Span span{data, qwc * 16u, phys, hash, bind};
+            Span span{data, qwc * 16u, bind};
             spans.push_back(span);
             total += spans.back().bytes;
         }
@@ -503,12 +437,6 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
             if (origins)
             {
                 origins->emplace_back(static_cast<uint32_t>(out.size()), span.address);
-            }
-            if (span.hash != 0u)
-            {
-                holes->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, false, span.hash});
-                out.resize(out.size() + span.bytes);
-                continue;
             }
             const size_t at = out.size();
             appendBytes(memory, out, span.address, span.bytes);
@@ -557,7 +485,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 // A texture continued over DIRECT packets (PS2Memory's image callback).
 void deliverImage(const uint8_t *data, uint32_t size);
 // A hole's image data (gatherChain), which never left guest memory.
-void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash);
 
 // (M6: there is no draw stage any more. A list runs on the game thread as it
 // is sent and what it makes goes straight to the producer, in the game's
@@ -571,7 +498,6 @@ struct List
 {
     Bytes data;
     // Spans of `data` left uncopied (gatherChain), in order.
-    std::vector<Hole> holes;
     // With the native effects: where each piece of `data` came from, as
     // (offset in data, EE address), and the list's number.
     std::vector<std::pair<uint32_t, uint32_t>> origins;
@@ -1040,8 +966,6 @@ private:
             t_listSize = m_current.data.size();
             t_listOrigins = &m_current.origins;
             t_listOriginAt = 0u;
-            t_listHoles = &m_current.holes;
-            t_listHoleAt = 0u;
             retainList();
             if (!m_current.data.empty())
             {
@@ -2100,13 +2024,6 @@ bool bindingTextures()
 }
 namespace
 {
-// A list's withheld texture uploads stay uncopied (gatherChain's holes):
-// the producer takes a hole as a record of its own and reads no byte of it.
-// (RG_UPLOAD_ELIDE went in M6.)
-constexpr bool elidingUploads()
-{
-    return true;
-}
 
 // sceDmaSend/SendI (chain) and SendN (normal) to VIF1 go to the thread;
 // anything else to the GS path first waits for the lists in flight.
@@ -2155,7 +2072,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
         list.number = ++listNumber;
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
                     nativeEffects() ? &list.origins : nullptr,
-                    elidingUploads() ? &list.holes : nullptr, bindingTextures());
+                    bindingTextures());
     }
     reportFinished(rdram, ctx, runtime);
     if (vifwait::g_on)
@@ -2388,73 +2305,6 @@ void deliverImage(const uint8_t *data, uint32_t size)
     }
 }
 
-// A hole's image data, on the draw stage: the rest of a withheld upload
-// whose record has the hole's hash is withheld as it is, no byte read (what
-// withheldContinuation and seeWithheld would do with them: the sent bytes
-// are the ones the record was hashed from, so the check passes). Anything
-// else (no upload being withheld, another record's, part of it already seen
-// as bytes) takes the bytes from guest memory now, later than the send
-// would have copied them, and goes the usual way; counted, and said once.
-void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash)
-{
-    UploadWithhold &u = t_upload;
-    if (uploadsTaken() && u.imageBytes >= size && u.expectHash == hash && u.seen.empty())
-    {
-            u.imageBytes -= size;
-        u.expectBytes = 0u;
-        rg::nativeproducer::noteElided(size, false);
-        return;
-    }
-    rg::nativeproducer::noteElided(size, true);
-    static std::atomic<uint32_t> told{0u};
-    if (told.fetch_add(1u, std::memory_order_relaxed) < 4u)
-        std::fprintf(stderr,
-                     "[native-upload] an uncopied upload (%u bytes at %08x) was not the one being withheld: read from "
-                     "guest memory now\n",
-                     size, phys);
-    thread_local std::vector<uint8_t> bytes;
-    const uint8_t *ram = g_runtime->memory().getRDRAM();
-    bytes.assign(ram + phys, ram + phys + size);
-    deliverImage(bytes.data(), size);
-}
-
-// A packet or image the VIF hands over from the list, against the list's
-// holes (the VIF1 thread's): the hole when the span is one's image data
-// whole (`image`), to go on as a record without bytes. Any other span that
-// touches a hole gets the hole's bytes first, read from guest memory now
-// (not expected: elidableUpload checks that the VIF hands the span to the
-// GIF whole; then only the image path not being primed leads here).
-const Hole *listHole(const uint8_t *data, uint32_t size, bool image)
-{
-    if (!t_listHoles || t_listHoles->empty() || !t_listData || data < t_listData || data >= t_listData + t_listSize)
-        return nullptr;
-    std::vector<Hole> &holes = *t_listHoles;
-    const uint32_t first = static_cast<uint32_t>(data - t_listData), last = first + size;
-    // The list is decoded front to back: holes behind this span are done.
-    size_t at = t_listHoleAt;
-    while (at < holes.size() && holes[at].offset + holes[at].bytes <= first)
-        ++at;
-    t_listHoleAt = at;
-    for (; at < holes.size() && holes[at].offset < last; ++at)
-    {
-        Hole &hole = holes[at];
-        if (hole.filled)
-            continue;
-        if (image && hole.offset == first && hole.bytes == size)
-            return &hole;
-        std::memcpy(const_cast<uint8_t *>(t_listData) + hole.offset, g_runtime->memory().getRDRAM() + hole.phys,
-                    hole.bytes);
-        hole.filled = true;
-        rg::nativeproducer::noteElided(hole.bytes, true);
-        static std::atomic<uint32_t> told{0u};
-        if (told.fetch_add(1u, std::memory_order_relaxed) < 4u)
-            std::fprintf(stderr,
-                         "[native-upload] an uncopied upload (%u bytes at %08x) was not handed over as image data: "
-                         "read from guest memory now\n",
-                         hole.bytes, hole.phys);
-    }
-    return nullptr;
-}
 } // namespace
 
 void install(PS2Runtime &runtime)
@@ -2483,22 +2333,11 @@ void install(PS2Runtime &runtime)
     // game's own GIF transfers, after the drain every DMA start does) straight
     // to the GS, behind whatever the stage still holds.
     memory.setGifPacketCallback([](const uint8_t *data, uint32_t size) {
-        if (t_listDecoder)
-        {
-            listHole(data, size, false);
-        }
         deliverPacket(data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([](const uint8_t *data, uint32_t size) {
-        // An upload's data the list left in guest memory (a hole) comes as
-        // what the producer made of it, the rest as it is.
-        if (const Hole *hole = t_listDecoder ? listHole(data, size, true) : nullptr)
-        {
-            deliverElidedImage(hole->bytes, hole->phys, hole->hash);
-            return;
-        }
         deliverImage(data, size);
     });
     // DMA the game starts through the registers rather than sceDmaSend.
