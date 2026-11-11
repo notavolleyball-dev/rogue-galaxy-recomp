@@ -1398,58 +1398,22 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         return "quad 76.z set (an entry into B other than its first)";
     if (program.decode == Decode::Skinned && bonesOf(program, vu, top) == 0u)
         return "an entry into the skinning B not read";
-    if (program.kind == Kind::Outline)
-    {
-        const uint32_t count = vu.half(top, 1);
-        if (count == 0u || count % outlinePoints(vu, top) != 0u)
-            return "an outline chunk not of whole edges";
+    // A chunk of no whole edge, triangle or particle, or of fewer vertices
+    // than a pipelined F piece reads before it tests the count (the VU would
+    // run past the chunk's end there): the model stage draws the whole ones
+    // it has, and nothing for none.
+    if (program.kind == Kind::Outline || program.kind == Kind::Shadow || program.kind == Kind::Particles)
         return nullptr;
-    }
-    if (program.kind == Kind::Shadow)
-    {
-        const uint32_t count = vu.half(top, 1);
-        if (count == 0u || count % 3u != 0u)
-            return "a shadow chunk not of whole triangles";
-        return nullptr;
-    }
-    if (program.kind == Kind::Particles)
-        return vu.half(top, 1) == 0u ? "no particles" : nullptr;
     if (program.kind == Kind::Projector)
-    {
-        if ((vu.half(81, 0) & 2u) && !clips)
-            return "clipping (slot E)";
-        // C's list path loops until it has written exactly the count's
-        // vertices.
-        if ((vu.half(top, 0) & 7u) == 3u && vu.half(top, 1) % 3u != 0u)
-            return "triangle list not of whole triangles (C's own path)";
-        return vu.half(top, 1) == 0u ? "no vertices" : nullptr;
-    }
+        return (vu.half(81, 0) & 2u) && !clips ? "clipping (slot E)" : nullptr;
     if ((vu.half(81, 0) & 2u) && !clips && program.uv != Uv::Beam)
         return "clipping (slot E)";
-    // PRIM from the chunk header. Only the backface pieces read it, with a
-    // path of their own for triangle lists (a triangle at a time, its ADC on
-    // its last vertex, the facing sign not alternating), which loops until
-    // it has written exactly the count's vertices: another count would run
-    // past the end. The others run lists through their strip code, whose
-    // ADC window of three vertices lands on each triangle.
+    // PRIM from the chunk header: the model stage draws strips and lists (a
+    // list's whole triangles; the backface pieces' own list path would run
+    // past the end of another count, the model stage draws what it has).
     const uint32_t primType = vu.half(top, 0) & 7u;
-    if (primType == 3u && program.cull == Cull::GuardBandAndBackface &&
-        (vu.half(top, 1) == 0u || vu.half(top, 1) % 3u != 0u))
-        return "triangle list not of whole triangles (D's own path)";
     if (primType != 3u && primType != 4u)
         return "neither strip nor triangle list";
-    // The reflection's loop reads three vertices before it first looks at the
-    // count.
-    if (program.uv == Uv::Reflect && vu.half(top, 1) < 3u)
-        return "reflection over fewer than three vertices (slot F)";
-    if (program.uv == Uv::Swell && vu.half(top, 1) < 2u)
-        return "swell over fewer than two vertices (slot F)";
-    if (program.uv == Uv::Beam && vu.half(top, 1) < 4u)
-        return "beam over fewer than four vertices (slot F)";
-    // The scroll's loop is pipelined over two vertices (a guess: one would
-    // run past the end); the model stage moves the UVs by quad 88.xy.
-    if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f) && vu.half(top, 1) < 2u)
-        return "scrolling UVs over fewer than two vertices (slot F)";
     return nullptr;
 }
 
