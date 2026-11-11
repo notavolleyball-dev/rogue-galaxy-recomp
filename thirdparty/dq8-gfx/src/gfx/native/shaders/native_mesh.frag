@@ -115,6 +115,9 @@ void main() {
             // As bytes of `units.w` a unit: alpha's bits 2-7 from green's.
             float k = material.units.w;
             t.a = float((uint(t.g * k + 0.5) & 0xFCu) | (uint(t.a * k + 0.5) & 3u)) / k;
+        } else if (material.blend.x == 2.0) {
+            t.b = t.r;
+            t.a = t.g;
         }
         bool tcc = material.mode.z != 0u;
         uint fn = material.mode.y;

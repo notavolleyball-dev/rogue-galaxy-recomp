@@ -403,13 +403,49 @@ void focusFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_focusOriginal, rdram, ctx, runtime, &afterFocus, stackTop());
 }
 
+uint32_t g_shadowMapUnit = 0u; // game thread
+
 void afterShadowMapBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::ShadowMapBlur);
+    addRange(top, stackTop(), Effect::ShadowMapBlur, g_shadowMapUnit);
+    g_shadowMapUnit = 0u;
 }
 
+// ShadowMapBlur_145b60(ctx): the map's node at ctx+0x3A70 (w +2, h +4, TEX0
+// +0x38), its partner's at *(ctx+0x3AE8); the colors 0x2E and 0x26, and the
+// offsets of the tables at 0x449D10 and 0x449D30 (20 sixteenths along each
+// axis, less 8), are the function's (docs/NATIVE-ONLY-NOTES.md). The call
+// runs: it also pops the view stack and writes the light state's packet.
 void shadowMapBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t a = getRegU32(ctx, 4);
+    g_shadowMapUnit = 0u;
+    if (a != 0u && read32(a + 0x3AE8u) != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 10u; // native::PassKind::ShadowMap
+        const uint32_t map = a + 0x3A70u, partner = read32(a + 0x3AE8u);
+        request.workBases[0] = descriptorBase(map);
+        request.workBases[1] = descriptorBase(partner);
+        const auto side = [](uint32_t node, int at) {
+            int16_t v = 0;
+            std::memcpy(&v, g_rdram + physical(node + static_cast<uint32_t>(at)), sizeof(v));
+            return v > 0 ? static_cast<uint32_t>(v) : 0u;
+        };
+        request.workSizes[0][0] = side(map, 2);
+        request.workSizes[0][1] = side(map, 4);
+        request.workSizes[1][0] = side(partner, 2);
+        request.workSizes[1][1] = side(partner, 4);
+        request.params[0] = float(0x2E) / 128.0f;
+        request.params[1] = float(0x26) / 128.0f;
+        constexpr int32_t kOffsetX[4] = {20, -20, 0, 0}, kOffsetY[4] = {0, 0, 20, -20};
+        for (int j = 0; j < 4; ++j)
+        {
+            request.params[2 + 2 * j] = float(kOffsetX[j] - 8) / 16.0f;
+            request.params[3 + 2 * j] = float(kOffsetY[j] - 8) / 16.0f;
+        }
+        g_shadowMapUnit = keepPass(request);
+    }
     rg::hooks::callThen(g_shadowMapBlurOriginal, rdram, ctx, runtime, &afterShadowMapBlur, stackTop());
 }
 
@@ -1646,7 +1682,7 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 bool isPass(Effect effect)
 {
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
-           effect == Effect::Refraction;
+           effect == Effect::Refraction || effect == Effect::ShadowMapBlur;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

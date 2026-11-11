@@ -695,7 +695,9 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         mu.size[1] = m.textureHeight ? float(m.textureHeight) : ownH;
         mu.size[2] = ownW;
         mu.size[3] = ownH;
-        mu.blend[0] = m.shuffle == ChannelShuffle::GreenToAlpha ? 1.0f : 0.0f;
+        mu.blend[0] = m.shuffle == ChannelShuffle::GreenToAlpha          ? 1.0f
+                      : m.shuffle == ChannelShuffle::RedGreenToBlueAlpha ? 2.0f
+                                                                         : 0.0f;
         mu.blend[2] = m.clampU ? 1.0f : 0.0f;
         mu.blend[3] = m.clampV ? 1.0f : 0.0f;
         mu.offset[0] = m.texelOffset[0];

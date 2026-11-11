@@ -78,10 +78,17 @@ stacked PRs at the end).
   `rg::nativeproducer::PassRequest` kept by the unit of its packet range
   (`native_effects.cpp`'s `keepPass`); the VIF1 thread, reaching the range,
   sends the `Pass` (`emitPass`) and drops the packets; the renderer expands
-  the pass into its own draws (`native_passes.cpp`). Done: glare. Next, in
-  order: flip copy, plane shadow, bloom, DoF, object layers, CBlur,
-  refraction, color filter, fades and captures, TexAnime, focus, shadow
-  map, lens flare, depth probe. Each gets a note in NATIVE-ONLY-NOTES.md.
+  the pass into its own draws (`native_passes.cpp`). Done: glare, bloom,
+  colour filter, refraction capture, the flip's copy, the shadow map's
+  blur. DoF is read but blocked (its note says on what). Left: plane
+  shadow, DoF, object layers, CBlur (its two functions are long; read
+  `CBlurTexBlurMaybe_1789e0`, `CBlurDrawMaybe_1784e0` and their helpers),
+  fades and captures, TexAnime, focus (`FocusFilterDrawMaybe_17c000`),
+  lens flare, depth probe; then delete the sprite builder
+  (`native_effects.cpp`'s `build`, `native_effect.h`, the producer's
+  `effect()`), the `RG_NATIVE_<EFFECT>` switches and the green-to-alpha
+  shuffle once CBlur no longer needs it. Each gets a note in
+  NATIVE-ONLY-NOTES.md.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`

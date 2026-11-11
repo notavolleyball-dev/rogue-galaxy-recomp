@@ -337,6 +337,54 @@ bool Renderer::expandPass(const Pass &pass)
         passRect(into, frame, rect, uv, 1.0f, spriteMaterial());
         return true;
     }
+    case PassKind::ShadowMap:
+    {
+        // ShadowMapBlur_145b60: the map darkened into its partner and back,
+        // eight additive blurs between the two (each reads the other, read
+        // without its alpha: 1), then the map's red and green copied onto
+        // its blue and alpha (the CT16 view's copy, unmasked), and its
+        // one-pixel border cleared.
+        const Id map = pass.work[0], partner = pass.work[1];
+        float w = 0.0f, h = 0.0f, pw = 0.0f, ph = 0.0f;
+        if (!size(map, w, h) || !size(partner, pw, ph))
+            return false;
+        const Id scratch = passScratch(2u, map);
+        if (scratch == 0u)
+            return false;
+        const float whole[4] = {0.0f, 0.0f, w, h};
+        Material copy = spriteMaterial();
+        passRect(partner, map, whole, whole, pass.params[0], copy);
+        passRect(map, partner, whole, whole, 1.0f, copy);
+        Material blur = additive(spriteMaterial());
+        blur.sourceAlpha = 1.0f;
+        for (int i = 0; i < 8; ++i)
+        {
+            const Id into = (i % 2) == 0 ? partner : map, from = (i % 2) == 0 ? map : partner;
+            const int j = i % 4;
+            const float ox = pass.params[2 + 2 * j], oy = pass.params[3 + 2 * j];
+            const float rect[4] = {ox, oy, w + ox, h + oy};
+            passRect(into, from, rect, whole, pass.params[1], blur);
+        }
+        Material plain = spriteMaterial();
+        plain.linear = false;
+        passRect(scratch, map, whole, whole, 1.0f, plain);
+        Material swap = plain;
+        swap.function = TextureFunction::Decal;
+        swap.shuffle = ChannelShuffle::RedGreenToBlueAlpha;
+        passRect(map, scratch, whole, whole, 1.0f, swap);
+        const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float borders[4][4] = {{0.0f, 0.0f, w, 1.0f},
+                                     {w - 1.0f, 0.0f, w, h},
+                                     {0.0f, h - 1.0f, w, h},
+                                     {0.0f, 0.0f, 1.0f, h}};
+        for (const auto &r : borders)
+        {
+            passRect(map, 0u, r, none, 0.0f, spriteMaterial());
+            for (Vertex &v : m_meshes.back().vertices)
+                v.color[3] = 0.0f;
+        }
+        return true;
+    }
     default:
         return false;
     }

@@ -155,3 +155,25 @@ from the code.
 - **The hook emits:** after the call, a `Pass` (`PassKind::Capture`) into
   the node's buffer (declared at its size if the game never declared it).
 - **Open:** the filter (the frame descriptor's TEX1; taken as bilinear).
+
+### `ShadowMapBlur_145b60` (M3)
+
+- **Arguments:** `a0` = the draw context: the shadow map's node at
+  `+0x3A70` (w `+2`, h `+4`, TEX0 `+0x38`), its partner's pointer at
+  `+0x3AE8` (none: nothing drawn).
+- **What it draws** (sixteenths of a pixel; 0x80 = 1): the map into its
+  partner at color 0x2E, no blend, then back at 0x80; eight rounds `i`, into
+  the partner when `i` is even, else the map, from the other read as CT24
+  (`psm = 1`, TEXA TA0 0x80: alpha 1), bilinear, preset 9 (`Cs + Cd`),
+  color 0x26, shifted by the tables at `0x449D10` / `0x449D30` (x: 20, -20,
+  0, 0; y: 0, 0, 20, -20; by `i % 4`) less 8; then the map viewed as CT16
+  (twice its height) copied onto itself 8 pixels over with no frame mask:
+  each pixel's RG half onto its BA half, whole (blue = red, alpha = green,
+  byte for byte); then, after the environment's pop, a line strip around
+  `(0, 0)`-`(w - 1, h - 1)` in black, alpha 0.
+- **Writes outside the packet stack:** the view stack's pop
+  (`ViewStackPop_1443e0`), the light state's packet into the list
+  (`LightStateWritePacket_1484a0`): the call keeps running.
+- **The hook emits:** a `Pass` (`PassKind::ShadowMap`).
+- **Open:** the frame the border's line strip goes to is the one the
+  environment pops back to; taken as the map (the blur follows its render).

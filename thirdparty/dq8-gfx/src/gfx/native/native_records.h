@@ -169,6 +169,9 @@ enum class ChannelShuffle : uint8_t
     // GS's 16-bit view of a 32-bit buffer copying each pixel's RG half onto
     // its BA half with R and G masked). Goes when M3 makes CBlur a Pass.
     GreenToAlpha,
+    // Blue from red and alpha from green, whole (the same copy unmasked:
+    // the shadow map's blur). A pass's only.
+    RedGreenToBlueAlpha,
 };
 
 struct Material
@@ -379,6 +382,9 @@ enum class PassKind : uint8_t
     Capture,
     TexAnime,
     Focus,
+    // ShadowMapBlur: work[0] the shadow map, work[1] its partner. params: 0
+    // the first copy's color, 1 the blur's, 2-9 the four offsets (x, y) in
+    // pixels.
     ShadowMap,
     Flare,
 };
