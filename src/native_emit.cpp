@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -334,9 +335,27 @@ std::atomic<uint64_t> g_unwrittenCalls{0u}, g_writtenCalls{0u};
 // the list's would be after them).
 void syncGlobals();
 Globals currentGlobals();
+// The draw environment the game draws under now (DrawEnv at dctx+0x270:
+// FRAME, ZBUF, XYOFFSET, SCISSOR, PRMODECONT, COLCLAMP, DTHE, TEST_1, each a
+// value and its register from +0x80), on the game thread's draw state: what
+// the env packets in the list set (PRMODECONT.AC 0, so a model's PRMODE
+// gives its texture, fog and blend bits).
+void applyDrawEnv()
+{
+    const uint32_t dctx = read32(kDrawCtxPointer);
+    const uint32_t env = dctx != 0u ? read32(dctx + 0x270u) : 0u;
+    if (env == 0u)
+        return;
+    std::pair<uint8_t, uint64_t> writes[8];
+    for (uint32_t i = 0; i < 8u; ++i)
+        writes[i] = {static_cast<uint8_t>(read64(env + 0x88u + 16u * i) & 0xFFu), read64(env + 0x80u + 16u * i)};
+    rg::drawstate::game().observeWrites(writes, 8u);
+}
+
 void captureState(Call &call)
 {
     syncGlobals();
+    applyDrawEnv();
     call.globals = currentGlobals();
     rg::drawstate::Tracker &game = rg::drawstate::game();
     for (Item &item : call.items)
@@ -733,6 +752,7 @@ void endCapture(const CaptureStart &start)
         ++g_captureFailed;
         return; // (left in the list as written)
     }
+    applyDrawEnv();
     stream.regs = rg::drawstate::game().registers();
     stream.globals = g_globals;
     // The stretch's own view, camera and light packets (it replays them).
@@ -1075,9 +1095,13 @@ void emitCaster(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void report()
 {
+    // Every ten seconds (the list's run, at a record's or a stream's marker).
+    static auto next = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
     const uint64_t n = g_unwrittenCalls.load();
-    if (n == 1u || n % 60000u == 0u)
+    if (now >= next)
     {
+        next = now + std::chrono::seconds(10);
         std::string why;
         for (uint32_t k = kDrawable + 1u; k < kWhyCount; ++k)
             if (const uint64_t c = g_why[k].load())
@@ -1135,6 +1159,7 @@ bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Regis
             bytes = std::move(it->bytes);
             regs = it->regs;
             globals = it->globals;
+            report();
             g_streams.erase(it);
             return true;
         }

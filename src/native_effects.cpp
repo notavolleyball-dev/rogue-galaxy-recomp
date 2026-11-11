@@ -1589,6 +1589,12 @@ bool inCompositeCall()
     return g_composite.unit != 0u;
 }
 
+std::atomic<uint64_t> g_compositesBegun{0u};
+uint64_t compositesBegun()
+{
+    return g_compositesBegun.load();
+}
+
 bool compositeTail()
 {
     return g_composite.unit != 0u && g_composite.emitted;
@@ -1613,6 +1619,8 @@ bool compositeBegin(const Box &box)
         g_boxes.emplace_back(unit, box);
     }
     c.begun = writePassMarker(unit);
+    if (c.begun)
+        ++g_compositesBegun;
     return c.begun;
 }
 

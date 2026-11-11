@@ -1654,8 +1654,11 @@ void compositeTail(uint32_t unit)
         ++g_compositeRefused;
     const uint64_t units = ++g_compositeUnits;
     if (units == 1u || units % 5000u == 0u)
-        std::fprintf(stderr, "[composite] %llu objects, %llu in layers, %llu tails not drawn\n",
+        std::fprintf(stderr,
+                     "[composite] %llu objects, %llu in layers (heads that found a clear box: %llu), %llu tails not "
+                     "drawn\n",
                      static_cast<unsigned long long>(units), static_cast<unsigned long long>(g_compositeRouted.load()),
+                     static_cast<unsigned long long>(rg::nativefx::compositesBegun()),
                      static_cast<unsigned long long>(g_compositeRefused.load()));
 }
 

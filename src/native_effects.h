@@ -121,6 +121,8 @@ struct Box
 // none in progress, or already begun). The list's side takes the box at
 // the marker (by its unit).
 bool compositeBegin(const Box &box);
+// How many composites' heads began a layer so far (game thread's count).
+uint64_t compositesBegun();
 bool takeCompositeBox(uint32_t unit, Box &box);
 
 

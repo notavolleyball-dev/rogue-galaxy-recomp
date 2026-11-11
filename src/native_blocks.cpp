@@ -174,7 +174,9 @@ template <typename Visit> bool eachDirect(uint32_t start, uint32_t end, Visit &&
         // GsPktEnd's RET (no data) ends the block.
         if (id == 6u && qwc == 0u && at + 16u == end)
             return true;
-        if (id != 1u)
+        // cnt, or a ret or end with data (DrawEnvWritePacket's RET 9: the
+        // packet ends with it).
+        if (id != 1u && id != 6u && id != 7u)
             return false;
         const uint32_t payload = at + 16u, bytes = qwc * 16u;
         if (payload + bytes > end)
@@ -192,6 +194,8 @@ template <typename Visit> bool eachDirect(uint32_t start, uint32_t end, Visit &&
                 return false; // (NOP, FLUSHE, FLUSH, FLUSHA only)
         }
         at = payload + bytes;
+        if (id != 1u)
+            return true;
     }
     return at == end;
 }
@@ -342,7 +346,7 @@ bool clearBox(const Block &block, rg::nativefx::Box &box)
     for (const KeptPiece &piece : block.pieces)
     {
         const rg::DrawState &st = piece.state;
-        if (piece.texels || st.prim.tme || st.prim.type != rg::kPrimSprite || piece.mesh.vertices.empty())
+        if (st.prim.tme || st.prim.type != rg::kPrimSprite || piece.mesh.vertices.empty())
             continue;
         const uint32_t base = st.context.frame.fbp << 5, fbw = st.context.frame.fbw;
         if (st.context.frame.psm != 0u || fbw == 0u || (found && (base != box.base || fbw != box.fbw)))
