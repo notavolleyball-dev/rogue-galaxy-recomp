@@ -353,13 +353,19 @@ bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
                  static_cast<int32_t>(q.y + q.height)};
     // The presenting thread answers it (step 7d), nothing on the GS queue.
     const uint32_t id = native::beginColorRead(read);
+    thread_local std::vector<float> units;
     thread_local std::vector<uint8_t> rgba;
     // The last answer, by the read's size and format, for a read not served.
     static std::mutex lastMutex;
     static std::vector<uint8_t> last;
     static uint32_t lastWidth = 0u, lastHeight = 0u, lastPsm = ~0u;
-    if (native::waitColorRead(id, rgba, 2000u))
+    if (native::waitColorRead(id, units, 2000u))
     {
+        // The target's units (native_producer.cpp's: a byte over 0x80) back
+        // to the game's bytes.
+        rgba.resize(units.size());
+        for (size_t i = 0; i < units.size(); ++i)
+            rgba[i] = static_cast<uint8_t>(std::clamp(units[i] * 128.0f + 0.5f, 0.0f, 255.0f));
         toFormat(rgba, psm, static_cast<size_t>(q.width) * q.height, bytes);
         if (!bytes.empty())
         {

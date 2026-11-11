@@ -51,6 +51,15 @@ const bool g_sourcesNamed = [] {
 
 constexpr uint32_t kCT32 = 0x00u, kCT16 = 0x02u, kCT16S = 0x0Au, kT8 = 0x13u, kT4 = 0x14u;
 
+// The units of every record made here (native_records.h): the game's color
+// and alpha byte over 0x80, which its texture functions and blend factors
+// take as 1.0. A texel's full 8 bits are worth 255/128 of them, the GS
+// clamps a color to its 0xFF, and its 0xFF is white on the screen.
+constexpr float kUnit = 1.0f / 128.0f;
+constexpr float kTexelScale = 255.0f / 128.0f;
+constexpr float kColorClamp = 255.0f / 128.0f;
+constexpr float kFogUnit = 1.0f / 255.0f; // the GS's fog factor F, 0 to 255
+
 struct Counts
 {
     uint64_t levels = 0, texturesNew = 0, texturesKnown = 0, texturesResent = 0;
@@ -522,6 +531,7 @@ void forgetEvicted(State &s)
         if (kept != s.texels.end() && kept->second.data && textureNamed(s, id))
         {
             native::Texture record;
+            record.scale = kTexelScale;
             record.id = id;
             record.width = static_cast<uint16_t>(kept->second.width);
             record.height = static_cast<uint16_t>(kept->second.height);
@@ -661,6 +671,7 @@ native::Id textureRecord(State &s, const TextureLevel &l, size_t bytes, uint64_t
     // one texture twice, never a wrong one.
     auto out = std::make_shared<std::vector<uint8_t>>();
     native::Texture record;
+    record.scale = kTexelScale;
     record.width = static_cast<uint16_t>(l.width);
     record.height = static_cast<uint16_t>(l.height);
     if (psm == kCT32 && !l.preSwizzled)
@@ -762,6 +773,7 @@ native::Id paletteRecord(State &s, const uint8_t *ram, uint32_t cbp, uint32_t cp
             std::copy_n(ram + at * 4u, 4u, colors->data() + i * 4u);
     }
     native::Palette record;
+    record.scale = kTexelScale;
     const native::Id id = record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
     if (dumpingTextures())
@@ -1230,6 +1242,7 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
                     std::copy_n(data + at * 4u, 4u, colors->data() + i * 4u);
             }
             native::Palette record;
+            record.scale = kTexelScale;
             record.id = id = s.nextPalette++;
             record.entries = static_cast<uint16_t>(entries);
             if (dumpingTextures())
@@ -1250,6 +1263,7 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
         return;
     const size_t texels = size_t(width) * height;
     native::Texture record;
+    record.scale = kTexelScale;
     auto out = std::make_shared<std::vector<uint8_t>>();
     if (dpsm == kCT32 && bytes >= texels * 4u)
     {
@@ -1455,7 +1469,7 @@ bool blendOf(uint64_t alpha, native::Material &m)
 {
     const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, c = (alpha >> 4) & 3u, d = (alpha >> 6) & 3u;
     m.blending = true;
-    m.blendFactor = static_cast<uint8_t>((alpha >> 32) & 0xFFu);
+    m.blendConstant = float((alpha >> 32) & 0xFFu) * kUnit;
     // The coefficient of a color (0 Cs, 1 Cd): k1 * C + k0.
     const auto coefficient = [&](uint32_t color, int &k1, int &k0) {
         k1 = (a == color ? 1 : 0) - (b == color ? 1 : 0);
@@ -1506,7 +1520,7 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
     if (test & 1u)
     {
         m.alphaTest = alphaCompare(static_cast<uint32_t>(test >> 1));
-        m.alphaRef = static_cast<uint8_t>((test >> 4) & 0xFFu);
+        m.alphaReference = float((test >> 4) & 0xFFu) * kUnit;
         static constexpr native::AlphaFail fails[4] = {native::AlphaFail::Nothing, native::AlphaFail::ColorOnly,
                                                       native::AlphaFail::DepthOnly, native::AlphaFail::RgbOnly};
         m.alphaFail = fails[(test >> 12) & 3u];
@@ -1532,6 +1546,7 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
 {
     const GSContext &c = state.context;
     bool known = true;
+    m.colorClamp = kColorClamp;
     if (state.prim.tme)
     {
         const GSTex0Reg &t = c.tex0;
@@ -1560,7 +1575,7 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
         else if ((t.psm & 0x3Fu) == 0x01u)
         {
             // CT24, a target or a CT32 texture: alpha from TEXA (as piece()).
-            m.fixedTextureAlpha = state.texa.ta0;
+            m.sourceAlpha = float(state.texa.ta0) * kUnit;
             m.alphaZeroOnBlack = state.texa.aem;
         }
         else if (m.sourceTarget && (t.psm & 0x3Fu) != 0x00u)
@@ -1912,6 +1927,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     draw.raw.assign(rawFirst, rawFirst + count);
     std::memcpy(draw.rawHeader, &h, sizeof(h));
     std::memcpy(draw.rawColorMax, h.colorMax, sizeof(draw.rawColorMax));
+    draw.rawColorScale = kUnit;
     if (retained != 0u)
     {
         // The renderer draws it from its own buffer and judges the
@@ -1925,7 +1941,8 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         draw.backface = h.backface != 0u;
         draw.clips = h.clips != 0u;
     }
-    std::memcpy(draw.fog, h.fog, sizeof(draw.fog));
+    for (int i = 0; i < 4; ++i)
+        draw.fog[i] = h.fog[i] * kFogUnit;
 
     // The camera and the model, as the game keeps them in VU1 data memory.
     float model[16], view[16], projection[16], viewport[16], whole[16];
@@ -2037,9 +2054,9 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     if (draw.material.depthTest != native::Compare::Always || draw.material.depthWrite)
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
-    draw.fogColor[0] = drawState->fogR;
-    draw.fogColor[1] = drawState->fogG;
-    draw.fogColor[2] = drawState->fogB;
+    draw.fogColor[0] = float(drawState->fogR) * kUnit;
+    draw.fogColor[1] = float(drawState->fogG) * kUnit;
+    draw.fogColor[2] = float(drawState->fogB) * kUnit;
     draw.material.known = known;
     if (known)
         ++s.counts.materialKnown;
@@ -2163,6 +2180,7 @@ native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg 
         return made.id;
     }
     native::Texture record;
+    record.scale = kTexelScale;
     record.width = static_cast<uint16_t>(width);
     record.height = static_cast<uint16_t>(height);
     record.format = rgba ? native::PixelFormat::Rgba8 : native::PixelFormat::Index8;
@@ -2214,6 +2232,7 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
         return made.id;
     }
     native::Palette record;
+    record.scale = kTexelScale;
     record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
     if (dumpingTextures())
@@ -2461,6 +2480,7 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
             return;
         }
         native::Texture record;
+        record.scale = kTexelScale;
         record.id = s.nextTexture++;
         record.format = blockFormat(picture.blocks);
         record.width = static_cast<uint16_t>(picture.width);
@@ -2642,6 +2662,7 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
     else
     {
         native::Texture record;
+        record.scale = kTexelScale;
         record.width = static_cast<uint16_t>(texW);
         record.height = static_cast<uint16_t>(texH);
         record.format = indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
@@ -2788,11 +2809,13 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         c.tex0.tbp0 == frameBase && c.tex0.tbw == c.frame.fbw)
     {
         native::Material &g = draw.material;
+        g.colorClamp = kColorClamp;
         g.sourceTarget = draw.target;
         g.textureWidth = g.textureHeight = 1u;
         g.function = native::TextureFunction::Decal;
         g.textureAlpha = true;
         g.shuffle = native::ChannelShuffle::GreenToAlpha;
+        g.shuffleScale = 128.0f; // a byte a unit over 0x80
         g.colorWrite = 0x8u;
         g.known = true;
         const float x1 = float(std::min<uint32_t>(std::max(c.frame.fbw, 1u) * 64u, c.scissor.x1 + 1u));
@@ -2805,7 +2828,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             out.position[0] = out.uv[0] = corners[v][0];
             out.position[1] = out.uv[1] = corners[v][1];
             for (int ch = 0; ch < 4; ++ch)
-                out.color[ch] = 128.0f;
+                out.color[ch] = 1.0f;
         }
         draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
         draw.scissor = {0, 0, int32_t(x1), int32_t(y1)};
@@ -2816,6 +2839,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         return true;
     }
     native::Material &m = draw.material;
+    m.colorClamp = kColorClamp;
     bool known = true;
     uint32_t why = 0u; // RG_NATIVE_UNKNOWN_LOG: 1 source psm, 2 clamp, 4 blend, 8 FBA, 16 write mask, 32 fog
     if (drawState->prim.tme)
@@ -2850,7 +2874,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         // here yet.
         if ((m.sourceTarget || m.texture) && (c.tex0.psm & 0x3Fu) == 0x01u)
         {
-            m.fixedTextureAlpha = drawState->texa.ta0;
+            m.sourceAlpha = float(drawState->texa.ta0) * kUnit;
             m.alphaZeroOnBlack = drawState->texa.aem;
             ++s.counts.piecesCt24;
         }
@@ -2939,13 +2963,13 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         out.position[2] = in.depth >= 0.0f ? in.depth : 0.0f;
         out.uv[0] = fogged && texels ? in.u / w : in.u;
         out.uv[1] = fogged && texels ? in.v / w : in.v;
-        out.color[0] = in.r;
-        out.color[1] = in.g;
-        out.color[2] = in.b;
-        out.color[3] = in.a;
+        out.color[0] = in.r * kUnit;
+        out.color[1] = in.g * kUnit;
+        out.color[2] = in.b * kUnit;
+        out.color[3] = in.a * kUnit;
         // build2D's fogged form: w = 1 + (F + 0.25) / 255.
         if (fogged)
-            out.fog = std::clamp((w - 1.0f) * 255.0f - 0.25f, 0.0f, 255.0f);
+            out.fog = std::clamp((w - 1.0f) * 255.0f - 0.25f, 0.0f, 255.0f) * kFogUnit;
     }
     if (!indices.empty())
         draw.indices.assign(indices.begin(), indices.begin() + indices.size() / 3u * 3u);
@@ -2958,9 +2982,9 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     }
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
     m.fog = fogged;
-    draw.fogColor[0] = drawState->fogR;
-    draw.fogColor[1] = drawState->fogG;
-    draw.fogColor[2] = drawState->fogB;
+    draw.fogColor[0] = float(drawState->fogR) * kUnit;
+    draw.fogColor[1] = float(drawState->fogG) * kUnit;
+    draw.fogColor[2] = float(drawState->fogB) * kUnit;
     m.known = known;
     if (why && std::getenv("RG_NATIVE_UNKNOWN_LOG"))
     {
@@ -3038,6 +3062,7 @@ native::Draw2D rectDraw(native::Id target, const int32_t box[4], native::Id sour
     draw.source = kSourceLayer;
     draw.target = target;
     native::Material &m = draw.material;
+    m.colorClamp = kColorClamp;
     if (source != 0u)
     {
         m.sourceTarget = source;
@@ -3056,7 +3081,7 @@ native::Draw2D rectDraw(native::Id target, const int32_t box[4], native::Id sour
         out.position[0] = out.uv[0] = corners[v][0];
         out.position[1] = out.uv[1] = corners[v][1];
         for (float &c : out.color)
-            c = source != 0u ? 128.0f : 0.0f;
+            c = source != 0u ? 1.0f : 0.0f;
     }
     draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
     draw.scissor = {box[0], box[1], box[2], box[3]};
@@ -3180,6 +3205,7 @@ bool effect(const GSNativeEffect &e)
         draw.source = kSourceEffect;
         draw.target = target;
         native::Material &m = draw.material;
+        m.colorClamp = kColorClamp;
         bool known = true;
         if (greenToAlpha)
         {
@@ -3192,6 +3218,7 @@ bool effect(const GSNativeEffect &e)
             m.function = native::TextureFunction::Decal;
             m.textureAlpha = true;
             m.shuffle = native::ChannelShuffle::GreenToAlpha;
+            m.shuffleScale = 128.0f; // a byte a unit over 0x80
         }
         else if (op.source >= 0)
         {
@@ -3223,7 +3250,7 @@ bool effect(const GSNativeEffect &e)
             if (op.flags & GSNativeEffect::kCt24)
             {
                 const uint32_t texa = (op.flags & GSNativeEffect::kTexaFromGs) ? gsTexa : op.texa;
-                m.fixedTextureAlpha = static_cast<int16_t>(texa & 0xFFu);
+                m.sourceAlpha = float(texa & 0xFFu) * kUnit;
                 m.alphaZeroOnBlack = (texa & 0x8000u) != 0u;
             }
         }
@@ -3263,7 +3290,7 @@ bool effect(const GSNativeEffect &e)
             out.uv[0] = corners[v][3];
             out.uv[1] = corners[v][4];
             for (int ch = 0; ch < 4; ++ch)
-                out.color[ch] = op.rgba[ch];
+                out.color[ch] = op.rgba[ch] * kUnit;
         }
         draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
         draw.scissor = {static_cast<int32_t>(op.scissor[0]), static_cast<int32_t>(op.scissor[1]),

@@ -232,7 +232,7 @@ SDL_GPUTexture *Renderer::targetTexture(SDL_GPUDevice *device, Id id, bool depth
         m_retired.push_back(t.texture); // a draw planned before may bind it
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
-    info.format = depth ? m_depthFormat : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.format = depth ? m_depthFormat : kColorFormat;
     info.usage = depth ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET
                        : (SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
     info.width = width;
@@ -275,7 +275,7 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
     const bool depth = ((key >> 4) & 1u) && attached;
 
     SDL_GPUColorTargetDescription color{};
-    color.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    color.format = kColorFormat;
     SDL_GPUColorTargetBlendState &b = color.blend_state;
     b.enable_color_write_mask = true;
     b.color_write_mask = static_cast<SDL_GPUColorComponentFlags>((key >> 5) & 0xFu);
@@ -393,7 +393,7 @@ inline size_t vertexCount(const MeshDraw &d)
 
 bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
 {
-    static_assert(sizeof(GpuDraw) == 448u, "std430, as the shaders read it");
+    static_assert(sizeof(GpuDraw) == 480u, "std430, as the shaders read it");
     // The retained meshes taken in since the last frame drawn, behind those
     // already in their buffer.
     if (!m_staticBuffer)
@@ -498,11 +498,11 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
                 v->position[2] = in.z;
                 v->uv[0] = in.u;
                 v->uv[1] = in.v;
-                v->color[0] = capColor(in.r, d.rawColorMax[0]);
-                v->color[1] = capColor(in.g, d.rawColorMax[1]);
-                v->color[2] = capColor(in.b, d.rawColorMax[2]);
-                v->color[3] = capColor(in.a, d.rawColorMax[3]);
-                v->fog = 255.0f; // Vertex's default: a model's F is the draw's
+                v->color[0] = capColor(in.r, d.rawColorMax[0]) * d.rawColorScale;
+                v->color[1] = capColor(in.g, d.rawColorMax[1]) * d.rawColorScale;
+                v->color[2] = capColor(in.b, d.rawColorMax[2]) * d.rawColorScale;
+                v->color[3] = capColor(in.a, d.rawColorMax[3]) * d.rawColorScale;
+                v->fog = 1.0f; // Vertex's default: a model's F is the draw's
                 v->draw = row;
                 ++v;
             }
@@ -573,8 +573,13 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         }
         GpuDraw &du = m_drawTable[n], &mu = du; // the vertex stage's half, the fragment stage's
         du = GpuDraw{};
-        mu.texa[0] = m.fixedTextureAlpha;
+        mu.texa[0] = m.sourceAlpha;
         mu.texa[1] = m.alphaZeroOnBlack ? 1.0f : 0.0f;
+        mu.units[0] = 1.0f; // a target's texel is in its units already
+        mu.units[1] = m.colorClamp;
+        mu.units[2] = m.alphaReference;
+        mu.units[3] = m.shuffleScale;
+        du.vertexUnits[0] = d.rawColorScale;
         SDL_GPUTexture *image = m_white, *palette = m_white;
         float ownW = 1.0f, ownH = 1.0f;
         if (m.sourceTarget != 0u)
@@ -628,6 +633,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             }
             const Image &img = it->second;
             image = palette = img.texture;
+            mu.units[0] = img.scale;
             // A larger picture of a texture (a texture pack's) is addressed
             // at the game's size.
             ownW = float(img.logicalWidth ? img.logicalWidth : img.width);
@@ -642,6 +648,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
                     continue;
                 }
                 palette = p->second.texture;
+                mu.units[0] = p->second.scale;
                 mu.mode[0] = 2u;
                 mu.mode[3] = p->second.width;
             }
@@ -681,7 +688,6 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             continue;
         }
         mu.test[0] = static_cast<uint32_t>(m.alphaTest);
-        mu.test[1] = m.alphaRef;
         // RG_NATIVE_AFAIL_DISCARD=1 (debug): pixels failing the alpha test are
         // dropped whatever AFAIL says. Here a failing pixel otherwise keeps
         // every write, depth included, where the GS writes only some
@@ -709,7 +715,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         mu.region[2] = m.regionV[0];
         mu.region[3] = m.regionV[1];
         for (int i = 0; i < 3; ++i)
-            mu.fogColor[i] = float(d.fogColor[i]) / 255.0f;
+            mu.fogColor[i] = d.fogColor[i];
 
         if (d.hasModel)
         {
@@ -782,10 +788,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
 
         if (m.blending && (m.srcFactor == BlendFactor::Fixed || m.srcFactor == BlendFactor::InvFixed ||
                            m.dstFactor == BlendFactor::Fixed || m.dstFactor == BlendFactor::InvFixed))
-        {
-            const float f = std::min(float(m.blendFactor) / 128.0f, 1.0f);
-            plan.blendConstant = f;
-        }
+            plan.blendConstant = m.blendConstant; // past 1.0 too: the targets are float
         const uint32_t samplerKey = (m.linear ? 1u : 0u) | (m.clampU ? 2u : 0u) | (m.clampV ? 4u : 0u);
         plan.sampler = meshSampler(device, samplerKey);
         plan.image = image;
@@ -987,11 +990,11 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             const Material &m = d.material;
             const float *c = d.vertices.empty() ? nullptr : d.vertices[0].color;
             std::fprintf(stderr,
-                         "[frame-dump] %4zu target %u depth %u %s src %s%u fn %d tcc %d blend %d/%d/%d fix %u write %x "
-                         "atest %d/%u ztest %d zw %d tris %zu box %.0f,%.0f-%.0f,%.0f rgba %.0f,%.0f,%.0f,%.0f z %.0f fog %.0f cam %u%s\n",
+                         "[frame-dump] %4zu target %u depth %u %s src %s%u fn %d tcc %d blend %d/%d/%d fix %g write %x "
+                         "atest %d/%g ztest %d zw %d tris %zu box %.0f,%.0f-%.0f,%.0f rgba %.3f,%.3f,%.3f,%.3f z %.3f fog %.2f cam %u%s\n",
                          n, d.target, d.depthTarget, d.hasModel ? "3d" : "2d", m.sourceTarget ? "target " : "tex ",
                          m.sourceTarget ? m.sourceTarget : m.texture, int(m.function), int(m.textureAlpha),
-                         m.blending ? int(m.srcFactor) : -1, int(m.dstFactor), int(m.blendOp), m.blendFactor, m.colorWrite, int(m.alphaTest), m.alphaRef, int(m.depthTest),
+                         m.blending ? int(m.srcFactor) : -1, int(m.dstFactor), int(m.blendOp), m.blendConstant, m.colorWrite, int(m.alphaTest), m.alphaReference, int(m.depthTest),
                          int(m.depthWrite), d.indices.size() / 3, d.hasModel ? 0.f : x0, d.hasModel ? 0.f : y0,
                          d.hasModel ? 0.f : x1, d.hasModel ? 0.f : y1, c ? c[0] : 0.f, c ? c[1] : 0.f,
                          c ? c[2] : 0.f, c ? c[3] : 0.f, d.vertices.empty() ? 0.f : d.vertices[0].position[2],

@@ -3,8 +3,7 @@
 // The native pipeline's debug view (Rogue Galaxy: added): a texture as the
 // renderer holds it. Mode 0: RGBA. Mode 1: Index8 through its palette (a
 // 16- or 256-wide row), fetched by index. Mode 2: Index8 with no palette, as
-// grey. Shown opaque: alpha is the game's, 0x80 for opaque, and not what
-// this view is for.
+// grey. Shown opaque: alpha is not what this view is for.
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
 layout(set = 3, binding = 0) uniform ViewMode {

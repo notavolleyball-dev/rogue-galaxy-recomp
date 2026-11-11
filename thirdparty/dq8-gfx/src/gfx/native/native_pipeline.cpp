@@ -1,5 +1,7 @@
 #include "gfx/native/native_pipeline.h"
 
+#include "native_resolve.frag.spv.h"
+#include "native_resolve.vert.spv.h"
 #include "native_view.frag.spv.h"
 #include "native_view.vert.spv.h"
 
@@ -98,7 +100,7 @@ struct ColorMailbox
     {
         ColorRead read;
         bool finished = false, ok = false;
-        std::vector<uint8_t> rgba;
+        std::vector<float> rgba;
     };
     std::unordered_map<uint32_t, Entry> entries;
 };
@@ -106,6 +108,36 @@ ColorMailbox &colorMailbox()
 {
     static ColorMailbox instance;
     return instance;
+}
+
+// An IEEE half (a color target's channel, kColorFormat) as a float.
+float halfToFloat(uint16_t h)
+{
+    const uint32_t sign = uint32_t(h >> 15) << 31, exponent = (h >> 10) & 0x1Fu, mantissa = h & 0x3FFu;
+    uint32_t bits;
+    if (exponent == 0u)
+    {
+        if (mantissa == 0u)
+            bits = sign;
+        else
+        {
+            // Subnormal: normalize.
+            uint32_t m = mantissa, e = 113u;
+            while ((m & 0x400u) == 0u)
+            {
+                m <<= 1u;
+                --e;
+            }
+            bits = sign | (e << 23) | ((m & 0x3FFu) << 13);
+        }
+    }
+    else if (exponent == 31u)
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    else
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
 }
 } // namespace
 
@@ -130,7 +162,7 @@ bool colorReadsWaiting()
     return false;
 }
 
-bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs)
+bool waitColorRead(uint32_t id, std::vector<float> &rgba, uint32_t timeoutMs)
 {
     ColorMailbox &m = colorMailbox();
     std::unique_lock lock(m.mutex);
@@ -491,6 +523,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                 m_clears.clear();
                 m_presentTarget = r.target;
                 m_presentRect = r.rect;
+                m_presentScale = r.scale;
                 m_frameReady = true;
                 ++m_meshCounts.frames;
             }
@@ -545,7 +578,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     m_imageOrder.erase(std::find(m_imageOrder.begin(), m_imageOrder.end(), r.id));
                 }
                 m_images[r.id] = Image{texture, r.format, r.width, r.height, r.palette, bytes, r.logicalWidth,
-                                       r.logicalHeight};
+                                       r.logicalHeight, r.scale};
                 m_imageOrder.push_back(r.id);
                 m_imageBytes += bytes;
                 m_uploads.push_back({texture, r.width, r.height, r.texels});
@@ -575,7 +608,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     return;
                 if (const auto old = m_palettes.find(r.id); old != m_palettes.end())
                     SDL_ReleaseGPUTexture(device, old->second.texture);
-                m_palettes[r.id] = Image{texture, PixelFormat::Rgba8, r.entries, 1u, 0u, r.entries * 4u};
+                m_palettes[r.id] = Image{texture, PixelFormat::Rgba8, r.entries, 1u, 0u, r.entries * 4u, 0u, 0u, r.scale};
                 m_uploads.push_back({texture, r.entries, 1u, r.colors});
             }
             // The rest is drawn from step 4 on; counted above.
@@ -712,7 +745,7 @@ bool Renderer::ensureView(SDL_GPUDevice *device, std::string &error)
         return false;
     }
     SDL_GPUColorTargetDescription colorTarget{};
-    colorTarget.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    colorTarget.format = kColorFormat;
     SDL_GPUGraphicsPipelineCreateInfo info{};
     info.vertex_shader = vertex;
     info.fragment_shader = fragment;
@@ -852,7 +885,7 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
             SDL_ReleaseGPUTexture(device, m_scene);
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
-        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.format = kColorFormat;
         info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
         info.width = width;
         info.height = height;
@@ -876,37 +909,40 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         return v && *v && *v != '0';
     }();
     // What the Present record shows: its target (the scene unless it names
-    // another), the rectangle it names (all of it when none).
-    const auto shown = [&] {
-        out.texture = m_scene;
-        out.x = out.y = 0u;
-        out.width = m_sceneWidth;
-        out.height = m_sceneHeight;
+    // another), the rectangle it names (all of it when none), resolved into
+    // the 8-bit picture at its scale when it changed.
+    const auto shown = [&](bool changed) {
+        SDL_GPUTexture *source = m_scene;
+        uint32_t x = 0u, y = 0u, w = m_sceneWidth, h = m_sceneHeight;
         if (m_presentTarget != 0u && m_presentTarget != m_sceneTarget)
         {
             const auto t = m_gpuTargets.find(m_presentTarget);
             if (t != m_gpuTargets.end() && t->second.texture)
             {
-                out.texture = t->second.texture;
-                out.width = t->second.width;
-                out.height = t->second.height;
+                source = t->second.texture;
+                w = t->second.width;
+                h = t->second.height;
             }
         }
         const Rect &r = m_presentRect;
         if (r.x1 > r.x0 && r.y1 > r.y0 && r.x0 >= 0 && r.y0 >= 0)
         {
-            out.x = std::min(uint32_t(r.x0) * scale, out.width);
-            out.y = std::min(uint32_t(r.y0) * scale, out.height);
-            out.width = std::min(uint32_t(r.x1 - r.x0) * scale, out.width - out.x);
-            out.height = std::min(uint32_t(r.y1 - r.y0) * scale, out.height - out.y);
+            x = std::min(uint32_t(r.x0) * scale, w);
+            y = std::min(uint32_t(r.y0) * scale, h);
+            w = std::min(uint32_t(r.x1 - r.x0) * scale, w - x);
+            h = std::min(uint32_t(r.y1 - r.y0) * scale, h - y);
         }
+        if ((changed || !m_output) && !resolve(device, commands, source, x, y, w, h, error))
+            return false;
+        out.texture = m_output;
+        out.x = out.y = 0u;
+        out.width = m_outputWidth;
+        out.height = m_outputHeight;
+        return true;
     };
     const bool draw = meshes && m_frameReady;
     if (!draw && !fresh && !grid)
-    {
-        shown();
-        return true;
-    }
+        return shown(false);
     bool drawn = false;
     if (draw)
     {
@@ -941,7 +977,110 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
             drawView(commands, pass);
         SDL_EndGPURenderPass(pass);
     }
-    shown();
+    return shown(true);
+}
+
+bool Renderer::resolve(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPUTexture *source, uint32_t x,
+                       uint32_t y, uint32_t width, uint32_t height, std::string &error)
+{
+    if (m_resolveFailed)
+    {
+        error = "no resolve pipeline";
+        return false;
+    }
+    if (!m_resolvePipeline)
+    {
+        m_resolveFailed = true; // until made
+        SDL_GPUShaderCreateInfo vertexInfo{};
+        vertexInfo.code = reinterpret_cast<const uint8_t *>(kNativeResolveVertSpirv);
+        vertexInfo.code_size = sizeof(kNativeResolveVertSpirv);
+        vertexInfo.entrypoint = "main";
+        vertexInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        vertexInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+        SDL_GPUShaderCreateInfo fragmentInfo{};
+        fragmentInfo.code = reinterpret_cast<const uint8_t *>(kNativeResolveFragSpirv);
+        fragmentInfo.code_size = sizeof(kNativeResolveFragSpirv);
+        fragmentInfo.entrypoint = "main";
+        fragmentInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        fragmentInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        fragmentInfo.num_samplers = 1u;
+        fragmentInfo.num_uniform_buffers = 1u;
+        SDL_GPUShader *vertex = SDL_CreateGPUShader(device, &vertexInfo);
+        SDL_GPUShader *fragment = vertex ? SDL_CreateGPUShader(device, &fragmentInfo) : nullptr;
+        if (fragment)
+        {
+            SDL_GPUColorTargetDescription color{};
+            color.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            SDL_GPUGraphicsPipelineCreateInfo info{};
+            info.vertex_shader = vertex;
+            info.fragment_shader = fragment;
+            info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+            info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+            info.target_info.color_target_descriptions = &color;
+            info.target_info.num_color_targets = 1u;
+            m_resolvePipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
+        }
+        if (fragment)
+            SDL_ReleaseGPUShader(device, fragment);
+        if (vertex)
+            SDL_ReleaseGPUShader(device, vertex);
+        SDL_GPUSamplerCreateInfo samplerInfo{};
+        m_resolveSampler = m_resolvePipeline ? SDL_CreateGPUSampler(device, &samplerInfo) : nullptr;
+        if (!m_resolvePipeline || !m_resolveSampler)
+        {
+            error = std::string("the native pipeline's resolve: ") + SDL_GetError();
+            return false;
+        }
+        m_resolveFailed = false;
+    }
+    if (width == 0u || height == 0u || !source)
+    {
+        error = "nothing to show";
+        return false;
+    }
+    if (!m_output || m_outputWidth != width || m_outputHeight != height)
+    {
+        if (m_output)
+            SDL_ReleaseGPUTexture(device, m_output);
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        m_output = SDL_CreateGPUTexture(device, &info);
+        m_outputWidth = m_output ? width : 0u;
+        m_outputHeight = m_output ? height : 0u;
+        if (!m_output)
+        {
+            error = std::string("SDL_CreateGPUTexture(native output): ") + SDL_GetError();
+            return false;
+        }
+    }
+    SDL_GPUColorTargetInfo target{};
+    target.texture = m_output;
+    target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, nullptr);
+    if (!pass)
+    {
+        error = std::string("SDL_BeginGPURenderPass(native resolve): ") + SDL_GetError();
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, m_resolvePipeline);
+    const SDL_GPUTextureSamplerBinding binding{source, m_resolveSampler};
+    SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+    struct
+    {
+        int32_t origin[4];
+        float scale[4];
+    } params{{int32_t(x), int32_t(y), 0, 0}, {m_presentScale, 0.0f, 0.0f, 0.0f}};
+    SDL_PushGPUFragmentUniformData(commands, 0, &params, sizeof(params));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
     return true;
 }
 
@@ -1161,7 +1300,7 @@ void Renderer::dumpTargets(SDL_GPUDevice *device)
     {
         if (!texture || w == 0u || h == 0u)
             continue;
-        const uint32_t bytes = w * h * 4u;
+        const uint32_t bytes = w * h * 8u;
         SDL_GPUTransferBufferCreateInfo info{};
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
         info.size = bytes;
@@ -1190,8 +1329,12 @@ void Renderer::dumpTargets(SDL_GPUDevice *device)
         {
             SDL_WaitForGPUFences(device, true, &fence, 1u);
             SDL_ReleaseGPUFence(device, fence);
-            if (const auto *p = static_cast<const uint8_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
+            if (const auto *p = static_cast<const uint16_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
             {
+                // As shown: the Present record's scale, clamped.
+                const auto shown = [&](uint16_t h) {
+                    return uint8_t(std::clamp(halfToFloat(h) * m_presentScale * 255.0f + 0.5f, 0.0f, 255.0f));
+                };
                 char name[96];
                 std::snprintf(name, sizeof(name), "build/run/targets/target%u_%ux%u.ppm", id, w, h);
                 if (FILE *f = std::fopen(name, "wb"))
@@ -1202,9 +1345,10 @@ void Renderer::dumpTargets(SDL_GPUDevice *device)
                     {
                         for (uint32_t x = 0; x < w; ++x)
                         {
-                            const uint8_t *px = p + (size_t(y) * w + x) * 4u;
-                            std::memcpy(row.data() + x * 3u, px, 3u);
-                            row[(w + x) * 3u] = row[(w + x) * 3u + 1u] = row[(w + x) * 3u + 2u] = px[3];
+                            const uint16_t *px = p + (size_t(y) * w + x) * 4u;
+                            for (uint32_t c = 0; c < 3u; ++c)
+                                row[x * 3u + c] = shown(px[c]);
+                            row[(w + x) * 3u] = row[(w + x) * 3u + 1u] = row[(w + x) * 3u + 2u] = shown(px[3]);
                         }
                         std::fwrite(row.data(), 1, row.size(), f);
                     }
@@ -1233,7 +1377,7 @@ void Renderer::serveColorReads(SDL_GPUDevice *device)
     }
     if (waiting.empty())
         return;
-    const auto finish = [&](uint32_t id, std::vector<uint8_t> &&rgba, bool ok) {
+    const auto finish = [&](uint32_t id, std::vector<float> &&rgba, bool ok) {
         ++(ok ? m_colorReads : m_colorReadsFailed);
         std::lock_guard lock(m.mutex);
         const auto e = m.entries.find(id);
@@ -1283,7 +1427,7 @@ void Renderer::serveColorReads(SDL_GPUDevice *device)
             const uint32_t halfW = w * left / 2u, halfH = h * left / 2u;
             SDL_GPUTextureCreateInfo halfInfo{};
             halfInfo.type = SDL_GPU_TEXTURETYPE_2D;
-            halfInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            halfInfo.format = kColorFormat;
             halfInfo.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
             halfInfo.width = halfW;
             halfInfo.height = halfH;
@@ -1309,7 +1453,7 @@ void Renderer::serveColorReads(SDL_GPUDevice *device)
             fromX = fromY = 0u;
             left /= 2u;
         }
-        const uint32_t hostW = w * left, hostH = h * left, bytes = hostW * hostH * 4u;
+        const uint32_t hostW = w * left, hostH = h * left, bytes = hostW * hostH * 8u;
         SDL_GPUTransferBufferCreateInfo info{};
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
         info.size = bytes;
@@ -1335,29 +1479,26 @@ void Renderer::serveColorReads(SDL_GPUDevice *device)
         }
         else if (commands)
             SDL_CancelGPUCommandBuffer(commands);
-        std::vector<uint8_t> rgba;
+        std::vector<float> rgba;
         bool ok = false;
         if (fence)
         {
             SDL_WaitForGPUFences(device, true, &fence, 1u);
             SDL_ReleaseGPUFence(device, fence);
-            if (const auto *p = static_cast<const uint8_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
+            if (const auto *p = static_cast<const uint16_t *>(SDL_MapGPUTransferBuffer(device, download, false)))
             {
-                // Each game pixel the mean of the left x left it covers;
-                // alpha from the stored A / 0x80 back to the game's.
+                // Each game pixel the mean of the left x left it covers, in
+                // the target's units.
                 rgba.resize(size_t(w) * h * 4u);
                 for (uint32_t y = 0; y < h; ++y)
                     for (uint32_t x = 0; x < w; ++x)
                         for (uint32_t c = 0; c < 4u; ++c)
                         {
-                            uint32_t sum = 0;
+                            float sum = 0.0f;
                             for (uint32_t dy = 0; dy < left; ++dy)
                                 for (uint32_t dx = 0; dx < left; ++dx)
-                                    sum += p[(size_t(y * left + dy) * hostW + x * left + dx) * 4u + c];
-                            float v = float(sum) / float(left * left);
-                            if (c == 3u)
-                                v = v * 128.0f / 255.0f;
-                            rgba[(size_t(y) * w + x) * 4u + c] = uint8_t(std::min(v + 0.5f, 255.0f));
+                                    sum += halfToFloat(p[(size_t(y * left + dy) * hostW + x * left + dx) * 4u + c]);
+                            rgba[(size_t(y) * w + x) * 4u + c] = sum / float(left * left);
                         }
                 SDL_UnmapGPUTransferBuffer(device, download);
                 ok = true;
@@ -1401,6 +1542,15 @@ void Renderer::release(SDL_GPUDevice *device)
     m_frameClears.clear();
     if (m_scene)
         SDL_ReleaseGPUTexture(device, m_scene);
+    if (m_output)
+        SDL_ReleaseGPUTexture(device, m_output);
+    m_output = nullptr;
+    if (m_resolvePipeline)
+        SDL_ReleaseGPUGraphicsPipeline(device, m_resolvePipeline);
+    m_resolvePipeline = nullptr;
+    if (m_resolveSampler)
+        SDL_ReleaseGPUSampler(device, m_resolveSampler);
+    m_resolveSampler = nullptr;
     for (auto &[id, image] : m_images)
         SDL_ReleaseGPUTexture(device, image.texture);
     for (auto &[id, image] : m_palettes)

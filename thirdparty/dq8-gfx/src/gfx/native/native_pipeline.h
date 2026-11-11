@@ -27,6 +27,10 @@ namespace dq8::gfx::native
 // Any thread.
 void push(Record &&record);
 
+// What every color target is on the GPU: float, so the draw's units past
+// 1.0 survive (records.h).
+inline constexpr SDL_GPUTextureFormat kColorFormat = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+
 // The block-compressed formats the renderer's device samples, or'd: 1 BC1,
 // 2 BC2, 4 BC3, 8 BC7. 0 until the renderer has first run. Any thread.
 int blockFormats();
@@ -116,9 +120,9 @@ struct ColorRead
 uint32_t beginColorRead(const ColorRead &read);
 // Any thread: a read was opened and not answered yet.
 bool colorReadsWaiting();
-// RGBA8, rows in order, alpha as the game's (0x80 is 1.0). False when the
+// Four floats a pixel in the target's units, rows in order. False when the
 // renderer could not serve it, or did not within `timeoutMs`.
-bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs);
+bool waitColorRead(uint32_t id, std::vector<float> &rgba, uint32_t timeoutMs);
 
 // A line of the producers' own counts, printed with the renderer's.
 void setProducerStats(std::function<std::string()> line);
@@ -181,6 +185,7 @@ private:
         Id palette = 0;
         uint64_t bytes = 0;
         uint32_t logicalWidth = 0, logicalHeight = 0; // the game's size, when it differs
+        float scale = 1.0f; // Texture::scale, Palette::scale
     };
     struct PendingUpload
     {
@@ -271,6 +276,8 @@ private:
         float bandOffset[4];
         float cull[4]; // the winding sign; the guard band test, the backface test, a clipped chunk (0 or 1)
         float colorMax[4];
+        float units[4];       // texel scale, color clamp, alpha reference, shuffle scale
+        float vertexUnits[4]; // raw color scale
     };
     // A draw's binding state, resolved before recording.
     struct DrawPlan
@@ -320,6 +327,16 @@ private:
     // What the last Present record shows.
     Id m_presentTarget = 0;
     Rect m_presentRect;
+    float m_presentScale = 1.0f;
+    // The picture shown: the Present record's rectangle times its scale, in
+    // 8 bits (resolve), what render() hands the presenter.
+    bool resolve(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPUTexture *source, uint32_t x,
+                 uint32_t y, uint32_t width, uint32_t height, std::string &error);
+    SDL_GPUTexture *m_output = nullptr;
+    uint32_t m_outputWidth = 0, m_outputHeight = 0;
+    SDL_GPUGraphicsPipeline *m_resolvePipeline = nullptr;
+    SDL_GPUSampler *m_resolveSampler = nullptr;
+    bool m_resolveFailed = false;
     uint64_t m_clearsRefused = 0, m_passesIgnored = 0;
     bool m_frameReady = false;
     bool m_dumpTargets = false; // the triggered dump: write the targets out

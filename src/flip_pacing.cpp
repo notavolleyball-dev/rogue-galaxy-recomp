@@ -36,6 +36,9 @@ void presentNative(uint64_t frame)
     present.target = rg::nativeproducer::kSceneTarget;
     present.rect = {0, 0, 640u, 448u};
     present.frame = frame;
+    // The game's color units (native_producer.cpp's) to the screen's: its
+    // 0xFF is white.
+    present.scale = 128.0f / 255.0f;
     native::push(std::move(present));
     rg::nativeproducer::frameBoundary();
 }

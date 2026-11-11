@@ -6,7 +6,15 @@
 // What producers (the game's hooks, its VU1 program starts, the packet
 // converter) hand the native renderer, in the order the game built them.
 // Every reference is an id the producer assigned; nothing here is a GS
-// address, register, page or packet. This header, and the library it
+// address, register, page or packet.
+//
+// Units (the contract v2 of the game's docs/NATIVE-ONLY.md): colors and
+// alphas are floats in the draw's units, which the producer chooses: 1.0 is
+// the identity of the texture functions and of an alpha as a blend factor,
+// and values past it are legal (src/native_producer.h gives the game's).
+// Targets keep them as they are (a color target is RGBA16F on the GPU);
+// Present::scale maps them to the screen. Nothing here clamps, rounds or truncates as the PS2 did,
+// apart from what a material asks for (colorClamp). This header, and the library it
 // belongs to (dq8_gfx_native), must not include anything of the GS: the
 // library does not link the runtime, so a GS header does not compile here.
 
@@ -21,7 +29,7 @@ using Id = uint32_t; // 0 is none
 
 enum class PixelFormat : uint8_t
 {
-    Rgba8,   // 8 bits a channel; alpha as the game stores it, 0x80 is opaque
+    Rgba8,   // 8 bits a channel, worth Texture::scale each at full
     Index8,  // palette indices, one byte each (4-bit art is widened to this)
     Depth32, // a depth target
     // A replacement picture's blocks as its file has them (a texture pack's
@@ -44,6 +52,8 @@ struct Texture
     uint8_t mips = 1;
     Id palette = 0; // an Index8 texture's own palette, when the producer knows it
     Bytes texels;   // mip 0 first, rows in order
+    // What a texel channel at its full 8 bits is worth in the draw's units.
+    float scale = 1.0f;
     // The size the game knows it at, which its draws address it by; 0: its
     // own. A texture pack's picture of a texture is larger than the game's.
     uint16_t logicalWidth = 0;
@@ -54,7 +64,8 @@ struct Palette
 {
     Id id = 0;
     uint16_t entries = 0; // 16 or 256, in index order
-    Bytes colors;         // Rgba8 each, alpha as the game stores it
+    Bytes colors;         // Rgba8 each
+    float scale = 1.0f;   // as Texture::scale
 };
 
 enum class TargetRole : uint8_t
@@ -91,10 +102,10 @@ struct Camera
     float jitter[2] = {};    // in output pixels, for a temporal pass
 };
 
-// Blending: color = Cs * src + Cd * dst (or their difference, by op). The
-// alphas are the game's, 0x80 being 1.0: the source's as drawn, the
-// target's as stored; Fixed is Material::blendFactor. A target's stored
-// alpha is the source's, unblended.
+// Blending: color = Cs * src + Cd * dst (or their difference, by op), with
+// the alphas as they are (the source's as drawn, the target's as stored;
+// past 1.0 too); Fixed is Material::blendConstant. A target's stored alpha
+// is the source's, unblended.
 enum class BlendFactor : uint8_t
 {
     Zero,
@@ -127,7 +138,7 @@ enum class Compare : uint8_t
 };
 
 // How the texel and the vertex color combine (Cf the vertex's, Ct the
-// texel's, 0x80 is 1.0 in both).
+// texel's).
 enum class TextureFunction : uint8_t
 {
     Modulate,   // Cf * Ct
@@ -150,9 +161,10 @@ enum class AlphaFail : uint8_t
 enum class ChannelShuffle : uint8_t
 {
     None,
-    // Alpha's bits 2-7 from green's, its bits 0-1 kept (the game's CBlur:
-    // the GS's 16-bit view of a 32-bit buffer copying each pixel's RG half
-    // onto its BA half with R and G masked).
+    // Alpha's bits 2-7 from green's, its bits 0-1 kept, a channel's value
+    // times Material::shuffleScale being its byte (the game's CBlur: the
+    // GS's 16-bit view of a 32-bit buffer copying each pixel's RG half onto
+    // its BA half with R and G masked). Goes when M3 makes CBlur a Pass.
     GreenToAlpha,
 };
 
@@ -161,13 +173,18 @@ struct Material
     Id texture = 0; // 0: untextured
     Id palette = 0; // an Index8 texture's, chosen at the draw; 0: the texture's own
     // Instead of a texture: a target's color as drawn so far this frame (an
-    // effect reading a buffer back). Its alpha is the game's, 0x80 opaque.
+    // effect reading a buffer back), in the target's units.
     Id sourceTarget = 0;
-    // The texel's alpha replaced by this (0-255) when not -1: a buffer read
+    // The texel's alpha replaced by this when not negative: a buffer read
     // without its alpha (the GS's CT24 view, TEXA's TA0), and 0 where the
     // texel is black when alphaZeroOnBlack (TEXA's AEM).
-    int16_t fixedTextureAlpha = -1;
+    float sourceAlpha = -1.0f;
     bool alphaZeroOnBlack = false;
+    // The color after the texture function is clamped to [0, this] when
+    // above 0 (the game's: its 0xFF).
+    float colorClamp = 0.0f;
+    // See ChannelShuffle::GreenToAlpha.
+    float shuffleScale = 0.0f;
     // The size the uvs are normalized to; 0: the texture's own.
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
@@ -187,12 +204,12 @@ struct Material
     BlendFactor srcFactor = BlendFactor::One;
     BlendFactor dstFactor = BlendFactor::Zero;
     BlendOp blendOp = BlendOp::Add;
-    uint8_t blendFactor = 0x80; // Fixed's, 0x80 is 1.0
+    float blendConstant = 1.0f; // Fixed's
     Compare alphaTest = Compare::Always;
-    uint8_t alphaRef = 0;
+    float alphaReference = 0.0f;
     AlphaFail alphaFail = AlphaFail::Nothing;
-    // Drawn only where the target's alpha is below 0x80 (0) or at least
-    // 0x80 (1), as it was before the draw; -1: everywhere.
+    // Drawn only where the target's alpha is below 1.0 (0) or at least 1.0
+    // (1), as it was before the draw; -1: everywhere.
     int8_t destinationAlphaTest = -1;
     // Depth grows toward the camera (reversed): Greater passes a nearer pixel.
     Compare depthTest = Compare::Always;
@@ -214,11 +231,11 @@ struct Vertex
 {
     float position[3] = {}; // object space
     float uv[2] = {};
-    float color[4] = {};    // 0-255, before any clamp
+    float color[4] = {};    // in the draw's units
     float normal[3] = {};   // when MeshDraw::hasNormals
-    // A window-space draw's fog factor, per vertex (255 none, toward
-    // fogColor as it falls); a draw with a model has MeshDraw::fog instead.
-    float fog = 255.0f;
+    // A window-space draw's fog factor, per vertex (1 none, toward the fog
+    // color as it falls to 0); a draw with a model has MeshDraw::fog instead.
+    float fog = 1.0f;
 };
 
 // A VU1 chunk's vertex as the program left it (the producer's
@@ -253,10 +270,10 @@ struct MeshDraw
     bool hasNormals = false;
     bool floatDepth = false; // depth written as float (linear or reversed), not the game's integers
     // With material.fog: the fog factor F = clamp(fog[0] + fog[3] * w, at
-    // most fog[1], at least fog[2]), w the clip-space w; 255 is no fog,
-    // toward fogColor as F falls.
+    // most fog[1], at least fog[2]), w the clip-space w; 1 is no fog,
+    // toward fogColor (in the draw's units) as F falls to 0.
     float fog[4] = {};
-    uint8_t fogColor[3] = {};
+    float fogColor[3] = {};
     uint32_t source = 0; // what made it (a VU1 program, a hook), for profiles
     // The model the same object had in the frame before (motion vectors,
     // TAA), when the producer knows it.
@@ -276,6 +293,8 @@ struct MeshDraw
     // these, each colour capped at rawColorMax (fmin).
     std::vector<RawVertex> raw;
     float rawColorMax[4] = {};
+    // The raw colours, once capped, times this are in the draw's units.
+    float rawColorScale = 1.0f;
     // A retained mesh (the game's docs/NATIVE-BOUNDARY.md, issue 2): a
     // chunk the producer saw unchanged from one frame to the next, kept by
     // the renderer in a vertex buffer of its own under this id (a
@@ -321,8 +340,8 @@ struct Draw2D
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices; // triangles; empty: vertices are a strip
     // With material.fog: the color each vertex's fog factor (Vertex::fog)
-    // goes toward.
-    uint8_t fogColor[3] = {};
+    // goes toward, in the draw's units.
+    float fogColor[3] = {};
     uint32_t source = 0;
 };
 
@@ -378,6 +397,8 @@ struct Present
     Id target = 0;
     Rect rect; // what of the target is shown
     uint64_t frame = 0;
+    // The target's color times this is shown (clamped to [0, 1]).
+    float scale = 1.0f;
 };
 
 // A retained mesh's vertices (MeshDraw::retained), sent once: a strip, or

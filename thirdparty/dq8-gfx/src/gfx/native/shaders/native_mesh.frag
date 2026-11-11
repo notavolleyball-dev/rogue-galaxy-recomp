@@ -1,9 +1,10 @@
 #version 450
 
-// The native pipeline's mesh draw (Rogue Galaxy: added): the game's texture
-// function, alpha test and fog, in its own units (0x80 is 1.0 for colors
-// and alphas). Blending is the pipeline's: the alpha written out is As /
-// 0x80, the blend's source alpha and what a target stores (clamped at 1).
+// The native pipeline's mesh draw (Rogue Galaxy: added): the texture
+// function, alpha test and fog, in float, in the draw's units (1.0 the
+// identity of a texture function and of an alpha as a blend factor).
+// Blending is the pipeline's: the alpha written out is the blend's source
+// alpha and what the target (RGBA16F) stores, past 1.0 too.
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
 // The draw's uniforms, from the frame's draw table (see the vertex shader).
@@ -19,12 +20,11 @@ struct DrawRow {
     vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
     // The fragment stage's.
     // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
-    //    (its alpha stored as A / 0x80, the blend's factor)
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries
     uvec4 mode;
-    // x: the alpha test (0 always ... the Compare enum), y: its reference,
+    // x: the alpha test (0 always ... the Compare enum), y unused,
     // z: whether a failing pixel is discarded, w: fog on
     uvec4 test;
     // x, y: the size the uvs are normalized to (the game's 2^TW, 2^TH);
@@ -33,11 +33,11 @@ struct DrawRow {
     // x: a channel shuffle (1: alpha's bits 2-7 from green's), z: clamp u,
     // w: clamp v (y unused)
     vec4 blend;
-    vec4 fogColor; // 0-1
-    // x: the texel's alpha replaced by this (0-255) when not negative (a
-    // CT24 read); y: then 0 where the texel is black (AEM); z: the
+    vec4 fogColor; // in the draw's units
+    // x: the texel's alpha replaced by this when not negative (a target
+    // read without its alpha); y: then 0 where the texel is black; z: the
     // destination alpha test, 0 none, 1 drawn where the target's alpha is
-    // below 0x80, 2 where at least (read from `palette`, the target's copy)
+    // below 1, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
     // The GS's CLAMP: x, y the u region (min, max), z, w the v region;
     // wrap.x, .y the modes (0 repeat, 1 clamp, 2 region clamp, 3 region
@@ -53,6 +53,13 @@ struct DrawRow {
     vec4 bandOffset;
     vec4 cull;
     vec4 colorMax;
+    // x: what a texel channel's 1.0 is worth (the texture's or palette's
+    // scale; 1 for a target), y: the color's clamp (0 none), z: the alpha
+    // test's reference, w: the shuffle's scale.
+    vec4 units;
+    // x: what a raw vertex color is worth once capped (MeshDraw's
+    // rawColorScale).
+    vec4 vertexUnits;
 };
 layout(std430, set = 2, binding = 2) readonly buffer Draws {
     DrawRow draws[];
@@ -90,13 +97,11 @@ bool passes(uint compare, float a, float ref) {
 
 void main() {
     if (material.texa.z > 0.0) {
-        // Stored as A / 0x80: bit 7 set is 1.0.
-        bool high = texelFetch(palette, ivec2(gl_FragCoord.xy), 0).a >= 0.999;
+        bool high = texelFetch(palette, ivec2(gl_FragCoord.xy), 0).a >= 1.0;
         if (high != (material.texa.z > 1.5))
             discard;
     }
-    // The vertex color as the GS takes it: truncated to integers 0-255.
-    vec4 f = clamp(floor(inColor), 0.0, 255.0);
+    vec4 f = inColor;
     vec4 c = f;
     if (material.mode.x != 0u) {
         vec4 t;
@@ -118,35 +123,36 @@ void main() {
         } else {
             t = texture(image, texel / material.size.zw);
         }
-        bool target = material.mode.x == 3u;
-        t = vec4(floor(t.rgb * 255.0 + 0.5), floor(t.a * (target ? 128.0 : 255.0) + 0.5));
+        t *= material.units.x;
         if (material.texa.x >= 0.0)
             t.a = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.texa.x;
-        if (material.blend.x == 1.0)
-            t.a = float((uint(t.g) & 0xFCu) | (uint(t.a) & 3u));
+        if (material.blend.x == 1.0) {
+            // As bytes of `units.w` a unit: alpha's bits 2-7 from green's.
+            float k = material.units.w;
+            t.a = float((uint(t.g * k + 0.5) & 0xFCu) | (uint(t.a * k + 0.5) & 3u)) / k;
+        }
         bool tcc = material.mode.z != 0u;
         uint fn = material.mode.y;
         if (fn == 1u) {
             c.rgb = t.rgb;
             c.a = tcc ? t.a : f.a;
         } else {
-            c.rgb = floor(f.rgb * t.rgb / 128.0);
+            c.rgb = f.rgb * t.rgb;
             if (fn >= 2u)
                 c.rgb += f.a;
             if (fn == 0u)
-                c.a = tcc ? floor(f.a * t.a / 128.0) : f.a;
+                c.a = tcc ? f.a * t.a : f.a;
             else if (fn == 2u)
                 c.a = tcc ? t.a + f.a : f.a;
             else
                 c.a = tcc ? t.a : f.a;
         }
-        c = min(c, 255.0);
+        if (material.units.y > 0.0)
+            c = clamp(c, 0.0, material.units.y);
     }
-    if (!passes(material.test.x, c.a, float(material.test.y)) && material.test.z != 0u)
+    if (!passes(material.test.x, c.a, material.units.z) && material.test.z != 0u)
         discard;
-    if (material.test.w != 0u) {
-        float k = clamp(floor(inFog), 0.0, 255.0) / 255.0;
-        c.rgb = mix(material.fogColor.rgb * 255.0, c.rgb, k);
-    }
-    outColor = vec4(c.rgb / 255.0, c.a / 128.0);
+    if (material.test.w != 0u)
+        c.rgb = mix(material.fogColor.rgb, c.rgb, clamp(inFog, 0.0, 1.0));
+    outColor = c;
 }

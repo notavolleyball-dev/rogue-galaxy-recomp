@@ -22,12 +22,11 @@ struct DrawRow {
     vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
     // The fragment stage's.
     // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
-    //    (its alpha stored as A / 0x80, the blend's factor)
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries
     uvec4 mode;
-    // x: the alpha test (0 always ... the Compare enum), y: its reference,
+    // x: the alpha test (0 always ... the Compare enum), y unused,
     // z: whether a failing pixel is discarded, w: fog on
     uvec4 test;
     // x, y: the size the uvs are normalized to (the game's 2^TW, 2^TH);
@@ -36,11 +35,11 @@ struct DrawRow {
     // x: a channel shuffle (1: alpha's bits 2-7 from green's), z: clamp u,
     // w: clamp v (y unused)
     vec4 blend;
-    vec4 fogColor; // 0-1
-    // x: the texel's alpha replaced by this (0-255) when not negative (a
-    // CT24 read); y: then 0 where the texel is black (AEM); z: the
+    vec4 fogColor; // in the draw's units
+    // x: the texel's alpha replaced by this when not negative (a target
+    // read without its alpha); y: then 0 where the texel is black; z: the
     // destination alpha test, 0 none, 1 drawn where the target's alpha is
-    // below 0x80, 2 where at least (read from `palette`, the target's copy)
+    // below 1, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
     // The GS's CLAMP: x, y the u region (min, max), z, w the v region;
     // wrap.x, .y the modes (0 repeat, 1 clamp, 2 region clamp, 3 region
@@ -56,6 +55,13 @@ struct DrawRow {
     vec4 bandOffset;
     vec4 cull;
     vec4 colorMax;
+    // x: what a texel channel's 1.0 is worth (the texture's or palette's
+    // scale; 1 for a target), y: the color's clamp (0 none), z: the alpha
+    // test's reference, w: the shuffle's scale.
+    vec4 units;
+    // x: what a raw vertex color is worth once capped (MeshDraw's
+    // rawColorScale).
+    vec4 vertexUnits;
 };
 layout(std430, set = 0, binding = 0) readonly buffer Draws {
     DrawRow draws[];

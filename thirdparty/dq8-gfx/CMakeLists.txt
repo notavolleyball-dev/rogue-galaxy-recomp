@@ -45,7 +45,9 @@ foreach(shader IN ITEMS
         "native_view.frag;frag;kNativeViewFragSpirv"
         "native_mesh.vert;vert;kNativeMeshVertSpirv"
         "native_mesh_static.vert;vert;kNativeMeshStaticVertSpirv"
-        "native_mesh.frag;frag;kNativeMeshFragSpirv")
+        "native_mesh.frag;frag;kNativeMeshFragSpirv"
+        "native_resolve.vert;vert;kNativeResolveVertSpirv"
+        "native_resolve.frag;frag;kNativeResolveFragSpirv")
     list(GET shader 0 file)
     list(GET shader 1 stage)
     list(GET shader 2 symbol)
