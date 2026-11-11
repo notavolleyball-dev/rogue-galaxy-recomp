@@ -214,10 +214,8 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
                  std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh);
-// `knownSlots`: the palette's size (modelSlots) when the chunk's sections
-// are not in memory (a chunk the list no longer carries); ~0u: read them.
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
-              std::vector<float> &palette, uint32_t knownSlots = ~0u);
+              std::vector<float> &palette);
 
 // What the VIF1 thread did with each chunk: drawn natively (the model
 // vertex stage, or buildChunk's packets), or left to the VU1 and why; a
