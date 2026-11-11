@@ -1080,9 +1080,24 @@ program (the microcode table's six packets, identified as the list's run
 identifies the VU1's code), the GS state (ALPHA, TEST, ZBUF's mask, FBA
 from the material's GsEnv; TEX0 from its texture node; TEX1, CLAMP from
 its packet), and each chunk's header from the group's chain of spans in
-EE memory. The draws still come from the list. Next, as the counts allow:
-the call writes no packet and the draw is pushed from these (the vertex
-data from the same spans, the camera and lights from their packets). The sorted path (`ModelQueueSortedPackets`,
+EE memory.
+
+**Step 2 in code, guarded per mesh:** a call whose every item's mesh is a
+`ModelMeshLinks` (static chains) whose chunks agreed with the list eight
+times and never differed, every group a strip or projector program the
+table names, is not written: the hook leaves a marker in the list with
+the call's record and returns 0 quadwords (the emitter's caches left as
+they are). Where the list's run reaches the marker, each item is drawn
+from the record: its model matrix put in VU1 memory and the base piece
+run (as its p14's MSCAL 0 would), its header and palette put (p18, p1C),
+each group's material quads and texenv register writes (the material's
+GsEnv with the draw environment's frame and depth base, TEX1, CLAMP,
+TEX0) applied, each chunk unpacked from its span in EE memory to the
+item's VIF BASE and drawn as any model chunk. The camera, view and light
+packets still come from the list. `[model-emit] ... calls the game did
+not write N` counts them. Next: the sorted path
+(`ModelQueueSortedPackets`, drawn at the buckets' replay) and the shadow
+casters; then the view, camera and light packets as records too. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its

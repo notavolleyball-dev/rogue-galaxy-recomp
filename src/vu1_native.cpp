@@ -1432,6 +1432,13 @@ namespace
 
 } // namespace
 
+void runBaseOn(uint8_t *data, std::vector<std::vector<uint8_t>> &packets)
+{
+    const VuRounding rounding;
+    packets.clear();
+    runBase(data, &packets);
+}
+
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 {
     if (program.kind == Kind::Base)

@@ -678,6 +678,10 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
 
 // A GS packet on its way, as the memory's GIF callback sends it (below).
 void deliverPacket(const uint8_t *data, uint32_t size);
+// Register writes to the draw state, as an A+D packet's would go (below).
+void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes);
+// A model emit call the game did not write, drawn from its record (below).
+void drawUnwritten(uint32_t unit);
 // A native strip likewise, in order with the packets. `vu1Data`: the VU1
 // data memory a program's mesh was built from, for the native pipeline's
 // mesh draw (rg::nativeproducer::mesh); null for others.
@@ -1054,6 +1058,165 @@ public:
     }
     // An MSCNT that ran a chunk the list carried: inside a model span, it is
     // counted, and the span spoiled unless learnChunk names it.
+    // M6: a model emit call the game did not write (src/native_emit.h),
+    // drawn where its marker is in the list: each item's quads put in VU1
+    // memory as its packets would have put them (the model matrix, then
+    // the base piece's run; the mesh header; the palette), each group's
+    // material quads and texenv register writes, each chunk unpacked from
+    // its span in EE memory to the item's VIF BASE and drawn as the list's
+    // run draws a model chunk.
+public:
+    void drawUnwritten(uint32_t unit)
+    {
+        rg::nativeemit::Call call;
+        if (!rg::nativeemit::takeUnwritten(unit, call))
+            return;
+        PS2Memory &memory = m_runtime.memory();
+        uint8_t *data = memory.getVU1Data();
+        const uint8_t *rdram = memory.getRDRAM();
+        const auto put = [&](uint32_t q, const rg::nativeemit::Quad &v) {
+            std::memcpy(data + (q & 1023u) * 16u, v.data(), 16u);
+        };
+        std::vector<std::vector<uint8_t>> basePackets;
+        for (const rg::nativeemit::Item &item : call.items)
+        {
+            for (uint32_t r = 0; r < 4u; ++r)
+                put(60u + r, item.model[r]);
+            rg::vu1native::runBaseOn(data, basePackets);
+            for (const auto &packet : basePackets)
+                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            put(76u, item.q76);
+            put(77u, item.q77);
+            put(78u, item.q78);
+            put(79u, item.q79);
+            put(81u, item.q81);
+            put(42u, item.q42);
+            if (item.bones != 0u && item.p1C != 0u && item.paletteAt + item.bones * 4u <= 1024u)
+                std::memcpy(data + item.paletteAt * 16u, rdram + ((item.p1C + 0x20u) & (PS2_RAM_SIZE - 1u)),
+                            item.bones * 4u * 16u);
+            for (const rg::nativeemit::Group &group : item.groups)
+            {
+                put(82u, group.q82);
+                put(83u, rg::nativeemit::Quad{});
+                put(84u, group.q84);
+                put(86u, group.q86);
+                put(87u, group.q87);
+                put(88u, rg::nativeemit::Quad{});
+                rg::native2d::observeWrites(group.writes.data(), group.writes.size());
+                applyWrites(group.writes);
+                unpackChain(memory, group.chain, item.base, *group.program);
+            }
+        }
+    }
+private:
+    // A group's chain, as the VIF would run it: STCYCL and UNPACK into VU1
+    // data memory (TOP the item's BASE), each MSCNT a chunk drawn.
+    void unpackChain(PS2Memory &memory, uint32_t chain, uint32_t top, const rg::vu1native::Program &program)
+    {
+        const uint8_t *rdram = memory.getRDRAM();
+        uint8_t *data = memory.getVU1Data();
+        const auto word = [&](uint32_t address) {
+            uint32_t v;
+            std::memcpy(&v, rdram + (address & (PS2_RAM_SIZE - 1u)), 4u);
+            return v;
+        };
+        uint32_t cl = 1u, wl = 1u;
+        for (int tags = 0; tags < 4096; ++tags, chain += 16u)
+        {
+            const uint32_t tag = word(chain);
+            if (((tag >> 28) & 7u) != 3u)
+                return; // the RET (or not a REF: nothing more)
+            const uint32_t start = word(chain + 4u) & 0x0FFFFFFFu, end = start + (tag & 0xFFFFu) * 16u;
+            uint32_t at = start;
+            while (at + 4u <= end)
+            {
+                const uint32_t cmd = word(at);
+                at += 4u;
+                const uint32_t op = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+                if (op == 0x01u)
+                {
+                    cl = imm & 0xFFu;
+                    wl = (imm >> 8) & 0xFFu;
+                }
+                else if (op == 0x17u)
+                    drawUnwrittenChunk(program, data, top);
+                else if ((op & 0x60u) == 0x60u)
+                {
+                    const uint32_t vn = (op >> 2) & 3u, vl = op & 3u, n = num == 0u ? 256u : num;
+                    const bool usn = (imm >> 14) & 1u, flg = (imm >> 15) & 1u;
+                    const uint32_t address = (imm & 0x3FFu) + (flg ? top : 0u);
+                    const uint32_t lanes = vn + 1u, step = std::max(cl, 1u), write = std::max(wl, 1u);
+                    const uint32_t bits = vl == 3u ? 16u : (32u >> vl) * lanes;
+                    for (uint32_t i = 0; i < n; ++i)
+                    {
+                        const uint32_t q = (address + (write <= step ? (i / write) * step + (i % write) : i)) & 1023u;
+                        uint32_t out[4];
+                        std::memcpy(out, data + q * 16u, sizeof(out));
+                        const uint32_t bytes = 4u >> vl;
+                        for (uint32_t l = 0; l < lanes && vl != 3u; ++l)
+                        {
+                            const uint32_t from = at + (i * lanes + l) * bytes;
+                            uint32_t v = word(from & ~3u) >> ((from & 3u) * 8u);
+                            if (bytes == 2u)
+                                v = usn ? (v & 0xFFFFu) : uint32_t(int32_t(int16_t(v & 0xFFFFu)));
+                            else if (bytes == 1u)
+                                v = usn ? (v & 0xFFu) : uint32_t(int32_t(int8_t(v & 0xFFu)));
+                            out[l] = v;
+                        }
+                        if (vn == 0u && vl != 3u)
+                            out[1] = out[2] = out[3] = out[0];
+                        std::memcpy(data + q * 16u, out, sizeof(out));
+                    }
+                    at += ((n * bits + 31u) / 32u) * 4u;
+                }
+                else
+                {
+                    // Data words of the others (MPG, DIRECT, STMASK, ...): skipped.
+                    if (op == 0x20u)
+                        at += 4u;
+                    else if (op == 0x30u || op == 0x31u)
+                        at += 16u;
+                    else if (op == 0x4Au)
+                        at += (num == 0u ? 256u : num) * 8u;
+                    else if (op == 0x50u || op == 0x51u)
+                        at += (imm == 0u ? 65536u : imm) * 16u;
+                }
+            }
+        }
+    }
+
+    // One chunk of an unwritten call, as the list's run draws a model chunk.
+    void drawUnwrittenChunk(const rg::vu1native::Program &program, uint8_t *data, uint32_t top)
+    {
+        const rg::vu1native::Program *native = &program;
+        t_vu1Source = programSource(native);
+        const uint32_t modelId = modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
+        t_model.transient = modelId == 0u;
+        if (t_model.define || t_model.transient)
+            rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
+        rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
+        rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
+        t_model.active = true;
+        t_model.edge = 0u;
+        t_model.volume = false;
+        const bool asWrites = packetsAsWrites(m_nativePackets, m_nativeWrites);
+        if (!asWrites)
+            for (const auto &packet : m_nativePackets)
+                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+        t_retain = {modelId, false};
+        if (asWrites)
+        {
+            t_meshWrites = m_nativeWrites.data();
+            t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
+        }
+        deliverMesh(m_nativeMesh, data);
+        t_retain = {};
+        t_model.active = false;
+        t_meshWriteCount = 0u;
+        t_vu1Source = 0u;
+        m_nativeMonitor.native(*native);
+    }
+public:
     void learnBegin(PS2Memory &memory)
     {
         m_learnSpan = -1;
@@ -1331,6 +1494,11 @@ private:
 };
 
 Vif1Thread *g_thread = nullptr;
+
+void drawUnwritten(uint32_t unit)
+{
+    g_thread->drawUnwritten(unit);
+}
 
 // Steps 3b and 6 of docs/NATIVE-PIPELINE.md: uploads the producer made
 // records of are withheld from the GS, a record whose memory the game
@@ -2365,10 +2533,14 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
             flushEffect();
         uint64_t unit = 0u;
         std::memcpy(&unit, data + 16u, sizeof(unit));
-        if ((unit >> 24) == 3u || (unit >> 24) == 4u)
+        if ((unit >> 24) >= 3u && (unit >> 24) <= 5u)
         {
-            // M6: an emit call's output begins or ends (src/native_emit.h).
-            rg::nativeemit::marker(static_cast<uint32_t>(unit));
+            // M6: an emit call's output begins or ends, or a call the game
+            // did not write is drawn here (src/native_emit.h).
+            bool unwritten = false;
+            rg::nativeemit::marker(static_cast<uint32_t>(unit), unwritten);
+            if (unwritten)
+                drawUnwritten(static_cast<uint32_t>(unit));
             return;
         }
         if ((unit >> 24) == 2u)

@@ -25,7 +25,10 @@ uint8_t *g_rdram = nullptr;
 
 constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u;
 // The markers' kinds (the unit's high byte; 1 passes, 2 blocks).
-constexpr uint32_t kBegin = 3u, kEnd = 4u;
+constexpr uint32_t kBegin = 3u, kEnd = 4u, kUnwritten = 5u;
+// ModelMeshLinks: its chains are built once at load (static spans), so a
+// call of only these can be drawn from its record with nothing written.
+constexpr uint32_t kMeshLinks = 0x00470010u;
 
 uint32_t physical(uint32_t address)
 {
@@ -43,7 +46,6 @@ uint32_t read32(uint32_t address)
     std::memcpy(&v, g_rdram + physical(address), sizeof(v));
     return v;
 }
-using Quad = std::array<uint32_t, 4>;
 Quad readQuad(uint32_t address)
 {
     Quad q;
@@ -51,39 +53,6 @@ Quad readQuad(uint32_t address)
     return q;
 }
 
-// What a group's chunks should find in VU1 memory: the material packet's
-// quads 82, 84, 86, 87.
-struct Group
-{
-    Quad q82{}, q84{}, q86{}, q87{};
-    // The program the microcode table names (null: a slot left as it was,
-    // or pieces identify() does not know; not compared).
-    const rg::vu1native::Program *program = nullptr;
-    bool programKnown = false;
-    // The GS state its texenv sets: the material's GsEnv (t+0x14: ALPHA,
-    // TEST, ZBUF's mask, FBA), TEX0 from its texture node, TEX1 and CLAMP
-    // from its packet (frozen at load).
-    uint64_t alpha = 0u, test = 0u, fba = 0u, tex0 = 0u, tex1 = 0u, clamp = 0u;
-    bool zmask = false, textured = false, stateKnown = false;
-    // Its chunks' two header quads (TOP, TOP+1), from its chain's spans in
-    // EE memory, in the order they are drawn; and how many the list drew.
-    std::vector<std::array<Quad, 2>> chunks;
-    bool chunksKnown = false;
-    uint32_t drawn = 0u;
-};
-// An item's: the model matrix (60-63) and the mesh header (76-79, 81, 42),
-// from its packets p14 and p18; its groups, in the order they are drawn.
-struct Item
-{
-    std::array<Quad, 4> model{};
-    Quad q76{}, q77{}, q78{}, q79{}, q81{}, q42{};
-    std::vector<Group> groups;
-};
-struct Call
-{
-    uint32_t unit = 0u;
-    std::vector<Item> items;
-};
 std::mutex g_mutex;
 std::deque<Call> g_calls; // by unit, until the list reaches them
 uint32_t g_units = 0u;
@@ -244,6 +213,11 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
         if (mesh == 0u)
             continue;
         Item &item = call.items.emplace_back();
+        item.mesh = mesh;
+        item.base = read32(mesh) & 0x3FFu;
+        item.p1C = read32(it + 0x1Cu);
+        item.paletteAt = read32(mesh + 0x124u) & 0x3FFu;
+        item.bones = read32(mesh + 0x128u);
         for (uint32_t r = 0; r < 4u; ++r)
             item.model[r] = readQuad(p14 + 0x10u + 16u * r);
         item.q76 = readQuad(p18 + 0x20u);
@@ -262,7 +236,8 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
                 continue;
             const uint32_t t = read32(materials + 4u * read32(group + 0x0Cu));
             Group &out = item.groups.emplace_back();
-            out.chunksKnown = chunksOf(read32(group + 0x10u), out.chunks);
+            out.chain = read32(group + 0x10u);
+            out.chunksKnown = chunksOf(out.chain, out.chunks);
             if (t == 0u)
                 continue;
             const uint32_t pkt = read32(t);
@@ -286,8 +261,58 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
                 out.clamp = read64(pkt + 0xB0u);
             }
             out.stateKnown = true;
+            // The texenv's writes (DrawListWriteTexEnvPacket): the GsEnv
+            // with ZBUF's base and format and FRAME from the draw
+            // environment (FRAME's mask the material's when it has a mask
+            // mode), then the material packet's TEX1 and CLAMP, then TEX0.
+            const uint32_t drawEnv = read32(dctx + 0x270u);
+            const uint64_t zbufBase = (0x1FFull | (0xFull << 24));
+            const uint64_t zbuf = (read64(env + 0x30u) & ~zbufBase) | (read64(drawEnv + 0x90u) & zbufBase);
+            uint64_t frame = read64(drawEnv + 0x80u);
+            if (static_cast<int32_t>(read32(env + 0x5Cu)) != -1)
+                frame = (frame & 0xFFFFFFFFull) | (read64(env + 0x50u) & 0xFFFFFFFF00000000ull);
+            out.writes = {{0x42u, out.alpha}, {0x47u, out.test}, {0x4Eu, zbuf}, {0x4Au, read64(env + 0x40u)},
+                          {0x4Cu, frame}};
+            if (out.textured)
+            {
+                out.writes.emplace_back(0x14u, out.tex1);
+                out.writes.emplace_back(0x08u, out.clamp);
+                out.writes.emplace_back(0x06u, out.tex0);
+            }
         }
     }
+}
+
+// By mesh (game thread): its chunks that agreed with the list and whether
+// one ever did not. A call whose every item's mesh is a ModelMeshLinks that
+// agreed kTrusted times and never differed, every group's program a strip
+// or projector one, is drawn from its record: the game writes nothing for
+// it.
+struct MeshRecord
+{
+    uint32_t agreed = 0u;
+    bool bad = false;
+};
+std::unordered_map<uint32_t, MeshRecord> g_meshes;
+constexpr uint32_t kTrusted = 8u;
+std::atomic<uint64_t> g_unwrittenCalls{0u};
+
+bool drawable(const Call &call)
+{
+    if (call.items.empty())
+        return false;
+    for (const Item &item : call.items)
+    {
+        const auto known = g_meshes.find(item.mesh);
+        if (known == g_meshes.end() || known->second.bad || known->second.agreed < kTrusted ||
+            read32(item.mesh + 0x50u) != kMeshLinks)
+            return false;
+        for (const Group &group : item.groups)
+            if (!group.programKnown || !group.program || !rg::vu1native::modelOnGpu(*group.program) ||
+                !group.stateKnown || !group.chunksKnown)
+                return false;
+    }
+    return true;
 }
 
 PS2Runtime::RecompiledFunction g_emitOriginal = nullptr;
@@ -319,6 +344,26 @@ void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     g_units = (g_units + 1u) & 0xFFFFFFu;
     g_units = g_units == 0u ? 1u : g_units;
+    // A call of trusted meshes: drawn from its record, nothing written (the
+    // emitter returns 0 quadwords; its caches are left as they are).
+    {
+        Call call;
+        call.unit = g_units | (kUnwritten << 24);
+        predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call);
+        if (drawable(call) && rg::nativefx::writeMarker(call.unit))
+        {
+            ++g_unwrittenCalls;
+            {
+                std::lock_guard lock(g_mutex);
+                if (g_calls.size() >= 4096u)
+                    g_calls.pop_front();
+                g_calls.push_back(std::move(call));
+            }
+            setReturnS32(ctx, 0);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+    }
     const uint32_t unit = g_units | (kBegin << 24);
     if (!rg::nativefx::writeMarker(unit))
     {
@@ -341,9 +386,11 @@ void report()
     if (n == 1u || n % 60000u == 0u)
         std::fprintf(stderr,
                      "[model-emit] chunks against their emit call's structures: the same %llu, differing %llu; "
-                     "calls not found %llu, chunks outside an item or group %llu\n",
+                     "calls not found %llu, chunks outside an item or group %llu; calls the game did not write "
+                     "%llu\n",
                      (unsigned long long)g_same.load(), (unsigned long long)g_differ.load(),
-                     (unsigned long long)g_unknown.load(), (unsigned long long)g_outside.load());
+                     (unsigned long long)g_unknown.load(), (unsigned long long)g_outside.load(),
+                     (unsigned long long)g_unwrittenCalls.load());
 }
 } // namespace
 
@@ -354,9 +401,26 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[model-emit] ModelEmitDrawPackets not hooked\n");
 }
 
-bool marker(uint32_t unit)
+bool takeUnwritten(uint32_t unit, Call &out)
+{
+    std::lock_guard lock(g_mutex);
+    for (auto it = g_calls.begin(); it != g_calls.end(); ++it)
+        if (it->unit == unit)
+        {
+            out = std::move(*it);
+            g_calls.erase(it);
+            return true;
+        }
+    ++g_unknown;
+    return false;
+}
+
+bool marker(uint32_t unit, bool &unwritten)
 {
     const uint32_t kind = unit >> 24;
+    unwritten = kind == kUnwritten;
+    if (unwritten)
+        return true;
     if (kind == kEnd)
     {
         t_in = false;
@@ -484,9 +548,11 @@ void chunk(const uint8_t *vu1Data, uint32_t top, const void *program)
     if (!what)
     {
         ++g_same;
+        ++g_meshes[item.mesh].agreed;
         report();
         return;
     }
+    g_meshes[item.mesh].bad = true;
     const uint64_t n = ++g_differ;
     if (n <= 12u)
         std::fprintf(stderr,

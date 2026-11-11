@@ -172,6 +172,11 @@ std::string describePieces(const uint8_t *code, uint32_t startPC);
 // 1023.
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 
+// The base piece's run (MSCAL 0x000) on `data` as the VU1 would leave it
+// (quads 64-75, 100-102, 111), and the packet it kicks (FOGCOL): for an
+// item drawn from its emit call (src/native_emit.h).
+void runBaseOn(uint8_t *data, std::vector<std::vector<uint8_t>> &packets);
+
 // The GS packets the program kicks for that chunk, in order: the base
 // piece's FOGCOL, and the fallback of a shadow chunk whose packets set no
 // RGBAQ (the overlay's: none, its sprites are an ObjectLayer pass).
