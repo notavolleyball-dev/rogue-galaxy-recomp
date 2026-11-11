@@ -48,8 +48,5 @@ void transform(rg::NativeMesh &mesh, float sx, float sy, float tx, float ty);
 float vertexX(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v);
 float vertexY(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v);
 
-// After the block's packets went on: the VIF1 thread's mirror compared
-// with what the game thread's said at the block's end (counted).
-void compare(uint32_t unit);
 
 } // namespace rg::nativeblocks

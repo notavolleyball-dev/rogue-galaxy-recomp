@@ -71,7 +71,6 @@ struct Block
 {
     uint32_t unit = 0u;
     std::vector<KeptPiece> pieces;
-    rg::DrawState end{}; // the game thread's state at its end
     // A block the game did not write (its packets never reach the draw
     // stage): its register writes, in order, for the stage's state.
     std::vector<std::pair<uint8_t, uint64_t>> writes;
@@ -80,7 +79,7 @@ struct Block
 std::mutex g_mutex;
 std::deque<Block> g_blocks;
 uint32_t g_units = 0u;
-std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u}, g_mismatch{0u};
+std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u};
 // Blocks drawn from their shadow (the game wrote none of them), and those
 // lost (a block written through something the shadow does not follow).
 std::atomic<uint64_t> g_unwritten{0u}, g_lost{0u}, g_discarded{0u};
@@ -258,7 +257,6 @@ uint32_t keepBlock(Block &block)
         rg::hudsize::reshape(g_blockOwner, meshes);
         rg::widescreen::reshape(g_blockOwner, meshes);
     }
-    block.end = g_state->current();
     g_units = (g_units + 1u) & 0xFFFFFFu;
     g_units = g_units == 0u ? 1u : g_units;
     block.unit = g_units | (2u << 24);
@@ -404,7 +402,7 @@ bool take(uint32_t unit, Block &out)
     return true;
 }
 
-thread_local Block t_last; // the block emit() sent, for compare()
+thread_local Block t_last; // the block emit() sent (its storage kept)
 } // namespace
 
 // A fogged piece's clip is (x w, y w, 0, w), w its z (native_2d's closeMesh).
@@ -467,41 +465,16 @@ bool emit(uint32_t unit)
     }
     for (const KeptPiece &piece : block.pieces)
         rg::nativeproducer::piece(piece.mesh, &piece.state, piece.texels, piece.layer, piece.indices);
-    // A block the game did not write: its register writes, which no packet
-    // brings to the draw stage's state.
-    if (block.unwritten && !block.writes.empty())
-        rg::drawstate::observeWrites(block.writes.data(), block.writes.size());
     const uint64_t emitted = ++g_emitted;
     if (emitted == 1u || emitted % 60000u == 0u)
         std::fprintf(stderr,
                      "[native-blocks] blocks drawn from the builder's calls %llu (made %llu, not found %llu, lost "
-                     "%llu), effects' blocks left to their passes %llu, state differing at a block's end %llu\n",
+                     "%llu), effects' blocks left to their passes %llu\n",
                      (unsigned long long)emitted, (unsigned long long)g_kept.load(),
                      (unsigned long long)g_unknown.load(), (unsigned long long)g_lost.load(),
-                     (unsigned long long)g_discarded.load(), (unsigned long long)g_mismatch.load());
+                     (unsigned long long)g_discarded.load());
     return true;
 }
 
-void compare(uint32_t unit)
-{
-    const Block &block = t_last;
-    if (block.unit != unit)
-        return;
-    const rg::DrawState now = rg::drawstate::current();
-    const rg::DrawContext &a = now.context, &b = block.end.context;
-    const bool same = a.frame.fbp == b.frame.fbp && a.tex0.tbp0 == b.tex0.tbp0 && a.tex0.psm == b.tex0.psm &&
-                      a.alpha == b.alpha && a.test == b.test && a.scissor.x1 == b.scissor.x1 &&
-                      a.scissor.y1 == b.scissor.y1 && a.xyoffset.ofx == b.xyoffset.ofx;
-    if (!same)
-    {
-        const uint64_t n = ++g_mismatch;
-        if (n <= 8u)
-            std::fprintf(stderr,
-                         "[native-blocks] the VIF1 thread's state differs from the game thread's at a block's end: "
-                         "frame %x/%x tex0 %x/%x alpha %llx/%llx test %llx/%llx\n",
-                         a.frame.fbp, b.frame.fbp, a.tex0.tbp0, b.tex0.tbp0, (unsigned long long)a.alpha,
-                         (unsigned long long)b.alpha, (unsigned long long)a.test, (unsigned long long)b.test);
-    }
-}
 
 } // namespace rg::nativeblocks

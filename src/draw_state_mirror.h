@@ -7,24 +7,17 @@
 #include "native_types.h"
 
 
-// The GS draw registers as the game sets them, kept on the game's side for
-// the native pipeline (docs/NATIVE-PIPELINE.md): a VU1 mesh becomes a mesh
-// draw under the material these registers give it (texture, blend, tests,
-// target), read where the mesh is made, in order with the packets before it.
+// The GS draw registers as the game sets them, on the game's side, for the
+// native pipeline: a draw is made under the material these registers give
+// it (texture, blend, tests, target).
 //
-// It follows every packet the lists send (observe) and the register writes
-// the libgraph stubs make (through vif1's register sink). Removed in M6 of
-// docs/NATIVE-ONLY.md, with the packet path.
+// M6 of docs/NATIVE-ONLY.md: there is no mirror of the list's state any
+// more. The game thread's tracker (game()) follows the draw environments'
+// packets, the blocks, libgraph's environments and the model calls, at the
+// time the game writes them; each record (a block's pieces, a model call's
+// groups, a captured stream) keeps the registers it is drawn under.
 namespace rg::drawstate
 {
-
-// A packet as it goes to the GS: its register writes, in order. Any thread;
-// the VIF1 thread and the game thread take turns (the VIF1 thread's lists
-// are drained before the game thread sends).
-void observe(const uint8_t *data, uint32_t size);
-// The same for register writes an A+D packet would carry, without one.
-void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
-
 
 // The draw registers (both contexts, PRIM and PRMODE apart, the rest) and
 // the effective PRIM (PRMODECONT applied), as the GS decodes them: a value
@@ -54,11 +47,10 @@ struct Registers
     rg::DrawState state() const;
 };
 
-// The draw state of now: what a primitive drawn next would be drawn under.
-rg::DrawState current();
 
-// A mirror of its own, fed by whoever holds it (M4: the game thread's, from
-// the packets the game writes, in its order). Not thread-safe: one owner.
+// A tracker of the registers, fed by whoever holds it (the game thread's,
+// game(): the packets and writes the game makes, in its order). Not
+// thread-safe: one owner.
 class Tracker
 {
 public:

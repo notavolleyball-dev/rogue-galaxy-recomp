@@ -1,7 +1,6 @@
 #include "draw_state_mirror.h"
 
 #include <algorithm>
-#include <mutex>
 #include <vector>
 
 #include "gs_writes.h"
@@ -11,12 +10,6 @@ namespace rg::drawstate
 {
 namespace
 {
-struct Mirror
-{
-    std::mutex mutex;
-    Registers regs;
-};
-Mirror g_mirror;
 
 rg::PrimReg decodePrim(uint64_t value)
 {
@@ -147,30 +140,6 @@ void writeTo(DrawRegisters &r, rg::PrimReg &prim, uint8_t reg, uint64_t value)
 }
 } // namespace
 
-void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
-{
-    if (count == 0u)
-        return;
-    std::lock_guard lock(g_mirror.mutex);
-    g_mirror.regs.write(writes, count);
-}
-
-void observe(const uint8_t *data, uint32_t size)
-{
-    if (!data || size < 16u)
-        return;
-    thread_local std::vector<rg::gswrites::Write> writes;
-    writes.clear();
-    rg::gswrites::read(data, size, writes);
-    std::lock_guard lock(g_mirror.mutex);
-    g_mirror.regs.write(writes.data(), writes.size());
-}
-
-rg::DrawState current()
-{
-    std::lock_guard lock(g_mirror.mutex);
-    return g_mirror.regs.state();
-}
 
 void Registers::write(uint8_t reg, uint64_t value)
 {

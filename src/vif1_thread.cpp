@@ -1602,7 +1602,6 @@ void sendRaw(const uint8_t *data, uint32_t size)
             size = static_cast<uint32_t>(kept.size());
         }
         watchTransfers(data, size, true);
-        rg::drawstate::observe(data, size);
     }
 }
 
@@ -1610,7 +1609,6 @@ void sendRaw(const uint8_t *data, uint32_t size)
 // mirror, then SIGNAL, FINISH and LABEL.
 void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 {
-    rg::drawstate::observeWrites(writes.data(), writes.size());
     if (t_streamRegs)
         t_streamRegs->write(writes.data(), writes.size());
     g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
@@ -1829,8 +1827,7 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
         if ((unit >> 24) == 2u)
         {
             // M4: a block the game did not write (src/native_gspkt.h).
-            if (rg::nativeblocks::emit(static_cast<uint32_t>(unit)))
-                rg::nativeblocks::compare(static_cast<uint32_t>(unit));
+            rg::nativeblocks::emit(static_cast<uint32_t>(unit));
             return;
         }
         countEffect(rg::nativefx::emitPassUnit(static_cast<uint32_t>(unit)), rg::nativefx::Effect::Glare,
@@ -1875,16 +1872,12 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 
 void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
 {
-    // The mesh's own register writes, where its packets went: the mirror
-    // and the converter's carried state, or as a packet when the packet's
-    // way has more to do (not absorbing, or image data due first).
+    // The mesh's own register writes ride with it (on its record's or its
+    // stream's state, below); as a packet only when image data is due first.
     if (t_meshWriteCount != 0u)
     {
         if (absorbing() && t_upload.imageBytes == 0u)
-        {
-            rg::drawstate::observeWrites(t_meshWrites, t_meshWriteCount);
             g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
-        }
         else
         {
             const std::vector<RegisterWrite> writes(t_meshWrites, t_meshWrites + t_meshWriteCount);
@@ -1915,7 +1908,18 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
             state = t_streamRegs->state();
         }
         else
-            state = rg::drawstate::current();
+        {
+            // M6: every model emitter's chunks come from a record or a
+            // captured stream; one from neither (a capture that failed, a
+            // writer not known) has no draw state: not drawn.
+            static std::atomic<uint64_t> outside{0u};
+            const uint64_t n = ++outside;
+            if (n == 1u || n % 10000u == 0u)
+                std::fprintf(stderr, "[vu1native] chunks in the list outside a record or a captured stream, not "
+                                     "drawn: %llu\n",
+                             (unsigned long long)n);
+            return;
+        }
         rg::nativeproducer::ModelDraw model;
         if (t_model.active)
         {
