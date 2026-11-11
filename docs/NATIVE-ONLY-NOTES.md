@@ -94,3 +94,33 @@ from the code.
 - **The hook emits:** a `Pass` (`PassKind::Bloom`), as the glare's.
 - **Open:** the filter of the blur's sprites (not set in their blocks; taken
   as bilinear).
+
+### `DofFilterDrawMaybe_17d150` (1532 bytes; M3, not ported yet)
+
+- **Arguments:** `a0` = n, the number of levels; `a1` = an array of n
+  distances (floats); `a2` = the work buffer's descriptor (copied into a
+  local node); `f12` = a strength (`scale`). Caller:
+  `GameSceneDofDraw_1cefb0+0x1d0`.
+- **What it draws:** for each level i: `GfxBlitTexRect_141000` copies the
+  previous level (first the frame) into the next rectangle of the work
+  buffer, each 2/3 the size of the one before (rectangles side by side,
+  half a pixel up and left), filter bilinear (`GsTex1SetFilter 1`); then a
+  triangle strip over the whole frame, textured from that rectangle (UVs a
+  texel in from its edges), Z test on with ZTST 2 (GEQUAL), Z write off,
+  frame mask 1 (alpha kept), blend on (no ALPHA set in the block), a raw
+  `TEXA = 0x8000000080` (TA0 = TA1 = 0x80), color `(0x80, 0x80, 0x80,
+  (s32)(128 scale))`, its vertices' Z alternating between
+  `ProjectDepth(d_i)` and `ProjectDepth(d_i + d_i / 10)` column after
+  column (16 columns across).
+- **`ProjectDepth_15d0a0(d)`:** the point `(x, y, -d, w)` (x, y, w from the
+  constant at `0x47DF20`) through the matrix at `*(0x4810A4) + 0xF20 + 0x200`
+  (`MtxMulPoint_13c890`), z / w truncated: the GS Z of a point at distance d
+  in front of the camera.
+- **Blocking (to read next):** the ALPHA register a fresh primitive block
+  carries (`DrawListBeginPrim_141b00` / `GsPktBegin_13f7e0`'s template),
+  which decides how `128 scale` blends; `MtxMulPoint_13c890`'s convention
+  (row or column vector), to compute the Z in the hook. With those, the
+  pass is: the levels as blurred copies, each laid over the frame where
+  the scene's depth is behind the level's distance (the renderer's depth
+  from the producer's `standardDepth` of the two Z values), at the
+  strength's alpha.
