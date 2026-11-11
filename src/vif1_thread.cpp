@@ -409,19 +409,13 @@ void meshRepeatList()
         r.seen.clear();
 }
 
-// Retained meshes (docs/NATIVE-BOUNDARY.md, issue 2). Half of a frame's
-// vertices are meshes the game sends unchanged frame after frame (the map).
-// One is known here by its vertices in object space (the native VU1
-// program's output, before the camera); built the same in two lists, it is
-// given an id and sent to the renderer once, which keeps it in a vertex
-// buffer of its own and judges the program's cull on the GPU. Every later
-// time only the id and the chunk's header go on: no vertex is copied to the
-// draw stage, to the producer or to the GPU, and none is culled on the CPU.
-// RG_MESH_RETAIN=0: every mesh whole, every frame, as before.
+// Model chunks kept by the renderer (M5 of docs/NATIVE-ONLY.md): a chunk
+// whose inputs the VIF1 thread saw in two lists gets an id; its inputs go
+// to the renderer once, and every later draw names it.
 struct MeshRetain
 {
-    uint32_t id = 0u;    // 0: not retained
-    bool define = false; // its vertices go with it (the first time)
+    uint32_t id = 0u;    // 0: none (the model chunk is drawn once, or not a model chunk)
+    bool define = false; // (unused: a model chunk's inputs go in t_model)
 };
 // The mesh on its way (the VIF1 thread to the draw stage, the draw stage to
 // the producer).
@@ -452,30 +446,17 @@ struct RetainTable
     struct Entry
     {
         uint32_t id;
-        uint32_t sightings; // lists it was built in, while it has no id
+        uint32_t sightings; // lists it was seen in, while it has no id
         uint64_t list;
     };
-    // A mesh the same over this many lists is the map's; fewer, and what
-    // only holds still for a few frames (an animation's pose, a slow
-    // scroll) filled the renderer's buffer with meshes drawn twice.
-    static constexpr uint32_t kSightings = 8u;
-    std::unordered_map<uint64_t, Entry> seen;
-    // Model chunks by the hash of their inputs (M5): seen in two lists, a
-    // chunk gets an id and goes to the GPU; one whose inputs change from
-    // frame to frame (cloth) stays on the CPU.
+    // Model chunks by the hash of their inputs: seen in two lists, a chunk
+    // gets an id; one whose inputs change from frame to frame (cloth) is
+    // drawn once each time, its inputs with it.
     std::unordered_map<uint64_t, Entry> models;
     uint64_t list = 0u, epoch = 0u;
     uint32_t nextId = 0u; // never reused, whatever the epoch
 };
 thread_local RetainTable t_retained;
-bool retainingMeshes()
-{
-    static const bool on = [] {
-        const char *value = std::getenv("RG_MESH_RETAIN");
-        return !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
-}
 // At a list's start: the renderer's epoch (a new one: every id is gone), and
 // now and then the meshes not seen for a while forgotten.
 void retainList()
@@ -486,14 +467,10 @@ void retainList()
     if (epoch != r.epoch)
     {
         r.epoch = epoch;
-        r.seen.clear();
         r.models.clear();
     }
     if (r.list % 512u == 0u)
-    {
-        std::erase_if(r.seen, [&](const auto &e) { return e.second.id == 0u && r.list - e.second.list > 64u; });
         std::erase_if(r.models, [&](const auto &e) { return e.second.id == 0u && r.list - e.second.list > 64u; });
-    }
 }
 // A model chunk's id (0: not yet: the CPU draws it this time), by the hash
 // of its inputs; `define`: its inputs go with it.
@@ -518,45 +495,6 @@ uint32_t modelIdOf(uint64_t hash, bool &define)
     return entry.id;
 }
 
-MeshRetain retainOf(const GSNativeMesh &mesh)
-{
-    RetainTable &r = t_retained;
-    const size_t count = mesh.vertices.size();
-    if (count < 3u)
-        return {};
-    // Position, UV and colour (36 bytes of the 40; the depth is the
-    // camera's), and what the renderer makes its triangles by.
-    constexpr uint64_t k = 0x9E3779B97F4A7C15ull;
-    uint64_t lane[2] = {count * k, mesh.header.triangleList ? k : ~k};
-    for (const GSNativeMesh::Vertex &v : mesh.vertices)
-    {
-        uint64_t words[4];
-        uint32_t last;
-        std::memcpy(words, &v, sizeof(words));
-        std::memcpy(&last, &v.a, sizeof(last));
-        lane[0] = (lane[0] ^ words[0]) * k;
-        lane[1] = (lane[1] ^ words[1]) * k;
-        lane[0] = (lane[0] ^ (words[2] + (lane[1] >> 29))) * k;
-        lane[1] = (lane[1] ^ (words[3] + last + (lane[0] >> 31))) * k;
-    }
-    const uint64_t hash = lane[0] ^ (lane[1] >> 32) ^ (lane[1] << 32);
-    const auto [it, fresh] = r.seen.try_emplace(hash, RetainTable::Entry{0u, 1u, r.list});
-    RetainTable::Entry &entry = it->second;
-    if (fresh)
-        return {};
-    if (entry.id != 0u)
-    {
-        entry.list = r.list;
-        return {entry.id, false};
-    }
-    if (entry.list == r.list)
-        return {}; // twice in one list: it waits for another
-    entry.list = r.list;
-    if (++entry.sightings < RetainTable::kSightings)
-        return {};
-    entry.id = ++r.nextId;
-    return {entry.id, true};
-}
 
 // A VU1 mesh's own register writes (docs/NATIVE-BOUNDARY.md, issue 4): the
 // native program's fog colour, PRIM and PRMODE went ahead of each mesh as two
@@ -1997,8 +1935,6 @@ public:
                 {
                     if (t_model.active)
                         t_retain = {m_modelId, false};
-                    else if (retainingMeshes() && toDrawStage() && native->decode != rg::vu1native::Decode::Skinned)
-                        t_retain = retainOf(m_nativeMesh);
                     if (asWrites)
                     {
                         t_meshWrites = m_nativeWrites.data();
@@ -2254,8 +2190,7 @@ private:
                 t_listHoleAt = 0u;
                 if (countingMeshRepeats())
                     meshRepeatList();
-                if (retainingMeshes())
-                    retainList();
+                retainList();
                 learnList();
                 if (!m_current.data.empty())
                 {

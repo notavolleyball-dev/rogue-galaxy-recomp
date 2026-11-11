@@ -512,14 +512,13 @@ struct Present
 
 // A retained mesh's vertices (MeshDraw::retained), sent once: a strip, or
 // with `list` a triangle list.
+// A model chunk the renderer keeps (M5): its vertices as the program reads
+// them (a strip, or a list with `list`), drawn through native_model.vert
+// from MeshDraw::modelRow and its palette.
 struct RetainedMesh
 {
     Id id = 0;
     bool list = false;
-    std::vector<RawVertex> raw;
-    // A model chunk instead (M5): its vertices as the program reads them
-    // (a strip, or a list with `list`), drawn through native_model.vert
-    // from MeshDraw::modelRow and its palette.
     std::vector<ModelInput> model;
 };
 

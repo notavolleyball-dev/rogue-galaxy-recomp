@@ -8,7 +8,7 @@
 // swell), C (the color: the material, the vertex colors, the directional and
 // point lights), as src/vu1_native.cpp's readChunk does on the CPU, product
 // by product in the same order (`precise`: nothing fused). Then the rest is
-// native_mesh_static.vert's: the program's backface rule from the triangle's
+// the retained meshes' rule before (deleted in M5): the program's backface rule from the triangle's
 // three corners (each through the same B and F), the transform, the fog and
 // the depth. The guard band's skip is not kept (the GPU clips).
 //

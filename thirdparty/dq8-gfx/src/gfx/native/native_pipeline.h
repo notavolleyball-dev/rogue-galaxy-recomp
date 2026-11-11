@@ -66,15 +66,6 @@ void (*meshCull())(MeshDraw &draw);
 // A retained mesh's vertex (native_mesh_static.vert): its triangle's three
 // corners, its own UV and colour, which corner it is and the triangle's
 // place in the strip (the sign its winding has there).
-struct StaticVertex
-{
-    float a[3], b[3], c[3];
-    float uv[2];
-    float color[4];
-    float corner, parity;
-};
-static_assert(sizeof(StaticVertex) == 68u, "tightly packed");
-constexpr uint32_t kStaticVertices = 1u << 19; // 34 MiB
 
 // A model chunk's triangle vertex (Renderer::retain): its triangle's three
 // corners' positions, bones and weights (the program's backface rule needs
@@ -406,9 +397,7 @@ private:
     SDL_GPUBuffer *m_drawBuffer = nullptr; // the frame's draw table
     uint32_t m_drawCapacity = 0;
     std::vector<uint32_t> m_firstIndex; // per frame mesh, into the index buffer
-    // Retained meshes: their triangles, three vertices each, in one buffer
-    // filled from its start (m_staticUsed vertices); what apply() took in
-    // since the last upload waits in m_staticPending.
+    // Kept model chunks (their triangles in m_modelBuffer), by id.
     struct Retained
     {
         uint32_t first = 0, count = 0; // vertices
@@ -432,10 +421,6 @@ private:
         return it != m_retained.end() ? &it->second : nullptr;
     }
     std::unordered_map<Id, Retained> m_retained;
-    SDL_GPUBuffer *m_staticBuffer = nullptr;
-    SDL_GPUShader *m_staticVertex = nullptr;
-    uint32_t m_staticUsed = 0, m_staticUploaded = 0;
-    std::vector<uint8_t> m_staticPending;
     uint64_t m_retainedDefined = 0, m_retainedDrawn = 0, m_retainedMissing = 0, m_retainedResets = 0;
     // Model chunks (M5): their triangles as ModelVertex in their own buffer,
     // drawn by native_model.vert; each draw's constants (ModelRow) and its

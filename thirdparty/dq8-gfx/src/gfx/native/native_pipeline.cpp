@@ -402,8 +402,6 @@ void Renderer::retain(const RetainedMesh &d)
         if (m_modelUsed + triangles * 3u > kModelVertices)
         {
             m_retained.clear();
-            m_staticPending.clear();
-            m_staticUsed = m_staticUploaded = 0u;
             m_modelPending.clear();
             m_modelUsed = m_modelUploaded = 0u;
             ++m_retainedResets;
@@ -419,55 +417,7 @@ void Renderer::retain(const RetainedMesh &d)
         ++m_modelDefined;
         return;
     }
-    const uint32_t count = static_cast<uint32_t>(d.raw.size());
-    const uint32_t triangles = d.list ? count / 3u : (count >= 2u ? count - 2u : 0u);
-    if (m_staticUsed + triangles * 3u > kStaticVertices)
-    {
-        // Full: everything goes, and the producer starts again.
-        m_retained.clear();
-        m_staticPending.clear();
-        m_staticUsed = m_staticUploaded = 0u;
-        m_modelPending.clear();
-        m_modelUsed = m_modelUploaded = 0u;
-        ++m_retainedResets;
-        g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
-    }
-    if (triangles * 3u <= kStaticVertices)
-    {
-        const size_t at = m_staticPending.size();
-        m_staticPending.resize(at + size_t(triangles) * 3u * sizeof(StaticVertex));
-        auto *out = reinterpret_cast<StaticVertex *>(m_staticPending.data() + at);
-        for (uint32_t k = 2u; k < count; ++k)
-        {
-            if (d.list && k % 3u != 2u)
-                continue;
-            // The sign the strip's winding has at this triangle (cullMesh:
-            // it starts at the second vertex and turns at each); a list's
-            // never turns.
-            const float parity = d.list || (k - 1u) % 2u == 0u ? 1.0f : -1.0f;
-            const RawVertex *corner[3] = {&d.raw[k - 2u], &d.raw[k - 1u], &d.raw[k]};
-            for (int i = 0; i < 3; ++i, ++out)
-            {
-                for (int j = 0; j < 3; ++j)
-                {
-                    out->a[j] = (&corner[0]->x)[j];
-                    out->b[j] = (&corner[1]->x)[j];
-                    out->c[j] = (&corner[2]->x)[j];
-                }
-                out->uv[0] = corner[i]->u;
-                out->uv[1] = corner[i]->v;
-                out->color[0] = corner[i]->r;
-                out->color[1] = corner[i]->g;
-                out->color[2] = corner[i]->b;
-                out->color[3] = corner[i]->a;
-                out->corner = float(i);
-                out->parity = parity;
-            }
-        }
-        m_retained[d.id] = {m_staticUsed, triangles * 3u};
-        m_staticUsed += triangles * 3u;
-        ++m_retainedDefined;
-    }
+
 }
 
 std::vector<Id> takeEvicted()
@@ -1268,7 +1218,7 @@ std::string Renderer::statsLine()
     line += " | held: textures " + std::to_string(m_images.size()) + " (" + std::to_string(m_imageBytes >> 20) +
             " MiB), palettes " + std::to_string(m_palettes.size()) + ", evicted " + d(m_evicted, m_evictedReported) +
             ", refused " + d(m_refused, m_refusedReported) + " | retained meshes " +
-            std::to_string(m_retained.size()) + " (" + std::to_string(m_staticUsed) + " vertices, defined so far " +
+            std::to_string(m_retained.size()) + " (defined so far " +
             std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
             ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
             std::to_string(m_retainedResets) + ") | model chunks: defined so far " + std::to_string(m_modelDefined) +

@@ -2109,16 +2109,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         kept.model = *chunkModel->inputs;
         native::push(std::move(kept));
     }
-    // A retained mesh's vertices, once, whatever becomes of this draw.
-    if (retained != 0u && !mesh.vertices.empty())
-    {
-        native::RetainedMesh kept;
-        kept.id = retained;
-        kept.list = mesh.header.triangleList != 0u;
-        const auto *first = reinterpret_cast<const native::RawVertex *>(mesh.vertices.data());
-        kept.raw.assign(first, first + mesh.vertices.size());
-        native::push(std::move(kept));
-    }
+
     // A chunk the program clips (h.clips: its slot E clips at z = -w and
     // z = w) keeps the triangles crossing the guard band: the GS backend
     // draws them clipped by the planes, and here the GPU clips them in clip
