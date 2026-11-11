@@ -607,8 +607,6 @@ struct List
     Bytes data;
     // Spans of `data` left uncopied (gatherChain), in order.
     std::vector<Hole> holes;
-    bool dBit = false;
-    bool tBit = false;
     // With the native effects: where each piece of `data` came from, as
     // (offset in data, EE address), and the list's number.
     std::vector<std::pair<uint32_t, uint32_t>> origins;
@@ -667,17 +665,12 @@ public:
         return buffer;
     }
 
-    // MSCAL/MSCNT from the list being run. The runtime's own callbacks read
-    // the D/T enables from, and write VPU_STAT into, the context of whatever
-    // guest thread the scheduler is running, which from this thread can be
-    // mid-change or already freed; these use the list's enables and keep the
-    // stop bits for the game thread (takeVpuStat).
-    void runVu1(bool resume, uint32_t startPC, uint32_t top, uint32_t itop)
+    // MSCAL/MSCNT from the list being run: the chunk drawn by the native
+    // programs (M6: nothing runs the VU1 for a draw; a chunk they do not
+    // know or decline is counted and not drawn).
+    void runVu1(bool resume, uint32_t startPC, uint32_t top)
     {
         PS2Memory &memory = m_runtime.memory();
-        VU1Interpreter &vu1 = m_runtime.vu1();
-        vu1.state().dBitEnabled = m_current.dBit;
-        vu1.state().tBitEnabled = m_current.tBit;
         // RG_VU1_NATIVE: the chunk of a program done natively, built from the
         // data memory before the VU1 changes it. The MSCAL names the program
         // (once per code image and entry), its MSCNTs run the chunks; or the
@@ -734,14 +727,16 @@ public:
                     m_particleMesh = false;
                     m_shadowMesh = false;
                     m_outlineMesh = false;
-                    if (native->kind == rg::vu1native::Kind::Shadow &&
-                        rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top, m_shadowPackets,
-                                                    m_shadowMeshes, m_shadowInputs, m_shadowRows, m_shadowPalette))
+                    if (native->kind == rg::vu1native::Kind::Shadow)
                     {
                         // M5: the shadow volumes to the model vertex stage,
                         // twice (the facing ones' blend and the others').
-                        m_shadowMesh = true;
                         m_nativePackets.clear();
+                        m_shadowMesh = rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top,
+                                                                   m_shadowPackets, m_shadowMeshes, m_shadowInputs,
+                                                                   m_shadowRows, m_shadowPalette);
+                        if (!m_shadowMesh)
+                            m_nativeMonitor.dropped("shadow: its colours not set");
                     }
                     else if (native->kind == rg::vu1native::Kind::Outline &&
                              rg::vu1native::outlineDraw(*native, memory.getVU1Data(), top, m_nativePackets,
@@ -803,19 +798,8 @@ public:
             }
             m_nativeMonitor.tick();
         }
-        if (!native)
-        {
-            if (resume)
-            {
-                vu1.resume(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                           m_runtime.gs(), &memory, top, itop, 65536);
-            }
-            else
-            {
-                vu1.execute(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                            m_runtime.gs(), &memory, startPC, top, itop, 65536);
-            }
-        }
+        if (!native && !m_nativeProgram)
+            m_nativeMonitor.dropped("a program identify() does not know");
         if (native)
         {
             {
@@ -884,8 +868,6 @@ public:
             }
         }
         t_vu1Source = 0u;
-        m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
-                        std::memory_order_release);
     }
 
     // M6: a model emit call the game did not write (src/native_emit.h),
@@ -1051,8 +1033,6 @@ public:
     // of the 1 KiB of microcode from it, which names the program whatever else
     // the code memory holds. Kept until the code memory is next written.
 
-    // VPU_STAT's VU1 D/T stop bits after the last MSCAL/MSCNT.
-    uint32_t takeVpuStat() const { return m_vpuStat.load(std::memory_order_acquire); }
 
     // Waits until every list handed over has run, and the GS packets they
     // made with them. A no-op on the VIF1 thread itself, which never starts
@@ -1159,7 +1139,6 @@ private:
     bool m_running = false; // a list is running (on the game's thread)
     static constexpr size_t kPoolSize = 8u;
     std::vector<Bytes> m_pool; // guarded by m_mutex
-    std::atomic<uint32_t> m_vpuStat{0u};
     // RG_VU1_NATIVE: the program the last MSCAL started, for its MSCNTs, the
     // code image it was found in, and the packets of a chunk.
     const rg::vu1native::Program *m_nativeProgram = nullptr;
@@ -2436,7 +2415,7 @@ void reportFinished(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         return;
     }
-    ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & ~0x0600u) | g_thread->takeVpuStat();
+    ctx->vu0_vpu_stat &= ~0x0600u; // (no VU1 run: never stopped by D or T)
     for (uint64_t n = finished; n > 0u; --n)
     {
         ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 1u);
@@ -2495,8 +2474,6 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     const uint32_t address = toDmaPhys(getRegU32(ctx, 5));
     List list;
     list.data = g_thread->takeBuffer();
-    list.dBit = (ctx->vu0_fbrst & (1u << 10)) != 0u;
-    list.tBit = (ctx->vu0_fbrst & (1u << 11)) != 0u;
     if (normal)
     {
         const uint32_t qwc = getRegU32(ctx, 6) & 0xFFFFu;
@@ -2872,9 +2849,10 @@ void install(PS2Runtime &runtime)
     // VU1 started by the lists, without the guest thread context the
     // runtime's callbacks reach into (see Vif1Thread::runVu1).
     memory.setVu1MscalCallback([](uint32_t startPC, uint32_t top, uint32_t itop) {
-        g_thread->runVu1(false, startPC, top, itop);
+        (void)itop;
+        g_thread->runVu1(false, startPC, top);
     });
-    memory.setVu1MscntCallback([](uint32_t top, uint32_t itop) { g_thread->runVu1(true, 0u, top, itop); });
+    memory.setVu1MscntCallback([](uint32_t top, uint32_t) { g_thread->runVu1(true, 0u, top); });
     memory.setDmaStartObserver([](uint32_t channel) {
         if (channel == kGifChannel || channel == kVif1Channel)
         {
@@ -2920,32 +2898,6 @@ std::string busyReport()
     lastTime = now;
     lastBusy = busy;
     lastGif = gif;
-    // VU1 pairs run on the interpreter since the last report: a program the
-    // build has not compiled (several times slower), e.g. an effect's, shows
-    // up here. Read unsynchronised from the VIF1 thread's counters; a stats
-    // line can live with a torn count.
-    if (g_runtime)
-    {
-        static uint64_t lastInterpreted = 0u, lastCompiled = 0u;
-        const uint64_t interpreted = g_runtime->vu1().interpretedPairsExecuted();
-        const uint64_t compiled = g_runtime->vu1().compiledPairsExecuted();
-        const uint64_t newInterpreted = interpreted - std::min(interpreted, lastInterpreted);
-        const uint64_t newCompiled = compiled - std::min(compiled, lastCompiled);
-        lastInterpreted = interpreted;
-        lastCompiled = compiled;
-        if (newInterpreted != 0u)
-        {
-            // Per second, and as a share of the pairs the VU1 ran at all: the
-            // chunks done natively never run it, so a high share of a small
-            // count is no load (2026-11-01: 44% was 14k pairs a second).
-            char more[128];
-            std::snprintf(more, sizeof(more), " | vu1 interpreted %.1fk pairs/s (%.0f%% of what the VU1 ran)",
-                          wall > 0.0 ? static_cast<double>(newInterpreted) / wall / 1000.0 : 0.0,
-                          100.0 * static_cast<double>(newInterpreted) /
-                              static_cast<double>(newInterpreted + newCompiled));
-            return std::string(text) + more;
-        }
-    }
     return text;
 }
 

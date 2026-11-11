@@ -49,9 +49,8 @@
 // (native_model.vert) from the inputs and constants made here; this file no
 // longer makes a vertex. The other programs (Kind) are written out below,
 // each by itself: the outlines, shadow volumes and particles for the same
-// stage (outlineDraw, shadowMeshes, particleMesh), buildShadow as the
-// shadows' packet fallback, runBase for what
-// they leave in VU1 memory.
+// stage (outlineDraw, shadowMeshes, particleMesh), runBase for what
+// they leave in VU1 memory. Nothing runs the VU1 for a draw (M6).
 // The arithmetic runs in the VU's rounding (toward zero), set around each
 // entry point (VuRounding): the compiler must not move float work across it.
 #pragma STDC FENV_ACCESS ON
@@ -355,11 +354,6 @@ private:
     const uint8_t *m_data;
 };
 
-float itof15(int32_t v)
-{
-    return static_cast<float>(v) / 32768.0f;
-}
-
 float fromBits(uint32_t bits)
 {
     float value;
@@ -420,29 +414,6 @@ void putWords(std::vector<uint8_t> &packet, uint32_t x, uint32_t y, uint32_t z, 
 {
     const uint32_t words[4] = {x, y, z, w};
     putQuad(packet, words);
-}
-
-// Vertex k's position as B leaves it: the int16 / 32768 times quad 77, then
-// skinned over `bones` bones (0: not skinned).
-void decodePosition(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, float position[3], bool raw = false)
-{
-    const uint32_t positions = top + 2u;
-    const Vec4 scale = vu.quad(77);
-    if (raw)
-    {
-        for (uint32_t i = 0; i < 3u; ++i)
-            position[i] = fromBits(static_cast<uint32_t>(vu.word(positions + k, i)));
-    }
-    else
-    {
-        position[0] = itof15(vu.word(positions + k, 0)) * scale.x;
-        position[1] = itof15(vu.word(positions + k, 1)) * scale.y;
-        position[2] = itof15(vu.word(positions + k, 2)) * scale.z;
-    }
-    if (bones != 0u)
-    {
-        skin(vu, positions + vu.half(top + 1u, 2) + k * 2u, bones, position);
-    }
 }
 
 // The lit C (91f542d0): four directional lights, their directions the lanes
@@ -831,141 +802,9 @@ Vec4 transform(const Vec4 rows[4], const Vec4 &v)
     return {out[0], out[1], out[2], out[3]};
 }
 
-bool clipsOwnW(const Vec4 &v)
-{
-    const float w = std::fabs(v.w);
-    return v.x > w || v.x < -w || v.y > w || v.y < -w || v.z > w || v.z < -w;
-}
-
-// The z of OPMULA a, b then OPMSUB b, a: a.x b.y - b.x a.y.
-float crossZ(const Vec4 &a, const Vec4 &b)
-{
-    return a.x * b.y - b.x * a.y;
-}
-
 Vec4 sub(const Vec4 &a, const Vec4 &b)
 {
     return {a.x - b.x, a.y - b.y, a.z - b.z, 0.0f};
-}
-
-// The shadow volume C. The chunk's points come in threes, a triangle of
-// the caster. Its world normal (quads 60-63 the model matrix) against the
-// light (quad 34) must exceed 1e-4, else nothing is drawn. Its corners
-// (front) and the same pushed away from the light (back: the model matrix
-// times quads 30-33) go through the view (quads 8-11 times 24-27, x and y
-// scaled by 16) and, unless any falls outside its own w, through the
-// projection (quads 12-15, 12.x by 16.z and 13.y by 16.w) and the divide.
-// It draws the volume as five fans of four: three sides, the front cap and
-// the back cap, each after the A+D packet at quad 38 if it faces the screen
-// (its z cross product is positive), at quad 35 if not (the blend that adds
-// or takes away).
-void buildShadow(const Program &program, const VuData &vu, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets)
-{
-    packets.clear();
-    const uint32_t count = vu.half(top, 1);
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    Vec4 model[4], light[4], view[4], projection[4], away[4], camera[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        model[i] = vu.quad(60u + i);
-        away[i] = vu.quad(30u + i);
-        camera[i] = vu.quad(8u + i);
-    }
-    const Vec4 viewport = vu.quad(16);
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        light[i] = transform(away, model[i]);
-        view[i] = transform(camera, vu.quad(24u + i));
-        view[i].x *= viewport.x;
-        view[i].y *= viewport.y;
-        projection[i] = vu.quad(12u + i);
-    }
-    projection[0].x *= viewport.z;
-    projection[1].y *= viewport.w;
-    const Vec4 toLight = vu.quad(34);
-    const float lit = fromBits(0x38d1b717u); // 1e-4
-
-    uint8_t header[4][16];
-    const uint32_t prim[4] = {5u, 0u, 0u, 0u};
-    const uint32_t prmode[4] = {vu.half(87, 0), 0u, 27u, 0u};
-    uint32_t tag[4];
-    std::memcpy(tag, vu.bytes(86), sizeof(tag));
-    tag[0] = 0x8004u;
-    std::memcpy(header[0], vu.bytes(0), 16u);
-    std::memcpy(header[1], prim, 16u);
-    std::memcpy(header[2], prmode, 16u);
-    std::memcpy(header[3], tag, 16u);
-    const std::vector<uint8_t> facing = gifPacket(vu, 38), backing = gifPacket(vu, 35);
-
-    for (uint32_t first = 0; first < count; first += 3u)
-    {
-        Vec4 world[3], pushed[3];
-        for (uint32_t j = 0; j < 3u; ++j)
-        {
-            float p[3];
-            decodePosition(vu, top, first + j, bones, p);
-            const Vec4 point{p[0], p[1], p[2], 1.0f};
-            world[j] = transform(model, point);
-            pushed[j] = transform(light, point);
-        }
-        const Vec4 a = sub(world[1], world[0]), b = sub(world[2], world[0]);
-        const float nx = a.y * b.z - b.y * a.z, ny = a.z * b.x - b.z * a.x, nz = a.x * b.y - b.x * a.y;
-        if (!(toLight.x * nx + toLight.y * ny + toLight.z * nz > lit))
-        {
-            continue;
-        }
-        Vec4 corners[6];
-        bool outside = false;
-        for (uint32_t j = 0; j < 3u; ++j)
-        {
-            corners[j] = transform(view, world[j]);
-            corners[3u + j] = transform(view, pushed[j]);
-        }
-        for (const Vec4 &corner : corners)
-        {
-            outside = outside || clipsOwnW(corner);
-        }
-        if (outside)
-        {
-            continue;
-        }
-        Vec4 screen[6];
-        uint32_t fixed[6][4];
-        for (uint32_t j = 0; j < 6u; ++j)
-        {
-            Vec4 &s = screen[j] = transform(projection, corners[j]);
-            const float q = rg::nativeReciprocal(s.w);
-            s.x *= q;
-            s.y *= q;
-            s.z *= q;
-            const float lanes[4] = {s.x, s.y, s.z, s.w};
-            for (int i = 0; i < 4; ++i)
-            {
-                fixed[j][i] = static_cast<uint32_t>(rg::nativeFtoi(lanes[i], 16.0f));
-            }
-        }
-        // The fans: front 0-2, back 3-5, and the corners each takes, and
-        // the two edges whose cross product says which way it faces.
-        constexpr uint8_t kFans[5][4] = {{0, 3, 4, 1}, {1, 4, 5, 2}, {2, 5, 3, 0}, {0, 1, 2, 2}, {5, 4, 3, 3}};
-        constexpr uint8_t kFacing[5][3] = {{0, 3, 4}, {1, 4, 5}, {2, 5, 3}, {0, 1, 2}, {5, 4, 3}};
-        for (uint32_t f = 0; f < 5u; ++f)
-        {
-            const Vec4 &origin = screen[kFacing[f][0]];
-            const float z = crossZ(sub(screen[kFacing[f][1]], origin), sub(screen[kFacing[f][2]], origin)) * 1.0f;
-            packets.push_back(z > 0.0f ? facing : backing);
-            std::vector<uint8_t> &fan = packets.emplace_back();
-            fan.reserve(128u);
-            for (const auto &quad : header)
-            {
-                putQuad(fan, quad);
-            }
-            for (uint32_t v = 0; v < 4u; ++v)
-            {
-                putQuad(fan, fixed[kFans[f][v]]);
-            }
-        }
-    }
 }
 
 // The shadow volumes for the model vertex stage (M5, flag 64 of the row):
@@ -1463,11 +1302,6 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
 {
     const VuRounding rounding;
-    if (program.kind == Kind::Shadow)
-    {
-        buildShadow(program, VuData(data), top, packets);
-        return;
-    }
     if (program.kind == Kind::Overlay)
     {
         // The overlay B's sprites are drawn only inside a composite's tail,
@@ -1829,7 +1663,7 @@ void Monitor::tick()
     {
         left += " [" + reason + "]=" + std::to_string(count);
     }
-    std::fprintf(stderr, "[vu1native] gpu: native chunks%s; left to the VU1%s",
+    std::fprintf(stderr, "[vu1native] gpu: native chunks%s; not drawn%s",
                  line.empty() ? " none" : line.c_str(), left.empty() ? " none" : left.c_str());
     std::fprintf(stderr, "\n");
 }

@@ -149,8 +149,7 @@ const Program *identify(const uint8_t *code, uint32_t startPC);
 // each volume's facing triangles kept and after quad 35's with the others,
 // each with its row (flag 64; colored by its packet's RGBAQ) and header (no
 // vertices; world to window: the model matrix the identity, as
-// particleMesh's). False when a packet sets no RGBAQ: the caller keeps
-// buildChunk's packets.
+// particleMesh's). False when a packet sets no RGBAQ: not drawn.
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
                   std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
@@ -178,8 +177,7 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 void runBaseOn(uint8_t *data, std::vector<std::vector<uint8_t>> &packets);
 
 // The GS packets the program kicks for that chunk, in order: the base
-// piece's FOGCOL, and the fallback of a shadow chunk whose packets set no
-// RGBAQ (the overlay's: none, its sprites are an ObjectLayer pass).
+// piece's FOGCOL (the overlay's: none, its sprites are an ObjectLayer pass).
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets);
 
@@ -218,7 +216,7 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
               std::vector<float> &palette);
 
 // What the VIF1 thread did with each chunk: drawn natively (the model
-// vertex stage, or buildChunk's packets), or left to the VU1 and why; a
+// vertex stage, or buildChunk's packets), or not drawn and why; a
 // line every two seconds. (The check mode that compared them with the
 // VU1's packets, the RG_VU1_REPLAY recordings, the oracle and the CPU mesh
 // path went in M5 of docs/NATIVE-ONLY.md: the GPU runs the programs now.)
@@ -227,7 +225,10 @@ class Monitor
 public:
 
     void native(const Program &program) { ++m_native[program.name]; }
+    // A chunk not drawn (M6: nothing runs the VU1 for a draw): declined by
+    // declineChunk, or of a program identify() does not know.
     void declined(const Program &program, const char *reason);
+    void dropped(const char *what) { ++m_declined[what]; }
     // Prints the line when it is due.
     void tick();
 
