@@ -2273,8 +2273,7 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 
 bool modelOnGpu(const Program &program)
 {
-    return program.kind == Kind::Strip && hasMesh(program) && !program.rawFloats && !program.rawColor &&
-           !program.affine;
+    return program.kind == Kind::Strip && hasMesh(program) && !program.rawColor && !program.affine;
 }
 
 namespace
@@ -2346,13 +2345,18 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
     for (uint32_t k = 0; k < s.count; ++k)
     {
         dq8::gfx::native::ModelInput &v = out[k];
+        // The float-skinning Bs take the EE's floats as they are.
+        const auto value = [&](uint32_t q, uint32_t lane) {
+            const int32_t word = vu.word(q, lane);
+            return program.rawFloats ? fromBits(static_cast<uint32_t>(word)) : float(word);
+        };
         for (uint32_t i = 0; i < 3u; ++i)
         {
-            v.position[i] = float(vu.word(s.positions + k, i));
-            v.normal[i] = float(vu.word(s.normals + k, i));
+            v.position[i] = value(s.positions + k, i);
+            v.normal[i] = value(s.normals + k, i);
         }
-        v.uv[0] = float(vu.word(s.uvs + k, 0));
-        v.uv[1] = float(vu.word(s.uvs + k, 1));
+        v.uv[0] = value(s.uvs + k, 0);
+        v.uv[1] = value(s.uvs + k, 1);
         for (uint32_t i = 0; i < 4u; ++i)
             v.color[i] = float(vu.word(s.colors + k, i));
         for (uint32_t b = 0; b < 4u; ++b)
@@ -2414,7 +2418,8 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
     put(0, q77.x, q77.y, q77.z, float(static_cast<uint32_t>(program.color)));
     put(1, q78.x, q78.y, q78.z, float(static_cast<uint32_t>(program.uv)));
     put(2, q79.x, q79.y, float(s.bones),
-        float((program.white ? 1u : 0u) | ((flags87 & 0x100u) ? 2u : 0u) | (program.skinNormals ? 4u : 0u)));
+        float((program.white ? 1u : 0u) | ((flags87 & 0x100u) ? 2u : 0u) | (program.skinNormals ? 4u : 0u) |
+              (program.rawFloats ? 8u : 0u)));
     // The base color (readChunk's): the material times 42 and the ambient
     // 83, or with 87.y & 0x200 the material times 43.
     Vec4 material = vu.quad(82);

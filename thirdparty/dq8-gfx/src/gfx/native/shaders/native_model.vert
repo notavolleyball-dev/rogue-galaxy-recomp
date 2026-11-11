@@ -74,7 +74,8 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //  1: quad 78 (normal scale), w: the F piece (Uv: 0 plain, 1 sphere map,
 //     2 reflection, 3 swell, 4 beam, 5 ramp, 6 wave)
 //  2: quad 79 (UV scale) xy, z: the bones (0: not skinned), w: flags (1
-//     white, 2 87.y & 0x100, 4 skin the normals)
+//     white, 2 87.y & 0x100, 4 skin the normals, 8 the inputs are floats:
+//     the position, normal and UV taken as they are)
 //  3: the base color; 4-6: the lights' directions (quads 100-102, lane i
 //     light i); 7-10: their colors times the material; 11: the ambient
 //  12-15: the point lights' positions (w: falloff); 16-19: their colors
@@ -160,8 +161,20 @@ float vuSin(float x) {
 
 // B, then the F pieces that move positions (the wave, the swell): a corner's
 // object-space position.
+bool floats() {
+    return (uint(M.q[2].w) & 8u) != 0u;
+}
+
+vec3 decodeNormal(vec3 raw) {
+    if (floats())
+        return raw;
+    precise vec3 n = vec3(itof15(raw.x) * M.q[1].x, itof15(raw.y) * M.q[1].y, itof15(raw.z) * M.q[1].z);
+    return n;
+}
+
 vec3 position(vec3 raw, vec4 bones, vec4 weights, vec3 rawNormal) {
-    precise vec3 p = vec3(itof15(raw.x) * M.q[0].x, itof15(raw.y) * M.q[0].y, itof15(raw.z) * M.q[0].z);
+    precise vec3 p = floats() ? raw
+                              : vec3(itof15(raw.x) * M.q[0].x, itof15(raw.y) * M.q[0].y, itof15(raw.z) * M.q[0].z);
     int count = int(M.q[2].z);
     if (count > 0)
         p = skin(p, bones, weights, count, true);
@@ -179,8 +192,7 @@ vec3 position(vec3 raw, vec4 bones, vec4 weights, vec3 rawNormal) {
         p.y = ny;
     } else if (uv == 3u) {
         // The swell: pushed out along the normal, fading with depth.
-        precise vec3 n = vec3(itof15(rawNormal.x) * M.q[1].x, itof15(rawNormal.y) * M.q[1].y,
-                              itof15(rawNormal.z) * M.q[1].z);
+        precise vec3 n = decodeNormal(rawNormal);
         if (count > 0 && (uint(M.q[2].w) & 4u) != 0u)
             n = skin(n, bones, weights, count, false);
         vec4 lane = M.q[36];
@@ -242,7 +254,7 @@ void main() {
     uint flags = uint(M.q[2].w);
 
     // The UV: the scaled int, or what F makes of it.
-    precise vec2 uv = vec2(itof15(inUv.x) * M.q[2].x, itof15(inUv.y) * M.q[2].y);
+    precise vec2 uv = floats() ? inUv : vec2(itof15(inUv.x) * M.q[2].x, itof15(inUv.y) * M.q[2].y);
     // The color: the base, times the vertex color for C 0.
     vec4 base = M.q[3];
     precise vec4 cv = vec4(itof15(inColor.x), itof15(inColor.y), itof15(inColor.z), itof15(inColor.w)) * 256.0;
@@ -263,8 +275,7 @@ void main() {
     bool lit = colorKind >= 2u;
     bool normals = lit || uvKind == 1u || uvKind == 2u || uvKind == 5u || uvKind == 3u;
     if (normals) {
-        precise vec3 n = vec3(itof15(inNormal.x) * M.q[1].x, itof15(inNormal.y) * M.q[1].y,
-                              itof15(inNormal.z) * M.q[1].z);
+        precise vec3 n = decodeNormal(inNormal);
         if (count > 0 && (flags & 4u) != 0u)
             n = skin(n, bones, weights, count, false);
         if (lit) {
