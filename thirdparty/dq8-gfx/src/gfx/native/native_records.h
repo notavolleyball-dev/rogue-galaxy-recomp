@@ -385,6 +385,11 @@ enum class PassKind : uint8_t
     // refraction's picture).
     Capture,
     TexAnime,
+    // FocusFilterDrawMaybe: work A, A', C, C' (two pairs of partners).
+    // params: 0-3 four depths (the renderer's), 4-7 the alpha the frame
+    // gets where the scene is behind each, 8 the first blur's lerp, 9 the
+    // mask's color, 10 the composite's alpha, 11-12 the blurs' offsets in
+    // pixels.
     Focus,
     // ShadowMapBlur: work[0] the shadow map, work[1] its partner. params: 0
     // the first copy's color, 1 the blur's, 2-9 the four offsets (x, y) in

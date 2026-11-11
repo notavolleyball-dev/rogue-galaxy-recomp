@@ -10,6 +10,7 @@
 
 #include "gfx/native/native_pipeline.h"
 
+#include "native_effects.h"
 #include "native_producer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -70,7 +71,10 @@ void setFrameFromDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t desc = getRegU32(ctx, 5);
     if (desc != 0u)
+    {
         declare(readAt<uint64_t>(desc + 0x38u), 0, readAt<int16_t>(desc + 4u), kAuto);
+        rg::nativefx::noteFrameDesc(desc);
+    }
     g_setFrameFromDescOriginal(rdram, ctx, runtime);
 }
 

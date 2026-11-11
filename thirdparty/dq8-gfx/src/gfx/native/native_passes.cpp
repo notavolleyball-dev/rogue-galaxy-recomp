@@ -485,6 +485,119 @@ bool Renderer::expandPass(const Pass &pass)
         }
         return true;
     }
+    case PassKind::Focus:
+    {
+        // FocusFilterDrawMaybe_17c000: the frame's alpha as a mask by depth
+        // band, the frame blurred twice (into A by lerps, into C by adds,
+        // C's red and green its blue and alpha: the mask blurred), A's alpha
+        // C's, A laid over the frame by its alpha.
+        const Id frame = pass.frame, a = pass.work[0], a2 = pass.work[1], c = pass.work[2], c2 = pass.work[3];
+        const Id depth = pass.depth;
+        float fw = 0.0f, fh = 0.0f, aw = 0.0f, ah = 0.0f, cw = 0.0f, ch = 0.0f, t0 = 0.0f, t1 = 0.0f;
+        if (!size(frame, fw, fh) || !size(a, aw, ah) || !size(c, cw, ch) || !size(a2, t0, t1) ||
+            !size(c2, t0, t1) || depth == 0u)
+            return false;
+        const Id scratch = passScratch(4u, c);
+        if (scratch == 0u)
+            return false;
+        const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float frameRect[4] = {0.0f, 0.0f, fw, fh};
+        // 1. The frame's alpha: 1, then each band's where the scene is
+        // behind its depth.
+        {
+            Material m = spriteMaterial();
+            m.colorWrite = 0x8u;
+            passRect(frame, 0u, frameRect, none, 1.0f, m);
+            for (int i = 0; i < 4; ++i)
+            {
+                Material band = m;
+                band.depthTest = Compare::GreaterEqual;
+                const float rgba[4] = {0.0f, 0.0f, 0.0f, pass.params[4 + i]};
+                passRect(frame, 0u, frameRect, none, rgba, band);
+                MeshDraw &d = m_meshes.back();
+                d.depthTarget = depth;
+                for (Vertex &v : d.vertices)
+                    v.position[2] = pass.params[i];
+            }
+        }
+        // 2. The frame into A and into C, half a pixel up and left; C's
+        // color the mask (Cs Ad), its alpha 1; then their partners copied.
+        {
+            const float intoA[4] = {-0.5f, -0.5f, aw - 0.5f, ah - 0.5f};
+            const float intoC[4] = {-0.5f, -0.5f, cw - 0.5f, ch - 0.5f};
+            passRect(a, frame, intoA, frameRect, 1.0f, spriteMaterial());
+            passRect(c, frame, intoC, frameRect, 1.0f, spriteMaterial());
+            Material mask = spriteMaterial();
+            mask.blending = true;
+            mask.srcFactor = BlendFactor::DstAlpha;
+            mask.dstFactor = BlendFactor::Zero;
+            const float wholeC[4] = {0.0f, 0.0f, cw, ch};
+            passRect(c, 0u, wholeC, none, pass.params[9], mask);
+            Material plain = spriteMaterial();
+            plain.linear = false;
+            const float wholeA[4] = {0.0f, 0.0f, aw, ah};
+            passRect(a2, a, wholeA, wholeA, 1.0f, plain);
+            passRect(c2, c, wholeC, wholeC, 1.0f, plain);
+        }
+        const float dx[4] = {0.0f, -1.0f, 0.0f, 1.0f}, dy[4] = {-1.0f, 0.0f, 1.0f, 0.0f};
+        // 3. Four rounds between A and A': each the other shifted, lerped
+        // in by params 8 (A=Cs B=Cd C=FIX D=Cd), alpha kept.
+        {
+            Material lerp = spriteMaterial();
+            lerp.blending = true;
+            lerp.srcFactor = BlendFactor::Fixed;
+            lerp.dstFactor = BlendFactor::InvFixed;
+            lerp.blendConstant = pass.params[8];
+            lerp.colorWrite = 0x7u;
+            const float uv[4] = {0.0f, 0.0f, aw, ah};
+            for (int q = 0; q < 4; ++q)
+            {
+                const Id into = (q % 2) == 0 ? a2 : a, from = (q % 2) == 0 ? a : a2;
+                const float o = pass.params[11];
+                const float rect[4] = {dx[q] * o - 0.5f, dy[q] * o - 0.5f, aw + dx[q] * o - 0.5f, ah + dy[q] * o - 0.5f};
+                passRect(into, from, rect, uv, 1.0f, lerp);
+            }
+        }
+        // 4. Four rounds between C and C', added, alpha kept.
+        {
+            Material add = additive(spriteMaterial());
+            add.colorWrite = 0x7u;
+            const float uv[4] = {0.0f, 0.0f, cw, ch};
+            for (int q = 0; q < 4; ++q)
+            {
+                const Id into = (q % 2) == 0 ? c2 : c, from = (q % 2) == 0 ? c : c2;
+                const float o = pass.params[12];
+                const float rect[4] = {dx[q] * o - 0.5f, dy[q] * o - 0.5f, cw + dx[q] * o - 0.5f, ch + dy[q] * o - 0.5f};
+                passRect(into, from, rect, uv, 1.0f, add);
+            }
+        }
+        // 5. C's red and green onto its blue and alpha (its CT16 view's
+        // copy); A's alpha C's (scaled to A); A over the frame by its alpha
+        // at params 10, the frame's alpha kept.
+        {
+            const float wholeC[4] = {0.0f, 0.0f, cw, ch};
+            Material plain = spriteMaterial();
+            plain.linear = false;
+            passRect(scratch, c, wholeC, wholeC, 1.0f, plain);
+            Material swap = plain;
+            swap.function = TextureFunction::Decal;
+            swap.shuffle = ChannelShuffle::RedGreenToBlueAlpha;
+            passRect(c, scratch, wholeC, wholeC, 1.0f, swap);
+            Material alphaOnly = spriteMaterial();
+            alphaOnly.colorWrite = 0x8u;
+            const float intoA[4] = {-0.5f, -0.5f, aw - 0.5f, ah - 0.5f};
+            passRect(a, c, intoA, wholeC, 1.0f, alphaOnly);
+            Material over = spriteMaterial();
+            over.blending = true;
+            over.srcFactor = BlendFactor::SrcAlpha;
+            over.dstFactor = BlendFactor::InvSrcAlpha;
+            over.colorWrite = 0x7u;
+            const float uv[4] = {0.0f, 0.0f, aw, ah};
+            const float rgba[4] = {1.0f, 1.0f, 1.0f, pass.params[10]};
+            passRect(frame, a, frameRect, uv, rgba, over);
+        }
+        return true;
+    }
     default:
         return false;
     }

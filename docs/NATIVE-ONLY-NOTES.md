@@ -192,7 +192,7 @@ from the code.
 - **Open:** the frame the border's line strip goes to is the one the
   environment pops back to; taken as the map (the blur follows its render).
 
-### `FocusFilterDrawMaybe_17c000` (M3, read in part)
+### `FocusFilterDrawMaybe_17c000` (M3)
 
 - **Arguments:** `a0` = an argument block: names of four buffers (A, A',
   C, C', found in the draw context's name table by name; each pair the same
@@ -206,6 +206,18 @@ from the code.
   copied into their partners (`GfxBlitTexRectPixelsAt_141810`), then blur
   rounds along `(0, -1), (-1, 0), (0, 1), (1, 0)` (the rest of the function,
   past this note, still to read) and the composite back.
-- **Needs:** a `Pass` depth target (the scene's) and Z thresholds the
-  producer turns into the renderer's depth; the pass mechanism has neither
-  yet.
+- **The rest:** four rounds between A and A' (each the other shifted by
+  `(0, -1), (-1, 0), (0, 1), (1, 0)` times 18 sixteenths, less 8), blended
+  `(Cs - Cd) FIX + Cd` with FIX 0x50, alpha kept (frame mask 1); four
+  rounds between C and C' (24 sixteenths), preset 9 (`Cs + Cd`), alpha
+  kept; C viewed as CT16 copied onto itself 8 pixels over (frame mask 3):
+  its red and green onto its blue and alpha; C into A, alpha only (frame
+  mask 2): A's alpha the blurred mask; back on the frame, A over it, preset
+  1 (`(Cs - Cd) As + Cd`), color alpha 0x40, the frame's alpha kept.
+- **The hook emits:** a `Pass` (`PassKind::Focus`). The four buffers are
+  found by name in the call, so the hook takes them from the frames the call
+  sets (`DrawEnvSetFrameFromDesc`, recorded by `native_capture.cpp`'s hook
+  while the call runs): A, C, then A' first among the rounds, C' first
+  among the second rounds.
+- **Open:** the CT16 copy under frame mask 3 is taken as the shadow map's
+  (blue = red, alpha = green).

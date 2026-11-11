@@ -393,13 +393,58 @@ constexpr uint32_t kShadowMapBlur = 0x00145B60u;
 PS2Runtime::RecompiledFunction g_focusOriginal = nullptr;
 PS2Runtime::RecompiledFunction g_shadowMapBlurOriginal = nullptr;
 
+int32_t projectDepth(float d);
+
+// The frames an effect's call sets, in order (game thread): its buffers
+// when the call finds them itself (by name, as the focus filter does).
+bool g_recordingFrames = false;
+std::vector<uint32_t> g_framesSet;
+rg::nativeproducer::PassRequest g_focusRequest; // game thread
+
 void afterFocus(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Focus);
+    g_recordingFrames = false;
+    uint32_t unit = 0u;
+    // The frames it set: A, C, then A', A, A', A, then C', C, C', C (the
+    // rounds), C's CT16 view, A (docs/NATIVE-ONLY-NOTES.md).
+    if (g_framesSet.size() >= 7u)
+    {
+        rg::nativeproducer::PassRequest request = g_focusRequest;
+        request.workBases[0] = g_framesSet[0];
+        request.workBases[1] = g_framesSet[2];
+        request.workBases[2] = g_framesSet[1];
+        request.workBases[3] = g_framesSet[6];
+        unit = keepPass(request);
+    }
+    g_framesSet.clear();
+    addRange(top, stackTop(), Effect::Focus, unit);
 }
 
+// FocusFilterDrawMaybe_17c000(arg): arg +0x84 and +0x88 the focus distances;
+// its four buffers are found by name, so they are the frames it sets.
 void focusFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t arg = getRegU32(ctx, 4);
+    rg::nativeproducer::PassRequest &request = g_focusRequest;
+    request = {};
+    request.kind = 9u; // native::PassKind::Focus
+    const float f = readFloatAt(arg + 0x84u), f2 = readFloatAt(arg + 0x88u);
+    const float distances[4] = {0.5f * f, 0.667f * f, f + 0.75f * (f - f2), f}; // 0.667: the float at 0x47D848
+    const float alphas[4] = {0.75f, 0.35f, 0.25f, 0.0f};
+    for (int i = 0; i < 4; ++i)
+    {
+        request.params[i] = float(projectDepth(distances[i]));
+        request.depthParams |= 1u << i;
+        request.params[4 + i] = float(static_cast<int32_t>(128.0f * alphas[i])) / 128.0f;
+    }
+    request.params[8] = float(0x50) / 128.0f;  // the first blur's lerp (FIX)
+    request.params[9] = float(0x3C) / 128.0f;  // the mask's color
+    request.params[10] = float(0x40) / 128.0f; // the composite's alpha
+    request.params[11] = 18.0f / 16.0f;        // the first blur's offset
+    request.params[12] = 24.0f / 16.0f;        // the second's
+    request.sceneDepth = true;
+    g_framesSet.clear();
+    g_recordingFrames = true;
     rg::hooks::callThen(g_focusOriginal, rdram, ctx, runtime, &afterFocus, stackTop());
 }
 
@@ -1718,10 +1763,17 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 }
 } // namespace
 
+void noteFrameDesc(uint32_t desc)
+{
+    if (g_recordingFrames)
+        g_framesSet.push_back(descriptorBase(desc));
+}
+
 bool isPass(Effect effect)
 {
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
-           effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof;
+           effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof ||
+           effect == Effect::Focus;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

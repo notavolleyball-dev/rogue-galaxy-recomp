@@ -146,6 +146,9 @@ void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &pack
 // packets: whether it is one, and the pass of the call whose packet range
 // carries `unit`, sent (false: not found, or its buffers unknown).
 bool isPass(Effect effect);
+// Game thread: DrawEnvSetFrameFromDesc_144fe0 was called with `desc`
+// (native_capture.cpp's hook); an effect's call in progress may record it.
+void noteFrameDesc(uint32_t desc);
 bool emitPass(Effect effect, uint32_t unit);
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit = 0u);

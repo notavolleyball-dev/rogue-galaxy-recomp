@@ -81,11 +81,11 @@ stacked PRs at the end).
   the pass into its own draws (`native_passes.cpp`). Done: glare, bloom,
   colour filter, refraction capture, the flip's copy, the shadow map's
   blur, DoF (a pass may test the scene's depth: `Pass::depth`, and GS Z
-  parameters become the renderer's depth in the producer). Left: plane
+  parameters become the renderer's depth in the producer), focus (its
+  buffers are the frames its call sets: `noteFrameDesc`). Left: plane
   shadow, object layers, CBlur (its two functions are long; read
   `CBlurTexBlurMaybe_1789e0`, `CBlurDrawMaybe_1784e0` and their helpers),
-  fades and captures, TexAnime, focus (`FocusFilterDrawMaybe_17c000`),
-  lens flare, depth probe; then delete the sprite builder
+  fades and captures, TexAnime, lens flare, depth probe; then delete the sprite builder
   (`native_effects.cpp`'s `build`, `native_effect.h`, the producer's
   `effect()`), the `RG_NATIVE_<EFFECT>` switches and the green-to-alpha
   shuffle once CBlur no longer needs it. Each gets a note in
