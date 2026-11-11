@@ -211,6 +211,11 @@ private:
     // A target of the renderer's own for a pass (a ping-pong partner),
     // declared like `like` the first time.
     Id passScratch(uint32_t slot, Id like);
+    // CT16 texels (PixelFormat::Ct16) as the device samples them, and their
+    // bytes for it (native_pipeline.cpp).
+    SDL_GPUTextureFormat ct16Format(SDL_GPUDevice *device);
+    Bytes ct16Texels(SDL_GPUDevice *device, const Bytes &raw, size_t count);
+    int m_ct16Native = -1;
     uint64_t m_passesDrawn = 0, m_passesRefused = 0;
     SDL_GPUTexture *createTexture(SDL_GPUDevice *device, SDL_GPUTextureFormat format, uint32_t width,
                                   uint32_t height, std::string &error);
@@ -283,7 +288,7 @@ private:
         float blend[4];
         float fogColor[4];
         float texa[4];
-        float offset[4]; // xy: Material::texelOffset
+        float offset[4]; // xy: Material::texelOffset; zw: texaLow, texaHigh
         // A retained mesh's cull and colour cap (native_mesh_static.vert).
         float cullMatrix[16];
         float bandScale[4];

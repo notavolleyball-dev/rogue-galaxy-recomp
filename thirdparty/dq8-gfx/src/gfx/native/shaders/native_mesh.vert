@@ -21,7 +21,8 @@ struct DrawRow {
     vec4 depthRow; // the depth times w from the position, made in double (scaled and biased)
     vec4 depthLimit; // x: MeshDraw::depthCap; y: 1 when it applies
     // The fragment stage's.
-    // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
+    // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target,
+    // 4 CT16, 5 Index8 through a CT16 palette
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries

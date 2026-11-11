@@ -19,7 +19,8 @@ struct DrawRow {
     vec4 depthRow; // the depth times w from the position, made in double (scaled and biased)
     vec4 depthLimit; // x: MeshDraw::depthCap; y: 1 when it applies
     // The fragment stage's.
-    // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
+    // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target,
+    // 4 CT16, 5 Index8 through a CT16 palette
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries
@@ -39,7 +40,9 @@ struct DrawRow {
     // destination alpha test, 0 none, 1 drawn where the target's alpha is
     // below 1, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
-    // xy: subtracted from the texel coordinate (Material::texelOffset).
+    // xy: subtracted from the texel coordinate (Material::texelOffset);
+    // zw: a CT16 texel's alpha without and with its alpha bit (TEXA's TA0
+    // and TA1).
     vec4 offset;
     // A retained mesh's cull (native_mesh_static.vert): the program's matrix
     // to GS window coordinates, its guard band, x: the winding sign, y: the
@@ -97,7 +100,9 @@ void main() {
     if (material.mode.x != 0u) {
         vec4 t;
         vec2 texel = inUv * material.size.xy - material.offset.xy; // in texels
-        if (material.mode.x == 2u) {
+        bool indexed = material.mode.x == 2u || material.mode.x == 5u;
+        bool ct16 = material.mode.x >= 4u;
+        if (indexed) {
             // Fetched, not filtered: an index is not a color.
             ivec2 size = ivec2(material.size.zw);
             ivec2 at = ivec2(floor(texel));
@@ -108,9 +113,20 @@ void main() {
         } else {
             t = texture(image, texel / material.size.zw);
         }
-        t *= material.units.x;
-        if (material.texa.x >= 0.0)
-            t.a = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.texa.x;
+        if (ct16) {
+            // The GS's CT16 as B5G5R5A1 reads it: its red in blue. The
+            // channels widened by a shift (units.x), the alpha TEXA's: TA1
+            // with the bit, TA0 without, 0 for black with AEM (filtered
+            // between them as the GS filters the expanded texels).
+            float bit = t.a;
+            t.rgb = t.bgr * material.units.x;
+            float low = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.offset.z;
+            t.a = mix(low, material.offset.w, bit);
+        } else {
+            t *= material.units.x;
+            if (material.texa.x >= 0.0)
+                t.a = (material.texa.y != 0.0 && t.rgb == vec3(0.0)) ? 0.0 : material.texa.x;
+        }
         if (material.blend.x == 1.0) {
             // As bytes of `units.w` a unit: alpha's bits 2-7 from green's.
             float k = material.units.w;

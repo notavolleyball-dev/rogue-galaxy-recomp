@@ -55,6 +55,17 @@ constexpr uint32_t kCT32 = 0x00u, kCT16 = 0x02u, kCT16S = 0x0Au, kT8 = 0x13u, kT
 // clamps a color to its 0xFF, and its 0xFF is white on the screen.
 constexpr float kUnit = 1.0f / 128.0f;
 constexpr float kTexelScale = 255.0f / 128.0f;
+// CT16's 5-bit channels, sampled as UNORM (v / 31), are worth v * 8 / 128
+// (the GS widens them by a shift).
+constexpr float kCt16Scale = 31.0f * 8.0f / 128.0f;
+uint32_t texelBytes(native::PixelFormat f)
+{
+    return f == native::PixelFormat::Index8 ? 1u : f == native::PixelFormat::Ct16 ? 2u : 4u;
+}
+float texelScale(native::PixelFormat f)
+{
+    return f == native::PixelFormat::Ct16 ? kCt16Scale : kTexelScale;
+}
 constexpr float kColorClamp = 255.0f / 128.0f;
 constexpr float kFogUnit = 1.0f / 255.0f; // the GS's fog factor F, 0 to 255
 
@@ -183,16 +194,14 @@ struct State
     // drawn at another, which the GS's pages fold.
     std::unordered_map<uint32_t, native::Target> views;          // viewKey -> as declared
     std::unordered_map<uint32_t, std::vector<uint32_t>> viewWidths; // base -> widths with a view
-    // RG_NATIVE_TEXTURE_DUMP: the records' contents kept, to write out.
     struct Kept
     {
         std::shared_ptr<std::vector<uint8_t>> data;
         uint32_t width = 0u, height = 0u;
-        bool indexed = false;
+        native::PixelFormat format = native::PixelFormat::Rgba8;
         native::Id palette = 0u; // the record's own, for one sent again
     };
-    std::unordered_map<native::Id, Kept> keptTextures, keptPalettes;
-    // Every live texture record's texels (a byte a texel, or RGBA8), for
+    // Every live texture record's texels (as its format has them), for
     // local copies (mirrorCopy) and for a record the renderer evicted that
     // GS memory still holds (forgetEvicted sends it again); forgotten with
     // the renderer's other evictions.
@@ -532,7 +541,8 @@ void forgetEvicted(State &s)
             record.id = id;
             record.width = static_cast<uint16_t>(kept->second.width);
             record.height = static_cast<uint16_t>(kept->second.height);
-            record.format = kept->second.indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
+            record.format = kept->second.format;
+            record.scale = texelScale(record.format);
             record.palette = kept->second.palette;
             record.texels = kept->second.data;
             native::push(std::move(record));
@@ -556,9 +566,10 @@ uint8_t expand5(uint32_t v)
     return static_cast<uint8_t>((v & 31u) << 3);
 }
 
-// A CT16 texel as RGBA8 with the game's alpha: A set reads as 0x80. (The GS
-// takes TEXA's TA1 and TA0 for set and clear; the game's are 0x80 and 0 where
-// it uses CT16, not yet read from its TEXA.)
+// A CT16 texel as RGBA8 with the game's alpha, A set as 0x80: only for the
+// texture packs' palette hash, which PCSX2 takes of the CLUT expanded so.
+// (Drawn, CT16 stays as the game has it: the renderer's shader expands it
+// with the draw's TEXA.)
 void ct16(uint16_t v, uint8_t *out)
 {
     out[0] = expand5(v);
@@ -678,10 +689,8 @@ native::Id textureRecord(State &s, const TextureLevel &l, size_t bytes, uint64_t
     }
     else if (psm == kCT16 || psm == kCT16S)
     {
-        record.format = native::PixelFormat::Rgba8;
-        out->resize(texels * 4u);
-        for (size_t i = 0; i < texels; ++i)
-            ct16(uint16_t(l.ram[i * 2u] | (l.ram[i * 2u + 1u] << 8)), out->data() + i * 4u);
+        record.format = native::PixelFormat::Ct16;
+        out->assign(l.ram, l.ram + texels * 2u);
     }
     else if (l.preSwizzled)
     {
@@ -709,15 +718,12 @@ native::Id textureRecord(State &s, const TextureLevel &l, size_t bytes, uint64_t
         for (size_t i = 0; i < texels; ++i)
             (*out)[i] = (l.ram[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
     }
+    record.scale = texelScale(record.format);
     lock.lock();
     if (psm == kT8 || psm == kT4)
         record.palette = palette ? *palette : (s.paletteAt.count(l.cbp) ? s.paletteAt[l.cbp] : 0u);
     const native::Id id = record.id = s.nextTexture++;
-    if (dumpingTextures())
-        s.keptTextures[record.id] = {out, record.width, record.height,
-                                     record.format == native::PixelFormat::Index8};
-    s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8,
-                           record.palette};
+    s.texels[record.id] = {out, record.width, record.height, record.format, record.palette};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
@@ -758,23 +764,22 @@ native::Id paletteRecord(State &s, const uint8_t *ram, uint32_t cbp, uint32_t cp
         }
         return known->second;
     }
-    auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
+    // CT16 entries stay as the game has them (the shader expands them with
+    // the draw's TEXA).
+    const uint32_t entryBytes = is16 ? 2u : 4u;
+    auto colors = std::make_shared<std::vector<uint8_t>>(entries * entryBytes);
     for (uint32_t i = 0; i < entries; ++i)
     {
         // CSM1: a 256-entry palette's entries 8-15 and 16-23 of each 32 are
         // stored swapped.
         const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
-        if (is16)
-            ct16(uint16_t(ram[at * 2u] | (ram[at * 2u + 1u] << 8)), colors->data() + i * 4u);
-        else
-            std::copy_n(ram + at * 4u, 4u, colors->data() + i * 4u);
+        std::copy_n(ram + at * entryBytes, entryBytes, colors->data() + i * entryBytes);
     }
     native::Palette record;
-    record.scale = kTexelScale;
+    record.format = is16 ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
+    record.scale = texelScale(record.format);
     const native::Id id = record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
-    if (dumpingTextures())
-        s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
     s.paletteColors[record.id] = colors;
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
@@ -1229,21 +1234,18 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
             id = known->second;
         else
         {
-            auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
+            const uint32_t entryBytes = is16 ? 2u : 4u;
+            auto colors = std::make_shared<std::vector<uint8_t>>(entries * entryBytes);
             for (uint32_t i = 0; i < entries; ++i)
             {
                 const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
-                if (is16)
-                    ct16(uint16_t(data[at * 2u] | (data[at * 2u + 1u] << 8)), colors->data() + i * 4u);
-                else
-                    std::copy_n(data + at * 4u, 4u, colors->data() + i * 4u);
+                std::copy_n(data + at * entryBytes, entryBytes, colors->data() + i * entryBytes);
             }
             native::Palette record;
-            record.scale = kTexelScale;
+            record.format = is16 ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
+            record.scale = texelScale(record.format);
             record.id = id = s.nextPalette++;
             record.entries = static_cast<uint16_t>(entries);
-            if (dumpingTextures())
-                s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
             s.paletteColors[record.id] = colors;
             record.colors = std::move(colors);
             s.paletteIds[key] = record.id;
@@ -1269,10 +1271,8 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
     }
     else if ((dpsm == kCT16 || dpsm == kCT16S) && bytes >= texels * 2u)
     {
-        record.format = native::PixelFormat::Rgba8;
-        out->resize(texels * 4u);
-        for (size_t i = 0; i < texels; ++i)
-            ct16(uint16_t(data[i * 2u] | (data[i * 2u + 1u] << 8)), out->data() + i * 4u);
+        record.format = native::PixelFormat::Ct16;
+        out->assign(data, data + texels * 2u);
     }
     else if (dpsm == kT8 && bytes >= texels)
     {
@@ -1296,11 +1296,9 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
     {
         record.width = static_cast<uint16_t>(width);
         record.height = static_cast<uint16_t>(height);
+        record.scale = texelScale(record.format);
         record.id = id = s.nextTexture++;
-        if (dumpingTextures())
-            s.keptTextures[record.id] = {out, record.width, record.height,
-                                         record.format == native::PixelFormat::Index8};
-        s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8};
+        s.texels[record.id] = {out, record.width, record.height, record.format};
         record.texels = std::move(out);
         s.textureIds[key] = record.id;
         s.textureKeys[record.id] = key;
@@ -1535,6 +1533,26 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
 // Locked. The material the draw state means; false where some part of it
 // has no exact meaning here (counted by reason).
 } // namespace
+
+namespace
+{
+// Whether a draw reads CT16 texels: a CT16 texture, or a palette of CT16
+// entries. Their alpha is the draw's TEXA, applied by the shader.
+bool ct16Read(uint32_t psm, uint32_t cpsm)
+{
+    psm &= 0x3Fu;
+    cpsm &= 0x3Fu;
+    const bool is16 = psm == kCT16 || psm == kCT16S;
+    return is16 || (indexedPsm(psm) && (cpsm == kCT16 || cpsm == kCT16S));
+}
+
+void texa16(native::Material &m, const GSTexaReg &texa)
+{
+    m.texaLow = float(texa.ta0) * kUnit;
+    m.texaHigh = float(texa.ta1) * kUnit;
+    m.alphaZeroOnBlack = texa.aem;
+}
+} // namespace
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
 void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m);
 void cutRegion(State &s, uint64_t clamp, native::Material &m);
@@ -1576,6 +1594,8 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
             m.sourceAlpha = float(state.texa.ta0) * kUnit;
             m.alphaZeroOnBlack = state.texa.aem;
         }
+        else if (ct16Read(t.psm, t.cpsm))
+            texa16(m, state.texa);
         else if (m.sourceTarget && (t.psm & 0x3Fu) != 0x00u)
             known = false; // a target read in another format: not modelled
         m.textureWidth = static_cast<uint16_t>(1u << std::min<uint32_t>(t.tw, 10u));
@@ -2257,18 +2277,15 @@ native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg 
         return made.id;
     const uint32_t stride = image.dbw * 64u;
     const uint32_t bytesPer = psm == kCT32 ? 4u : (psm == kCT16 || psm == kCT16S) ? 2u : 1u;
-    const bool rgba = bytesPer > 1u;
-    auto out = std::make_shared<std::vector<uint8_t>>(size_t(width) * height * (rgba ? 4u : 1u), uint8_t(0));
+    const native::PixelFormat format = bytesPer == 4u   ? native::PixelFormat::Rgba8
+                                       : bytesPer == 2u ? native::PixelFormat::Ct16
+                                                        : native::PixelFormat::Index8;
+    auto out = std::make_shared<std::vector<uint8_t>>(size_t(width) * height * bytesPer, uint8_t(0));
     for (uint32_t y = 0; y < height && y < image.height; ++y)
     {
         const uint8_t *row = image.pixels.data() + size_t(y) * stride * bytesPer;
-        uint8_t *dst = out->data() + size_t(y) * width * (rgba ? 4u : 1u);
-        const uint32_t n = std::min(width, stride);
-        if (bytesPer == 2u)
-            for (uint32_t x = 0; x < n; ++x)
-                ct16(uint16_t(row[x * 2u] | (row[x * 2u + 1u] << 8)), dst + x * 4u);
-        else
-            std::memcpy(dst, row, size_t(n) * bytesPer);
+        uint8_t *dst = out->data() + size_t(y) * width * bytesPer;
+        std::memcpy(dst, row, size_t(std::min(width, stride)) * bytesPer);
     }
     const uint64_t hash = imageHash(out->data(), out->size());
     s.counts.bytesHashed += out->size();
@@ -2281,15 +2298,12 @@ native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg 
         return made.id;
     }
     native::Texture record;
-    record.scale = kTexelScale;
+    record.format = format;
+    record.scale = texelScale(format);
     record.width = static_cast<uint16_t>(width);
     record.height = static_cast<uint16_t>(height);
-    record.format = rgba ? native::PixelFormat::Rgba8 : native::PixelFormat::Index8;
     record.id = s.nextTexture++;
-    if (dumpingTextures())
-        s.keptTextures[record.id] = {out, record.width, record.height,
-                                     record.format == native::PixelFormat::Index8};
-    s.texels[record.id] = {out, record.width, record.height, record.format == native::PixelFormat::Index8};
+    s.texels[record.id] = {out, record.width, record.height, record.format};
     record.texels = std::move(out);
     s.textureIds[key] = record.id;
     s.textureKeys[record.id] = key;
@@ -2313,16 +2327,13 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
     State::HostRecord &made = s.hostPalettes[read];
     if (made.id != 0u && made.version == image.version)
         return made.id;
-    auto colors = std::make_shared<std::vector<uint8_t>>(entries * 4u);
+    const uint32_t entryBytes = is16 ? 2u : 4u;
+    auto colors = std::make_shared<std::vector<uint8_t>>(entries * entryBytes);
     for (uint32_t i = 0; i < entries; ++i)
     {
         const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
         const size_t texel = size_t(at / columns) * stride + at % columns;
-        const uint8_t *src = image.pixels.data() + texel * (is16 ? 2u : 4u);
-        if (is16)
-            ct16(uint16_t(src[0] | (src[1] << 8)), colors->data() + i * 4u);
-        else
-            std::copy_n(src, 4u, colors->data() + i * 4u);
+        std::copy_n(image.pixels.data() + texel * entryBytes, entryBytes, colors->data() + i * entryBytes);
     }
     const uint64_t hash = imageHash(colors->data(), colors->size());
     made.version = image.version;
@@ -2333,11 +2344,10 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
         return made.id;
     }
     native::Palette record;
-    record.scale = kTexelScale;
+    record.format = is16 ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
+    record.scale = texelScale(record.format);
     record.id = s.nextPalette++;
     record.entries = static_cast<uint16_t>(entries);
-    if (dumpingTextures())
-        s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
     s.paletteColors[record.id] = colors;
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
@@ -2522,7 +2532,7 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
         return;
     const uint32_t psm = t.psm & 0x3Fu;
     const auto tex = s.texels.find(m.texture);
-    if (tex == s.texels.end() || !tex->second.indexed || !tex->second.data)
+    if (tex == s.texels.end() || tex->second.format != native::PixelFormat::Index8 || !tex->second.data)
         return;
     const uint32_t width = tex->second.width, height = tex->second.height;
     if (!rg::pcsx2::hashable(psm, width, height) || width != (1u << std::min<uint32_t>(t.tw, 10u)) ||
@@ -2530,7 +2540,7 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
         return;
     const uint32_t entries = psm == kT4 ? 16u : 256u;
     const auto colors = s.paletteColors.find(m.palette);
-    if (colors == s.paletteColors.end() || !colors->second || colors->second->size() < entries * 4u)
+    if (colors == s.paletteColors.end() || !colors->second || colors->second->size() < entries * 2u)
         return;
     if (const uint64_t generation = rg::texturePack::generation(); generation != s.packGeneration)
     {
@@ -2543,14 +2553,25 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
     if (!w.hashed)
     {
         w.hashed = true;
+        // PCSX2 hashes the CLUT expanded to RGBA8; a CT16 one is kept as
+        // the game has it.
+        std::vector<uint8_t> expanded;
+        const std::vector<uint8_t> *rgba = colors->second.get();
+        if (rgba->size() < entries * 4u)
+        {
+            expanded.resize(entries * 4u);
+            for (uint32_t i = 0; i < entries; ++i)
+                ct16(uint16_t((*rgba)[i * 2u] | ((*rgba)[i * 2u + 1u] << 8)), expanded.data() + i * 4u);
+            rgba = &expanded;
+        }
         w.texels = rg::pcsx2::texelHash(tex->second.data->data(), width, height, psm);
         const auto known = s.clutHashes.find(m.palette);
         w.clut = known != s.clutHashes.end() ? known->second
                                               : (s.clutHashes[m.palette] =
-                                                     rg::pcsx2::clutHash(colors->second->data(), entries));
+                                                     rg::pcsx2::clutHash(rgba->data(), entries));
         ++s.counts.wholesAsked;
         if (dumping && s.dumped.insert(w.texels * 1099511628211ull ^ w.clut).second)
-            dumpWhole(tex->second.data->data(), *colors->second, entries, width, height, psm, w.texels, w.clut);
+            dumpWhole(tex->second.data->data(), *rgba, entries, width, height, psm, w.texels, w.clut);
     }
     if (w.id == 0u && !w.none)
     {
@@ -2623,7 +2644,7 @@ void cutRegion(State &s, uint64_t clamp, native::Material &m)
     // Copied: the table may grow below.
     const State::Kept from = source->second;
     const uint32_t width = from.width, height = from.height;
-    const size_t texel = from.indexed ? 1u : 4u;
+    const size_t texel = texelBytes(from.format);
     if (width == 0u || height == 0u || from.data->size() < size_t(width) * height * texel)
     {
         ++s.counts.unknownClamp;
@@ -2665,13 +2686,13 @@ void cutRegion(State &s, uint64_t clamp, native::Material &m)
             std::memcpy(out->data() + (y * columns.size() + x) * texel,
                         from.data->data() + (size_t(rows[y]) * width + columns[x]) * texel, texel);
     native::Texture record;
-    record.scale = kTexelScale;
+    record.format = from.format;
+    record.scale = texelScale(record.format);
     record.id = s.nextTexture++;
-    record.format = from.indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
     record.width = static_cast<uint16_t>(columns.size());
     record.height = static_cast<uint16_t>(rows.size());
     record.palette = from.palette;
-    s.texels[record.id] = {out, record.width, record.height, from.indexed, from.palette};
+    s.texels[record.id] = {out, record.width, record.height, from.format, from.palette};
     record.texels = std::move(out);
     s.cuts[key] = record.id;
     s.cutOf[record.id] = key;
@@ -2755,7 +2776,7 @@ Plane planeAt(State &s, uint32_t base, uint32_t psm, uint32_t bufferWidth)
         p.kept = kept;
         p.stride = kept->width;
         p.height = kept->height;
-        p.bytesPer = kept->indexed ? 1u : 4u;
+        p.bytesPer = texelBytes(kept->format);
     }
     return p;
 }
@@ -2830,7 +2851,7 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
             std::memcpy(out->data() + at, rect.data() + size_t(y) * w * bpp, size_t(w) * bpp);
     }
     const uint32_t texW = to.kept->width, texH = to.kept->height;
-    const bool indexed = to.kept->indexed;
+    const native::PixelFormat format = to.kept->format;
     auto resident = s.residentTexture.find(dbp);
     const uint64_t hash = imageHash(out->data(), out->size());
     const uint64_t key = keyOf(hash, dpsm | 0x400u, texW, texH);
@@ -2840,14 +2861,12 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
     else
     {
         native::Texture record;
-        record.scale = kTexelScale;
+        record.format = format;
+        record.scale = texelScale(format);
         record.width = static_cast<uint16_t>(texW);
         record.height = static_cast<uint16_t>(texH);
-        record.format = indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
         record.id = id = s.nextTexture++;
-        if (dumpingTextures())
-            s.keptTextures[record.id] = {out, record.width, record.height, indexed};
-        s.texels[record.id] = {out, record.width, record.height, indexed};
+        s.texels[record.id] = {out, record.width, record.height, format};
         record.texels = std::move(out);
         s.textureIds[key] = record.id;
         s.textureKeys[record.id] = key;
@@ -3056,6 +3075,8 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             m.alphaZeroOnBlack = drawState->texa.aem;
             ++s.counts.piecesCt24;
         }
+        else if (m.texture && ct16Read(c.tex0.psm, c.tex0.cpsm))
+            texa16(m, drawState->texa);
         else if (m.sourceTarget && (c.tex0.psm & 0x3Fu) != 0x00u)
         {
             known = false;

@@ -541,6 +541,10 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
                     bytes = uint64_t(r.width) * r.height;
                     break;
+                case PixelFormat::Ct16:
+                    format = ct16Format(device);
+                    bytes = uint64_t(r.width) * r.height * 2u;
+                    break;
                 case PixelFormat::Bc1:
                     format = SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
                     bytes = blocks * 8u;
@@ -579,7 +583,8 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                                        r.logicalHeight, r.scale};
                 m_imageOrder.push_back(r.id);
                 m_imageBytes += bytes;
-                m_uploads.push_back({texture, r.width, r.height, r.texels});
+                m_uploads.push_back({texture, r.width, r.height,
+                                     r.format == PixelFormat::Ct16 ? ct16Texels(device, r.texels, bytes / 2u) : r.texels});
                 m_recent.erase(std::remove(m_recent.begin(), m_recent.end(), r.id), m_recent.end());
                 m_recent.push_front(r.id);
                 if (m_recent.size() > kViewColumns * kViewRows)
@@ -594,24 +599,58 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             }
             else if constexpr (std::is_same_v<T, Palette>)
             {
+                const bool ct16 = r.format == PixelFormat::Ct16;
+                const uint32_t entryBytes = ct16 ? 2u : 4u;
                 if (r.id == 0u || (r.entries != 16u && r.entries != 256u) || !r.colors ||
-                    r.colors->size() < r.entries * 4u)
+                    r.colors->size() < r.entries * entryBytes)
                 {
                     ++m_refused;
                     return;
                 }
-                SDL_GPUTexture *texture =
-                    createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, r.entries, 1u, error);
+                SDL_GPUTexture *texture = createTexture(
+                    device, ct16 ? ct16Format(device) : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, r.entries, 1u, error);
                 if (!texture)
                     return;
                 if (const auto old = m_palettes.find(r.id); old != m_palettes.end())
                     SDL_ReleaseGPUTexture(device, old->second.texture);
-                m_palettes[r.id] = Image{texture, PixelFormat::Rgba8, r.entries, 1u, 0u, r.entries * 4u, 0u, 0u, r.scale};
-                m_uploads.push_back({texture, r.entries, 1u, r.colors});
+                m_palettes[r.id] =
+                    Image{texture, r.format, r.entries, 1u, 0u, r.entries * entryBytes, 0u, 0u, r.scale};
+                m_uploads.push_back({texture, r.entries, 1u, ct16 ? ct16Texels(device, r.colors, r.entries) : r.colors});
             }
             // The rest is drawn from step 4 on; counted above.
         },
         record);
+}
+
+SDL_GPUTextureFormat Renderer::ct16Format(SDL_GPUDevice *device)
+{
+    if (m_ct16Native < 0)
+        m_ct16Native = SDL_GPUTextureSupportsFormat(device, SDL_GPU_TEXTUREFORMAT_B5G5R5A1_UNORM,
+                                                    SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER)
+                           ? 1
+                           : 0;
+    return m_ct16Native ? SDL_GPU_TEXTUREFORMAT_B5G5R5A1_UNORM : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+}
+
+Bytes Renderer::ct16Texels(SDL_GPUDevice *device, const Bytes &raw, size_t count)
+{
+    // B5G5R5A1 holds the GS's texels as they are: its blue reads the GS's
+    // red (bits 0-4). Without it, the same channels as RGBA8 (blue, green,
+    // red, alpha: what B5G5R5A1 would read), so the shader is one.
+    if (ct16Format(device) == SDL_GPU_TEXTUREFORMAT_B5G5R5A1_UNORM || !raw)
+        return raw;
+    auto out = std::make_shared<std::vector<uint8_t>>(count * 4u);
+    const auto widen = [](uint32_t v) { return uint8_t(((v & 31u) * 255u + 15u) / 31u); };
+    for (size_t i = 0; i < count && i * 2u + 1u < raw->size(); ++i)
+    {
+        const uint32_t v = (*raw)[i * 2u] | ((*raw)[i * 2u + 1u] << 8);
+        uint8_t *o = out->data() + i * 4u;
+        o[0] = widen(v >> 10);
+        o[1] = widen(v >> 5);
+        o[2] = widen(v);
+        o[3] = (v & 0x8000u) ? 255u : 0u;
+    }
+    return out;
 }
 
 bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
@@ -777,12 +816,14 @@ void Renderer::drawView(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass)
         const Image &image = it->second;
         uint32_t mode[4] = {0u, 0u, 0u, 0u};
         SDL_GPUTexture *palette = image.texture;
+        if (image.format == PixelFormat::Ct16)
+            mode[0] = 3u;
         if (image.format == PixelFormat::Index8)
         {
             const auto p = m_palettes.find(image.palette);
             if (p != m_palettes.end())
             {
-                mode[0] = 1u;
+                mode[0] = p->second.format == PixelFormat::Ct16 ? 4u : 1u;
                 mode[1] = p->second.width;
                 palette = p->second.texture;
             }

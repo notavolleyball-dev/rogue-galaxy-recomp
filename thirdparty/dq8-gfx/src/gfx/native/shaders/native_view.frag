@@ -3,7 +3,8 @@
 // The native pipeline's debug view (Rogue Galaxy: added): a texture as the
 // renderer holds it. Mode 0: RGBA. Mode 1: Index8 through its palette (a
 // 16- or 256-wide row), fetched by index. Mode 2: Index8 with no palette, as
-// grey. Shown opaque: alpha is not what this view is for.
+// grey. Mode 3: CT16 (B5G5R5A1: its red read as blue). Mode 4: Index8
+// through a CT16 palette. Shown opaque: alpha is not what this view is for.
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
 layout(set = 3, binding = 0) uniform ViewMode {
@@ -19,6 +20,12 @@ void main() {
         texel = texelFetch(palette, ivec2(min(index, int(params.mode.y) - 1), 0), 0);
     } else if (params.mode.x == 2u) {
         texel = vec4(texel.rrr, 1.0);
+    } else if (params.mode.x == 3u) {
+        texel.rgb = texel.bgr;
+    } else if (params.mode.x == 4u) {
+        int index = int(texel.r * 255.0 + 0.5);
+        texel = texelFetch(palette, ivec2(min(index, int(params.mode.y) - 1), 0), 0);
+        texel.rgb = texel.bgr;
     }
     outColor = vec4(texel.rgb, 1.0);
 }

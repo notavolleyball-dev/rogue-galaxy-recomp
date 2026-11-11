@@ -31,6 +31,12 @@ enum class PixelFormat : uint8_t
 {
     Rgba8,   // 8 bits a channel, worth Texture::scale each at full
     Index8,  // palette indices, one byte each (4-bit art is widened to this)
+    // The GS's CT16 as the game has it, two bytes a texel: red in bits 0-4,
+    // green 5-9, blue 10-14, the alpha bit 15. The shader widens the
+    // channels (by a shift, as the GS: worth Texture::scale at full) and
+    // takes the alpha from the draw's TEXA (Material::texaLow, texaHigh,
+    // alphaZeroOnBlack). Also a palette's entries.
+    Ct16,
     Depth32, // a depth target
     // A replacement picture's blocks as its file has them (a texture pack's
     // DDS), 4x4 texels a block, a row of blocks after another.
@@ -64,7 +70,8 @@ struct Palette
 {
     Id id = 0;
     uint16_t entries = 0; // 16 or 256, in index order
-    Bytes colors;         // Rgba8 each
+    PixelFormat format = PixelFormat::Rgba8; // or Ct16
+    Bytes colors;         // `format` each
     float scale = 1.0f;   // as Texture::scale
 };
 
@@ -186,6 +193,10 @@ struct Material
     // texel is black when alphaZeroOnBlack (TEXA's AEM).
     float sourceAlpha = -1.0f;
     bool alphaZeroOnBlack = false;
+    // A CT16 texel's alpha (texture or palette entry, PixelFormat::Ct16):
+    // texaHigh with the alpha bit, else texaLow (TEXA's TA1 and TA0), 0
+    // where the texel is black when alphaZeroOnBlack (AEM).
+    float texaLow = 0.0f, texaHigh = 1.0f;
     // The color after the texture function is clamped to [0, this] when
     // above 0.
     float colorClamp = 0.0f;

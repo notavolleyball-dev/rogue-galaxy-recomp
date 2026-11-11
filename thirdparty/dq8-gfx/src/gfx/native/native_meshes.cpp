@@ -628,7 +628,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             // at the game's size.
             ownW = float(img.logicalWidth ? img.logicalWidth : img.width);
             ownH = float(img.logicalHeight ? img.logicalHeight : img.height);
-            mu.mode[0] = 1u;
+            mu.mode[0] = img.format == PixelFormat::Ct16 ? 4u : 1u;
             if (img.format == PixelFormat::Index8)
             {
                 const auto p = m_palettes.find(m.palette ? m.palette : img.palette);
@@ -639,7 +639,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
                 }
                 palette = p->second.texture;
                 mu.units[0] = p->second.scale;
-                mu.mode[0] = 2u;
+                mu.mode[0] = p->second.format == PixelFormat::Ct16 ? 5u : 2u;
                 mu.mode[3] = p->second.width;
             }
             mu.mode[1] = static_cast<uint32_t>(m.function);
@@ -649,7 +649,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         {
             // The target's alpha, from the copy, at the pixel (the palette
             // slot, which an Index8 texture would need too).
-            if (!copy || n != first || mu.mode[0] == 2u)
+            if (!copy || n != first || mu.mode[0] == 2u || mu.mode[0] == 5u)
             {
                 ++m_meshCounts.feedback;
                 continue;
@@ -702,6 +702,8 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         mu.blend[3] = m.clampV ? 1.0f : 0.0f;
         mu.offset[0] = m.texelOffset[0];
         mu.offset[1] = m.texelOffset[1];
+        mu.offset[2] = m.texaLow;
+        mu.offset[3] = m.texaHigh;
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = d.fogColor[i];
 
