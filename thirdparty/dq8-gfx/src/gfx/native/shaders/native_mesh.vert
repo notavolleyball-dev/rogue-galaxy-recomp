@@ -80,12 +80,14 @@ layout(location = 0) out vec2 outUv;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out float outFog;
 layout(location = 3) flat out uint outDraw;
+layout(location = 4) out float outQ; // the UV's divisor (native_model.vert's affine draws)
 
 void main() {
     vec4 clip = draw.clip * vec4(inPosition, 1.0);
     vec4 window = draw.viewport * clip;
     outDraw = inDraw;
     outUv = inUv;
+    outQ = 1.0;
     outColor = inColor;
     outFog = draw.target.z != 0.0 ? inFog : clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
     // The program caps its depth per vertex (depthMax); only in front of

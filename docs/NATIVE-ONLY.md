@@ -810,7 +810,10 @@ recovers.
 - **Since step 1, also in code:**
   - every strip chunk the model stage can draw goes to it (a chunk with
     no id yet, or whose inputs change every frame, with its inputs);
-  - the float-input and projector programs, too;
+  - the float-input and projector programs, too, and the affine D (flag
+    128: the UV goes times w with a divisor w, so the GPU's interpolation
+    gives the GS's screen-linear ST with Q 1) and the float-color D (flag
+    256);
   - the particles in the model vertex stage (`particle()`, flag 32): six
     inputs a particle (position, shape, corner offsets, texel, color); the
     shader turns each to face the eye (buildParticles' arithmetic, its sine
@@ -831,8 +834,7 @@ recovers.
     side (so they scale with the output, as the 2D path's lines);
   - the retained static meshes (`native_mesh_static.vert`, `StaticVertex`,
     `RG_MESH_RETAIN`) deleted.
-  - The CPU raw path stays for `RG_MODEL_GPU=0` and for the programs the
-    stage does not take (affine, raw color).
+  - The CPU raw path stays only for `RG_MODEL_GPU=0`.
 - **Step 3 in code too** (`src/native_models.*`):
   - The game thread's gather reads every VIF1 list as the VIF would: its
     own VU1 data and code memory and draw state; UNPACK, MPG, the base

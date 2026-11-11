@@ -76,7 +76,8 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //  2: quad 79 (UV scale) xy, z: the bones (0: not skinned), w: flags (1
 //     white, 2 87.y & 0x100, 4 skin the normals, 8 the inputs are floats:
 //     the position, normal and UV taken as they are; 16 an outline draw,
-//     outline())
+//     outline(); 32 particle(); 64 volume(); 128 the affine D (UV linear
+//     on screen); 256 the float-color D (the color input as it is))
 //  3: the base color; 4-6: the lights' directions (quads 100-102, lane i
 //     light i); 7-10: their colors times the material; 11: the ambient
 //  12-15: the point lights' positions (w: falloff); 16-19: their colors
@@ -125,6 +126,7 @@ layout(location = 0) out vec2 outUv;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out float outFog;
 layout(location = 3) flat out uint outDraw;
+layout(location = 4) out float outQ; // the UV's divisor (native_mesh.frag): w for an affine draw, else 1
 
 // The VU's int / 32768 (ITOF15).
 float itof15(float v) {
@@ -234,7 +236,11 @@ void emit(vec3 p, vec2 uv, vec4 color, bool skip) {
     vec4 clip = draw.clip * vec4(p, 1.0);
     vec4 window = draw.viewport * clip;
     outDraw = inDraw;
-    outUv = uv;
+    // The affine D (flag 128) leaves ST as the UV and Q 1: the GS's UV is
+    // then linear on screen.
+    bool affine = (uint(M.q[2].w) & 128u) != 0u;
+    outUv = affine ? uv * clip.w : uv;
+    outQ = affine ? clip.w : 1.0;
     outColor = min(color, draw.colorMax) * draw.vertexUnits.x;
     outFog = clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
     float depth = dot(draw.depthRow, vec4(p, 1.0));
@@ -419,6 +425,7 @@ void outline() {
     vec4 window = end == 0 ? window0 : window1;
     outDraw = inDraw;
     outUv = vec2(0.0);
+    outQ = 1.0;
     outColor = min(vec4(16.0, 16.0, 16.0, floor(alpha * 64.0)), draw.colorMax) * draw.vertexUnits.x;
     outFog = clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
     float depth = dot(draw.depthRow, vec4(p, 1.0));
@@ -498,6 +505,9 @@ void main() {
         precise float tq = t.w != 0.0 ? 1.0 / t.w : ((floatBitsToUint(t.w) >> 31) != 0u ? -3.402823466e38 : 3.402823466e38);
         uv = vec2(t.x * tq, t.y * tq);
     }
+    // The float-color D (flag 256): the colors section's floats as they are.
+    if ((flags & 256u) != 0u)
+        color = inColor;
     if ((flags & 1u) != 0u)
         color.rgb = vec3(128.0);
     bool lit = colorKind >= 2u && colorKind <= 5u;

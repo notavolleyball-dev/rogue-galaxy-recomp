@@ -75,6 +75,10 @@ layout(location = 0) in vec2 inUv;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in float inFog;
 layout(location = 3) flat in uint inDraw;
+// The UV's divisor: 1, or w for an affine draw (its UV times w, so that the
+// GPU's perspective-correct interpolation of both, divided, is the GS's
+// screen-linear ST with Q = 1).
+layout(location = 4) in float inQ;
 layout(location = 0) out vec4 outColor;
 
 bool passes(uint compare, float a, float ref) {
@@ -100,7 +104,7 @@ void main() {
     vec4 c = f;
     if (material.mode.x != 0u) {
         vec4 t;
-        vec2 texel = inUv * material.size.xy - material.offset.xy; // in texels
+        vec2 texel = (inUv / inQ) * material.size.xy - material.offset.xy; // in texels
         uint kind = material.mode.x & 7u;
         bool indexed = kind == 2u || kind == 5u;
         bool ct16 = kind == 4u || kind == 5u;

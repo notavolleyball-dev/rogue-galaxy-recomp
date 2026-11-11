@@ -124,11 +124,11 @@ struct Program
     bool rawColor = false;
 };
 
-// Whether buildMesh can make the program's chunks a GSNativeMesh; if not,
-// the GPU path sends buildChunk's packets.
+// Whether the program's chunks are meshes (the model vertex stage's); if
+// not, the GPU path sends buildChunk's packets.
 inline bool hasMesh(const Program &program)
 {
-    return (program.kind == Kind::Strip && !program.affine && !program.rawColor) || program.kind == Kind::Projector;
+    return program.kind == Kind::Strip || program.kind == Kind::Projector;
 }
 
 // Whether the program draws in its MSCAL (the overlay sprites) rather than
