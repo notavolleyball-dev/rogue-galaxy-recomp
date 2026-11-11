@@ -99,10 +99,13 @@ stacked PRs at the end).
     vertex or argument patches); libgraph's `sceGsPutDrawEnv` is state
     and clears; a census names the draw tasks whose 2D the converter
     still makes (`[native2d] pieces the converter made, by draw task`).
-  - Next: 2D records from the `GsPkt*` builder's calls (no GIF decode of
-    blocks; the builder's map is being written into
-    NATIVE-ONLY-NOTES.md), fonts as glyph records, region packs' glyph
-    variants, and whatever the census names.
+  - The builder's map is in NATIVE-ONLY-NOTES.md; its shadow of each
+    block is made from the calls and compared with the bytes (step one;
+    step two, the 2D from the calls and no bytes written, waits for the
+    count to say they agree). Blocks were never read before this branch
+    (fixed here).
+  - Next: fonts as glyph records, region packs' glyph variants, the
+    composites the shadow does not follow, and whatever the census names.
 - **M6's first step is in too** (on the same branch, as it needed no play
   data): the lists run on the game thread as they are sent; the VIF1
   thread is gone (see M6). Two more M5 declines were ported there too
@@ -735,6 +738,23 @@ Done:
   draw stage's converter still turns into 2D, and `no task@0` for
   packets outside any task. Each named one is a source left to move to
   the game thread; the VU1 packet programs' are expected to stay.
+
+- **The builder's calls, step one** (`src/native_gspkt.*`): the builder's
+  framing functions and emitters (25 of them, from the map in
+  NATIVE-ONLY-NOTES.md) are hooked, and each block's GIF data is made on
+  the game thread from their arguments and the builder's fields, never
+  from the bytes they write. It is compared with the block's bytes:
+  `[native-blocks] … the builder's shadow: the same N, differing M, not
+  followed K` (the first differences in full). Not followed: blocks with
+  the PACKED sprite composites that write their data themselves
+  (`GsPktDrawSprite`, `GsPktAddTexSprite`), raw writes or a DMA call (the
+  overlay's VU1 call), and outer blocks with one nested in them. The 2D is
+  still read from the bytes.
+  - **Step two, once "differing" stays 0 over a session:** the 2D from the
+    shadow, and the builder's emitters skipped (the block written only as
+    a marker in the list, as the passes are): the game writes no 2D bytes.
+- **Fixed:** blocks were never read before (their range ended in RET
+  tags; see the commit). The counts above are the first real ones.
 
 Not done:
 - fonts as glyph records;

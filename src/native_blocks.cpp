@@ -15,6 +15,7 @@
 #include "hud_size.h"
 #include "native_2d.h"
 #include "native_effects.h"
+#include "native_gspkt.h"
 #include "native_producer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -74,6 +75,9 @@ std::mutex g_mutex;
 std::deque<Block> g_blocks;
 uint32_t g_units = 0u;
 std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u}, g_unread{0u}, g_mismatch{0u};
+// The builder's shadow against the game's bytes (src/native_gspkt.h): the
+// same, differing, and blocks it does not follow.
+std::atomic<uint64_t> g_shadowSame{0u}, g_shadowDiffer{0u}, g_shadowNone{0u};
 
 // The GIF packets in a stretch of a list the game wrote: DMA cnt tags, each
 // with its two VIFcodes; a DIRECT's data is GIF. False: something else (a
@@ -150,6 +154,7 @@ void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (g_depth > 0)
         g_nested = true;
     ++g_depth;
+    rg::gspkt::beginBlock();
     g_envAt = g_envQwords = 0u;
     g_blockOwner = getRegU32(ctx, 31);
     g_beginOriginal(rdram, ctx, runtime);
@@ -160,9 +165,11 @@ void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // them, and stays out of the range): its pieces with their states, kept;
 // the range marked. A block not of the shape expected is left to the draw
 // stage's converter.
-void readBlock(uint32_t start, uint32_t end);
+void readBlock(uint32_t start, uint32_t end, const std::vector<uint8_t> *shadow);
 void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
+    thread_local std::vector<uint8_t> shadowBytes;
+    const bool shadowed = rg::gspkt::endBlock(shadowBytes);
     --g_depth;
     const uint32_t envAt = g_envAt, envQwords = g_envQwords;
     g_envAt = g_envQwords = 0u;
@@ -179,15 +186,52 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
                                            g_rdram + physical(ctx + kBuilder + kBuilderFirstOpen)) : 0u;
     const uint32_t end = envAt != 0u ? physical(envAt) : 0u;
     if (!nested && g_state && start != 0u && end > physical(start) && end - physical(start) <= (1u << 20))
-        readBlock(physical(start), end);
+        readBlock(physical(start), end, shadowed ? &shadowBytes : nullptr);
     else if (start != 0u)
         ++g_unread;
     if (envAt != 0u)
         observeEnvironment(envAt, envQwords);
 }
 
-void readBlock(uint32_t start, uint32_t end)
+// The shadow against the block's own bytes (its DIRECTs' data in order).
+void compareShadow(uint32_t start, uint32_t end, const std::vector<uint8_t> *shadow)
 {
+    if (!shadow)
+    {
+        ++g_shadowNone;
+        return;
+    }
+    thread_local std::vector<uint8_t> game;
+    game.clear();
+    if (!eachDirect(start, end, [&](const uint8_t *data, uint32_t size) { game.insert(game.end(), data, data + size); }))
+        return;
+    if (game == *shadow)
+    {
+        ++g_shadowSame;
+        return;
+    }
+    const uint64_t n = ++g_shadowDiffer;
+    if (n > 8u)
+        return;
+    size_t at = 0u;
+    while (at < game.size() && at < shadow->size() && game[at] == (*shadow)[at])
+        ++at;
+    at &= ~size_t(15u);
+    uint64_t g[2] = {}, s[2] = {};
+    if (at + 16u <= game.size())
+        std::memcpy(g, game.data() + at, 16u);
+    if (at + 16u <= shadow->size())
+        std::memcpy(s, shadow->data() + at, 16u);
+    std::fprintf(stderr,
+                 "[native-blocks] the builder's shadow differs from the block (owner %08x) at qword %zu of %zu/%zu: "
+                 "game %016llx %016llx, shadow %016llx %016llx\n",
+                 g_blockOwner, at / 16u, game.size() / 16u, shadow->size() / 16u, (unsigned long long)g[0],
+                 (unsigned long long)g[1], (unsigned long long)s[0], (unsigned long long)s[1]);
+}
+
+void readBlock(uint32_t start, uint32_t end, const std::vector<uint8_t> *shadow)
+{
+    compareShadow(start, end, shadow);
     Block block;
     thread_local std::vector<rg::native2d::Piece> pieces;
     bool ok = true;
@@ -320,6 +364,7 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-blocks] not hooked: the VIF1 thread converts the 2D\n");
         return;
     }
+    rg::gspkt::install(runtime);
     g_on = true;
 }
 
@@ -337,10 +382,12 @@ bool emit(uint32_t unit)
     if (emitted == 1u || emitted % 60000u == 0u)
         std::fprintf(stderr,
                      "[native-blocks] blocks made on the game thread %llu, drawn %llu, not found %llu, not read %llu, "
-                     "state differing at a block's end %llu\n",
+                     "state differing at a block's end %llu; the builder's shadow: the same %llu, differing %llu, "
+                     "not followed %llu\n",
                      (unsigned long long)g_kept.load(), (unsigned long long)emitted,
                      (unsigned long long)g_unknown.load(), (unsigned long long)g_unread.load(),
-                     (unsigned long long)g_mismatch.load());
+                     (unsigned long long)g_mismatch.load(), (unsigned long long)g_shadowSame.load(),
+                     (unsigned long long)g_shadowDiffer.load(), (unsigned long long)g_shadowNone.load());
     return true;
 }
 
