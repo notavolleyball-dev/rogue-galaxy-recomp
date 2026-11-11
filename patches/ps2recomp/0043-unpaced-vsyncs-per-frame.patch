@@ -1,0 +1,238 @@
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 55c85f9..cf0e747 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -523,6 +523,24 @@ public:
+     void setHostSpeed(double speed);
+     [[nodiscard]] bool hostPaused() const;
+     [[nodiscard]] double hostSpeed() const;
++    // The guest finished a frame (Rogue Galaxy: after each flip). Unpaced,
++    // the idle path then gives it kUnpacedVsyncsPerFrame VBlanks at once;
++    // past those, while hostWorkPending says host threads are still on work
++    // the guest may be waiting for (the VIF1 lists), it holds the next VBlank
++    // for the following frame, an event or kUnpacedVsyncHold, instead of
++    // running VBlanks back to back. Waits on emulated time (an IOP reply)
++    // are not held. Without a frame noted VBlanks are never held. Call
++    // setHostWorkPending before run(); it is called on the executor with the
++    // event lock held, so it must not post events.
++    void setHostWorkPending(std::function<bool()> pending) { m_hostWorkPending = std::move(pending); }
++    void noteGuestFrame()
++    {
++        {
++            std::lock_guard lock(m_eventMutex);
++            m_guestFrames.fetch_add(1u, std::memory_order_acq_rel);
++        }
++        m_eventCv.notify_all();
++    }
+ 
+ private:
+     friend struct EeSchedulerPacingTestAccess;
+@@ -713,4 +731,21 @@ private:
+     // Bumped under m_eventMutex on every change, so a waiting executor wakes
+     // and measures its deadline against the new clock.
+     std::atomic<uint64_t> m_pacingGeneration{0};
++
++    // noteGuestFrame: frames noted, and on the executor, the count the
++    // unpaced VBlank budget was last reset at and the VBlanks since.
++    static constexpr uint32_t kUnpacedVsyncsPerFrame = 2u;
++    static constexpr std::chrono::milliseconds kUnpacedVsyncHold{2};
++    std::atomic<uint64_t> m_guestFrames{0};
++    uint64_t m_unpacedFramesSeen = 0;
++    uint32_t m_unpacedVsyncs = 0;
++    std::function<bool()> m_hostWorkPending;
++    // Executor: the next VBlank is held since m_vblankHeldSince; or a hold
++    // ran out and that VBlank goes ahead (until it has run).
++    bool m_vblankHeld = false;
++    bool m_vblankLetThrough = false;
++    std::chrono::steady_clock::time_point m_vblankHeldSince{};
++    // Executor, with m_eventMutex held: whether the next VBlankStart is held
++    // now; `start` lets it begin a hold.
++    bool unpacedVBlankHeld(bool start);
+ };
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index e3ded4c..f84b478 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -73,6 +73,9 @@ std::unordered_map<int, Key> g_blockedOn;
+ std::unordered_map<Key, Span, KeyHash> g_waits;
+ Span g_idle, g_sched;
+ uint64_t g_vsyncs = 0;
++// Unpaced vsyncs the idle path held for a frame, and those let through after
++// kUnpacedVsyncHold with neither an event nor a frame.
++uint64_t g_vsyncHolds = 0, g_vsyncHoldTimeouts = 0;
+ Clock::time_point g_windowStart = Clock::now();
+ 
+ int objectOf(const EeWaitState &w)
+@@ -633,8 +636,9 @@ void EeScheduler::reportWaitLog()
+     }
+     std::sort(threads.rbegin(), threads.rend());
+     const uint64_t sched = window > guest + g_idle.ns ? window - guest - g_idle.ns : 0;
+-    std::fprintf(stderr, "[eewait] %.2fs vsyncs %llu (%.1f ms each) | guest %.0f%% idle %.0f%% (%llu sleeps) sched %.0f%% |",
++    std::fprintf(stderr, "[eewait] %.2fs vsyncs %llu (%.1f ms each, held %llu, %llu timed out) | guest %.0f%% idle %.0f%% (%llu sleeps) sched %.0f%% |",
+                  w / 1e9, (unsigned long long)g_vsyncs, g_vsyncs ? w / 1e6 / double(g_vsyncs) : 0.0,
++                 (unsigned long long)g_vsyncHolds, (unsigned long long)g_vsyncHoldTimeouts,
+                  100.0 * double(guest) / w, 100.0 * double(g_idle.ns) / w, (unsigned long long)g_idle.count,
+                  100.0 * double(sched) / w);
+     for (size_t i = 0; i < threads.size() && i < 8; ++i)
+@@ -662,6 +666,7 @@ void EeScheduler::reportWaitLog()
+     g_waits.clear();
+     g_idle = {};
+     g_vsyncs = 0;
++    g_vsyncHolds = g_vsyncHoldTimeouts = 0;
+     g_windowStart = now;
+ }
+ 
+@@ -2695,8 +2700,11 @@ void EeScheduler::processDueDeadlines()
+         {
+             std::unique_lock lock(m_eventMutex);
+             const auto now = pacingNow();
++            const bool held = unpacedVBlankHeld(false);
+             for (const ScheduledEvent &item : m_deadlines)
+             {
++                if (held && item.event.type == EeEventType::VBlankStart)
++                    continue;
+                 if (item.deadlineCycle <= m_eeCycle &&
+                     (pacingDeadline == std::chrono::steady_clock::time_point{} ||
+                      item.hostDeadline < pacingDeadline))
+@@ -2725,9 +2733,10 @@ void EeScheduler::processDueDeadlines()
+ 
+             const auto pacedNow = pacingNow();
+             auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
+-                                              [this, pacedNow](const ScheduledEvent &item)
++                                              [this, pacedNow, held](const ScheduledEvent &item)
+                                               { return item.deadlineCycle <= m_eeCycle &&
+-                                                       item.hostDeadline <= pacedNow; });
++                                                       item.hostDeadline <= pacedNow &&
++                                                       !(held && item.event.type == EeEventType::VBlankStart); });
+             due.insert(due.end(),
+                        std::make_move_iterator(m_deadlines.begin()),
+                        std::make_move_iterator(firstFuture));
+@@ -2786,6 +2795,8 @@ void EeScheduler::processEvent(const EeEvent &event)
+         break;
+     case EeEventType::VBlankStart:
+         ++eewait::g_vsyncs;
++        ++m_unpacedVsyncs;
++        m_vblankLetThrough = false;
+         ++m_vsyncTick;
+         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+         if ((m_vsyncTick & 1u) != 0u)
+@@ -2915,6 +2926,58 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
+     std::memcpy(m_rdram + physical, &value, sizeof(value));
+ }
+ 
++bool EeScheduler::unpacedVBlankHeld(bool start)
++{
++    if (!m_hostWorkPending || hostSpeed() != 0.0)
++    {
++        m_vblankHeld = false;
++        return false;
++    }
++    const uint64_t frames = m_guestFrames.load(std::memory_order_acquire);
++    if (frames == 0u)
++    {
++        return false;
++    }
++    if (frames != m_unpacedFramesSeen)
++    {
++        m_unpacedFramesSeen = frames;
++        m_unpacedVsyncs = 0u;
++        m_vblankHeld = false;
++        m_vblankLetThrough = false;
++    }
++    const auto now = std::chrono::steady_clock::now();
++    if (m_vblankHeld)
++    {
++        const bool expired = now - m_vblankHeldSince >= kUnpacedVsyncHold;
++        if (!expired && m_hostWorkPending())
++        {
++            return true;
++        }
++        // Out of time (a loading screen), or the host work is done: this
++        // VBlank goes ahead.
++        m_vblankHeld = false;
++        m_vblankLetThrough = true;
++        if (eewait::g_on && expired)
++        {
++            std::lock_guard waitLock(eewait::g_mutex);
++            ++eewait::g_vsyncHoldTimeouts;
++        }
++        return false;
++    }
++    if (!start || m_vblankLetThrough || m_unpacedVsyncs < kUnpacedVsyncsPerFrame || !m_hostWorkPending())
++    {
++        return false;
++    }
++    m_vblankHeld = true;
++    m_vblankHeldSince = now;
++    if (eewait::g_on)
++    {
++        std::lock_guard waitLock(eewait::g_mutex);
++        ++eewait::g_vsyncHolds;
++    }
++    return true;
++}
++
+ void EeScheduler::waitForEvent()
+ {
+     settleNativeBudget();
+@@ -2935,19 +2998,28 @@ void EeScheduler::waitForEvent()
+         return;
+     }
+ 
++    // Unpaced, the wait below jumps to the deadline at once: with the guest
++    // idle on host work (the VIF1 lists a frame waits for) the VBlanks would
++    // run back to back, tens of thousands a second, and every per-vsync
++    // thread with them. Past kUnpacedVsyncsPerFrame since the guest's last
++    // frame the next VBlank is held (unpacedVBlankHeld); only the VBlank:
++    // alarms and timers go on, or the game's DelayThread polls (SIF DMA,
++    // each frame) waited out the hold behind it.
++    const bool held = unpacedVBlankHeld(true);
+     uint64_t deadlineCycle = 0u;
+     auto hostDeadline = std::chrono::steady_clock::time_point::max();
+-    if (!m_deadlines.empty())
+-    {
+-        const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+-                                           [](const ScheduledEvent &left, const ScheduledEvent &right)
+-                                           {
+-                                               if (left.deadlineCycle != right.deadlineCycle)
+-                                               {
+-                                                   return left.deadlineCycle < right.deadlineCycle;
+-                                               }
+-                                               return left.sequence < right.sequence;
+-                                           });
++    const ScheduledEvent *next = nullptr;
++    for (const ScheduledEvent &item : m_deadlines)
++    {
++        if (held && item.event.type == EeEventType::VBlankStart)
++            continue;
++        if (!next || item.deadlineCycle < next->deadlineCycle ||
++            (item.deadlineCycle == next->deadlineCycle && item.sequence < next->sequence))
++            next = &item;
++    }
++    bool haveDeadline = next != nullptr;
++    if (next)
++    {
+         deadlineCycle = next->deadlineCycle;
+         hostDeadline = next->hostDeadline;
+     }
+@@ -2958,8 +3030,20 @@ void EeScheduler::waitForEvent()
+         {
+             deadlineCycle = m_eeCycle + timerCycles;
+             hostDeadline = timerHostDeadline;
++            haveDeadline = true;
+         }
+     }
++    if (!haveDeadline)
++    {
++        // Only the held VBlank: wait for an event (the VIF1 list's end) or a
++        // frame, at most until the hold runs out; the run loop comes back.
++        const uint64_t frames = m_guestFrames.load(std::memory_order_acquire);
++        m_eventCv.wait_until(lock, m_vblankHeldSince + kUnpacedVsyncHold, [&]()
++                             { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire) ||
++                                      m_guestFrames.load(std::memory_order_acquire) != frames; });
++        m_checkpointPending.store(true, std::memory_order_release);
++        return;
++    }
+ 
+     const bool signaled = pacingWaitUntil(lock, hostDeadline, [this]()
+                                           { return !m_events.empty() ||

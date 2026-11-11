@@ -1,0 +1,237 @@
+diff --git a/ps2xRuntime/include/runtime/ee_native_budget.h b/ps2xRuntime/include/runtime/ee_native_budget.h
+new file mode 100644
+index 0000000..5766135
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ee_native_budget.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++// RG_NATIVE_CPU's inline checkpoint (Rogue Galaxy: added). The native code's
++// back edges and calls subtract their charge from g_eeNativeBudget and call
++// out only when it runs out or g_eeCheckpointPending is set: the budget is
++// the cycles until the next thing that can come due (a deadline, the slice's
++// end, the timers' batch), so it runs out on the very checkpoint the
++// call-per-checkpoint scheme would have stopped at. EeScheduler folds what
++// was spent into its cycle clock before it reads it (settleNativeBudget) and
++// hands out a new budget before guest code runs again (grantNativeBudget).
++// The budget is the EE thread's; the pending flag is the scheduler's own,
++// set from any thread.
++
++#include <atomic>
++#include <cstdint>
++
++inline int64_t g_eeNativeBudget = 0;
++inline std::atomic<bool> g_eeCheckpointPending{false};
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index f54276b..69b213c 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -2,6 +2,7 @@
+ 
+ #include "ps2_runtime.h"
+ #include "runtime/ee_fiber.h"
++#include "runtime/ee_native_budget.h"
+ 
+ #include <memory>
+ 
+@@ -282,6 +283,7 @@ struct EeThreadCreateParams
+     uint32_t option = 0;
+ };
+ 
++
+ class EeScheduler
+ {
+ public:
+@@ -318,7 +320,9 @@ public:
+     // changed).
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept
+     {
+-        accountCycles(cycles);
++        settleNativeBudget();
++        if (cycles != 0u)
++            accountCycles(cycles);
+ 
+         if (m_checkpointPending.load(std::memory_order_acquire) ||
+             m_stopRequested.load(std::memory_order_acquire))
+@@ -357,7 +361,37 @@ public:
+     // deadline, so this can never run the game faster than real time.
+     void accountCycles(uint32_t cycles) noexcept
+     {
+-        const uint64_t elapsed = std::max<uint64_t>(1u, cycles) * s_eeCycleScale;
++        chargeElapsed(std::max<uint64_t>(1u, cycles) * s_eeCycleScale);
++    }
++    // The native code's spending since the last settle, into the clock (and
++    // the timers) as accountCycles would have put it a checkpoint at a time.
++    void settleNativeBudget() noexcept
++    {
++        const int64_t spent = m_nativeGranted - g_eeNativeBudget;
++        if (spent > 0)
++        {
++            m_nativeGranted = g_eeNativeBudget;
++            chargeElapsed(uint64_t(spent) * s_eeCycleScale);
++        }
++    }
++    // A budget up to whatever comes due first; 0 when something is due now.
++    void grantNativeBudget() noexcept
++    {
++        settleNativeBudget();
++        uint64_t room = kNativeBudgetCap;
++        const uint64_t next = m_nextDeadlineCycle.load(std::memory_order_acquire);
++        if (next != 0u)
++            room = std::min(room, next > m_eeCycle ? next - m_eeCycle : 0u);
++        room = std::min(room, m_sliceEndCycle > m_eeCycle ? m_sliceEndCycle - m_eeCycle : 0u);
++        room = std::min(room, m_runtime.memory().eeTimerRoom());
++        const int64_t units = int64_t((room + s_eeCycleScale - 1u) / s_eeCycleScale);
++        g_eeNativeBudget = m_nativeGranted = units;
++    }
++    // At most this many cycles between the scheduler's looks: a deadline set
++    // from another thread is noticed within it.
++    static constexpr uint64_t kNativeBudgetCap = 4096u;
++    void chargeElapsed(uint64_t elapsed) noexcept
++    {
+         m_eeCycle += elapsed;
+         m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+         if (m_pendingEeTimerInterrupts != 0u)
+@@ -435,7 +469,11 @@ public:
+     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
+     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+     // EE cycles charged so far. Executor only.
+-    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
++    [[nodiscard]] uint64_t eeCycle() noexcept
++    {
++        settleNativeBudget();
++        return m_eeCycle;
++    }
+     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
+ 
+     void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
+@@ -621,7 +659,8 @@ private:
+     std::atomic<bool> m_running{false};
+     std::atomic<bool> m_guestExecuting{false};
+     std::atomic<bool> m_stopRequested{false};
+-    std::atomic<bool> m_checkpointPending{false};
++    std::atomic<bool> &m_checkpointPending = g_eeCheckpointPending; // read inline by native code
++    int64_t m_nativeGranted = 0; // g_eeNativeBudget as of the last grant or settle
+     uint32_t m_debugPublishCountdown = 0u;
+     // The thread whose C++ stack the executor is standing in, or 0 outside a
+     // guest dispatch. A yield back onto this thread can skip the unwind.
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 6b23502..6a5e71c 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -317,6 +317,16 @@ public:
+     // A settle may have raised an interrupt as the write that cleared the
+     // last CUE went by: it is delivered whether or not a timer still runs.
+     // Inline, the batch's flush out of line (Rogue Galaxy: changed).
++    // The cycles advanceEeTimers can take before its batch is applied (and
++    // an interrupt may come due): none left with late interrupts waiting.
++    uint64_t eeTimerRoom() const noexcept
++    {
++        if (m_eeTimerLateInterrupts != 0u)
++            return 0u;
++        if (!m_anyEeTimerCued)
++            return UINT64_MAX;
++        return m_eeTimerPendingCycles < kEeTimerBatchCycles ? kEeTimerBatchCycles - m_eeTimerPendingCycles : 0u;
++    }
+     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept
+     {
+         const uint32_t late = m_eeTimerLateInterrupts;
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 31a4adb..f84b478 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -275,6 +275,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
+     m_insideInterrupt = false;
+     m_pendingEeTimerInterrupts = 0u;
+     m_eeCycle = 0u;
++    g_eeNativeBudget = m_nativeGranted = 0;
+     m_sliceEndCycle = kDefaultTimeSliceCycles;
+     m_stopRequested.store(false, std::memory_order_release);
+     m_checkpointPending.store(false, std::memory_order_release);
+@@ -380,6 +381,8 @@ void EeScheduler::run()
+ 
+         GuestThread *running = currentThread();
+         assert(running != nullptr);
++        // Guest code runs next: its inline checkpoints' budget, from here.
++        grantNativeBudget();
+ 
+         // Invocations nest onto the running thread, so a callback storm stacks
+         // them faster than they retire -- DQ8's movie streaming reached depth 13
+@@ -1618,6 +1621,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
+                           uint32_t sp)
+ {
+     assertExecutor();
++    settleNativeBudget();
+     if (handler == 0u || !m_runtime.hasFunction(handler))
+     {
+         return KE_ERROR;
+@@ -2130,6 +2134,7 @@ void EeScheduler::publishSnapshot()
+ 
+ void EeScheduler::publishSnapshotNow()
+ {
++    settleNativeBudget();
+     EeKernelSnapshot next{};
+     next.sequence = ++m_snapshotSequence;
+     next.eeCycle = m_eeCycle;
+@@ -2618,6 +2623,7 @@ void EeScheduler::applyPendingPreemption()
+ 
+ void EeScheduler::processPendingEvents()
+ {
++    settleNativeBudget();
+     assertExecutor();
+     g_eeProcessPendingEventsCount.fetch_add(1u, std::memory_order_relaxed);
+     processDueDeadlines();
+@@ -2676,6 +2682,7 @@ void EeScheduler::processPendingEvents()
+ 
+ void EeScheduler::processDueDeadlines()
+ {
++    settleNativeBudget();
+     // Runs after every guest dispatch, so the common "nothing is due" case must
+     // not cost a mutex, a clock read and a walk of m_deadlines. m_nextDeadlineCycle
+     // is the minimum deadlineCycle, or 0 when there are none -- exactly the
+@@ -2973,6 +2980,7 @@ bool EeScheduler::unpacedVBlankHeld(bool start)
+ 
+ void EeScheduler::waitForEvent()
+ {
++    settleNativeBudget();
+     std::unique_lock lock(m_eventMutex);
+     if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index c75a7ed..8b190a2 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2454,13 +2454,18 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+         m_eeScheduler->noteGuestUnwind();
+         return true;
+     }
++    // Native code may run next: its budget from the clock as it is now.
++    m_eeScheduler->grantNativeBudget();
+     return false;
+ }
+ 
+ void PS2Runtime::nativeCheckpoint(uint32_t cycles)
+ {
++    // `cycles` is 0 from the inline checkpoints (charged to the budget
++    // already). Not due, or resumed after a yield: a new budget either way.
+     if (!m_eeScheduler->checkpointDue(cycles) || m_eeScheduler->yieldInPlace())
+     {
++        m_eeScheduler->grantNativeBudget();
+         return;
+     }
+     // On a stop the run loop is leaving: unwinding lets the stacks end.
+@@ -2473,6 +2478,14 @@ void PS2Runtime::nativeCheckpoint(uint32_t cycles)
+ 
+ void PS2Runtime::nativeBoundary(uint8_t *rdram, R5900Context *ctx, uint32_t target, uint32_t ret, bool call)
+ {
++    // What runs here (host stubs, the dispatcher) reads the clock and may
++    // set deadlines: settled before, a fresh budget for the native code after.
++    m_eeScheduler->settleNativeBudget();
++    struct Regrant
++    {
++        EeScheduler &scheduler;
++        ~Regrant() { scheduler.grantNativeBudget(); }
++    } regrant{*m_eeScheduler};
+     const uint32_t entrySp = getRegU32(ctx, 29);
+     ctx->pc = target;
+     if (call)

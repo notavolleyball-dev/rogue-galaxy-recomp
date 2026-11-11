@@ -27,10 +27,10 @@ What each page here is for, by who it is for. New to the project? Start with
 
 ## Building and changing the game
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md): the rules for issues and pull
-  requests.
 - [BUILDING.md](BUILDING.md): building by hand, on Windows or Linux, and the
   project's layout.
+- [BUG-MARKS.md](BUG-MARKS.md): F8 on a graphics fault writes one folder; the
+  tool that reads it and names the draws behind a pixel (capture: Linux so far).
 - [DEVELOPMENT.md](DEVELOPMENT.md): the debug launchers, profiling, and the
   environment variables.
 - [HOOKS.md](HOOKS.md): writing hooks, the way changes to the game's
@@ -54,7 +54,13 @@ What each page here is for, by who it is for. New to the project? Start with
 Start with [NATIVE-RENDERER.md](NATIVE-RENDERER.md): it says where things
 stand and what each of the others is for.
 
+- [NATIVE-BOUNDARY.md](NATIVE-BOUNDARY.md): work left between the native CPU and
+  the native GPU sides (textures sent every frame, geometry derived every
+  frame), and the plan.
 - [VU1-NATIVE.md](VU1-NATIVE.md): the VU1's 3D programs run as native code.
+- [NATIVE-CPU.md](NATIVE-CPU.md): the game's code translated by our own
+  translator, without CPU emulation (`RG_NATIVE_CPU=1`); its goal in
+  [NATIVE-CPU-GOAL.md](NATIVE-CPU-GOAL.md).
 - [VU1-RECON.md](VU1-RECON.md): groundwork for temporal upscaling (object
   identity, jitter, cameras).
 - [GS-AUDIT.md](GS-AUDIT.md): where a frame's GPU time goes, and what was

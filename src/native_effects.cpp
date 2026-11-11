@@ -1588,7 +1588,8 @@ bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNa
                             queued = 0u;
                             pendingQuad = false;
                         }
-                        else if (event.reg == 0x53u || event.reg == 0x50u)
+                        else if (event.reg == 0x53u || event.reg == 0x50u ||
+                                 event.reg == rg::nativeproducer::kBindRegister)
                             ok = builder.fail("a transfer among the sprites");
                         registers.write(event.reg, event.value);
                         continue;

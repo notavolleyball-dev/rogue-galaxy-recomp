@@ -1,0 +1,41 @@
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index b9c0deb..97b4aa2 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -41,6 +41,22 @@ namespace
+                      uint32_t cl, uint32_t wl, uint32_t vl, uint32_t components, uint32_t bytesPerVector,
+                      bool zeroExtend)
+     {
++        // V4-32 into consecutive qwords (the common case: positions, colours,
++        // matrices): one copy per run up to the end of VU memory, not a
++        // library call per qword (Rogue Galaxy: added).
++        if (vl == 0u && components == 4u && cl == wl && bytesPerVector == 16u)
++        {
++            uint32_t done = 0u;
++            while (done < writeVectorCount)
++            {
++                const uint32_t dest = (vuAddr + done) & 0x3FFu;
++                const uint32_t run = std::min(writeVectorCount - done, 0x400u - dest);
++                std::memcpy(vuData + dest * 16u, src, run * 16u);
++                src += run * 16u;
++                done += run;
++            }
++            return;
++        }
+         for (uint32_t writeIndex = 0u; writeIndex < writeVectorCount; ++writeIndex, src += bytesPerVector)
+         {
+             const uint32_t destVec = cl == wl ? (vuAddr + writeIndex) & 0x3FFu
+@@ -56,8 +72,12 @@ namespace
+                     words[0] = words[1] = words[2] = words[3] = scalar;
+                     std::memcpy(dst, words, sizeof(words));
+                 }
++                else if (components == 4u)
++                    std::memcpy(dst, src, 16u);
++                else if (components == 3u)
++                    std::memcpy(dst, src, 12u);
+                 else
+-                    std::memcpy(dst, src, components * 4u);
++                    std::memcpy(dst, src, 8u);
+                 continue;
+             }
+             for (uint32_t c = 0u; c < components; ++c)

@@ -49,6 +49,7 @@
 #include "opening.h"
 #include "widescreen.h"
 #include "quick_scenes.h"
+#include "native_cpu.h"
 #include "scene_timing.h"
 #include "settings_pages.h"
 #include "shop_prices.h"
@@ -207,6 +208,8 @@ int run(int argc, char **argv)
     rg::debug::installPosTrace(runtime);
     rg::debug::installJumpTrace(runtime);
     rg::debug::installForcedEncounter(runtime);
+    // Last: it takes only the slots no hook has replaced (RG_NATIVE_CPU=1).
+    rg::nativecpu::install(runtime);
     rg::debug::startInputScript();
     rg::debug::startSampler();
     rg::debug::startStallWatch(runtime);

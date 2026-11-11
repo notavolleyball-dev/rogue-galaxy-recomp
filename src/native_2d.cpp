@@ -90,29 +90,130 @@ void observe(const uint8_t *data, uint32_t size)
     });
 }
 
+Quick quick(const uint8_t *data, uint32_t size, std::vector<std::pair<uint8_t, uint64_t>> &writes)
+{
+    Carried &carried = t_carried;
+    // Decoded against a copy of the carried vertex state, kept only if the
+    // packets are taken.
+    rg::gif::GifState state = carried.state;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    events.clear();
+    uint32_t packets = 0u;
+    bool image = false;
+    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
+        ++packets;
+        image |= rg::gif::decodeGifPacket(data + at, piece, state, events).imageQwords != 0u;
+    });
+    if (packets == 0u || (image && packets != 1u))
+        return Quick::No;
+    bool transfer = false;
+    for (const rg::gif::GifEvent &e : events)
+    {
+        if (e.kind != rg::gif::GifEvent::Kind::Register)
+            return Quick::No;
+        // (A texture binding goes where a transfer's registers go: sendRaw.)
+        transfer |= (e.reg >= 0x50u && e.reg <= 0x54u) || e.reg == rg::nativeproducer::kBindRegister;
+    }
+    carried.state = state;
+    if (image)
+    {
+        carried.queue.clear(); // build's upload piece: its events are the GS's alone
+        return Quick::Raw;
+    }
+    // As build's register events: PRMODECONT, PRMODE, and a PRIM write ends
+    // any strip under way.
+    for (const rg::gif::GifEvent &e : events)
+    {
+        if (e.reg == 0x1Au)
+            carried.attributesFromPrim = (e.value & 1u) != 0u;
+        else if (e.reg == 0x1Bu)
+            carried.prmode = static_cast<uint16_t>(e.value & 0x7F8u);
+        else if (e.reg == 0x00u)
+        {
+            carried.queue.clear();
+            carried.queuePrim = 0xFFFFu;
+        }
+    }
+    if (transfer)
+        return Quick::Raw;
+    for (const rg::gif::GifEvent &e : events)
+        writes.emplace_back(e.reg, e.value);
+    return Quick::Writes;
+}
+
+void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
+{
+    Carried &carried = t_carried;
+    thread_local std::vector<rg::gif::GifEvent> events;
+    events.clear();
+    for (size_t i = 0; i < count; ++i)
+    {
+        rg::gif::applyRegister(writes[i].first, writes[i].second, carried.state, events);
+        if (writes[i].first == 0x1Au)
+            carried.attributesFromPrim = (writes[i].second & 1u) != 0u;
+        else if (writes[i].first == 0x1Bu)
+            carried.prmode = static_cast<uint16_t>(writes[i].second & 0x7F8u);
+        else if (writes[i].first == 0x00u)
+        {
+            carried.queue.clear();
+            carried.queuePrim = 0xFFFFu;
+        }
+    }
+}
+
 bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::string &why)
 {
     // The last call's meshes' vertex storage, for this call's meshes: a
     // packet's meshes would otherwise allocate and free it each time.
     thread_local std::vector<std::vector<GSNativeMesh::Vertex>> spare;
+    thread_local std::vector<std::vector<uint32_t>> spareIndices;
+    // And its register writes' (one vector a flush).
+    thread_local std::vector<std::vector<std::pair<uint8_t, uint64_t>>> spareWrites;
     for (Piece &old : out)
+    {
         if (old.mesh.vertices.capacity() != 0u && spare.size() < 64u)
         {
             old.mesh.vertices.clear();
             spare.push_back(std::move(old.mesh.vertices));
         }
+        if (old.indices.capacity() != 0u && spareIndices.size() < 64u)
+        {
+            old.indices.clear();
+            spareIndices.push_back(std::move(old.indices));
+        }
+        if (old.writes.capacity() != 0u && spareWrites.size() < 64u)
+        {
+            old.writes.clear();
+            spareWrites.push_back(std::move(old.writes));
+        }
+    }
     out.clear();
+    const auto freshWrites = [&](std::vector<std::pair<uint8_t, uint64_t>> &into) {
+        if (!spareWrites.empty())
+        {
+            into.swap(spareWrites.back());
+            spareWrites.pop_back();
+        }
+        into.clear();
+    };
     Carried &carried = t_carried;
     rg::gif::GifState &state = carried.state;
     std::vector<rg::gif::GifEvent> &queue = carried.queue;
     uint16_t &queuePrim = carried.queuePrim;
     thread_local std::vector<rg::gif::GifEvent> events;
     std::vector<std::pair<uint8_t, uint64_t>> writes;
+    freshWrites(writes);
     Piece mesh;
     uint16_t meshPrim = 0xFFFFu;
 
     const auto closeMesh = [&] {
-        if (!mesh.mesh.vertices.empty())
+        // Called at every register write: an empty mesh (none open, or one
+        // just opened) keeps its storage and only forgets its PRIM.
+        if (mesh.mesh.vertices.empty())
+        {
+            meshPrim = 0xFFFFu;
+            return;
+        }
         {
             if (meshPrim != 0xFFFFu && (meshPrim & 0x20u))
             {
@@ -144,11 +245,19 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
             mesh.mesh.header.vertexCount = static_cast<uint32_t>(mesh.mesh.vertices.size());
             out.push_back(std::move(mesh));
         }
-        mesh = Piece{};
+        // Moved from: only the vertex storage needs replacing (openMesh sets
+        // the header and texelUvs before any vertex).
+        mesh.mesh.vertices = {};
+        mesh.indices = {};
         if (!spare.empty())
         {
             mesh.mesh.vertices = std::move(spare.back());
             spare.pop_back();
+        }
+        if (!spareIndices.empty())
+        {
+            mesh.indices = std::move(spareIndices.back());
+            spareIndices.pop_back();
         }
         meshPrim = 0xFFFFu;
     };
@@ -157,9 +266,9 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         {
             closeMesh();
             Piece piece;
-            piece.packet = adPacket(writes);
+            piece.writes.swap(writes);
             out.push_back(std::move(piece));
-            writes.clear();
+            freshWrites(writes);
         }
     };
     const auto vertexOf = [&](const rg::gif::GifEvent &e, const rg::gif::GifEvent &provoking, uint16_t prim, bool &ok) {
@@ -206,9 +315,18 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
     const auto triangle = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, const rg::gif::GifEvent &c,
                               uint16_t prim, bool &ok) {
         openMesh(prim);
+        const uint32_t base = static_cast<uint32_t>(mesh.mesh.vertices.size());
         mesh.mesh.vertices.push_back(vertexOf(a, c, prim, ok));
         mesh.mesh.vertices.push_back(vertexOf(b, c, prim, ok));
         mesh.mesh.vertices.push_back(vertexOf(c, c, prim, ok));
+        mesh.indices.insert(mesh.indices.end(), {base, base + 1u, base + 2u});
+    };
+    // Four corners, as the triangles (0, 1, 3) and (0, 3, 2).
+    const auto quad = [&](const GSNativeMesh::Vertex &v0, const GSNativeMesh::Vertex &v1,
+                          const GSNativeMesh::Vertex &v2, const GSNativeMesh::Vertex &v3) {
+        const uint32_t base = static_cast<uint32_t>(mesh.mesh.vertices.size());
+        mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v0, v1, v2, v3});
+        mesh.indices.insert(mesh.indices.end(), {base, base + 1u, base + 3u, base, base + 3u, base + 2u});
     };
     const auto sprite = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, uint16_t prim, bool &ok) {
         openMesh(prim);
@@ -223,7 +341,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         const GSNativeMesh::Vertex v1 = vertexOf(corner[1], b, prim & ~0x08u, ok);
         const GSNativeMesh::Vertex v2 = vertexOf(corner[2], b, prim & ~0x08u, ok);
         const GSNativeMesh::Vertex v3 = vertexOf(corner[3], b, prim & ~0x08u, ok);
-        mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v0, v1, v3, v0, v3, v2});
+        quad(v0, v1, v2, v3);
     };
 
     bool ok = true;
@@ -325,7 +443,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                         v[1].x -= nx; v[1].y -= ny;
                         v[2].x -= nx; v[2].y -= ny;
                         v[3].x += nx; v[3].y += ny;
-                        mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v[0], v[1], v[2], v[0], v[2], v[3]});
+                        quad(v[0], v[1], v[3], v[2]); // (0, 1, 2) and (0, 2, 3)
                         if (type == 1u)
                             queue.clear();
                     }

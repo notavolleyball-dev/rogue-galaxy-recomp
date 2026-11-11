@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <utility>
 
 #include "runtime/gs/gs_types.h"
 
@@ -25,6 +27,8 @@ bool enabled();
 // the VIF1 thread and the game thread take turns (the VIF1 thread's lists
 // are drained before the game thread sends).
 void observe(const uint8_t *data, uint32_t size);
+// The same for register writes an A+D packet would carry, without one.
+void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
 
 // After something wrote the front end's registers without a packet (the
 // libgraph stubs): the mirror takes them from the front end.

@@ -53,6 +53,10 @@ struct GifState
     uint8_t f = 0;
 };
 
+// One register write as an A+D qword gives it: vertex state into `state`,
+// a kick or another register's write appended as its event.
+void applyRegister(uint8_t reg, uint64_t value, GifState &state, std::vector<GifEvent> &out);
+
 // Appends the events of one packet: a chain of GIF tags up to EOP or the end
 // of the bytes. IMAGE data is counted, not decoded.
 GifDecodeStats decodeGifPacket(const uint8_t *data, uint32_t size, GifState &state, std::vector<GifEvent> &out);

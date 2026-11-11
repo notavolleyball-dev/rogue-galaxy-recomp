@@ -6,10 +6,9 @@
 
 With --issues it writes nothing and prints the issues the version's entries
 link, one a line, each with the entry that names it first: on release day each
-gets "This is in VERSION" and is closed, open or already closed
-(CONTRIBUTING.md: issues close when a release ships the fix, not at the
-merge). The "Known issues" subsection is left out, since what it names is not
-fixed; read the rest too, as an entry can name an issue it does not fix (0.2.0's
+gets "This is in VERSION" and is closed, open or already closed (issues
+close when a release ships the fix, not at the merge). The "Known issues"
+subsection is left out, since what it names is not fixed; read the rest too, as an entry can name an issue it does not fix (0.2.0's
 log line about #17).
 
 Otherwise it writes build/release/RogueGalaxy-<version>-notes.md, for

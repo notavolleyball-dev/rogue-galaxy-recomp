@@ -153,8 +153,16 @@ std::string describePieces(const uint8_t *code, uint32_t startPC);
 // may read: the bounds in quads 98 and 99 for the programs with
 // `depthBounds`. `apply` writes it where the VU1 did not run (skip, gpu);
 // `matches` says whether the VU1 left the same (check), from the data
-// memory before the run and after it.
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
+// memory before the run and after it. `built`, when given: the chunk as
+// buildMesh made it from this same data memory, not read again.
+// `bounds`, when buildMesh made them: written as they are.
+struct Bounds
+{
+    bool made = false;
+    float least[4] = {}, most[4] = {};
+};
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built = nullptr,
+                        const Bounds *bounds = nullptr);
 bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after);
 
 // The GS packets the program kicks for that chunk, in order.
@@ -163,9 +171,11 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 
 // The chunk as a mesh: the packets that set the GS state it draws under
 // (FOGCOL, PRIM and PRMODE), to go first, and the strip itself, for
-// GS::submitNativeMesh.
+// GS::submitNativeMesh. With `bounds`, and a program that keeps them
+// (applyMemoryEffects), they are made in the pass that gives each vertex its
+// depth: the same projection of the same vertex, done once instead of twice.
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
-               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh);
+               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds = nullptr);
 
 // RG_VU1_NATIVE, in the game (src/vif1_thread.cpp), for the chunks done
 // natively: `check` runs the VU1 as before and compares its packets with the

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "scene_timing.h"
+#include "runtime/ee_scheduler.h"
 
 namespace rg::vu0
 {
@@ -154,6 +155,15 @@ void install(PS2Runtime &runtime)
     if (enabled && *enabled == '0')
     {
         std::fprintf(stderr, "[rg] VU0 flags: the generated box tests stay (RG_VU0_FLAGS=0)\n");
+        return;
+    }
+    // The native CPU runs the box tests as translated, flags and all, and a
+    // call to a hooked function is a runtime boundary for it: ~4,000 a frame
+    // in the field, each flushing and reloading the caller's registers. Here
+    // the host versions are the longer path (native-hooks.txt no longer
+    // lists the three).
+    if (EeScheduler::s_nativeCpu)
+    {
         return;
     }
     g_check = enabled && std::strcmp(enabled, "check") == 0;

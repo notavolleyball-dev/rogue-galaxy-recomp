@@ -52,6 +52,43 @@ void texture(const TextureLevel &level);
 // image, CSM1's order) or 16 (8x2), CT32 or CT16, to the GS block `cbp`.
 void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm, uint32_t entries);
 
+// Texture bindings (docs/NATIVE-BOUNDARY.md, issue 1): in place of a node's
+// upload packets the texture hook writes a marker into the list, a GIF A+D
+// packet of writes to a register the GS does not have. In guest memory each
+// entry says where the level or palette is (BindEntry); the DMA send
+// resolves it to the record's id (bindResolve, game thread, when the PS2's
+// DMA would read the pixels), and the draw thread applies the resolved
+// entries in the stream's order (bound). No upload is built, copied or
+// withheld.
+constexpr uint8_t kBindRegister = 0x7Eu;
+// In the marker's DMA tag, bits 16-25 (unused by the DMA).
+constexpr uint32_t kBindTagMagic = 0x2B5u;
+constexpr uint8_t kBindPalette = 1u, kBindPreSwizzled = 2u;
+struct BindEntry
+{
+    uint32_t source;  // the data, a physical address in guest RAM
+    uint16_t width;   // the transfer's size in texels (TextureLevel's); a palette: its entries
+    uint16_t height;
+    uint8_t reg;      // kBindRegister (the A+D qword's register byte)
+    uint8_t flags;    // kBindPalette, kBindPreSwizzled
+    uint16_t at;      // the GS block: TBP, or the palette's CBP
+    uint8_t psm;      // the texture's format, or the palette's CPSM
+    uint8_t bufferWidth; // the texture's, in 64-pixel units
+    uint16_t cbp;     // an indexed texture's palette block
+};
+static_assert(sizeof(BindEntry) == 16u, "an A+D qword");
+// Whether a level is one a record can be made of (its format, its size, a
+// pre-swizzled one's layout): the hook writes a marker for a node only when
+// every level of it is, and leaves the others their uploads (game thread).
+bool bindable(const TextureLevel &level);
+// Once a list that holds markers, before its entries (game thread).
+void bindBegin();
+// The entry resolved: the A+D write's 64 bits (id, block, format, palette or
+// not). An id of 0: no record could be made (counted), nothing is bound.
+uint64_t bindResolve(const uint8_t *rdram, uint32_t ramSize, const BindEntry &entry);
+// A marker's resolved writes, applied (the thread that follows the stream).
+void bound(const uint64_t *values, size_t count);
+
 // A render target the game names (gs_named_targets' kinds: 0 auto, 1 the
 // frame, 2 the display buffer). Any thread.
 void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height, uint32_t psm, int kind);
@@ -70,7 +107,18 @@ uint32_t targetAt(uint32_t base);
 // (src/draw_state_mirror.h); null when it has none (the mesh is counted, not
 // made). `source` names what drew it, for profiles. True when the record
 // was made: the mesh is then not sent to the GS (step 4c).
-bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source);
+// `retained`: the mesh is one the renderer keeps under this id
+// (docs/NATIVE-BOUNDARY.md, issue 2): with its vertices it is defined first,
+// without them (a later draw) only the id goes.
+bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source,
+          uint32_t retained = 0u);
+// A name for a `source`, for the renderer's draw labels (a frame capture's;
+// debug/bug_mark.h). A VU1 mesh's source stands for its native program.
+void nameSource(uint32_t source, const char *name);
+
+// The renderer's epoch of retained meshes: when it changes, the ids handed
+// out before are no longer drawn (the renderer let go of them all).
+uint64_t retainedEpoch();
 
 // Step 5a's survey (counts only): an effect on its way to be drawn (by
 // command; a sprite effect's ops by what they draw into and from).
@@ -81,7 +129,10 @@ void noteEffect(const GSNativeEffect &effect);
 // renderer's window-space mesh draw. `texels`: its UVs are texels (FST),
 // not normalised. True when made; false leaves it to the GS (counted by
 // why).
-bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels);
+// `indices`: the mesh's triangles into mesh.vertices (empty: the vertices
+// are a triangle list themselves).
+bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels,
+           const std::vector<uint32_t> &indices = {});
 
 // Step 5b: an effect's sprites (src/native_effects.h) as the renderer's
 // window-space mesh draws, and step 5c's object layer commands. True when
@@ -126,6 +177,16 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
 // The hash takeProduced's `hash` is of, for bytes the VIF1 thread saw sent.
 uint64_t uploadHash(const uint8_t *data, size_t size);
 void noteWithheld(bool palette, uint32_t imageBytes);
+// Whether `size` bytes at `at` (guest RAM) are a texture level texture()
+// hashed and no write has reached since (rg::writewatch); `hash` is then
+// that hash, the one takeProduced gives for its record. On the game thread
+// only. An upload sent from such memory carries nothing the record does not
+// already hold: the DMA send leaves its bytes where they are (vif1_thread's
+// elided spans).
+bool sourceUnchanged(const uint8_t *at, size_t size, uint64_t &hash);
+// An elided upload withheld without its bytes; `fetched`: one that needed
+// them after all (read from guest memory, late).
+void noteElided(uint32_t imageBytes, bool fetched);
 void notePassed(Passed why);
 void noteSplit();
 void noteContinuedInPacket();

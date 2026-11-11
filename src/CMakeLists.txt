@@ -65,8 +65,33 @@ foreach(name IN LISTS RG_OVERLAYS)
     list(APPEND RG_OVERLAY_LIBS rg_generated_${name})
 endforeach()
 
+# The native CPU (docs/NATIVE-CPU.md): tools/rgcpu's translation of the main
+# ELF, written to build/generated/native by `setup.py recompile`. Built when
+# it is there; RG_NATIVE_CPU=1 at run time switches the game onto it.
+set(RG_NATIVE_CPU_DIR "${RG_GENERATED_DIR}/native")
+if(EXISTS "${RG_NATIVE_CPU_DIR}/register_native.cpp")
+    file(GLOB rg_native_cpu_sources CONFIGURE_DEPENDS "${RG_NATIVE_CPU_DIR}/nc_*.cpp")
+    list(LENGTH rg_native_cpu_sources rg_native_cpu_count)
+    message(STATUS "rg_native_cpu: ${rg_native_cpu_count} translation units")
+    add_library(rg_native_cpu STATIC ${rg_native_cpu_sources} "${RG_NATIVE_CPU_DIR}/register_native.cpp")
+    target_include_directories(rg_native_cpu PRIVATE "${CMAKE_SOURCE_DIR}/tools/rgcpu")
+    target_link_libraries(rg_native_cpu PRIVATE ps2_runtime)
+    target_compile_options(rg_native_cpu PRIVATE ${RG_GENERATED_FLAGS})
+    # The same order as the generated code's: ee_fpu.h overrides the runtime's
+    # macros, nc_contract.h (each file's first include) overrides those.
+    target_precompile_headers(rg_native_cpu PRIVATE
+        <ps2_runtime_macros.h> "${CMAKE_CURRENT_SOURCE_DIR}/ee_fpu.h" <ps2_runtime.h>)
+    set_source_files_properties("${RG_NATIVE_CPU_DIR}/register_native.cpp" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    set(RG_NATIVE_CPU_LIBS rg_native_cpu)
+    set(RG_NATIVE_CPU_COMMA ",")
+else()
+    set(RG_NATIVE_CPU_LIBS)
+    set(RG_NATIVE_CPU_COMMA "")
+endif()
+
 add_executable(roguegalaxy
     main.cpp
+    native_cpu.cpp
     graphics.cpp
     battle_rates.cpp
     button_art.cpp
@@ -106,6 +131,7 @@ add_executable(roguegalaxy
     vu1_native.cpp
     draw_state_mirror.cpp
     native_capture.cpp
+    guest_write_watch.cpp
     native_2d.cpp
     native_effects.cpp
     native_producer.cpp
@@ -113,6 +139,7 @@ add_executable(roguegalaxy
     vu0_flags.cpp
     vu0_native.cpp
     overlay/overlay_manager.cpp
+    debug/bug_mark.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
     debug/gs_census.cpp
@@ -135,9 +162,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # rg_generated_main is first needed by ps2_runtime, listed after it, so the
     # member would never be pulled in. Rescan them as a group.
     target_link_libraries(roguegalaxy PRIVATE
-        "$<LINK_GROUP:RESCAN,rg_generated_main,${RG_OVERLAY_LIBS},ps2_runtime>")
+        "$<LINK_GROUP:RESCAN,${RG_NATIVE_CPU_LIBS}${RG_NATIVE_CPU_COMMA}rg_generated_main,${RG_OVERLAY_LIBS},ps2_runtime>")
 else()
-    target_link_libraries(roguegalaxy PRIVATE rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
+    target_link_libraries(roguegalaxy PRIVATE ${RG_NATIVE_CPU_LIBS} rg_generated_main ${RG_OVERLAY_LIBS} ps2_runtime)
+endif()
+if(RG_NATIVE_CPU_LIBS)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/native_cpu.cpp" PROPERTIES COMPILE_DEFINITIONS RG_HAVE_NATIVE_CPU=1)
 endif()
 if(WIN32)
     # update_check.cpp asks GitHub through WinHTTP.

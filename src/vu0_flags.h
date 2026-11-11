@@ -13,8 +13,10 @@
 // late: the party fell out of Salgin's chest house that way. The
 // recompiler now updates the flags in the functions that read them
 // (patches/ps2recomp/0017); these host versions stay in place of the three,
-// as the shorter path. RG_VU0_FLAGS=0 keeps the generated code, and
-// RG_VU0_FLAGS=check runs it and counts where it disagrees with these.
+// as the shorter path, except under the native CPU (RG_NATIVE_CPU=1), where
+// the translated tests are direct calls and these would be boundaries.
+// RG_VU0_FLAGS=0 keeps the generated code, and RG_VU0_FLAGS=check runs it
+// and counts where it disagrees with these (without the native CPU).
 namespace rg::vu0
 {
 void install(PS2Runtime &runtime);

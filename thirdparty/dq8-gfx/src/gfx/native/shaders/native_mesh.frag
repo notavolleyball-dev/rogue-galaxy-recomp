@@ -6,8 +6,19 @@
 // 0x80, the blend's source alpha and what a target stores (clamped at 1).
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
-layout(set = 3, binding = 0) uniform Material {
-    // x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
+// The draw's uniforms, from the frame's draw table (see the vertex shader).
+// One draw's row; Renderer::GpuDraw is its C++ twin (std430).
+struct DrawRow {
+    // The vertex stage's.
+    mat4 clip;     // model x view x projection
+    mat4 viewport; // clip to the target's pixels (w kept)
+    vec4 target;   // the target's width and height in game pixels; z: fog per vertex (a window-space draw);
+                   // w: added to the depth (an overlay pulled toward the camera)
+    vec4 fog;      // F = clamp(fog.x + fog.w * w, at most fog.y, at least fog.z)
+    vec4 depthRow; // reversed depth (w - z) / 2 from the position, made in double, with the program's depthScale
+    vec4 depthLimit; // x: the program's depthMax as this depth; y: 1 when it applies
+    // The fragment stage's.
+    // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target
     //    (its alpha stored as A / 0x80, the blend's factor)
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
@@ -33,7 +44,20 @@ layout(set = 3, binding = 0) uniform Material {
     // repeat).
     uvec4 region;
     uvec4 wrap;
-} material;
+    // A retained mesh's cull (native_mesh_static.vert): the program's matrix
+    // to GS window coordinates, its guard band, x: the winding sign, y: the
+    // guard band test on, z: the backface test on, w: the chunk is clipped;
+    // and the cap of its vertex colors.
+    mat4 cullMatrix;
+    vec4 bandScale;
+    vec4 bandOffset;
+    vec4 cull;
+    vec4 colorMax;
+};
+layout(std430, set = 2, binding = 2) readonly buffer Draws {
+    DrawRow draws[];
+};
+#define material draws[inDraw]
 
 int wrapAxis(int a, int size, uint mode, uint lo, uint hi, bool clampOld) {
     if (mode == 2u)
@@ -48,6 +72,7 @@ int wrapAxis(int a, int size, uint mode, uint lo, uint hi, bool clampOld) {
 layout(location = 0) in vec2 inUv;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in float inFog;
+layout(location = 3) flat in uint inDraw;
 layout(location = 0) out vec4 outColor;
 
 bool passes(uint compare, float a, float ref) {

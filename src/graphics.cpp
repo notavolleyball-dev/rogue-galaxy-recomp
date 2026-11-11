@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "debug/bug_mark.h"
 #include "debug/gs_census.h"
 #include "debug/gs_timing.h"
 #include "debug/sampler.h"
@@ -572,6 +573,12 @@ bool SDLCALL countMarkKeys(void *, SDL_Event *event)
         {
             g_f7Presses.fetch_add(1u, std::memory_order_relaxed);
         }
+        else if (event->key.scancode == SDL_SCANCODE_F8)
+        {
+            // A bug mark (debug/bug_mark.h): the frame, with the mouse over
+            // the fault.
+            debug::requestBugMark();
+        }
         else if (event->key.scancode == SDL_SCANCODE_F6 && !(g_menu && g_menu->capturingBinding()))
         {
             // Not while the menu waits for a key to bind, which F6 is not
@@ -748,6 +755,7 @@ bool pump(void *userData)
         std::fprintf(stderr, "[mark] F10: stall report requested\n");
         debug::requestStallReport();
     }
+    debug::pollBugMarks(backend->window());
     if (g_f6Presses.exchange(0u, std::memory_order_relaxed) % 2u != 0u)
     {
         rg::freecamera::setEnabled(!rg::freecamera::enabled());
