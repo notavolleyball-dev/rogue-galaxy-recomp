@@ -68,7 +68,6 @@ enum class Effect : uint8_t
     ShadowMapBlur,
     // M4: a GsPkt block (DrawListBeginPrim to DrawListEndPrim), its 2D
     // made on the game thread (src/native_blocks.h); Place::unit its pieces'.
-    Block2D,
 };
 
 // What an EE address of the frame's packet memory holds: an effect's
@@ -118,7 +117,6 @@ bool writeMarker(uint32_t unit);
 // begun so far: what a 2D block drawn inside one is.
 bool inEffectCall();
 uint64_t effectCallsBegun();
-void markBlock(uint32_t start, uint32_t end, uint32_t unit);
 uint8_t currentLayer();
 
 // M4: the layer (native::Layer's value) of the draw task whose packets the

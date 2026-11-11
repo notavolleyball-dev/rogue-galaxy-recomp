@@ -2213,25 +2213,6 @@ void flushEffect()
     {
         return;
     }
-    // M4: a 2D block made on the game thread: its pieces to the producer,
-    // its packets on without their kicks (the mirror follows them). Not
-    // found: the converter takes the packets.
-    if (t_held.effect == rg::nativefx::Effect::Block2D)
-    {
-        const bool made = rg::nativeblocks::emit(t_held.unit);
-        for (std::vector<uint8_t> &packet : t_held.packets)
-        {
-            if (made)
-                rg::nativefx::withholdKicks(packet);
-            sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-        }
-        if (made)
-            rg::nativeblocks::compare(t_held.unit);
-        t_held.effect = rg::nativefx::Effect::None;
-        t_held.unit = 0u;
-        t_held.packets.clear();
-        return;
-    }
     // A pass: the renderer draws it from the function's parameters (M3 of
     // docs/NATIVE-ONLY.md); the packets' uploads and register writes still
     // go on, their draws not. (Anything else held, a composite's packets
@@ -2568,10 +2549,7 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
     {
         const rg::nativefx::Place place = address == ~0u ? rg::nativefx::Place{} : rg::nativefx::placeAt(address);
         effect = place.effect;
-        unit = effect == rg::nativefx::Effect::ColorFilter || rg::nativefx::isPass(effect) ||
-                       effect == rg::nativefx::Effect::Block2D
-                   ? place.unit
-                   : 0u;
+        unit = effect == rg::nativefx::Effect::ColorFilter || rg::nativefx::isPass(effect) ? place.unit : 0u;
         if (effect != t_held.effect || unit != t_held.unit)
         {
             flushEffect();

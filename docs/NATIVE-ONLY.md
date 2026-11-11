@@ -800,24 +800,18 @@ Done:
   (`GsPktDrawSprite`, `GsPktAddTexSprite`), raw writes or a DMA call (the
   overlay's VU1 call), and outer blocks with one nested in them. The 2D is
   still read from the bytes.
-  - **Step two, in code, guarded per owner:** an owner
-    (DrawListBeginPrim's return address) whose shadows agreed with its
-    bytes three times, and never differed or went unfollowed, has its
-    blocks skipped: each GsPktOpen opens a segment over scratch above the
-    memstack's top (the setters write there, nothing is allocated, no CALL
-    is written), the 2D is made from the shadow at DrawListEndPrim, and a
-    marker in the list where the CALL would have been brings it to the
-    draw stage, with the block's register writes for the stage's state.
-    The game writes no 2D bytes for those blocks. A skipped block written
-    through something the shadow does not follow is lost that once and
-    its owner goes back to writing (`lost` in the line; should stay 0).
-    The line's `blocks the game did not write` counts the rest.
-    - Effects: a block begun inside an effect's hooked call, or with one
-      called inside it, is the effect's (its pass draws it, or its range
-      withholds it): its owner is never skipped (every effect hook goes
-      through `callEffect`, which counts the calls in progress). An effect
-      called inside an already skipped block has its segments written as
-      the game writes them; the rest of that block is lost that once.
+  - **Step two, in code, unconditional:** every block outside an effect's
+    call is drawn from its shadow and the game writes none of it: each
+    GsPktOpen opens a segment over scratch above the memstack's top (the
+    setters still run and keep the builder coherent; nothing is
+    allocated, no CALL written), the 2D is made from the shadow at
+    GsPktEnd, and a marker where the CALL would have gone brings it, with
+    the block's register writes, to the list's run. The byte reading of
+    blocks, the per-owner comparison and the Block2D ranges are deleted.
+    A block written through something the shadow does not follow (a raw
+    write; an outer block an inner one reset) loses what was skipped of
+    it (`lost`, counted). An effect's blocks are written as the game
+    writes them (its pass or range takes them).
 - **Fixed:** blocks were never read before (their range ended in RET
   tags; see the commit). The counts above are the first real ones.
 

@@ -80,25 +80,11 @@ struct Block
 std::mutex g_mutex;
 std::deque<Block> g_blocks;
 uint32_t g_units = 0u;
-std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u}, g_unread{0u}, g_mismatch{0u};
-// The builder's shadow against the game's bytes (src/native_gspkt.h): the
-// same, differing, and blocks it does not follow.
-std::atomic<uint64_t> g_shadowSame{0u}, g_shadowDiffer{0u}, g_shadowNone{0u};
-// Blocks the game did not write (their 2D from the shadow), and those lost
-// (a skipped block written through something the shadow does not follow).
+std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u}, g_mismatch{0u};
+// Blocks drawn from their shadow (the game wrote none of them), and those
+// lost (a block written through something the shadow does not follow).
 std::atomic<uint64_t> g_unwritten{0u}, g_lost{0u};
 
-// By owner (DrawListBeginPrim's return address, game thread): its shadows
-// that agreed with its bytes, and whether one ever did not. An owner's
-// blocks are skipped (written by nobody, drawn from the shadow) once
-// kAgreed of its shadows agreed and none differed or went unfollowed.
-struct OwnerRecord
-{
-    uint32_t agreed = 0u;
-    bool bad = false;
-};
-std::unordered_map<uint32_t, OwnerRecord> g_owners;
-constexpr uint32_t kAgreed = 3u;
 // The blocks open (they nest): their owners, whether skipped, and whether
 // DrawListEndPrim's hook already made the block.
 struct OpenBlock
@@ -198,21 +184,13 @@ void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t owner = g_pendingOwner != 0u ? g_pendingOwner : getRegU32(ctx, 31);
     g_pendingOwner = 0u;
     if (g_depth > 0)
-    {
         g_nested = true;
-        // The outer block is reset by this one: never skipped again.
-        if (!g_open.empty())
-            g_owners[g_open.back().owner].bad = true;
-    }
     ++g_depth;
-    // A block inside an effect's call is the effect's (its pass draws it,
-    // or its range withholds it): its owner never skipped.
+    // Every block is drawn from its shadow and the game writes none of it,
+    // but a block inside an effect's call: the effect's (its pass draws it,
+    // or its range withholds it), written as the game writes it.
     const bool effect = rg::nativefx::inEffectCall();
-    if (effect)
-        g_owners[owner].bad = true;
-    const auto known = g_owners.find(owner);
-    const bool skip = g_depth == 1 && !effect && known != g_owners.end() && !known->second.bad &&
-                      known->second.agreed >= kAgreed;
+    const bool skip = !effect;
     g_open.push_back({owner, skip, false, effect, rg::nativefx::effectCallsBegun()});
     rg::gspkt::beginBlock(skip);
     g_envs.clear();
@@ -295,76 +273,6 @@ uint32_t keepBlock(Block &block)
     return unit;
 }
 
-enum class Shadowed : uint8_t
-{
-    Same,
-    Differ,
-    None,
-};
-
-// The shadow against the block's own bytes (its DIRECTs' data in order).
-Shadowed compareShadow(uint32_t start, uint32_t end, const std::vector<uint8_t> *shadow)
-{
-    if (!shadow)
-    {
-        ++g_shadowNone;
-        return Shadowed::None;
-    }
-    thread_local std::vector<uint8_t> game;
-    game.clear();
-    if (!eachDirect(start, end, [&](const uint8_t *data, uint32_t size) { game.insert(game.end(), data, data + size); }))
-        return Shadowed::None;
-    if (game == *shadow)
-    {
-        ++g_shadowSame;
-        return Shadowed::Same;
-    }
-    const uint64_t n = ++g_shadowDiffer;
-    if (n > 8u)
-        return Shadowed::Differ;
-    size_t at = 0u;
-    while (at < game.size() && at < shadow->size() && game[at] == (*shadow)[at])
-        ++at;
-    at &= ~size_t(15u);
-    uint64_t g[2] = {}, s[2] = {};
-    if (at + 16u <= game.size())
-        std::memcpy(g, game.data() + at, 16u);
-    if (at + 16u <= shadow->size())
-        std::memcpy(s, shadow->data() + at, 16u);
-    std::fprintf(stderr,
-                 "[native-blocks] the builder's shadow differs from the block (owner %08x) at qword %zu of %zu/%zu: "
-                 "game %016llx %016llx, shadow %016llx %016llx\n",
-                 g_blockOwner, at / 16u, game.size() / 16u, shadow->size() / 16u, (unsigned long long)g[0],
-                 (unsigned long long)g[1], (unsigned long long)s[0], (unsigned long long)s[1]);
-    return Shadowed::Differ;
-}
-
-// A block the game wrote: its bytes read from its first GsPktOpen to its
-// GsPktEnd's RET (the restore packet DrawListEndPrim writes after them is
-// observed after them, and stays out of the range), the range marked; its
-// owner's record from its shadow. A block not of the shape expected is
-// left to the draw stage's converter.
-void readBlock(uint32_t start, uint32_t end, const std::vector<uint8_t> *shadow)
-{
-    const Shadowed shadowed = compareShadow(start, end, shadow);
-    OwnerRecord &owner = g_owners[g_blockOwner];
-    if (shadowed == Shadowed::Same)
-        ++owner.agreed;
-    else
-        owner.bad = true;
-    Block block;
-    const bool read = buildBlock(
-        [&](auto &&visit) { return eachDirect(start, end, visit); }, block, false);
-    if (!read)
-    {
-        ++g_unread;
-        return;
-    }
-    if (block.pieces.empty())
-        return; // nothing drawn: the packets go on as they are
-    rg::nativefx::markBlock(start, end, keepBlock(block));
-}
-
 // A block the game did not write (skipped): made from the shadow before
 // DrawListEndPrim runs, and a marker put in the list where its CALL would
 // have been (before the restore packet's).
@@ -372,12 +280,11 @@ void makeSkipped()
 {
     thread_local std::vector<uint8_t> shadow;
     const bool whole = rg::gspkt::endBlock(shadow);
-    OwnerRecord &owner = g_owners[g_blockOwner];
     if (!whole)
     {
-        // Written through something the shadow does not follow: lost this
-        // once, and the owner's blocks written by the game from now on.
-        owner.bad = true;
+        // Written through something the shadow does not follow (a raw
+        // write, an outer block reset by an inner one): what was skipped of
+        // it is lost.
         ++g_lost;
         return;
     }
@@ -392,7 +299,6 @@ void makeSkipped()
         block, true);
     if (!built)
     {
-        owner.bad = true;
         ++g_lost;
         return;
     }
@@ -410,36 +316,21 @@ void afterEnd(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t)
     const OpenBlock open = g_open.empty() ? OpenBlock{} : g_open.back();
     if (!g_open.empty())
         g_open.pop_back();
-    thread_local std::vector<uint8_t> shadowBytes;
-    const bool shadowed = open.made ? false : rg::gspkt::endBlock(shadowBytes);
+    if (!open.made)
+    {
+        thread_local std::vector<uint8_t> unused;
+        rg::gspkt::endBlock(unused); // (an effect's block: written, not followed)
+    }
     --g_depth;
     thread_local std::vector<std::pair<uint32_t, uint32_t>> envs;
     envs.swap(g_envs);
     g_envs.clear();
-    // An outer block that had one end inside it: its first Open was the
-    // inner one's (GsPktBegin zeroes it), so its bytes are not read here.
-    const bool nested = g_nested && g_depth == 0;
     if (g_depth <= 0)
     {
         g_depth = 0;
         g_nested = false;
     }
-    // An effect called inside the block: its owner never skipped.
-    if (open.effect || rg::nativefx::effectCallsBegun() != open.effectsAt)
-        g_owners[open.owner].bad = true;
-    if (!open.made)
-    {
-        g_blockOwner = open.owner;
-        // GsPktEnd's answer (the first Open's CNT tag) to past its RET (the
-        // memstack's top now).
-        const uint32_t start = getRegU32(ctx, 2);
-        const uint32_t top = rg::nativefx::listTop();
-        const uint32_t end = top != 0u ? physical(top) : 0u;
-        if (!nested && g_state && start != 0u && end > physical(start) && end - physical(start) <= (1u << 20))
-            readBlock(physical(start), end, shadowed ? &shadowBytes : nullptr);
-        else if (start != 0u)
-            ++g_unread;
-    }
+    (void)ctx;
     for (const auto &[at, qwords] : envs)
         observeEnvironment(at, qwords);
 }
@@ -451,10 +342,6 @@ void pktEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (!g_open.empty() && g_open.back().skip && g_state)
     {
-        // (An effect called inside a skipped block: its 2D is lost; its
-        // owner is written from now on, above.)
-        if (rg::nativefx::effectCallsBegun() != g_open.back().effectsAt)
-            g_owners[g_open.back().owner].bad = true;
         g_blockOwner = g_open.back().owner;
         makeSkipped();
         g_open.back().made = true;
@@ -548,14 +435,11 @@ bool emit(uint32_t unit)
     const uint64_t emitted = ++g_emitted;
     if (emitted == 1u || emitted % 60000u == 0u)
         std::fprintf(stderr,
-                     "[native-blocks] blocks made on the game thread %llu, drawn %llu, not found %llu, not read %llu, "
-                     "state differing at a block's end %llu; the builder's shadow: the same %llu, differing %llu, "
-                     "not followed %llu; blocks the game did not write %llu, lost %llu\n",
-                     (unsigned long long)g_kept.load(), (unsigned long long)emitted,
-                     (unsigned long long)g_unknown.load(), (unsigned long long)g_unread.load(),
-                     (unsigned long long)g_mismatch.load(), (unsigned long long)g_shadowSame.load(),
-                     (unsigned long long)g_shadowDiffer.load(), (unsigned long long)g_shadowNone.load(),
-                     (unsigned long long)g_unwritten.load(), (unsigned long long)g_lost.load());
+                     "[native-blocks] blocks drawn from the builder's calls %llu (made %llu, not found %llu, lost "
+                     "%llu), state differing at a block's end %llu\n",
+                     (unsigned long long)emitted, (unsigned long long)g_kept.load(),
+                     (unsigned long long)g_unknown.load(), (unsigned long long)g_lost.load(),
+                     (unsigned long long)g_mismatch.load());
     return true;
 }
 

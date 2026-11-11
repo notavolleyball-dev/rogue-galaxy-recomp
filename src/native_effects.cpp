@@ -1488,7 +1488,6 @@ const char *name(Effect effect)
     case Effect::ColorFilter: return "color filter";
     case Effect::Focus: return "focus";
     case Effect::ShadowMapBlur: return "shadow map blur";
-    case Effect::Block2D: return "2D block";
     default: return "none";
     }
 }
@@ -1745,10 +1744,7 @@ uint64_t effectCallsBegun()
     return g_effectCalls;
 }
 
-void markBlock(uint32_t start, uint32_t end, uint32_t unit)
-{
-    addRange(start, end, Effect::Block2D, unit);
-}
+
 
 uint8_t currentLayer()
 {
