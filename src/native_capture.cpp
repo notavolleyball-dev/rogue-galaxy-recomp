@@ -2,6 +2,7 @@
 #include "guest_write_watch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -113,6 +114,77 @@ void getDispFbTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // the width and height, pre-swizzled. Each palette and level is handed to
 // the producer from where the node keeps it. The arithmetic is the
 // function's own.
+// A take marker (rg::nativeproducer::kTakeRegister) of `takes` at `at`:
+// the words it takes, as TexBuildUploadPkt returns them.
+uint32_t writeTakeMarker(uint32_t at, const std::vector<uint64_t> &takes)
+{
+    namespace producer = rg::nativeproducer;
+    const uint32_t k = static_cast<uint32_t>(takes.size());
+    const uint32_t head[8] = {(1u + k) | (1u << 28), 0u, 0u, 0x50000000u | (1u + k), k | 0x8000u, 0x10000000u, 0xEu, 0u};
+    std::memcpy(g_rdram + at, head, sizeof(head));
+    for (uint32_t q = 0; q < k; ++q)
+    {
+        const uint64_t pair[2] = {takes[q], producer::kTakeRegister};
+        std::memcpy(g_rdram + at + sizeof(head) + q * 16u, pair, sizeof(pair));
+    }
+    return (2u + k) * 4u;
+}
+
+// A node whose palettes the manager's own callback writes
+// (TexBuildClutUploadPkt lays out each palette's packet, a NEXT over the
+// palette's 0x400 or 0x40 bytes at +0x10, which the callback fills, then
+// its upload by reference; every palette of a node the same size): made
+// records from where the callback put them once the function returns, and,
+// every palette and level a record, its output replaced by a take marker.
+struct CallbackNode
+{
+    uint32_t dst = 0u, count = 0u, n = 0u, base = 0u, cpsm = 0u, entries = 0u;
+    uint64_t producedBefore = 0u;
+    std::vector<uint64_t> levelTakes;
+};
+std::vector<CallbackNode> g_callbackNodes;
+std::atomic<uint64_t> g_callbackTaken{0u}, g_callbackLeft{0u};
+
+void afterCallbackNode(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t)
+{
+    namespace producer = rg::nativeproducer;
+    if (g_callbackNodes.empty())
+        return;
+    const CallbackNode node = std::move(g_callbackNodes.back());
+    g_callbackNodes.pop_back();
+    const uint32_t words = getRegU32(ctx, 2);
+    const uint32_t at = physical(node.dst);
+    const uint32_t bytes = node.entries * ((node.cpsm & 0x3Fu) == 0u ? 4u : 2u);
+    if (node.count == 0u || words == 0u || (words * 4u) % node.count != 0u || at + words * 4u > PS2_RAM_SIZE)
+    {
+        ++g_callbackLeft;
+        return;
+    }
+    const uint32_t each = words * 4u / node.count;
+    std::vector<uint64_t> takes;
+    for (uint32_t i = 0; i < node.count; ++i)
+    {
+        const uint32_t data = at + i * each + 16u;
+        if (each < 16u + bytes)
+        {
+            ++g_callbackLeft;
+            return;
+        }
+        const uint32_t cbp = (node.base + i * node.n) & 0x3FFFu;
+        producer::palette(g_rdram + data, PS2_RAM_SIZE - data, cbp, node.cpsm, node.entries);
+        takes.push_back(producer::takeValue(cbp, 1u, node.cpsm, node.entries == 256u ? 16u : 8u,
+                                            node.entries == 256u ? 16u : 2u));
+    }
+    takes.insert(takes.end(), node.levelTakes.begin(), node.levelTakes.end());
+    if (producer::producedCount() - node.producedBefore != takes.size() || (2u + takes.size()) * 16u > words * 4u)
+    {
+        ++g_callbackLeft; // (uploads after all: the records made are withheld there)
+        return;
+    }
+    setReturnS32(ctx, static_cast<int32_t>(writeTakeMarker(at, takes)));
+    ++g_callbackTaken;
+}
+
 void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t obj = getRegU32(ctx, 4);
@@ -290,27 +362,38 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                               rg::vif1::bindingTextures();
         const uint32_t k = palettes + static_cast<uint32_t>(levels.size());
         const uint32_t at = physical(dst);
+        thread_local std::vector<uint64_t> takes;
+        takes.clear();
+        const uint32_t paletteEntries = nodeBpp == 8 ? 256u : 16u;
+        for (uint32_t i = 0u; i < palettes; ++i)
+            takes.push_back(producer::takeValue((base + i * n) & 0x3FFFu, 1u, cpsm,
+                                                paletteEntries == 256u ? 16u : 8u, paletteEntries == 256u ? 16u : 2u));
+        for (const producer::TextureLevel &level : levels)
+            takes.push_back(producer::takeValue(level.tbp, level.transferBufferWidth, level.transferPsm,
+                                                level.transferWidth, level.transferHeight));
         if (takeable && k != 0u && producer::producedCount() - producedBefore == k &&
             at + (2u + k) * 16u <= PS2_RAM_SIZE)
         {
-            const uint32_t head[8] = {(1u + k) | (1u << 28), 0u, 0u, 0x50000000u | (1u + k),
-                                      k | 0x8000u, 0x10000000u, 0xEu, 0u};
-            std::memcpy(g_rdram + at, head, sizeof(head));
-            uint32_t q = 0u;
-            const auto put = [&](uint64_t value) {
-                const uint64_t pair[2] = {value, producer::kTakeRegister};
-                std::memcpy(g_rdram + at + sizeof(head) + q * 16u, pair, sizeof(pair));
-                ++q;
-            };
-            const uint32_t paletteEntries = nodeBpp == 8 ? 256u : 16u;
-            for (uint32_t i = 0u; i < palettes; ++i)
-                put(producer::takeValue((base + i * n) & 0x3FFFu, 1u, cpsm, paletteEntries == 256u ? 16u : 8u,
-                                        paletteEntries == 256u ? 16u : 2u));
-            for (const producer::TextureLevel &level : levels)
-                put(producer::takeValue(level.tbp, level.transferBufferWidth, level.transferPsm,
-                                        level.transferWidth, level.transferHeight));
-            setReturnS32(ctx, static_cast<int32_t>((2u + k) * 4u));
+            setReturnS32(ctx, static_cast<int32_t>(writeTakeMarker(at, takes)));
             ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
+        if (callback && count > 0u && rg::vif1::bindingTextures() &&
+            producer::producedCount() - producedBefore == levels.size())
+        {
+            // The callback's palettes: after the function, from where it
+            // put them.
+            CallbackNode node;
+            node.dst = dst;
+            node.count = count;
+            node.n = n;
+            node.base = base;
+            node.cpsm = cpsm;
+            node.entries = paletteEntries;
+            node.producedBefore = producedBefore;
+            node.levelTakes.assign(takes.begin() + palettes, takes.end());
+            g_callbackNodes.push_back(std::move(node));
+            rg::hooks::callThen(g_texBuildUploadOriginal, rdram, ctx, runtime, &afterCallbackNode, 0u);
             return;
         }
     }
