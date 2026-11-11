@@ -43,8 +43,8 @@ constexpr uint64_t kImageBudget = 256ull << 20;
 constexpr uint32_t kViewColumns = 8u;
 constexpr uint32_t kViewRows = 6u;
 
-constexpr const char *kRecordNames[] = {"texture", "palette", "target",     "camera",   "mesh",      "sprite",
-                                        "effect",  "frame",   "present",    "readback", "depth-query", "retained-mesh"};
+constexpr const char *kRecordNames[] = {"texture", "palette", "target", "camera",  "mesh",          "2d",
+                                        "pass",    "clear",   "frame",  "present", "retained-mesh"};
 static_assert(std::size(kRecordNames) == std::variant_size_v<Record>, "a name per record kind");
 
 // Step 7b's depth reads: what was asked since the renderer last took them,
@@ -215,7 +215,9 @@ void recycleMeshes(std::vector<MeshDraw> &meshes)
 }
 } // namespace
 
-void reuseMeshBuffers(MeshDraw &draw)
+namespace
+{
+void reuseBuffers(std::vector<Vertex> &drawVertices, std::vector<uint32_t> &drawIndices)
 {
     // A batch at a time, so the pool's lock is taken once per many draws.
     constexpr size_t kBatch = 256u;
@@ -236,16 +238,27 @@ void reuseMeshBuffers(MeshDraw &draw)
             pool.indices.pop_back();
         }
     }
-    if (!vertices.empty() && draw.vertices.capacity() == 0u)
+    if (!vertices.empty() && drawVertices.capacity() == 0u)
     {
-        draw.vertices = std::move(vertices.back());
+        drawVertices = std::move(vertices.back());
         vertices.pop_back();
     }
-    if (!indices.empty() && draw.indices.capacity() == 0u)
+    if (!indices.empty() && drawIndices.capacity() == 0u)
     {
-        draw.indices = std::move(indices.back());
+        drawIndices = std::move(indices.back());
         indices.pop_back();
     }
+}
+} // namespace
+
+void reuseMeshBuffers(MeshDraw &draw)
+{
+    reuseBuffers(draw.vertices, draw.indices);
+}
+
+void reuseMeshBuffers(Draw2D &draw)
+{
+    reuseBuffers(draw.vertices, draw.indices);
 }
 
 // MeshDraw::raw's vectors, for a producer that fills raw rather than
@@ -439,12 +452,45 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                 // Any target (step 5a); one not declared is counted when drawn.
                 m_meshes.push_back(std::move(r));
             }
+            else if constexpr (std::is_same_v<T, Draw2D>)
+            {
+                // Drawn as a mesh with no model: its positions are the
+                // target's pixels.
+                MeshDraw draw;
+                reuseMeshBuffers(draw);
+                draw.target = r.target;
+                draw.depthTarget = r.depthTarget;
+                draw.camera = r.camera;
+                draw.hasModel = false;
+                draw.material = r.material;
+                draw.scissor = r.scissor;
+                draw.vertices.swap(r.vertices);
+                draw.indices.swap(r.indices);
+                std::copy_n(r.fogColor, 3, draw.fogColor);
+                draw.source = r.source;
+                count(draw);
+                m_meshes.push_back(std::move(draw));
+            }
+            else if constexpr (std::is_same_v<T, Clear>)
+            {
+                m_clears.emplace_back(m_meshes.size(), r);
+            }
+            else if constexpr (std::is_same_v<T, Pass>)
+            {
+                // Built in M3 of the game's docs/NATIVE-ONLY.md; nothing
+                // sends one yet.
+                ++m_passesIgnored;
+            }
             else if constexpr (std::is_same_v<T, Present>)
             {
                 // The draws since the last one are a frame; a frame not yet
                 // drawn when the next closes is dropped (the newest shows).
                 m_frameMeshes.swap(m_meshes);
                 recycleMeshes(m_meshes);
+                m_frameClears.swap(m_clears);
+                m_clears.clear();
+                m_presentTarget = r.target;
+                m_presentRect = r.rect;
                 m_frameReady = true;
                 ++m_meshCounts.frames;
             }
@@ -829,12 +875,36 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
         const char *v = std::getenv("RG_NATIVE_TEXTURE_GRID");
         return v && *v && *v != '0';
     }();
+    // What the Present record shows: its target (the scene unless it names
+    // another), the rectangle it names (all of it when none).
+    const auto shown = [&] {
+        out.texture = m_scene;
+        out.x = out.y = 0u;
+        out.width = m_sceneWidth;
+        out.height = m_sceneHeight;
+        if (m_presentTarget != 0u && m_presentTarget != m_sceneTarget)
+        {
+            const auto t = m_gpuTargets.find(m_presentTarget);
+            if (t != m_gpuTargets.end() && t->second.texture)
+            {
+                out.texture = t->second.texture;
+                out.width = t->second.width;
+                out.height = t->second.height;
+            }
+        }
+        const Rect &r = m_presentRect;
+        if (r.x1 > r.x0 && r.y1 > r.y0 && r.x0 >= 0 && r.y0 >= 0)
+        {
+            out.x = std::min(uint32_t(r.x0) * scale, out.width);
+            out.y = std::min(uint32_t(r.y0) * scale, out.height);
+            out.width = std::min(uint32_t(r.x1 - r.x0) * scale, out.width - out.x);
+            out.height = std::min(uint32_t(r.y1 - r.y0) * scale, out.height - out.y);
+        }
+    };
     const bool draw = meshes && m_frameReady;
     if (!draw && !fresh && !grid)
     {
-        out.texture = m_scene;
-        out.width = m_sceneWidth;
-        out.height = m_sceneHeight;
+        shown();
         return true;
     }
     bool drawn = false;
@@ -871,10 +941,7 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
             drawView(commands, pass);
         SDL_EndGPURenderPass(pass);
     }
-
-    out.texture = m_scene;
-    out.width = m_sceneWidth;
-    out.height = m_sceneHeight;
+    shown();
     return true;
 }
 
@@ -907,7 +974,8 @@ std::string Renderer::statsLine()
             std::to_string(m_retained.size()) + " (" + std::to_string(m_staticUsed) + " vertices, defined so far " +
             std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
             ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
-            std::to_string(m_retainedResets) + ")";
+            std::to_string(m_retainedResets) + ") | clears of part of a target (not drawn, so far) " +
+            std::to_string(m_clearsRefused) + ", passes (none yet, so far) " + std::to_string(m_passesIgnored);
     m_evictedReported = m_evicted;
     m_refusedReported = m_refused;
     const Readiness &now = m_readiness, &was = m_readinessReported;
@@ -1329,6 +1397,8 @@ void Renderer::release(SDL_GPUDevice *device)
     releaseDepth(device);
     m_meshes.clear();
     m_frameMeshes.clear();
+    m_clears.clear();
+    m_frameClears.clear();
     if (m_scene)
         SDL_ReleaseGPUTexture(device, m_scene);
     for (auto &[id, image] : m_images)

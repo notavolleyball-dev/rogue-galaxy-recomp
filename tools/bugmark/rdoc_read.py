@@ -131,7 +131,7 @@ def main():
             "window space, with a camera" if f.get("cam", "0") != "0" else "window space")
         if brief:
             return "%s [%s]" % (source, reads)
-        return "%s | %s | %s | into %s | depth log frame %s draws %s%s" % (
+        return "%s | %s | %s | into %s | frame %s draws %s%s" % (
             source, kind, reads, buffer(f.get("tgt", "?")), f.get("f"), f.get("n"),
             " | object %s" % f["obj"] if f.get("obj", "0") != "0" else "")
 

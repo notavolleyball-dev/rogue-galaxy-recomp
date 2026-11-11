@@ -238,21 +238,13 @@ void begin(SDL_Window *window)
                  static_cast<unsigned long long>(rg::graphics::guestFlips()), padReads(),
                  capture ? "with a RenderDoc capture" : "no RenderDoc: no frame capture");
     touch("build/run/dump-now");
-    touch("build/run/depth-log-now");
 }
 
-// The pieces that came since: the depth logs, and the log from a little
-// before the mark (the stats line it follows) to now.
+// The pieces that came since: the log from a little before the mark (the
+// stats line it follows) to now.
 void finish()
 {
     std::error_code error;
-    for (const fs::directory_entry &entry : fs::directory_iterator("build/run", error))
-    {
-        const std::string name = entry.path().filename().string();
-        if (name.rfind("depthlog-", 0) == 0 && entry.is_regular_file(error) &&
-            entry.last_write_time(error) >= g_open.filesFrom)
-            fs::rename(entry.path(), g_open.directory / name, error);
-    }
     if (const char *log = std::getenv("RG_LOG_FILE"); log && *log)
     {
         constexpr uintmax_t kBefore = 64u * 1024u;

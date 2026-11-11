@@ -208,6 +208,10 @@ struct State
     std::unordered_map<native::Id, uint64_t> wholeOf;    // a picture's record -> its key
     std::unordered_map<native::Id, uint64_t> clutHashes; // palette id -> PCSX2's hash
     uint64_t packGeneration = 0u;
+    // The depth targets drawn with since the frame began (frameBoundary):
+    // each is cleared at its first use in a frame, as the game's clear
+    // sprites (not records until M4 of docs/NATIVE-ONLY.md) leave it.
+    std::set<native::Id> depthsThisFrame;
     std::set<uint64_t> dumped;
     Counts counts, reported;
     bool statsSet = false;
@@ -1625,9 +1629,21 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
 // target it is drawn with.
 native::Id depthTarget(State &s, uint32_t base, uint32_t colorBase, native::Id color)
 {
+    // Its first use in the frame clears it (to the far plane).
+    const auto firstUse = [&s](native::Id id) {
+        if (s.depthsThisFrame.insert(id).second)
+        {
+            native::Clear clear;
+            clear.target = id;
+            clear.depth = true;
+            clear.depthValue = 0.0f;
+            native::push(std::move(clear));
+        }
+        return id;
+    };
     const auto at = s.depthAt.find(base);
     if (at != s.depthAt.end())
-        return at->second;
+        return firstUse(at->second);
     native::Target record;
     record.id = s.nextTarget++;
     record.role = color == kSceneTarget ? native::TargetRole::SceneDepth : native::TargetRole::Offscreen;
@@ -1642,7 +1658,7 @@ native::Id depthTarget(State &s, uint32_t base, uint32_t colorBase, native::Id c
     s.depthAt.emplace(base, record.id);
     ++s.counts.targetsNew;
     native::push(native::Target(record));
-    return record.id;
+    return firstUse(record.id);
 }
 
 // Locked. The camera's id, a record sent when it is new.
@@ -1878,11 +1894,6 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     // 1.y): decals at 1.01 and 1.02 sit in front of their surfaces.
     draw.depthScale = mesh.header.depthScale;
     draw.depthMax = mesh.header.depthMax;
-    // For the depth log: the program's matrix, to give the GS's Z.
-    draw.gsKnown = true;
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            draw.gsMatrix[i * 4 + j] = mesh.header.matrix[i][j];
 
     // The chunk as the program left it: the renderer culls it (cullMesh,
     // on its thread) and makes its GPU vertices from these.
@@ -2748,7 +2759,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
                    drawState->prim.tme != 0u, c.tex0.tbp0))
         return true; // dropped
     const GSNativeMesh::Header &h = mesh.header;
-    native::MeshDraw draw;
+    native::Draw2D draw;
     native::reuseMeshBuffers(draw);
     draw.source = kSource2d;
     const uint32_t frameBase = c.frame.fbp * 32u;
@@ -2798,11 +2809,10 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         }
         draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
         draw.scissor = {0, 0, int32_t(x1), int32_t(y1)};
-        draw.fog[0] = draw.fog[1] = 255.0f;
         ++s.counts.piecesMade;
         ++s.counts.opsGreenToAlpha;
         s.drawnSeq[seqKey] = ++s.sequence;
-        native::push(native::MeshDraw(std::move(draw)));
+        native::push(std::move(draw));
         return true;
     }
     native::Material &m = draw.material;
@@ -2947,7 +2957,6 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             draw.indices[k] = k;
     }
     draw.scissor = {c.scissor.x0, c.scissor.y0, c.scissor.x1 + 1, c.scissor.y1 + 1};
-    draw.fog[0] = draw.fog[1] = 255.0f; // a model's F: none (the vertices carry theirs)
     m.fog = fogged;
     draw.fogColor[0] = drawState->fogR;
     draw.fogColor[1] = drawState->fogG;
@@ -2971,7 +2980,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     ++s.counts.piecesMade;
     if (draw.target != s.layer || s.layer == 0u) // a routed draw leaves the buffer as it was
         s.drawnSeq[seqKey] = ++s.sequence;
-    native::push(native::MeshDraw(std::move(draw)));
+    native::push(std::move(draw));
     return true;
 }
 
@@ -3022,9 +3031,9 @@ namespace
 {
 // Locked. A window-space rectangle into `target` (x1, y1 exclusive): a clear
 // to transparent black, or, with `source`, that target's same pixels copied.
-native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id source)
+native::Draw2D rectDraw(native::Id target, const int32_t box[4], native::Id source)
 {
-    native::MeshDraw draw;
+    native::Draw2D draw;
     native::reuseMeshBuffers(draw);
     draw.source = kSourceLayer;
     draw.target = target;
@@ -3051,7 +3060,6 @@ native::MeshDraw rectDraw(native::Id target, const int32_t box[4], native::Id so
     }
     draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
     draw.scissor = {box[0], box[1], box[2], box[3]};
-    draw.fog[0] = draw.fog[1] = 255.0f;
     return draw;
 }
 
@@ -3079,7 +3087,7 @@ bool layerCommand(State &s, const GSNativeEffect &e)
         s.layerBox[2] = std::min<int32_t>(e.box[2], s.layerWidth);
         s.layerBox[3] = std::min<int32_t>(e.box[3], s.layerHeight);
         if (s.layerBox[2] > s.layerBox[0] && s.layerBox[3] > s.layerBox[1])
-            native::push(native::MeshDraw(rectDraw(layer, s.layerBox, 0u)));
+            native::push((rectDraw(layer, s.layerBox, 0u)));
         s.routing = true;
         s.routeBase = base;
         ++s.counts.layersRouted;
@@ -3100,7 +3108,7 @@ bool layerCommand(State &s, const GSNativeEffect &e)
             const native::Id into = targetForUnrouted(s, base, s.layerWidth, s.layerHeight, 0u);
             if (into == 0u)
                 return false;
-            native::push(native::MeshDraw(rectDraw(into, s.layerBox, s.layer)));
+            native::push((rectDraw(into, s.layerBox, s.layer)));
             s.drawnSeq[base] = ++s.sequence;
             ++s.counts.tailsBack;
         }
@@ -3146,7 +3154,7 @@ bool effect(const GSNativeEffect &e)
     // Everything is resolved before anything is sent: an effect is the
     // renderer's or the GS's, never split between them.
     const uint32_t ops = std::min<uint32_t>(e.opCount, GSNativeEffect::kMaxOps);
-    thread_local std::vector<native::MeshDraw> made;
+    thread_local std::vector<native::Draw2D> made;
     thread_local std::vector<uint32_t> bases;
     made.clear();
     bases.clear();
@@ -3167,7 +3175,7 @@ bool effect(const GSNativeEffect &e)
         if (target == 0u)
             return refuse(s.counts.opsNoTarget);
         const bool greenToAlpha = (op.flags & GSNativeEffect::kGreenToAlpha) != 0u;
-        native::MeshDraw draw;
+        native::Draw2D draw;
         native::reuseMeshBuffers(draw); // the renderer gives every draw's buffers back to the pool
         draw.source = kSourceEffect;
         draw.target = target;
@@ -3260,7 +3268,6 @@ bool effect(const GSNativeEffect &e)
         draw.indices = {0u, 1u, 2u, 1u, 3u, 2u};
         draw.scissor = {static_cast<int32_t>(op.scissor[0]), static_cast<int32_t>(op.scissor[1]),
                         static_cast<int32_t>(op.scissor[2]) + 1, static_cast<int32_t>(op.scissor[3]) + 1};
-        draw.fog[0] = draw.fog[1] = 255.0f;
         m.known = known;
         made.push_back(std::move(draw));
         bases.push_back(into.base);
@@ -3269,7 +3276,7 @@ bool effect(const GSNativeEffect &e)
     {
         if (made[k].target != s.layer || s.layer == 0u)
             s.drawnSeq[bases[k]] = ++s.sequence;
-        native::push(native::MeshDraw(std::move(made[k])));
+        native::push(std::move(made[k]));
     }
     ++s.counts.effectsMade;
     if (tail)
@@ -3371,6 +3378,19 @@ bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t wid
     }
     return true;
 }
+void frameBoundary()
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    s.depthsThisFrame.clear();
+    // The scene starts each frame cleared to black, opaque.
+    native::Clear clear;
+    clear.target = kSceneTarget;
+    clear.color = true;
+    clear.rgba[3] = 1.0f;
+    native::push(std::move(clear));
+}
+
 } // namespace rg::nativeproducer
 
 

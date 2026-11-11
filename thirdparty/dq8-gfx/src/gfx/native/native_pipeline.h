@@ -47,6 +47,7 @@ void nameSource(uint32_t source, const char *name);
 // (2026-11-08: the presenter blocked ~4,400 times a second in delete).
 // Any thread; the producer's side takes a batch at a time.
 void reuseMeshBuffers(MeshDraw &draw);
+void reuseMeshBuffers(Draw2D &draw);
 
 // MeshDraw::raw's buffer from the same pool (reuseMeshBuffers gives the
 // others). Any thread.
@@ -151,6 +152,7 @@ public:
     struct Frame
     {
         SDL_GPUTexture *texture = nullptr;
+        uint32_t x = 0, y = 0; // what of the texture is shown, from here
         uint32_t width = 0;
         uint32_t height = 0;
     };
@@ -215,6 +217,9 @@ private:
         Id target = 0, depthId = 0;
         SDL_GPUTexture *color = nullptr, *depth = nullptr;
         SDL_GPUTexture *copy = nullptr; // the color copied here first (a draw reads its own target)
+        // Instead of draws: a Clear record, its texture (color, or depth).
+        bool clear = false;
+        Clear clearRecord;
         uint32_t colorW = 0, colorH = 0, gameW = 0, gameH = 0;
         SDL_GPULoadOp colorLoad = SDL_GPU_LOADOP_LOAD, depthLoad = SDL_GPU_LOADOP_LOAD;
         size_t first = 0, last = 0;
@@ -310,6 +315,12 @@ private:
 
     std::vector<MeshDraw> m_meshes;      // drawn since the last Present record, any target
     std::vector<MeshDraw> m_frameMeshes; // the frame a Present record closed
+    // The Clear records among them, each before the draw of its index.
+    std::vector<std::pair<size_t, Clear>> m_clears, m_frameClears;
+    // What the last Present record shows.
+    Id m_presentTarget = 0;
+    Rect m_presentRect;
+    uint64_t m_clearsRefused = 0, m_passesIgnored = 0;
     bool m_frameReady = false;
     bool m_dumpTargets = false; // the triggered dump: write the targets out
     SDL_GPUShader *m_meshVertex = nullptr;

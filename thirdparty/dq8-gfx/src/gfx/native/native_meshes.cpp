@@ -36,60 +36,7 @@ SourceNames &sourceNames()
     static SourceNames instance;
     return instance;
 }
-// Depth log (debug): `touch build/run/depth-log-now` and the next
-// RG_NATIVE_DEPTH_LOG_FRAMES frames (30 unless set) go to
-// build/run/depthlog-<frame>.txt: each pass (target, depth target, cleared
-// or loaded) and each draw as drawn (material, camera, the depth pull, and
-// every triangle in the target's pixels with the depth the GPU gets, made
-// as the vertex shader makes it). tools/depthlog.py reads it.
-struct DepthLog
-{
-    FILE *file = nullptr;
-    uint32_t framesLeft = 0u;
-};
-DepthLog &depthLog()
-{
-    static DepthLog log;
-    return log;
-}
 
-// The integer Z the GS would have got for a corner (gs_types.h's
-// gsNativeMeshDepth: the same operations in the same order, no fused
-// multiply-add); a window-space draw's z is that Z already. NaN when unknown.
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC push_options
-#pragma GCC optimize("fp-contract=off")
-#endif
-double gsDepthOf(const MeshDraw &d, const float p[3])
-{
-#if defined(__clang__)
-#pragma clang fp contract(off)
-#endif
-    if (!d.hasModel)
-        return p[2];
-    if (!d.gsKnown)
-        return std::nan("");
-    const float *m = d.gsMatrix;
-    const float z = p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14];
-    const float w = p[0] * m[3] + p[1] * m[7] + p[2] * m[11] + m[15];
-    const float r = w != 0.0f ? 1.0f / w : std::copysign(3.402823466e38f, w);
-    const float pz = std::fmin(z * r * d.depthScale, d.depthMax);
-    const double scaled = double(pz) * 16.0;
-    const int32_t fixed = !(scaled > -2147483648.0) ? INT32_MIN
-                          : scaled >= 2147483647.0  ? INT32_MAX
-                                                    : int32_t(scaled);
-    return double((uint32_t(fixed) >> 4) & 0xFFFFFFu);
-}
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC pop_options
-#endif
-
-// v x M for the game's row-vector matrices, in double.
-void rowTimes(const float m[16], const double v[4], double out[4])
-{
-    for (int j = 0; j < 4; ++j)
-        out[j] = v[0] * m[j] + v[1] * m[4 + j] + v[2] * m[8 + j] + v[3] * m[12 + j];
-}
 
 // A vertex as the mesh shader takes it: `draw` is its draw's row in the
 // frame's draw table.
@@ -832,64 +779,6 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             du.target[3] = decalUnits / (2.0f * std::fabs(camera->viewport[10]));
         std::memcpy(du.fog, d.fog, sizeof(du.fog));
 
-        if (FILE *log = depthLog().file)
-        {
-            // The draw, then its triangles: x y depth per corner, the
-            // vertex shader's arithmetic in double (nan: a corner at or
-            // behind the eye, which the GPU clips).
-            uint64_t geo = 1469598103934665603ull;
-            for (const Vertex &v : d.vertices)
-                for (int i = 0; i < 3; ++i)
-                {
-                    uint32_t bits;
-                    std::memcpy(&bits, &v.position[i], 4);
-                    geo = (geo ^ bits) * 1099511628211ull;
-                }
-            geo = (geo ^ d.indices.size()) * 1099511628211ull;
-            std::fprintf(log,
-                         "D n=%zu tgt=%u dt=%u att=%d model=%d cam=%u obj=%llx src=%x gpass=%u fd=%d zt=%d zw=%d "
-                         "bl=%d sf=%d df=%d op=%d at=%d ar=%u af=%d tex=%u stex=%u cw=%x pull=%.9g v22=%.9g "
-                         "v32=%.9g sc=%d,%d,%d,%d geo=%llx gs=%d zs=%.9g zmax=%.9g tris=%zu\n",
-                         n, d.target, d.depthTarget, depthAttached ? 1 : 0, d.hasModel ? 1 : 0, d.camera,
-                         (unsigned long long)d.object, d.source, d.pass, d.floatDepth ? 1 : 0, int(m.depthTest),
-                         m.depthWrite ? 1 : 0, m.blending ? 1 : 0, int(m.srcFactor), int(m.dstFactor),
-                         int(m.blendOp), int(m.alphaTest), m.alphaRef, int(m.alphaFail), m.texture,
-                         m.sourceTarget, m.colorWrite, du.target[3], camera ? camera->viewport[10] : 0.0f,
-                         camera ? camera->viewport[14] : 0.0f, d.scissor.x0, d.scissor.y0, d.scissor.x1,
-                         d.scissor.y1, (unsigned long long)geo, (d.gsKnown || !d.hasModel) ? 1 : 0,
-                         d.depthScale, d.depthMax, d.indices.size() / 3u);
-            std::fputs("T", log);
-            for (size_t k = 0; k + 2 < d.indices.size(); k += 3)
-                for (int c = 0; c < 3; ++c)
-                {
-                    const uint32_t index = d.indices[k + c];
-                    if (index >= d.vertices.size())
-                    {
-                        std::fputs(" nan nan nan nan", log);
-                        continue;
-                    }
-                    const float *p = d.vertices[index].position;
-                    const double pos[4] = {p[0], p[1], p[2], 1.0};
-                    double clip[4], window[4];
-                    rowTimes(du.clip, pos, clip);
-                    rowTimes(du.viewport, clip, window);
-                    if (!(clip[3] > 0.0))
-                    {
-                        std::fputs(" nan nan nan nan", log);
-                        continue;
-                    }
-                    const double ndcX = (window[0] * 2.0 / du.target[0] - window[3]) / clip[3];
-                    const double ndcY = (window[3] - window[1] * 2.0 / du.target[1]) / clip[3];
-                    double row = du.depthRow[0] * pos[0] + du.depthRow[1] * pos[1] + du.depthRow[2] * pos[2] +
-                                 du.depthRow[3];
-                    if (du.depthLimit[1] != 0.0f)
-                        row = std::min(row, double(du.depthLimit[0]) * clip[3]);
-                    const double depth = (row + du.target[3] * clip[3]) / clip[3];
-                    std::fprintf(log, " %.3f %.3f %.9g %.0f", (ndcX + 1.0) * 0.5 * du.target[0],
-                                 (1.0 - ndcY) * 0.5 * du.target[1], depth, gsDepthOf(d, p));
-                }
-            std::fputc('\n', log);
-        }
 
         if (m.blending && (m.srcFactor == BlendFactor::Fixed || m.srcFactor == BlendFactor::InvFixed ||
                            m.dstFactor == BlendFactor::Fixed || m.dstFactor == BlendFactor::InvFixed))
@@ -1046,38 +935,9 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
 bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, std::string &error)
 {
     scale = std::max(scale, 1u);
-    // The scene starts each frame cleared (the game's own clears are not
-    // records yet); every other target keeps what it holds.
-    {
-        SDL_GPUColorTargetInfo clear{};
-        clear.texture = m_scene;
-        clear.load_op = SDL_GPU_LOADOP_CLEAR;
-        clear.store_op = SDL_GPU_STOREOP_STORE;
-        clear.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
-        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &clear, 1, nullptr);
-        if (!pass)
-        {
-            error = std::string("SDL_BeginGPURenderPass(native scene clear): ") + SDL_GetError();
-            return false;
-        }
-        SDL_EndGPURenderPass(pass);
-    }
-    {
-        DepthLog &log = depthLog();
-        if (!log.file && std::remove("build/run/depth-log-now") == 0)
-        {
-            const char *v = std::getenv("RG_NATIVE_DEPTH_LOG_FRAMES");
-            log.framesLeft = v && *v ? uint32_t(std::strtoul(v, nullptr, 10)) : 30u;
-            const std::string path =
-                "build/run/depthlog-" + std::to_string((unsigned long long)m_meshCounts.frames) + ".txt";
-            log.file = log.framesLeft ? std::fopen(path.c_str(), "w") : nullptr;
-            std::fprintf(stderr, "[depth-log] %s: %u frames to %s\n", log.file ? "started" : "could not start",
-                         log.framesLeft, path.c_str());
-        }
-        if (log.file)
-            std::fprintf(log.file, "F frame=%llu draws=%zu scale=%u\n", (unsigned long long)m_meshCounts.frames,
-                         m_frameMeshes.size(), scale);
-    }
+    // Every target keeps what it holds until a Clear record says otherwise
+    // (the producer sends one for the scene at each frame's start, and for a
+    // depth target at its first use in a frame).
     // RG_NATIVE_FRAME_DUMP=N: the N-th frame's draws, one line each.
     static const uint64_t dumpFrame = [] {
         const char *v = std::getenv("RG_NATIVE_FRAME_DUMP");
@@ -1093,10 +953,10 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     }
     // VU1 chunks as the program left them: their triangles through the
     // producer's cull, on this thread rather than the producer's; with a
-    // log or a dump reading vertices, their Vertex form too.
+    // dump reading vertices, their Vertex form too.
     {
         void (*cull)(MeshDraw &) = meshCull();
-        const bool asVertices = depthLog().file || (dumpFrame != 0u && m_meshCounts.frames == dumpFrame) || triggered;
+        const bool asVertices = (dumpFrame != 0u && m_meshCounts.frames == dumpFrame) || triggered;
         for (MeshDraw &d : m_frameMeshes)
         {
             if (d.raw.empty())
@@ -1138,18 +998,58 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
                          d.vertices.empty() ? 0.f : d.vertices[0].fog, d.camera, m.known ? "" : " (unknown)");
         }
     }
-    std::vector<Id> depthsCleared;
     const size_t count = m_frameMeshes.size();
     m_drawPlans.assign(count, DrawPlan{});
     m_drawTable.resize(count);
     m_passPlans.clear();
+    // The Clear records before the draw `upTo` (and at the end, all), each
+    // a pass of its own, in order with the draws.
+    size_t nextClear = 0;
+    const auto planClears = [&](size_t upTo) {
+        for (; nextClear < m_frameClears.size() && m_frameClears[nextClear].first <= upTo; ++nextClear)
+        {
+            const Clear &c = m_frameClears[nextClear].second;
+            const auto declared = m_targets.find(c.target);
+            const bool whole = c.rect.x1 <= c.rect.x0 || c.rect.y1 <= c.rect.y0 ||
+                               (declared != m_targets.end() && c.rect.x0 <= 0 && c.rect.y0 <= 0 &&
+                                c.rect.x1 >= int32_t(declared->second.width) &&
+                                c.rect.y1 >= int32_t(declared->second.height));
+            if (declared == m_targets.end() || !whole || (!c.color && !c.depth))
+            {
+                ++m_clearsRefused; // a part of a target: not yet (M4 brings the game's own clears)
+                continue;
+            }
+            PassPlan plan;
+            plan.clear = true;
+            plan.clearRecord = c;
+            plan.target = c.target;
+            const bool depth = declared->second.format == PixelFormat::Depth32;
+            bool fresh = false;
+            if (depth)
+                plan.depth = targetTexture(device, c.target, true, declared->second.width * scale,
+                                           declared->second.height * scale, fresh, error);
+            else if (c.target == m_sceneTarget)
+                plan.color = m_scene;
+            else
+                plan.color = targetTexture(device, c.target, false, declared->second.width * scale,
+                                           declared->second.height * scale, fresh, error);
+            if ((depth && !plan.depth) || (!depth && !plan.color))
+                return false;
+            m_passPlans.push_back(plan);
+        }
+        return true;
+    };
     size_t i = 0;
     while (i < count)
     {
+        if (!planClears(i))
+            return false;
+        // A run ends at the next clear.
+        const size_t stop = nextClear < m_frameClears.size() ? std::max(m_frameClears[nextClear].first, i + 1u) : count;
         const Id target = m_frameMeshes[i].target;
         size_t j = i;
         Id depthId = 0u;
-        while (j < count && m_frameMeshes[j].target == target)
+        while (j < count && j < stop && m_frameMeshes[j].target == target)
         {
             const Id d = m_frameMeshes[j].depthTarget;
             if (d != 0u && depthId == 0u)
@@ -1201,10 +1101,7 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             plan.depth = targetTexture(device, depthId, true, colorW, colorH, depthFresh, error);
             if (!plan.depth)
                 return false;
-            const bool firstUse = std::find(depthsCleared.begin(), depthsCleared.end(), depthId) == depthsCleared.end();
-            if (firstUse)
-                depthsCleared.push_back(depthId);
-            plan.depthLoad = firstUse || depthFresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            plan.depthLoad = depthFresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         }
         // A draw that reads the target it draws into (its texels, or its
         // alpha for the destination alpha test) reads a copy taken just
@@ -1230,12 +1127,6 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             plan.first = a;
             plan.last = b;
             const GpuTarget &copied = m_gpuTargets[kFeedbackCopy]; // its texture may be the larger
-            if (FILE *log = depthLog().file)
-                std::fprintf(log, "P tgt=%u dt=%u depth=%s first=%zu last=%zu w=%u h=%u\n", target, depthId,
-                             !depthId                                       ? "none"
-                             : plan.depthLoad == SDL_GPU_LOADOP_CLEAR ? "clear"
-                                                                      : "load",
-                             a, b, gameW, gameH);
             planDraws(device, plan, scale, copied.width, copied.height);
             m_passPlans.push_back(plan);
             plan.colorLoad = SDL_GPU_LOADOP_LOAD;
@@ -1243,6 +1134,8 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             a = b;
         }
     }
+    if (!planClears(count))
+        return false;
     // Every texture is made and every draw's uniforms written: up they go
     // with the vertices, then the passes are recorded.
     const bool uploaded = uploadMeshes(device, commands, error);
@@ -1250,6 +1143,31 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     {
         if (!uploaded)
             break;
+        if (plan.clear)
+        {
+            const Clear &c = plan.clearRecord;
+            SDL_GPUColorTargetInfo colorInfo{};
+            colorInfo.texture = plan.color;
+            colorInfo.load_op = SDL_GPU_LOADOP_CLEAR;
+            colorInfo.store_op = SDL_GPU_STOREOP_STORE;
+            colorInfo.clear_color = SDL_FColor{c.rgba[0], c.rgba[1], c.rgba[2], c.rgba[3]};
+            SDL_GPUDepthStencilTargetInfo depthInfo{};
+            depthInfo.texture = plan.depth;
+            depthInfo.load_op = SDL_GPU_LOADOP_CLEAR;
+            depthInfo.store_op = SDL_GPU_STOREOP_STORE;
+            depthInfo.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+            depthInfo.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+            depthInfo.clear_depth = c.depthValue;
+            SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, plan.color ? &colorInfo : nullptr,
+                                                             plan.color ? 1u : 0u, plan.depth ? &depthInfo : nullptr);
+            if (!pass)
+            {
+                error = std::string("SDL_BeginGPURenderPass(native clear): ") + SDL_GetError();
+                break;
+            }
+            SDL_EndGPURenderPass(pass);
+            continue;
+        }
         if (plan.copy)
         {
             SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands);
@@ -1289,12 +1207,6 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
     m_retired.clear();
     if (!error.empty())
         return false;
-    if (DepthLog &log = depthLog(); log.file && --log.framesLeft == 0u)
-    {
-        std::fclose(log.file);
-        log.file = nullptr;
-        std::fprintf(stderr, "[depth-log] done\n");
-    }
     return true;
 }
 

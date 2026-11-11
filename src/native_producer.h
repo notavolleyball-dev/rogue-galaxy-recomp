@@ -200,4 +200,8 @@ uint32_t captureTarget(uint32_t base);
 
 // The scene target's id (the frame's).
 constexpr uint32_t kSceneTarget = 1u;
+
+// After the flip's Present record: the next frame begins. Its Clear records
+// (the scene's, and each depth target's at its first use) follow from here.
+void frameBoundary();
 } // namespace rg::nativeproducer

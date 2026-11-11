@@ -35,7 +35,6 @@ Other ways to make a mark, for scripted runs:
 | `info.txt` | Commit and branch, flip, pad read, window size, mouse position in window pixels, every `RG_` and `DQ8_` variable |
 | `settings.ini` | A copy of `RG_SETTINGS_FILE` |
 | `frame_capture.rdc` | RenderDoc's capture of the next three flips. Only when the game runs under RenderDoc |
-| `depthlog-N.txt` | Native pipeline only: the depth log from that frame on (`tools/depthlog.py` reads it) |
 | `log.txt` | The part of `RG_LOG_FILE` around the mark, with the 2D piece dump. Only when `RG_LOG_FILE` names the file the game's output goes to |
 
 Without RenderDoc the folder has everything but the capture.
@@ -61,9 +60,8 @@ of the mark is used. The report is printed and saved in `MARK/report/`:
 A draw is named by what made it: a VU1 mesh by its native program (`strip,
 guard band and backfaces`), the rest as `2D piece`, `effect op` or `object
 layer rectangle`. Targets are shown with the game's buffer address (`target 4
-(buffer 2a00)`), and each draw gives its depth log frame and draw numbers
-(`depth log frame 3238 draws 207-207`), which are the `F` and `D n=` lines of
-the depth log.
+(buffer 2a00)`), and each draw gives its frame and draw numbers
+(`frame 3238 draws 207-207`).
 
 ## Setup on Linux
 
@@ -115,6 +113,4 @@ measurements: its layer costs time.
 - The mouse is mapped to the picture as if the picture filled the window; with
   black bars at the sides the point is off. Use `--uv`.
 - A GPU call that draws several meshes at once is named after the first.
-- Draws are only named under the native pipeline (`RG_NATIVE_PIPELINE=1`).
-- The depth log covers 30 frames and is about 80 MB a mark.
 - Each capture is 5 to 80 MB. Nothing cleans `build/run/marks`.

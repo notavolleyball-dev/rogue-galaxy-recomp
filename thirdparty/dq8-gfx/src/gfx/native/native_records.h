@@ -257,8 +257,11 @@ struct MeshDraw
     // toward fogColor as F falls.
     float fog[4] = {};
     uint8_t fogColor[3] = {};
-    uint32_t pass = 0;   // the game's pass, for grouping
     uint32_t source = 0; // what made it (a VU1 program, a hook), for profiles
+    // The model the same object had in the frame before (motion vectors,
+    // TAA), when the producer knows it.
+    bool hasPreviousModel = false;
+    float previousModel[16] = {};
     // With hasModel: the program's window depth is the camera's, times
     // depthScale, capped at depthMax per vertex (Z = min(Zwin * depthScale,
     // depthMax), the game's integer Z). The game draws decals (lights on
@@ -266,10 +269,6 @@ struct MeshDraw
     // sit in front of the surface they lie on.
     float depthScale = 1.0f;
     float depthMax = 3.402823466e38f;
-    // Debug (the depth log): the program's matrix to GS window coordinates
-    // (row vectors), so the log can give the GS's integer Z beside ours.
-    bool gsKnown = false;
-    float gsMatrix[16] = {};
     // Instead of vertices and indices: a VU1 chunk as the program left it.
     // The renderer makes its triangles on its own thread through the cull
     // the producer set (setMeshCull, which reads rawHeader, the producer's
@@ -293,37 +292,79 @@ struct MeshDraw
     alignas(16) unsigned char rawHeader[256];
 };
 
-struct SpriteDraw
+// What a 2D draw belongs to, for passes that treat the layers apart (the
+// HUD at output resolution, the menus over a post effect). Until M4 of the
+// game's docs/NATIVE-ONLY.md tags each draw at its source, every one is
+// Scene.
+enum class Layer : uint8_t
 {
+    Scene,   // part of the picture: effects' sprites, sprites in the world
+    Hud,
+    Menu,
+    Text,
+    Fade,
+    Overlay,
+};
+
+// A draw in the target's own space: positions are the target's pixels at
+// the game's size (640x448 for the scene). With a depth target, each
+// vertex's z is a depth in the scene's convention (reversed: 1 near), and
+// `camera` the camera whose depth that is.
+struct Draw2D
+{
+    Layer layer = Layer::Scene;
     Id target = 0;
-    bool ui = false; // drawn at output resolution
-    float rect[4] = {};
-    float uv[4] = {};
-    float color[4] = {};
+    Id depthTarget = 0;
+    Id camera = 0;
     Material material;
     Rect scissor;
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices; // triangles; empty: vertices are a strip
+    // With material.fog: the color each vertex's fog factor (Vertex::fog)
+    // goes toward.
+    uint8_t fogColor[3] = {};
     uint32_t source = 0;
 };
 
-enum class EffectKind : uint8_t
+// A post effect the renderer draws itself (M3 of the game's
+// docs/NATIVE-ONLY.md): its inputs and outputs by id, and its parameters
+// from the hooked function's arguments. Each kind gets a parameter struct
+// of its own as it is ported; until then nothing sends one.
+enum class PassKind : uint8_t
 {
     Glare,
     Bloom,
     DepthOfField,
     PlaneShadow,
-    ObjectLayer,
     CBlur,
     ColorFilter,
     Fade,
-    RefractionCapture,
+    Capture,
     TexAnime,
+    Focus,
+    ShadowMap,
+    Flare,
 };
 
-struct Effect
+struct Pass
 {
-    EffectKind kind = EffectKind::Glare;
-    Id targets[4] = {};     // what it reads and writes, by its own convention
-    float params[16] = {};  // the hooked function's parameters
+    PassKind kind = PassKind::Glare;
+    Id source = 0;      // the target it reads
+    Id destination = 0; // the target it writes
+    Id depth = 0;       // the depth it reads, when it does
+    float params[16] = {};
+};
+
+// A target, or a rectangle of it, set to a color, a depth or both, in order
+// with the draws.
+struct Clear
+{
+    Id target = 0;
+    Rect rect;                 // empty: the whole target
+    bool color = false;
+    float rgba[4] = {};        // in the target's units
+    bool depth = false;
+    float depthValue = 0.0f;   // reversed: 0 is the far plane
 };
 
 struct FrameBegin
@@ -331,25 +372,12 @@ struct FrameBegin
     uint64_t frame = 0;
 };
 
+// The end of a frame: `target`'s `rect` is shown.
 struct Present
 {
     Id target = 0;
     Rect rect; // what of the target is shown
     uint64_t frame = 0;
-};
-
-struct Readback
-{
-    uint32_t request = 0; // the producer's, completed through its own mailbox
-    Id target = 0;
-    Rect rect;
-};
-
-struct DepthQuery
-{
-    uint32_t request = 0;
-    Id target = 0;
-    int32_t x = 0, y = 0;
 };
 
 // A retained mesh's vertices (MeshDraw::retained), sent once: a strip, or
@@ -361,7 +389,6 @@ struct RetainedMesh
     std::vector<RawVertex> raw;
 };
 
-using Record = std::variant<Texture, Palette, Target, Camera, MeshDraw, SpriteDraw, Effect, FrameBegin, Present,
-                            Readback, DepthQuery,
+using Record = std::variant<Texture, Palette, Target, Camera, MeshDraw, Draw2D, Pass, Clear, FrameBegin, Present,
                             RetainedMesh>;
 } // namespace dq8::gfx::native

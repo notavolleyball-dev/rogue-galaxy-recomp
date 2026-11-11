@@ -37,6 +37,7 @@ void presentNative(uint64_t frame)
     present.rect = {0, 0, 640u, 448u};
     present.frame = frame;
     native::push(std::move(present));
+    rg::nativeproducer::frameBoundary();
 }
 
 void afterFlip(uint8_t *, R5900Context *, PS2Runtime *runtime, uint32_t)

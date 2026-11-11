@@ -816,7 +816,7 @@ bool SdlGpuPresenter::presentFrame(std::vector<uint8_t> *pixels, uint32_t &width
             // Kept to show again and to read back: the renderer draws its
             // next frame into the same target.
             if (impl.ensureScratch(impl.frame, out.width, out.height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM)) {
-                Impl::blitRegion(commands, out.texture, {0u, 0u, out.width, out.height}, impl.frame.texture,
+                Impl::blitRegion(commands, out.texture, {out.x, out.y, out.width, out.height}, impl.frame.texture,
                                  {0u, 0u, out.width, out.height}, SDL_GPU_FILTER_NEAREST, SDL_GPU_LOADOP_DONT_CARE);
                 impl.haveFrame = true;
                 drawn = true;

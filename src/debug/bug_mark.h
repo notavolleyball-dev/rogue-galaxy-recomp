@@ -18,10 +18,8 @@ namespace rg::debug
 //                 on Wayland its layer has to be one built with Wayland
 //                 support, or the GPU device is refused: Arch's is not):
 //                 every pass and draw, replayable; tools/bugmark reads it
-//   depthlog-*.txt, log.txt
-//                 under the native pipeline, the depth log and the 2D piece
-//                 dump of that frame (as depth-log-now and dump-now ask for
-//                 them); log.txt is the part of RG_LOG_FILE around the mark
+//   log.txt       the part of RG_LOG_FILE around the mark, with the 2D
+//                 piece dump of that frame (dump-now asks for it)
 // "[bugmark] done DIR" on stderr about two seconds later says it is whole.
 void requestBugMark();
 

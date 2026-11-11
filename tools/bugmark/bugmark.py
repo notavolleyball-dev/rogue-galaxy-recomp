@@ -18,8 +18,8 @@ picture from its top left. Without either the mark's mouse position is used.
 
 The capture is replayed by RenderDoc (qrenderdoc, headless). The game writes
 one only when started under it (ENABLE_VULKAN_RENDERDOC_CAPTURE=1, with a
-layer that has Wayland support on Wayland; tools/run/play.sh rdoc). Without a capture the folder still has info.txt, the
-depth log (tools/depthlog.py) and the log around the mark.
+layer that has Wayland support on Wayland; tools/run/play.sh rdoc). Without a capture the folder still has info.txt and
+the log around the mark.
 """
 import argparse
 import glob
