@@ -857,9 +857,15 @@ Not done:
       glyph's own texel rectangle in black or grey, sprites of the glyph's
       piece, so the region's picture draws them, tinted as the game tints
       them);
-    - a region whose CLUT is offset by TEXCLUT (CSA is in code, below);
-    - a T8 with a CT16 CLUT (its 512-entry window reads GS memory the
-      producer does not hold).
+    - ~~a region whose CLUT is offset by TEXCLUT~~: no code of the game
+      writes TEXCLUT (no decompiled function names it, and the builder's
+      arbitrary register writes are 0x40, 0x3B and 0x3F only), so there is
+      no such region; still counted as not hashable if one appears;
+    - ~~a T8 with a CT16 CLUT~~ **in code:** its 512-entry window (CLUT rows
+      0-31) is its own palette's 256 entries and the 256 of the palette a
+      16x16 upload put where row 16 starts (CBP + 4, PSMCT16's block
+      table), from the producer's palette records; counted as not hashable
+      when that palette is not one.
   - The stats line counts `regions looked up`, `pictures made`,
     `draws from one` and `not hashable here`.
   - To confirm with a pack collected under the tag.

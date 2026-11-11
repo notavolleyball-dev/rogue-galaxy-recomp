@@ -2594,9 +2594,24 @@ void replaceRegion(State &s, const rg::DrawState &state, const rg::NativeMesh &m
         return;
     const bool sixteen = cpsm == kCT16 || cpsm == kCT16S;
     const uint32_t entries = psm == kT4 ? 16u : (sixteen ? 512u : 256u);
-    // (A CSA window is m.palette already: materialOf's paletteWindow.)
-    if ((t.csa != 0u && psm != kT4) || state.texclut.cou != 0u || state.texclut.cov != 0u || entries == 512u ||
-        colors->second->size() < size_t(entries) * (sixteen ? 2u : 4u))
+    // (A CSA window is m.palette already: materialOf's paletteWindow.) A
+    // T8 with a 16-bit CLUT reads 512 entries, CLUT rows 0-31: its own 256
+    // (rows 0-15) and the next 256 (rows 16-31), the palette a 16x16 upload
+    // put at the block row 16 starts in (PSMCT16's block table: CBP + 4).
+    // (TEXCLUT, an offset CLUT: no code of the game writes it.)
+    const uint8_t *upper = nullptr;
+    if (entries == 512u && t.csa == 0u && csm == 0u)
+    {
+        const auto next = s.paletteAt.find((t.cbp + 4u) & 0x3FFFu);
+        if (next != s.paletteAt.end())
+            if (const auto c = s.paletteColors.find(next->second);
+                c != s.paletteColors.end() && c->second && c->second->size() >= 512u)
+                upper = c->second->data();
+    }
+    const bool upperKnown = entries != 512u || upper != nullptr;
+    const size_t own = entries == 512u ? 256u : entries;
+    if ((t.csa != 0u && psm != kT4) || state.texclut.cou != 0u || state.texclut.cov != 0u || !upperKnown ||
+        colors->second->size() < own * (sixteen ? 2u : 4u))
     {
         ++s.counts.regionsUnhashable;
         return;
@@ -2666,7 +2681,9 @@ void replaceRegion(State &s, const rg::DrawState &state, const rg::NativeMesh &m
     for (uint32_t i = 0; i < entries; ++i)
     {
         uint32_t value = 0u;
-        if (sixteen)
+        if (i >= own)
+            value = uint32_t(upper[(i - own) * 2u]) | (uint32_t(upper[(i - own) * 2u + 1u]) << 8);
+        else if (sixteen)
             value = uint32_t(entry[i * 2u]) | (uint32_t(entry[i * 2u + 1u]) << 8);
         else
             std::memcpy(&value, entry + i * 4u, 4u);
