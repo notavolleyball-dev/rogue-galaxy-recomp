@@ -81,28 +81,26 @@ stacked PRs at the end).
 - **M4, first part** on `native-only/m4-2d` (from M3's branch): layer tags
   for 2D from the running draw task. The rest of M4 waits for M5 (see
   "Decisions").
-- **Now: M5, and M4's core,** on `native-only/m5-geometry` (from M4's
-  branch).
-  - M5:
-    - every strip chunk (projector and float-input programs included) is
-      drawn by the renderer's model vertex stage, with skinning, lighting
-      and UV generation on the GPU;
-    - known chunks no longer travel in the list (step 2);
-    - particles, shadow volumes and outlines are made by the model stage
-      too (billboards, volumes, lines on the GPU);
-    - the retained static meshes are deleted.
+- **M5 is done in code, but for the declines named in its status,** on
+  `native-only/m5-geometry` (from M4's branch), with M4's core:
+  - every VU1 chunk the native programs know is drawn by the renderer's
+    model vertex stage: strips (projector, float-input, affine and
+    float-color programs too) with skinning, lighting and UV generation;
+    outlines, shadow volumes and particles made there too;
+  - known chunks no longer travel in the list (step 2), and the game
+    thread's gather draws them (step 3);
+  - the CPU mesh path, the retained static meshes and every switch back
+    (`RG_MODEL_GPU`, `RG_VU1_CLIP_ON_GPU`, the mode switch) are deleted;
   - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
-    and sent in the stream's order.
+    and sent in the stream's order;
   - M6, early: the GS front end gets nothing any more (see M6).
-  - Left:
-    - M6: the records made at game time are still sent from the VIF1
-      stream (passes, blocks, model draws). Next: send them from the
-      gather in its order, and the VIF1 thread no longer decodes for the
-      graphics.
-    - M4: fonts as glyph records, libgraph's paths, HUD size and
-      widescreen as layer transforms, region packs (see M4's status),
-      TexAnime.
-    - M6.
+- **Now: the rest of M4** on `native-only/m4b-2d` (from M5's branch): 2D
+  records from the `GsPkt*` setters (no GIF decode of blocks), fonts as
+  glyph records, libgraph's paths, HUD size and widescreen as layer
+  transforms, region packs.
+- Then M6: the records made at game time are still sent from the VIF1
+  stream (passes, blocks, model draws); send them in the game's order, and
+  the VIF1 thread no longer decodes for the graphics.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -852,6 +850,17 @@ recovers.
   - `[model-game]` lines count the draws and how many differ from what the
     VIF1 thread's VU1 memory gives (should stay 0).
   - `RG_MODEL_GAME_TIME=0` turns it off.
+- **Left, by name (the user's to agree; `[vu1native]` lines count each as
+  "left to the VU1"):** chunks `declineChunk` refuses still run the VU1
+  interpreter: an entry into B other than its first (quad 76.z), a
+  skinning B whose entry is not read, PRIM neither strip nor list, a list
+  not of whole triangles, quad 87.y & 0x100 with the vertex-color C pieces
+  (C's other loop), scrolling UVs (quad 88.xy, slot F), and the
+  reflection, swell and beam F pieces over fewer vertices than they read
+  before testing the count. Each needs its VU code read (tools/vu1) before
+  it can be drawn; none is seen to be frequent, but a play session's
+  counts will say. Unknown programs (identify finds no pieces) run the VU1
+  too.
 - **Step 2 in code too:** a REF payload of chunks whose every MSCNT drew a
   known chunk is learned (by its guest address, size and the write watch's
   stamp). From then on the game thread's gather leaves it in guest memory
