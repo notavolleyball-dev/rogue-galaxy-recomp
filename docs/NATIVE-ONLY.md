@@ -1196,6 +1196,11 @@ shadow does not follow, 2D outside the builder) and uploads.
 - **Runtime patches 0002, 0013, 0015 and 0034 deleted;** the texture
   binding and upload elision switches (`RG_TEXTURE_BIND`,
   `RG_UPLOAD_ELIDE`) and dead lookups with them.
+- **Blocks:** a discarded block (a pass's) is never written even once its
+  shadow spoils (the composite tail's overlay calls); a block inside
+  another (TexAnime's) no longer spoils the outer one, unless the outer
+  one has a tag open. `[uploads]` counts the list's uploads by path and
+  draw task.
 
 **Left of M6, by what it waits on:**
 - **Uploads (play data):** the texture hook binds most uploads by marker
