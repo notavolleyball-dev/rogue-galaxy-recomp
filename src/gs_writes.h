@@ -27,6 +27,11 @@ struct Read
 
 constexpr uint8_t kPrim = 0x00u, kRgbaq = 0x01u, kSt = 0x02u, kUv = 0x03u, kXyzf2 = 0x04u, kXyz2 = 0x05u,
                   kFog = 0x0Au, kXyzf3 = 0x0Cu, kXyz3 = 0x0Du;
+// PACKED's own forms, which no A+D write has: RGBAQ's R, G, B, A without Q
+// (Q stays the GS's internal one), and the Q a PACKED ST sets (as float
+// bits). Not GS registers: state readers ignore them; a vertex reader (the
+// 2D builder) applies them.
+constexpr uint8_t kPackedRgba = 0xFDu, kPackedQ = 0xFEu;
 
 // Appends the writes of every GIF tag in `data` (past an EOP: the GS reads
 // on, as a GsPkt block's draw environment follows its primitives' EOP).

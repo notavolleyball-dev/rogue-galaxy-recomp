@@ -137,7 +137,6 @@ add_executable(roguegalaxy
     native_gspkt.cpp
     native_emit.cpp
     native_producer.cpp
-    gif_events.cpp
     gs_writes.cpp
     vu0_flags.cpp
     vu0_native.cpp

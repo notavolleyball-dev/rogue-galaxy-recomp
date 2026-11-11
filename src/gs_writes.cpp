@@ -39,11 +39,14 @@ void packed(const uint8_t *q, uint32_t desc, Read &r, std::vector<Write> &out)
     {
     case 0x0u: reg = kPrim; value = bits(q, 0, 11); break;
     case 0x1u: // RGBAQ: R, G, B, A from bits 0, 32, 64, 96 (Q the GS's own)
-        reg = kRgbaq;
-        value = bits(q, 0, 8) | (bits(q, 32, 8) << 8) | (bits(q, 64, 8) << 16) | (bits(q, 96, 8) << 24) |
-                (0x3F800000ull << 32);
+        reg = kPackedRgba;
+        value = bits(q, 0, 8) | (bits(q, 32, 8) << 8) | (bits(q, 64, 8) << 16) | (bits(q, 96, 8) << 24);
         break;
-    case 0x2u: reg = kSt; value = bits(q, 0, 64); break;
+    case 0x2u: // ST, and Q into the GS's own
+        out.emplace_back(kSt, bits(q, 0, 64));
+        reg = kPackedQ;
+        value = bits(q, 64, 32);
+        break;
     case 0x3u: reg = kUv; value = bits(q, 0, 14) | (bits(q, 32, 14) << 16); break;
     case 0x4u: // XYZF2 (ADC: XYZF3)
         reg = bits(q, 111, 1) ? kXyzf3 : kXyzf2;
@@ -92,7 +95,7 @@ Read read(const uint8_t *data, uint32_t size, std::vector<Write> &out)
         const uint32_t flg = static_cast<uint32_t>((tag >> 58) & 3u);
         uint32_t nreg = static_cast<uint32_t>(tag >> 60);
         nreg = nreg == 0u ? 16u : nreg;
-        if (pre && flg != 2u)
+        if (pre && flg == 0u)
             out.emplace_back(kPrim, (tag >> 47) & 0x7FFu);
         if (flg == 0u)
         {

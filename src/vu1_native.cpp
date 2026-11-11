@@ -845,7 +845,10 @@ bool shadowMeshFrom(const Program &program, const uint8_t *data, uint32_t top,
         std::vector<rg::gswrites::Write> writes;
         rg::gswrites::read(state[i].data(), static_cast<uint32_t>(state[i].size()), writes);
         const auto last = std::find_if(writes.rbegin(), writes.rend(),
-                                       [](const rg::gswrites::Write &w) { return w.first == rg::gswrites::kRgbaq; });
+                                       [](const rg::gswrites::Write &w) {
+                                           return w.first == rg::gswrites::kRgbaq ||
+                                                  w.first == rg::gswrites::kPackedRgba;
+                                       });
         if (last == writes.rend())
             return false;
         for (int l = 0; l < 4; ++l)

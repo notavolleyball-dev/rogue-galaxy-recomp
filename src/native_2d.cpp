@@ -5,13 +5,126 @@
 #include <cstring>
 #include <utility>
 
-#include "gif_events.h"
+#include "gs_writes.h"
 #include "native_producer.h"
 
 namespace rg::native2d
 {
 namespace
 {
+// The GS's vertex state as the shadow's writes leave it, and what each
+// write does: a register written, or a vertex (XYZ2/XYZF2 kick, XYZ3/XYZF3
+// not) with the vertex state at that moment.
+struct VertexState
+{
+    uint16_t prim = 0;
+    uint8_t rgba[4] = {};
+    float q = 1.0f, s = 0.0f, t = 0.0f;
+    uint16_t u = 0, v = 0;
+    uint8_t f = 0;
+};
+struct Event
+{
+    enum class Kind : uint8_t
+    {
+        Register,
+        Vertex,
+    };
+    Kind kind = Kind::Register;
+    uint8_t reg = 0;
+    uint64_t value = 0;
+    bool drawing = false;
+    bool fog = false;
+    uint16_t prim = 0;
+    uint16_t x = 0, y = 0; // 12.4 fixed point
+    uint32_t z = 0;
+    uint8_t f = 0;
+    uint8_t rgba[4] = {};
+    float q = 1.0f, s = 0.0f, t = 0.0f;
+    uint16_t u = 0, v = 0; // 10.4 fixed point
+};
+
+float asFloat(uint32_t bits)
+{
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+void vertex(VertexState &state, std::vector<Event> &out, bool drawing, bool fog, uint16_t x, uint16_t y, uint32_t z,
+            uint8_t f)
+{
+    if (fog)
+        state.f = f;
+    Event event;
+    event.kind = Event::Kind::Vertex;
+    event.drawing = drawing;
+    event.fog = fog;
+    event.prim = state.prim;
+    event.x = x;
+    event.y = y;
+    event.z = z;
+    event.f = state.f;
+    std::memcpy(event.rgba, state.rgba, sizeof(event.rgba));
+    event.q = state.q;
+    event.s = state.s;
+    event.t = state.t;
+    event.u = state.u;
+    event.v = state.v;
+    out.push_back(event);
+}
+
+// One write (src/gs_writes.h's, PACKED's own forms too) on the vertex state.
+void apply(uint8_t reg, uint64_t value, VertexState &state, std::vector<Event> &out)
+{
+    namespace w = rg::gswrites;
+    switch (reg)
+    {
+    case w::kPrim:
+        state.prim = static_cast<uint16_t>(value & 0x7FFu);
+        break;
+    case w::kRgbaq:
+        for (int i = 0; i < 4; ++i)
+            state.rgba[i] = static_cast<uint8_t>(value >> (8 * i));
+        state.q = asFloat(static_cast<uint32_t>(value >> 32));
+        return;
+    case w::kPackedRgba:
+        for (int i = 0; i < 4; ++i)
+            state.rgba[i] = static_cast<uint8_t>(value >> (8 * i));
+        return;
+    case w::kPackedQ:
+        state.q = asFloat(static_cast<uint32_t>(value));
+        return;
+    case w::kSt:
+        state.s = asFloat(static_cast<uint32_t>(value));
+        state.t = asFloat(static_cast<uint32_t>(value >> 32));
+        return;
+    case w::kUv:
+        state.u = static_cast<uint16_t>(value & 0x3FFFu);
+        state.v = static_cast<uint16_t>((value >> 16) & 0x3FFFu);
+        return;
+    case w::kXyzf2:
+    case w::kXyzf3:
+        vertex(state, out, reg == w::kXyzf2, true, static_cast<uint16_t>(value), static_cast<uint16_t>(value >> 16),
+               static_cast<uint32_t>((value >> 32) & 0xFFFFFFu), static_cast<uint8_t>(value >> 56));
+        return;
+    case w::kXyz2:
+    case w::kXyz3:
+        vertex(state, out, reg == w::kXyz2, false, static_cast<uint16_t>(value), static_cast<uint16_t>(value >> 16),
+               static_cast<uint32_t>(value >> 32), 0u);
+        return;
+    case w::kFog:
+        state.f = static_cast<uint8_t>(value >> 56);
+        return;
+    default:
+        break;
+    }
+    Event event;
+    event.reg = reg;
+    event.value = value;
+    out.push_back(event);
+}
+
 rg::NativeMesh::Header screenHeader()
 {
     rg::NativeMesh::Header header{};
@@ -25,8 +138,8 @@ rg::NativeMesh::Header screenHeader()
 // vertex state, a strip or fan under way, PRMODECONT and PRMODE.
 struct Carried
 {
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> queue;
+    VertexState state;
+    std::vector<Event> queue;
     uint16_t queuePrim = 0xFFFFu;
     bool attributesFromPrim = true; // PRMODECONT AC
     uint16_t prmode = 0u;
@@ -70,10 +183,10 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         into.clear();
     };
     Carried &carried = t_carried;
-    rg::gif::GifState &state = carried.state;
-    std::vector<rg::gif::GifEvent> &queue = carried.queue;
+    VertexState &state = carried.state;
+    std::vector<Event> &queue = carried.queue;
     uint16_t &queuePrim = carried.queuePrim;
-    thread_local std::vector<rg::gif::GifEvent> events;
+    thread_local std::vector<Event> events;
     std::vector<std::pair<uint8_t, uint64_t>> writes;
     freshWrites(writes);
     Piece mesh;
@@ -144,7 +257,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
             freshWrites(writes);
         }
     };
-    const auto vertexOf = [&](const rg::gif::GifEvent &e, const rg::gif::GifEvent &provoking, uint16_t prim, bool &ok) {
+    const auto vertexOf = [&](const Event &e, const Event &provoking, uint16_t prim, bool &ok) {
         rg::NativeMesh::Vertex v;
         v.x = static_cast<float>(e.x) / 16.0f;
         v.y = static_cast<float>(e.y) / 16.0f;
@@ -152,7 +265,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         v.depth = v.z; // the Z as the packet has it
         if (prim & 0x20u) // FGE: w carries F (closeMesh scales x and y by it)
             v.z = 1.0f + (static_cast<float>(e.f) + 0.25f) / 255.0f;
-        const rg::gif::GifEvent &c = (prim & 0x08u) ? e : provoking; // IIP
+        const Event &c = (prim & 0x08u) ? e : provoking; // IIP
         v.r = c.rgba[0];
         v.g = c.rgba[1];
         v.b = c.rgba[2];
@@ -185,7 +298,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         mesh.texelUvs = (prim & 0x110u) == 0x110u;
         meshPrim = prim;
     };
-    const auto triangle = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, const rg::gif::GifEvent &c,
+    const auto triangle = [&](const Event &a, const Event &b, const Event &c,
                               uint16_t prim, bool &ok) {
         openMesh(prim);
         const uint32_t base = static_cast<uint32_t>(mesh.mesh.vertices.size());
@@ -201,10 +314,10 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v0, v1, v2, v3});
         mesh.indices.insert(mesh.indices.end(), {base, base + 1u, base + 3u, base, base + 3u, base + 2u});
     };
-    const auto sprite = [&](const rg::gif::GifEvent &a, const rg::gif::GifEvent &b, uint16_t prim, bool &ok) {
+    const auto sprite = [&](const Event &a, const Event &b, uint16_t prim, bool &ok) {
         openMesh(prim);
         // Corners from the two vertices; Z and colour are the second's.
-        rg::gif::GifEvent corner[4] = {a, b, a, b};
+        Event corner[4] = {a, b, a, b};
         corner[0].z = corner[2].z = b.z;
         corner[1].x = b.x; corner[1].y = a.y; corner[1].u = b.u; corner[1].v = a.v; corner[1].s = b.s; corner[1].t = a.t;
         corner[2].x = a.x; corner[2].y = b.y; corner[2].u = a.u; corner[2].v = b.v; corner[2].s = a.s; corner[2].t = b.t;
@@ -219,24 +332,18 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
 
     bool ok = true;
     bool anyVertex = false;
-    // One DIRECT's bytes hold as many GIF packets as the game put there, each
-    // up to its EOP, and the GS reads on past an EOP (eachPacket): every one
-    // of them, not only the first.
-    thread_local std::vector<std::pair<uint32_t, uint32_t>> pieces;
     for (size_t index = 0; index < count; ++index)
     {
         const Span &packet = packets[index];
-        pieces.clear();
-        rg::gif::eachPacket(packet.data, packet.size, [&](uint32_t at, uint32_t size) { pieces.emplace_back(at, size); });
-        for (const auto &[at, size] : pieces)
         {
-            events.clear();
-            const rg::gif::GifDecodeStats stats = rg::gif::decodeGifPacket(packet.data + at, size, state, events);
-            // A tag cut at the packet's end (an IMAGE tag whose data follows
-            // through the image callback, a PACKED tag a DIRECT cuts short) is
-            // what GS::processGIFPacket takes as far as it goes and then drops:
-            // the events decoded up to the cut are what the GS would draw.
-            if (stats.imageQwords != 0u)
+            const uint32_t at = 0u, size = packet.size;
+            // Its writes (every GIF packet in the bytes: the GS reads on past
+            // an EOP), and what they do to the vertex state. A tag cut at
+            // the end is taken as far as it goes, as the GS would.
+            thread_local std::vector<rg::gswrites::Write> regs;
+            regs.clear();
+            const rg::gswrites::Read read = rg::gswrites::read(packet.data, packet.size, regs);
+            if (read.image)
             {
                 // An upload: on as it is, in its place.
                 flushWrites();
@@ -248,9 +355,12 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                 out.push_back(std::move(piece));
                 continue;
             }
-            for (const rg::gif::GifEvent &e : events)
+            events.clear();
+            for (const auto &[reg, value] : regs)
+                apply(reg, value, state, events);
+            for (const Event &e : events)
             {
-                if (e.kind == rg::gif::GifEvent::Kind::Register)
+                if (e.kind == Event::Kind::Register)
                 {
                     if (e.reg == 0x1Au)
                         carried.attributesFromPrim = (e.value & 1u) != 0u;
@@ -286,7 +396,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                 case 0u: // point: a pixel's square
                     if (e.drawing)
                     {
-                        rg::gif::GifEvent a = e, b = e;
+                        Event a = e, b = e;
                         a.x = static_cast<uint16_t>(e.x & ~15u);
                         a.y = static_cast<uint16_t>(e.y & ~15u);
                         b.x = static_cast<uint16_t>(a.x + 16u);
@@ -303,7 +413,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                     {
                         // Half a pixel either side of the centre line, as the
                         // backend widens the GS's lines.
-                        const rg::gif::GifEvent &p0 = queue[0], &p1 = queue[1];
+                        const Event &p0 = queue[0], &p1 = queue[1];
                         const float dx = (static_cast<float>(p1.x) - p0.x) / 16.0f;
                         const float dy = (static_cast<float>(p1.y) - p0.y) / 16.0f;
                         const float length = std::sqrt(dx * dx + dy * dy);
