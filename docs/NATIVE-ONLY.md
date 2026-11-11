@@ -1074,11 +1074,15 @@ animator set `t+6`). Markers on each side of the call's list output tell
 the list's run which call its chunks belong to (items by their base
 MSCAL 0, groups by their MSCAL A), and every model chunk compares its VU1
 memory with them: `[model-emit] ... the same N, differing M` (the first
-twelve in full). The draws still come from the list. Next, as the counts
-allow: the program from the microcode table, the GS state from the
-material and the draw environment, the geometry from the chain's spans
-(their layout is in the notes), then the call writes no packet and the
-draw is pushed from these. The sorted path (`ModelQueueSortedPackets`,
+twelve in full). Compared so far, all read at the call: the model matrix
+and mesh header (60-63, 76-79, 81, 42), the material's quads (82-87), the
+program (the microcode table's six packets, identified as the list's run
+identifies the VU1's code), the GS state (ALPHA, TEST, ZBUF's mask, FBA
+from the material's GsEnv; TEX0 from its texture node; TEX1, CLAMP from
+its packet), and each chunk's header from the group's chain of spans in
+EE memory. The draws still come from the list. Next, as the counts allow:
+the call writes no packet and the draw is pushed from these (the vertex
+data from the same spans, the camera and lights from their packets). The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its

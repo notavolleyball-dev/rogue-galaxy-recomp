@@ -26,6 +26,6 @@ void install(PS2Runtime &runtime);
 // and the native program the list ran it with.
 bool marker(uint32_t unit);
 void mscal(uint32_t startPC);
-void chunk(const uint8_t *vu1Data, const void *program);
+void chunk(const uint8_t *vu1Data, uint32_t top, const void *program);
 
 } // namespace rg::nativeemit

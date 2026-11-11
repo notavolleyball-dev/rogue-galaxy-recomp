@@ -65,6 +65,11 @@ struct Group
     // from its packet (frozen at load).
     uint64_t alpha = 0u, test = 0u, fba = 0u, tex0 = 0u, tex1 = 0u, clamp = 0u;
     bool zmask = false, textured = false, stateKnown = false;
+    // Its chunks' two header quads (TOP, TOP+1), from its chain's spans in
+    // EE memory, in the order they are drawn; and how many the list drew.
+    std::vector<std::array<Quad, 2>> chunks;
+    bool chunksKnown = false;
+    uint32_t drawn = 0u;
 };
 // An item's: the model matrix (60-63) and the mesh header (76-79, 81, 42),
 // from its packets p14 and p18; its groups, in the order they are drawn.
@@ -156,6 +161,68 @@ bool programOf(uint32_t dctx, uint32_t t, uint32_t itemFlags, const rg::vu1nativ
     return true;
 }
 
+// The words a VIF code takes after it (UNPACK, MPG, DIRECT, STMASK, STROW,
+// STCOL), as the VIF reads them.
+uint32_t vifDataWords(uint32_t cmd)
+{
+    const uint32_t op = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+    if (op == 0x20u)
+        return 1u;
+    if (op == 0x30u || op == 0x31u)
+        return 4u;
+    if (op == 0x4Au)
+        return (num == 0u ? 256u : num) * 2u;
+    if (op == 0x50u || op == 0x51u)
+        return (imm == 0u ? 65536u : imm) * 4u;
+    if ((op & 0x60u) == 0x60u)
+    {
+        const uint32_t vn = (op >> 2) & 3u, vl = op & 3u, n = num == 0u ? 256u : num;
+        const uint32_t bits = vl == 3u ? 16u : (32u >> vl) * (vn + 1u);
+        return (n * bits + 31u) / 32u;
+    }
+    return 0u;
+}
+
+// A group's chunks (NATIVE-ONLY-NOTES.md, "Chunk byte layout"): its chain is
+// REF tags to spans of chunks, then a RET; each chunk an STCYCL and an
+// UNPACK of its two header quads to TOP, its sections, its MSCNT. Each
+// chunk's header, read from the span as the VIF would. False: not of that
+// shape.
+bool chunksOf(uint32_t chain, std::vector<std::array<Quad, 2>> &out)
+{
+    for (int tags = 0; tags < 4096; ++tags, chain += 16u)
+    {
+        const uint32_t tag = read32(chain);
+        const uint32_t id = (tag >> 28) & 7u, qwc = tag & 0xFFFFu;
+        if (id == 6u)
+            return true; // RET
+        if (id != 3u || qwc == 0u)
+            return false;
+        const uint32_t start = read32(chain + 4u) & 0x0FFFFFFFu, end = start + qwc * 16u;
+        uint32_t at = start;
+        bool header = false;
+        while (at + 4u <= end)
+        {
+            const uint32_t cmd = read32(at);
+            at += 4u;
+            const uint32_t op = (cmd >> 24) & 0x7Fu;
+            if (cmd == 0x6C028000u && !header)
+            {
+                // UNPACK V4-32, two quads to TOP: the chunk's header.
+                std::array<Quad, 2> h;
+                h[0] = {read32(at), read32(at + 4u), read32(at + 8u), read32(at + 12u)};
+                h[1] = {read32(at + 16u), read32(at + 20u), read32(at + 24u), read32(at + 28u)};
+                out.push_back(h);
+                header = true;
+            }
+            if (op == 0x17u)
+                header = false; // MSCNT: the chunk's end
+            at += vifDataWords(cmd) * 4u;
+        }
+    }
+    return false;
+}
+
 // The call's items and groups, from inst a0, req a2 (read after the call:
 // ModelMesh's groups are rebuilt by it).
 void predict(uint32_t dctx, uint32_t req, Call &call)
@@ -195,6 +262,7 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
                 continue;
             const uint32_t t = read32(materials + 4u * read32(group + 0x0Cu));
             Group &out = item.groups.emplace_back();
+            out.chunksKnown = chunksOf(read32(group + 0x10u), out.chunks);
             if (t == 0u)
                 continue;
             const uint32_t pkt = read32(t);
@@ -325,7 +393,7 @@ void mscal(uint32_t startPC)
         ++t_group;
 }
 
-void chunk(const uint8_t *vu1Data, const void *program)
+void chunk(const uint8_t *vu1Data, uint32_t top, const void *program)
 {
     if (!t_in)
         return;
@@ -336,7 +404,8 @@ void chunk(const uint8_t *vu1Data, const void *program)
         return;
     }
     const Item &item = t_current.items[size_t(t_item)];
-    const Group &group = item.groups[size_t(t_group)];
+    Group &group = t_current.items[size_t(t_item)].groups[size_t(t_group)];
+    const uint32_t index = group.drawn++;
     const auto quad = [&](uint32_t q) {
         Quad v;
         std::memcpy(v.data(), vu1Data + q * 16u, sizeof(v));
@@ -369,6 +438,16 @@ void chunk(const uint8_t *vu1Data, const void *program)
     check("84", 84u, group.q84);
     check("86", 86u, group.q86, 0xEu); // (its NLOOP is the chunk's)
     check("87", 87u, group.q87);
+    if (!what && group.chunksKnown)
+    {
+        if (index >= group.chunks.size())
+            what = "a chunk past the chain's";
+        else
+        {
+            check("the chunk's header (TOP)", top & 1023u, group.chunks[index][0]);
+            check("the chunk's header (TOP+1)", (top + 1u) & 1023u, group.chunks[index][1]);
+        }
+    }
     if (!what && group.programKnown && group.program != program)
     {
         what = "the program (the table's against what the VU1 holds)";
