@@ -156,11 +156,6 @@ bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette);
 
-// The base piece's run (MSCAL 0x000) on `data`, as the VU1 would leave it
-// (quads 64-75, 100-102, 111), its packets not made: for a copy of VU1 data
-// memory kept elsewhere (src/native_models.cpp).
-void baseProgram(uint8_t *data);
-
 // Why the chunk an MSCNT runs (its header at `top`, in quadwords) is left to
 // the VU1, or null when it is done natively. Slot E's chunks are done too
 // for the programs with a mesh (hasMesh): the GPU clips them.

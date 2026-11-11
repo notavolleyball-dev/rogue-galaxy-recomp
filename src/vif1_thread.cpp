@@ -27,7 +27,6 @@
 #include "native_2d.h"
 #include "native_blocks.h"
 #include "native_effects.h"
-#include "native_models.h"
 #include "native_producer.h"
 #include "gif_events.h"
 #include "guest_write_watch.h"
@@ -253,8 +252,6 @@ struct ModelMark
 {
     uint32_t offset = 0u;
     ModelChunkMeta chunk;
-    // M5 step 3: its draw, made on the game thread (src/native_models.h).
-    std::shared_ptr<rg::nativemodels::GameDraw> game;
 };
 struct LearnedSpan
 {
@@ -638,8 +635,6 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
         // then ends where the copy stops, like one that cannot be read.
         out.reserve(total);
         bool begun = false;
-        // M5 step 3: the game thread's reader of the stream (TTE lists).
-        const bool reading = tte && modelMarks && rg::nativemodels::enabled();
         for (const Span &span : spans)
         {
             if (origins)
@@ -650,8 +645,6 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
             {
                 holes->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, false, span.hash});
                 out.resize(out.size() + span.bytes);
-                if (reading)
-                    rg::nativemodels::reader().skip(span.bytes);
                 continue;
             }
             if (span.chunks)
@@ -665,10 +658,7 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                     const uint32_t mscnt = 0x17000000u;
                     std::memcpy(out.data() + at + i * 4u, &mscnt, 4u);
                     const ModelChunkMeta &meta = (*span.chunks)[i];
-                    ModelMark mark{static_cast<uint32_t>(at + i * 4u), meta, nullptr};
-                    if (reading)
-                        mark.game = rg::nativemodels::reader().chunk(meta.header, meta.slots, meta.id);
-                    modelMarks->push_back(std::move(mark));
+                    modelMarks->push_back({static_cast<uint32_t>(at + i * 4u), meta});
                 }
                 ++g_modelSpansElided;
                 g_modelChunksElided += span.chunks->size();
@@ -678,8 +668,6 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                 modelSpans->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, span.stamp});
             const size_t at = out.size();
             appendBytes(memory, out, span.address, span.bytes);
-            if (reading && out.size() > at)
-                rg::nativemodels::reader().read(out.data() + at, static_cast<uint32_t>(out.size() - at));
             if (!span.bind)
                 continue;
             if (!begun)
@@ -1127,35 +1115,36 @@ struct List
 class Vif1Thread
 {
 public:
-    explicit Vif1Thread(PS2Runtime &runtime) : m_runtime(runtime)
-    {
-        m_thread = std::thread([this] { run(); });
-        m_workerId = m_thread.get_id();
-    }
+    explicit Vif1Thread(PS2Runtime &runtime) : m_runtime(runtime) {}
 
-    // Runs what is queued, then ends the thread. Before the runtime goes: a
-    // list finishing after it posted its interrupt to a freed scheduler.
-    void stop()
+    // (M6: lists run on the game's thread as they are sent; nothing to stop.)
+    void stop() {}
+
+    // M6 of docs/NATIVE-ONLY.md: a list runs on the caller's thread (the
+    // game's, in its send), so what it makes goes to the draw stage in the
+    // game's order, among the records the game's hooks make; there is no
+    // VIF1 thread any more. The draw stage still consumes the records on
+    // its own thread, and finishes the list.
+    void runList(List list)
     {
         {
             std::lock_guard lock(m_mutex);
-            m_stop = true;
-        }
-        m_work.notify_all();
-        if (m_thread.joinable())
-        {
-            m_thread.join();
-        }
-    }
-
-    void submit(List list)
-    {
-        {
-            std::lock_guard lock(m_mutex);
-            m_lists.push_back(std::move(list));
             ++m_submitted;
         }
-        m_work.notify_one();
+        m_current = std::move(list);
+        // As the VIF1 thread was: a list's decoder, at the default floating
+        // point environment (the records carry it to the draw stage).
+        const bool wasOn = t_onVif1Thread, wasDecoder = t_listDecoder;
+        const uint32_t mxcsr = _mm_getcsr();
+        _mm_setcsr(kDefaultMxcsr);
+        t_onVif1Thread = true;
+        t_listDecoder = true;
+        m_running = true;
+        runCurrent();
+        m_running = false;
+        t_onVif1Thread = wasOn;
+        t_listDecoder = wasDecoder;
+        _mm_setcsr(mxcsr);
     }
 
     // A buffer for the next list, with the capacity of one that has run:
@@ -1259,23 +1248,6 @@ public:
                     rg::vu1native::modelHeader(*m_nativeProgram, data, top, m_nativePackets, m_nativeMesh);
                     rg::vu1native::modelRow(*m_nativeProgram, data, top, t_model.row, t_model.palette,
                                             mark->chunk.slots);
-                    m_gameDraw = nullptr;
-                    if (mark->game)
-                    {
-                        // Made on the game thread: what it says goes, and
-                        // where it differs from this memory's, counted.
-                        const rg::nativemodels::GameDraw &game = *mark->game;
-                        const bool same = std::memcmp(&game.row, &t_model.row, sizeof(game.row)) == 0 &&
-                                          game.palette == t_model.palette &&
-                                          std::memcmp(game.mesh.header.matrix, m_nativeMesh.header.matrix,
-                                                      sizeof(game.mesh.header.matrix)) == 0;
-                        noteGameDraw(same);
-                        t_model.row = game.row;
-                        t_model.palette = game.palette;
-                        m_nativePackets = game.packets;
-                        m_nativeMesh = game.mesh;
-                        m_gameDraw = mark->game;
-                    }
                     t_model.active = true;
                     t_model.define = false;
                     t_model.transient = false;
@@ -1443,14 +1415,7 @@ public:
                         t_meshWrites = m_nativeWrites.data();
                         t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
                     }
-                    if (m_gameDraw)
-                    {
-                        // The producer's quads (camera, model) as the game
-                        // thread read them.
-                        deliverMesh(m_runtime.gs(), m_nativeMesh, m_gameDraw->vu.data());
-                        m_gameDraw = nullptr;
-                    }
-                    else if (m_particleMesh)
+                    if (m_particleMesh)
                     {
                         // The corners are in world space: the model matrix
                         // the producer reads (quads 60-63) the identity.
@@ -1491,18 +1456,6 @@ public:
         while (m_markAt < marks.size() && marks[m_markAt].offset < offset)
             ++m_markAt;
         return m_markAt < marks.size() && marks[m_markAt].offset == offset ? &marks[m_markAt] : nullptr;
-    }
-    // M5 step 3's count: game-thread draws, and those differing from this
-    // thread's VU1 memory.
-    void noteGameDraw(bool same)
-    {
-        static uint64_t draws = 0u, differ = 0u;
-        ++draws;
-        if (!same)
-            ++differ;
-        if (draws % 60000u == 1u)
-            std::fprintf(stderr, "[model-game] draws made on the game thread %llu, differing from the VIF1 thread's %llu\n",
-                         (unsigned long long)draws, (unsigned long long)differ);
     }
     // An MSCNT that ran a chunk the list carried: inside a model span, it is
     // counted, and the span spoiled unless learnChunk names it.
@@ -1632,8 +1585,7 @@ public:
     // DMA but could reach a hook, and on the GIF stage's.
     void drain(int line = __builtin_LINE())
     {
-        if (std::this_thread::get_id() == m_workerId ||
-            (g_drawStage && std::this_thread::get_id() == g_drawStage->id()))
+        if (m_running || (g_drawStage && std::this_thread::get_id() == g_drawStage->id()))
         {
             return;
         }
@@ -1682,107 +1634,81 @@ public:
     }
 
 private:
-    void run()
+    void runCurrent()
     {
-        ThreadNaming::SetCurrentThreadName("VIF1");
-        t_onVif1Thread = true;
-        t_listDecoder = true;
         PS2Memory &memory = m_runtime.memory();
-        for (;;)
+        const auto started = std::chrono::steady_clock::now();
+        const bool staged = toDrawStage();
+        try
         {
+            t_listData = m_current.data.data();
+            t_listSize = m_current.data.size();
+            t_listOrigins = &m_current.origins;
+            t_listOriginAt = 0u;
+            t_listHoles = &m_current.holes;
+            t_listHoleAt = 0u;
+            retainList();
+            learnList();
+            if (!m_current.data.empty())
             {
-                std::unique_lock lock(m_mutex);
-                const int64_t idleStart = vifwait::g_on ? vifwait::nowNs() : 0;
-                m_work.wait(lock, [&] { return !m_lists.empty() || m_stop; });
-                if (vifwait::g_on)
-                    vifwait::add(vifwait::g_vif1Idle, idleStart);
-                if (m_lists.empty())
-                {
-                    return;
-                }
-                m_current = std::move(m_lists.front());
-                m_lists.pop_front();
+                memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
             }
-            const auto started = std::chrono::steady_clock::now();
-            const bool staged = toDrawStage();
-            try
-            {
-                t_listData = m_current.data.data();
-                t_listSize = m_current.data.size();
-                t_listOrigins = &m_current.origins;
-                t_listOriginAt = 0u;
-                t_listHoles = &m_current.holes;
-                t_listHoleAt = 0u;
-                retainList();
-                learnList();
-                if (!m_current.data.empty())
-                {
-                    memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
-                }
-                publishLearned();
-            }
-            catch (const std::exception &error)
-            {
-                std::fprintf(stderr, "[vif1] list failed: %s\n", error.what());
-            }
-            // What the list held goes on before the next list's packets, also
-            // when it threw (with the draw stage, the stage does it at the
-            // list's end). If that throws too, it is dropped.
-            try
-            {
-                if (!staged)
-                {
-                    flushEffect();
-                    flushComposites();
-                }
-            }
-            catch (const std::exception &error)
-            {
-                std::fprintf(stderr, "[vif1] the list's held packets failed: %s\n", error.what());
-                discardHeld();
-            }
-            // The list's GS packets go over before it counts as done, so a
-            // drain that sees it done waits for them too. With the draw
-            // stage, the stage finishes the list.
-            if (vifwait::g_on)
-                vifwait::add(vifwait::g_listVif1, vifwait::g_listSent.load());
-            if (staged)
-            {
-                g_drawStage->endList();
-            }
-            g_busyNanos.fetch_add(
-                static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
-                        .count()),
-                std::memory_order_relaxed);
-            {
-                std::lock_guard lock(m_mutex);
-                m_completed += staged ? 0u : 1u;
-                if (m_pool.size() < kPoolSize)
-                {
-                    m_current.data.clear();
-                    m_pool.push_back(std::move(m_current.data));
-                }
-            }
-            if (staged)
-            {
-                continue;
-            }
-            m_idle.notify_all();
-            // Wakes the EE so it delivers the list's VIFcode interrupt now,
-            // not at its next vblank.
-            m_runtime.eeScheduler().postEvent(EeEvent{EeEventType::Dmac, 1u, 0u});
+            publishLearned();
         }
+        catch (const std::exception &error)
+        {
+            std::fprintf(stderr, "[vif1] list failed: %s\n", error.what());
+        }
+        // What the list held goes on before the next list's packets, also
+        // when it threw (with the draw stage, the stage does it at the
+        // list's end). If that throws too, it is dropped.
+        try
+        {
+            if (!staged)
+            {
+                flushEffect();
+                flushComposites();
+            }
+        }
+        catch (const std::exception &error)
+        {
+            std::fprintf(stderr, "[vif1] the list's held packets failed: %s\n", error.what());
+            discardHeld();
+        }
+        if (vifwait::g_on)
+            vifwait::add(vifwait::g_listVif1, vifwait::g_listSent.load());
+        if (staged)
+        {
+            g_drawStage->endList();
+        }
+        g_busyNanos.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
+                    .count()),
+            std::memory_order_relaxed);
+        {
+            std::lock_guard lock(m_mutex);
+            m_completed += staged ? 0u : 1u;
+            if (m_pool.size() < kPoolSize)
+            {
+                m_current.data.clear();
+                m_pool.push_back(std::move(m_current.data));
+            }
+        }
+        if (staged)
+        {
+            return;
+        }
+        m_idle.notify_all();
+        m_runtime.eeScheduler().postEvent(EeEvent{EeEventType::Dmac, 1u, 0u});
     }
 
+    static constexpr uint32_t kDefaultMxcsr = 0x1F80u;
     PS2Runtime &m_runtime;
-    std::thread m_thread;
-    std::thread::id m_workerId;
     std::mutex m_mutex;
-    std::condition_variable m_work;
     std::condition_variable m_idle;
-    std::deque<List> m_lists;
-    List m_current; // the VIF1 thread's
+    List m_current; // the list running
+    bool m_running = false; // a list is running (on the game's thread)
     static constexpr size_t kPoolSize = 8u;
     std::vector<Bytes> m_pool; // guarded by m_mutex
     std::atomic<uint32_t> m_vpuStat{0u};
@@ -1849,7 +1775,6 @@ private:
     std::vector<dq8::gfx::native::ModelInput> m_shadowInputs;
     dq8::gfx::native::ModelRow m_shadowRows[2]{};
     std::vector<float> m_shadowPalette;
-    std::shared_ptr<rg::nativemodels::GameDraw> m_gameDraw; // the mark's, made on the game thread
     alignas(16) uint8_t m_particleQuads[64u * 16u] = {}; // its VU1 quads, the model the identity
     struct SpanLearning
     {
@@ -1866,7 +1791,6 @@ private:
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
     uint64_t m_reported = 0u;
-    bool m_stop = false;
 };
 
 Vif1Thread *g_thread = nullptr;
@@ -3137,10 +3061,6 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
             {
                 list.origins.emplace_back(0u, address);
             }
-            // (A normal send has no tags: the game thread's reader of the
-            // stream takes its bytes as they are, M5 step 3.)
-            if (rg::nativemodels::enabled() && !list.data.empty())
-                rg::nativemodels::reader().read(list.data.data(), static_cast<uint32_t>(list.data.size()));
         }
         catch (const std::exception &)
         {
@@ -3161,7 +3081,7 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     reportFinished(rdram, ctx, runtime);
     if (vifwait::g_on)
         vifwait::g_listSent.store(vifwait::nowNs());
-    g_thread->submit(std::move(list));
+    g_thread->runList(std::move(list));
     returnToCaller(ctx, 0);
 }
 

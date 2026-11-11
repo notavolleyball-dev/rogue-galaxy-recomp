@@ -98,9 +98,9 @@ stacked PRs at the end).
   records from the `GsPkt*` setters (no GIF decode of blocks), fonts as
   glyph records, libgraph's paths, HUD size and widescreen as layer
   transforms, region packs.
-- Then M6: the records made at game time are still sent from the VIF1
-  stream (passes, blocks, model draws); send them in the game's order, and
-  the VIF1 thread no longer decodes for the graphics.
+- **M6's first step is in too** (on the same branch, as it needed no play
+  data): the lists run on the game thread as they are sent; the VIF1
+  thread is gone (see M6).
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -840,16 +840,12 @@ recovers.
     `RG_VU1_CLIP_ON_GPU` and the VU1 mode switch. Every VU1 mesh the producer takes is the model
     stage's; `buildChunk` is left for the overlay, the base piece, and the
     outline and shadow fallbacks.
-- **Step 3 in code too** (`src/native_models.*`):
-  - The game thread's gather reads every VIF1 list as the VIF would: its
-    own VU1 data and code memory and draw state; UNPACK, MPG, the base
-    program, DIRECT, and the double buffer.
-  - At each chunk the list no longer carries, it makes the chunk's draw
-    there: header, constants, bones, state packets.
-  - The VIF1 thread sends that draw.
-  - `[model-game]` lines count the draws and how many differ from what the
-    VIF1 thread's VU1 memory gives (should stay 0).
-  - `RG_MODEL_GAME_TIME=0` turns it off.
+- **Step 3 in code too:** every list now runs on the game thread as it is
+  sent (M6's first step), so every chunk's draw is made at game time from
+  VU1 memory as the list leaves it. The game thread's second reader of the
+  stream (`src/native_models.*`, its `[model-game]` count and
+  `RG_MODEL_GAME_TIME`) went with that: it duplicated what the list's own
+  run now does on the same thread.
 - **Left, by name (the user's to agree; `[vu1native]` lines count each as
   "left to the VU1"):** chunks `declineChunk` refuses still run the VU1
   interpreter: an entry into B other than its first (quad 76.z), a
@@ -919,6 +915,17 @@ differ slightly, and those differences are listed.
   list copy is the expected gain).
 
 ### M6: remove the GS front end and the packet path
+
+**Step 1 in code (2026-11-11, on `native-only/m4b-2d`): the lists run on
+the game thread.** `send()` runs each VIF1 list where the game sends it
+(`Vif1Thread::runList`): VIF decode, the native programs and the VU1
+interpreter for what is left to it, at the default floating-point
+environment, with its records going to the draw stage in the game's order
+among the records the game's hooks make. The VIF1 worker thread is gone;
+the draw stage still consumes on its own thread and finishes each list
+(the game's DMA completion). To watch: the game thread's frame time (the
+list's decode is now on it; `vif1 busy` in the stats is now the game
+thread's share).
 
 **Done early (2026-11-11, on `native-only/m5-geometry`):**
 - The VU1 parity tooling went with M5: check mode, `RG_VU1_REPLAY`,

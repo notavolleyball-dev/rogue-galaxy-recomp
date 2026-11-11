@@ -1397,11 +1397,6 @@ bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
     return shadowMeshFrom(program, data, top, packets, meshes, inputs, rows, palette);
 }
 
-void baseProgram(uint8_t *data)
-{
-    runBase(data, nullptr);
-}
-
 const Program *identify(const uint8_t *code, uint32_t startPC)
 {
     if (startPC == kBaseEntry && matches(code, kBase))
