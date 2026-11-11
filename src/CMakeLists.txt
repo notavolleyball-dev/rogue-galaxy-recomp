@@ -133,6 +133,7 @@ add_executable(roguegalaxy
     guest_write_watch.cpp
     native_2d.cpp
     native_effects.cpp
+    native_blocks.cpp
     native_producer.cpp
     gif_events.cpp
     vu0_flags.cpp

@@ -257,10 +257,13 @@ constexpr DrawTask kDrawTasks[] = {
 constexpr size_t kDrawTaskCount = sizeof(kDrawTasks) / sizeof(kDrawTasks[0]);
 PS2Runtime::RecompiledFunction g_drawTaskOriginals[kDrawTaskCount] = {};
 
+uint8_t g_currentLayer = 0u; // game thread: the running draw task's
+
 void afterDrawTask(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
 {
     // data: the task's index, and where its packets began.
     const uint32_t index = data >> 24, top = data & 0xFFFFFFu;
+    g_currentLayer = 0u;
     if (index < kDrawTaskCount && kDrawTasks[index].layer != Layer::Scene)
         addLayerRange(top, stackTop(), static_cast<uint8_t>(kDrawTasks[index].layer));
 }
@@ -273,6 +276,7 @@ template <size_t I> void drawTask(uint8_t *rdram, R5900Context *ctx, PS2Runtime 
         g_drawTaskOriginals[I](rdram, ctx, runtime);
         return;
     }
+    g_currentLayer = static_cast<uint8_t>(kDrawTasks[I].layer);
     rg::hooks::callThen(g_drawTaskOriginals[I], rdram, ctx, runtime, &afterDrawTask,
                         (static_cast<uint32_t>(I) << 24) | top);
 }
@@ -1358,6 +1362,7 @@ const char *name(Effect effect)
     case Effect::ColorFilter: return "color filter";
     case Effect::Focus: return "focus";
     case Effect::ShadowMapBlur: return "shadow map blur";
+    case Effect::Block2D: return "2D block";
     default: return "none";
     }
 }
@@ -1592,6 +1597,21 @@ Place placeAt(uint32_t address)
         return Place{};
     --it;
     return address < it->end ? it->place : Place{};
+}
+
+uint32_t listTop()
+{
+    return stackTop();
+}
+
+void markBlock(uint32_t start, uint32_t end, uint32_t unit)
+{
+    addRange(start, end, Effect::Block2D, unit);
+}
+
+uint8_t currentLayer()
+{
+    return g_currentLayer;
 }
 
 uint8_t layerAt(uint32_t address)

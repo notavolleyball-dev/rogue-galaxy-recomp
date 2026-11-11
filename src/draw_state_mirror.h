@@ -34,4 +34,22 @@ void readBack(const GS &gs);
 // The draw state of now: what a primitive drawn next would be drawn under.
 GSDrawState current();
 
+// A mirror of its own, fed by whoever holds it (M4: the game thread's, from
+// the packets the game writes, in its order). Not thread-safe: one owner.
+class Tracker
+{
+public:
+    Tracker();
+    ~Tracker();
+    Tracker(const Tracker &) = delete;
+    Tracker &operator=(const Tracker &) = delete;
+    void observe(const uint8_t *data, uint32_t size);
+    void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
+    GSDrawState current() const;
+
+private:
+    struct Impl;
+    Impl *m_impl;
+};
+
 } // namespace rg::drawstate

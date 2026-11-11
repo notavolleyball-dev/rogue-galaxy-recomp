@@ -66,6 +66,9 @@ enum class Effect : uint8_t
     // the bloom.
     Focus,
     ShadowMapBlur,
+    // M4: a GsPkt block (DrawListBeginPrim to DrawListEndPrim), its 2D
+    // made on the game thread (src/native_blocks.h); Place::unit its pieces'.
+    Block2D,
 };
 
 // What an EE address of the frame's packet memory holds: an effect's
@@ -102,6 +105,13 @@ void endFlip();
 // the buffer it reads (the frame) and the one it draws into (the display
 // buffer), as GS bases.
 bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &target);
+
+// M4 (src/native_blocks.cpp): the top of the draw list being built (game
+// thread), a block's packet range marked with its unit, and the layer of
+// the draw task running now.
+uint32_t listTop();
+void markBlock(uint32_t start, uint32_t end, uint32_t unit);
+uint8_t currentLayer();
 
 // M4: the layer (native::Layer's value) of the draw task whose packets the
 // EE address holds; 0 (Scene) for none.

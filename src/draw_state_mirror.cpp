@@ -198,11 +198,21 @@ void readBack(const GS &gs)
     g_mirror.prim = prim;
 }
 
+namespace
+{
+GSDrawState stateOf(const GS::DrawRegisters &r, const GSPrimReg &prim);
+}
+
 GSDrawState current()
 {
     std::lock_guard lock(g_mirror.mutex);
-    const GS::DrawRegisters &r = g_mirror.r;
-    const GSPrimReg &prim = g_mirror.prim;
+    return stateOf(g_mirror.r, g_mirror.prim);
+}
+
+namespace
+{
+GSDrawState stateOf(const GS::DrawRegisters &r, const GSPrimReg &prim)
+{
     GSDrawState state{};
     state.context = r.ctx[prim.ctxt ? 1 : 0];
     state.prim = prim;
@@ -223,6 +233,50 @@ GSDrawState current()
     const uint8_t mmin = static_cast<uint8_t>((tex1 >> 6u) & 0x7u);
     state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
     return state;
+}
+} // namespace
+
+struct Tracker::Impl
+{
+    Mirror mirror;
+    rg::gif::GifState carried;
+    std::vector<rg::gif::GifEvent> events;
+};
+
+Tracker::Tracker() : m_impl(new Impl) {}
+Tracker::~Tracker()
+{
+    delete m_impl;
+}
+
+void Tracker::observe(const uint8_t *data, uint32_t size)
+{
+    if (!data || size < 16u)
+        return;
+    Impl &t = *m_impl;
+    t.events.clear();
+    rg::gif::eachPacket(data, size, [&](uint32_t at, uint32_t piece) {
+        rg::gif::decodeGifPacket(data + at, piece, t.carried, t.events);
+    });
+    for (const rg::gif::GifEvent &e : t.events)
+        if (e.kind == rg::gif::GifEvent::Kind::Register)
+            write(t.mirror, e.reg, e.value);
+}
+
+void Tracker::observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
+{
+    Impl &t = *m_impl;
+    t.events.clear();
+    for (size_t i = 0; i < count; ++i)
+        rg::gif::applyRegister(writes[i].first, writes[i].second, t.carried, t.events);
+    for (const rg::gif::GifEvent &e : t.events)
+        if (e.kind == rg::gif::GifEvent::Kind::Register)
+            write(t.mirror, e.reg, e.value);
+}
+
+GSDrawState Tracker::current() const
+{
+    return stateOf(m_impl->mirror.r, m_impl->mirror.prim);
 }
 
 } // namespace rg::drawstate
