@@ -24,6 +24,9 @@ namespace
 uint8_t *g_rdram = nullptr;
 
 constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u;
+// ModelEmitShadowCasterPacketsMaybe: the same loop, one material for every
+// group (*(dctx+0x3B90), set by the shadow map's render).
+constexpr uint32_t kModelEmitShadowCaster = 0x0014E780u;
 // The markers' kinds (the unit's high byte; 1 passes, 2 blocks).
 constexpr uint32_t kBegin = 3u, kEnd = 4u, kUnwritten = 5u;
 // ModelMeshLinks: its chains are built once at load (static spans), so a
@@ -194,7 +197,7 @@ bool chunksOf(uint32_t chain, std::vector<std::array<Quad, 2>> &out)
 
 // The call's items and groups, from inst a0, req a2 (read after the call:
 // ModelMesh's groups are rebuilt by it).
-void predict(uint32_t dctx, uint32_t req, Call &call)
+void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
 {
     const uint32_t key = read32(req + 0x40u);
     const uint32_t meshes = read32(read32(req + 0x0Cu) + 4u);
@@ -234,7 +237,7 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
         {
             if (read32(group + 0x10u) == 0u)
                 continue;
-            const uint32_t t = read32(materials + 4u * read32(group + 0x0Cu));
+            const uint32_t t = caster ? read32(dctx + 0x3B90u) : read32(materials + 4u * read32(group + 0x0Cu));
             Group &out = item.groups.emplace_back();
             out.chain = read32(group + 0x10u);
             out.chunksKnown = chunksOf(out.chain, out.chunks);
@@ -316,16 +319,18 @@ bool drawable(const Call &call)
 }
 
 PS2Runtime::RecompiledFunction g_emitOriginal = nullptr;
-// The call's request (a2), for after it (game thread; the emitter does not
+PS2Runtime::RecompiledFunction g_casterOriginal = nullptr;
+// The call's request (a2), for after it (game thread; the emitters do not
 // nest outside effects, which are not followed).
 uint32_t t_pendingReq = 0u, t_pendingDctx = 0u;
+bool t_pendingCaster = false;
 
 void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
 {
     // data: the unit.
     Call call;
     call.unit = data;
-    predict(t_pendingDctx, t_pendingReq, call);
+    predict(t_pendingDctx, t_pendingReq, call, t_pendingCaster);
     rg::nativefx::writeMarker(kEnd << 24);
     std::lock_guard lock(g_mutex);
     if (g_calls.size() >= 4096u)
@@ -333,13 +338,14 @@ void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
     g_calls.push_back(std::move(call));
 }
 
-void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdram, R5900Context *ctx,
+              PS2Runtime *runtime)
 {
     // Inside an effect's call (the composite's parts), the effect's pass
     // stands for the draws: not followed here.
-    if (rg::nativefx::inEffectCall())
+    if (rg::nativefx::inEffectCall() || (caster && read32(getRegU32(ctx, 5) + 0x3B90u) == 0u))
     {
-        g_emitOriginal(rdram, ctx, runtime);
+        original(rdram, ctx, runtime);
         return;
     }
     g_units = (g_units + 1u) & 0xFFFFFFu;
@@ -349,7 +355,7 @@ void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         Call call;
         call.unit = g_units | (kUnwritten << 24);
-        predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call);
+        predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster);
         if (drawable(call) && rg::nativefx::writeMarker(call.unit))
         {
             ++g_unwrittenCalls;
@@ -367,12 +373,23 @@ void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t unit = g_units | (kBegin << 24);
     if (!rg::nativefx::writeMarker(unit))
     {
-        g_emitOriginal(rdram, ctx, runtime);
+        original(rdram, ctx, runtime);
         return;
     }
     t_pendingReq = getRegU32(ctx, 6);
     t_pendingDctx = getRegU32(ctx, 5);
-    rg::hooks::callThen(g_emitOriginal, rdram, ctx, runtime, &afterEmit, unit);
+    t_pendingCaster = caster;
+    rg::hooks::callThen(original, rdram, ctx, runtime, &afterEmit, unit);
+}
+
+void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    emitWith(g_emitOriginal, false, rdram, ctx, runtime);
+}
+
+void emitCaster(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    emitWith(g_casterOriginal, true, rdram, ctx, runtime);
 }
 
 // The list side.
@@ -397,8 +414,9 @@ void report()
 void install(PS2Runtime &runtime)
 {
     g_rdram = runtime.memory().getRDRAM();
-    if (!rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &emit, g_emitOriginal))
-        std::fprintf(stderr, "[model-emit] ModelEmitDrawPackets not hooked\n");
+    if (!rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &emit, g_emitOriginal) ||
+        !rg::timing::hookFunction(runtime, kModelEmitShadowCaster, &emitCaster, g_casterOriginal))
+        std::fprintf(stderr, "[model-emit] the model emitters not all hooked\n");
 }
 
 bool takeUnwritten(uint32_t unit, Call &out)

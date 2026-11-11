@@ -1095,9 +1095,11 @@ GsEnv with the draw environment's frame and depth base, TEX1, CLAMP,
 TEX0) applied, each chunk unpacked from its span in EE memory to the
 item's VIF BASE and drawn as any model chunk. The camera, view and light
 packets still come from the list. `[model-emit] ... calls the game did
-not write N` counts them. Next: the sorted path
-(`ModelQueueSortedPackets`, drawn at the buckets' replay) and the shadow
-casters; then the view, camera and light packets as records too. The sorted path (`ModelQueueSortedPackets`,
+not write N` counts them. The shadow casters
+(`ModelEmitShadowCasterPacketsMaybe`, one material for every group) go
+the same way. Next: the sorted path (`ModelQueueSortedPackets`, drawn at
+the buckets' replay); then the view, camera and light packets as records
+too. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
