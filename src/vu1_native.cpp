@@ -18,6 +18,7 @@
 
 #include "gfx/native/native_records.h"
 #include "gif_events.h"
+#define XXH_INLINE_ALL
 #include "xxhash.h"
 
 // The strip programs, piece by piece (byte addresses):

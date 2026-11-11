@@ -22,6 +22,7 @@
 
 #include "ThreadNaming.h"
 #include "debug/vu1_replay.h"
+#include "gfx/native/native_records.h"
 #include "vu1_native.h"
 #include "draw_state_mirror.h"
 #include "native_2d.h"
@@ -382,6 +383,26 @@ struct MeshRetain
 // The mesh on its way (the VIF1 thread to the draw stage, the draw stage to
 // the producer).
 thread_local MeshRetain t_retain;
+// M5 (docs/NATIVE-ONLY.md): a model chunk drawn by the renderer's model
+// vertex stage, on its way as t_retain is: its id (t_retain's), its inputs
+// the first time, the program's constants and its bones for this draw.
+struct ModelPayload
+{
+    bool active = false, define = false, list = false;
+    std::vector<dq8::gfx::native::ModelInput> inputs;
+    dq8::gfx::native::ModelRow row{};
+    std::vector<float> palette;
+};
+thread_local ModelPayload t_model;
+// RG_MODEL_GPU=0: every strip chunk through vu1_native's buildMesh, as before.
+bool modelGpuOn()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_MODEL_GPU");
+        return !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
 struct RetainTable
 {
     struct Entry
@@ -395,6 +416,10 @@ struct RetainTable
     // scroll) filled the renderer's buffer with meshes drawn twice.
     static constexpr uint32_t kSightings = 8u;
     std::unordered_map<uint64_t, Entry> seen;
+    // Model chunks by the hash of their inputs (M5): seen in two lists, a
+    // chunk gets an id and goes to the GPU; one whose inputs change from
+    // frame to frame (cloth) stays on the CPU.
+    std::unordered_map<uint64_t, Entry> models;
     uint64_t list = 0u, epoch = 0u;
     uint32_t nextId = 0u; // never reused, whatever the epoch
 };
@@ -418,10 +443,37 @@ void retainList()
     {
         r.epoch = epoch;
         r.seen.clear();
+        r.models.clear();
     }
     if (r.list % 512u == 0u)
+    {
         std::erase_if(r.seen, [&](const auto &e) { return e.second.id == 0u && r.list - e.second.list > 64u; });
+        std::erase_if(r.models, [&](const auto &e) { return e.second.id == 0u && r.list - e.second.list > 64u; });
+    }
 }
+// A model chunk's id (0: not yet: the CPU draws it this time), by the hash
+// of its inputs; `define`: its inputs go with it.
+uint32_t modelIdOf(uint64_t hash, bool &define)
+{
+    RetainTable &r = t_retained;
+    define = false;
+    const auto [it, fresh] = r.models.try_emplace(hash, RetainTable::Entry{0u, 1u, r.list});
+    RetainTable::Entry &entry = it->second;
+    if (fresh)
+        return 0u;
+    if (entry.id != 0u)
+    {
+        entry.list = r.list;
+        return entry.id;
+    }
+    if (entry.list == r.list)
+        return 0u;
+    entry.list = r.list;
+    entry.id = ++r.nextId;
+    define = true;
+    return entry.id;
+}
+
 MeshRetain retainOf(const GSNativeMesh &mesh)
 {
     RetainTable &r = t_retained;
@@ -1140,10 +1192,32 @@ public:
         const Elided elided{hole.bytes, hole.phys, hole.hash};
         std::memcpy(append(Kind::ImageElided, sizeof(elided), ~0u, ~0u, 0u), &elided, sizeof(elided));
     }
+    // A model chunk's payload (t_model), for the mesh that follows: its
+    // flags, its row, its palette, and its inputs when it defines them.
+    void model(const ModelPayload &m)
+    {
+        const uint32_t inputs = m.define ? static_cast<uint32_t>(m.inputs.size()) : 0u;
+        const uint32_t floats = static_cast<uint32_t>(m.palette.size());
+        const uint32_t size = 16u + static_cast<uint32_t>(sizeof(m.row)) + floats * 4u +
+                              inputs * static_cast<uint32_t>(sizeof(dq8::gfx::native::ModelInput));
+        uint8_t *at = append(Kind::Model, size, ~0u, ~0u, 0u);
+        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u), inputs, floats, 0u};
+        std::memcpy(at, head, sizeof(head));
+        at += 16u;
+        std::memcpy(at, &m.row, sizeof(m.row));
+        at += sizeof(m.row);
+        if (floats)
+            std::memcpy(at, m.palette.data(), floats * 4u);
+        at += floats * 4u;
+        if (inputs)
+            std::memcpy(at, m.inputs.data(), inputs * sizeof(dq8::gfx::native::ModelInput));
+    }
     // A VU1 program's mesh, with the quads of VU1 memory the producer reads
     // when `vu1Data` is given.
     void mesh(const GSNativeMesh &mesh, const uint8_t *vu1Data)
     {
+        if (t_model.active)
+            model(t_model);
         // A retained mesh already defined goes without its vertices; its id
         // rides in the record's cursor.
         const MeshRetain retain = t_retain;
@@ -1201,6 +1275,7 @@ private:
         Mesh,
         ListEnd,
         ImageElided,
+        Model, // a model chunk's payload, for the Mesh after it (M5)
     };
     struct Elided
     {
@@ -1336,7 +1411,29 @@ private:
                         t_retain = {header.cursor != ~0u ? header.cursor : 0u, vertices != 0u};
                         deliverMesh(m_gs, m_mesh, quads);
                         t_retain = {};
+                        t_model.active = false;
                         t_meshWriteCount = 0u;
+                        break;
+                    }
+                    case Kind::Model:
+                    {
+                        uint32_t head[4];
+                        std::memcpy(head, data, sizeof(head));
+                        const uint8_t *from = data + 16u;
+                        ModelPayload &m = t_model;
+                        m.active = true;
+                        m.define = (head[0] & 1u) != 0u;
+                        m.list = (head[0] & 2u) != 0u;
+                        std::memcpy(&m.row, from, sizeof(m.row));
+                        from += sizeof(m.row);
+                        m.palette.resize(head[2]);
+                        if (head[2])
+                            std::memcpy(m.palette.data(), from, head[2] * 4u);
+                        from += head[2] * 4u;
+                        m.inputs.resize(head[1]);
+                        if (head[1])
+                            std::memcpy(static_cast<void *>(m.inputs.data()), from,
+                                        head[1] * sizeof(dq8::gfx::native::ModelInput));
                         break;
                     }
                     case Kind::ListEnd:
@@ -1645,7 +1742,29 @@ public:
                 else
                 {
                     native = m_nativeProgram;
-                    if (gpu)
+                    t_model.active = false;
+                    uint32_t modelId = 0u;
+                    if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
+                    {
+                        // M5: a chunk seen before goes to the model vertex
+                        // stage, its inputs once; no vertex is made here.
+                        const uint8_t *data = memory.getVU1Data();
+                        modelId = modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
+                        if (modelId != 0u)
+                        {
+                            if (t_model.define)
+                                rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
+                            rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
+                            rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
+                            m_nativeBounds.made = false;
+                            t_model.active = true;
+                            m_modelId = modelId;
+                        }
+                    }
+                    if (gpu && modelId != 0u)
+                    {
+                    }
+                    else if (gpu)
                     {
                         rg::vu1native::buildMesh(*native, memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
                                                  &m_nativeBounds);
@@ -1725,7 +1844,9 @@ public:
                     }
                 if (meshed)
                 {
-                    if (retainingMeshes() && toDrawStage() && native->decode != rg::vu1native::Decode::Skinned)
+                    if (t_model.active)
+                        t_retain = {m_modelId, false};
+                    else if (retainingMeshes() && toDrawStage() && native->decode != rg::vu1native::Decode::Skinned)
                         t_retain = retainOf(m_nativeMesh);
                     if (asWrites)
                     {
@@ -1734,6 +1855,7 @@ public:
                     }
                     deliverMesh(m_runtime.gs(), m_nativeMesh, memory.getVU1Data());
                     t_retain = {};
+                    t_model.active = false;
                     t_meshWriteCount = 0u;
                 }
                 // What the VU1 would have left in its memory, where it did
@@ -2011,6 +2133,7 @@ private:
     std::vector<RegisterWrite> m_nativeWrites; // a mesh's, in their place
     GSNativeMesh m_nativeMesh;
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
+    uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     std::vector<std::vector<uint8_t>> m_vu1Packets;
     std::vector<uint8_t> m_checkData;
     VU1State m_checkState{};
@@ -3191,7 +3314,17 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
         if (g_stage && !t_onVif1Thread)
             g_thread->drain();
         const GSDrawState state = rg::drawstate::current();
-        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, t_vu1Source, t_retain.id))
+        rg::nativeproducer::ModelDraw model;
+        if (t_model.active)
+        {
+            model.define = t_model.define;
+            model.list = t_model.list;
+            model.inputs = &t_model.inputs;
+            model.row = &t_model.row;
+            model.palette = &t_model.palette;
+        }
+        if (rg::nativeproducer::mesh(mesh, &state, vu1Data, t_vu1Source, t_retain.id,
+                                     t_model.active ? &model : nullptr))
             return;
         // Refused here only for a buffer the game never named (counted as a
         // target miss): with no GS behind the pipeline nothing can draw it,

@@ -5,6 +5,12 @@
 #include <string>
 #include <vector>
 
+namespace dq8::gfx::native
+{
+struct ModelInput;
+struct ModelRow;
+} // namespace dq8::gfx::native
+
 struct GSNativeMesh;
 struct GSDrawState;
 
@@ -115,8 +121,19 @@ uint32_t targetAt(uint32_t base);
 // `retained`: the mesh is one the renderer keeps under this id
 // (docs/NATIVE-BOUNDARY.md, issue 2): with its vertices it is defined first,
 // without them (a later draw) only the id goes.
+// M5: a model chunk drawn by the renderer's model vertex stage
+// (docs/NATIVE-ONLY.md): `inputs` its vertices as the program reads them,
+// given the first time (`define`), `row` the program's constants for this
+// draw and `palette` its bones' matrices.
+struct ModelDraw
+{
+    bool define = false, list = false;
+    const std::vector<dq8::gfx::native::ModelInput> *inputs = nullptr;
+    const dq8::gfx::native::ModelRow *row = nullptr;
+    const std::vector<float> *palette = nullptr;
+};
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source,
-          uint32_t retained = 0u);
+          uint32_t retained = 0u, const ModelDraw *model = nullptr);
 // A name for a `source`, for the renderer's draw labels (a frame capture's;
 // debug/bug_mark.h). A VU1 mesh's source stands for its native program.
 void nameSource(uint32_t source, const char *name);

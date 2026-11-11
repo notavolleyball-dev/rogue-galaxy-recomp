@@ -2095,10 +2095,20 @@ void nameSource(uint32_t source, const char *name)
 }
 
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source,
-          uint32_t retained)
+          uint32_t retained, const ModelDraw *modelChunk)
 {
+    const ModelDraw *const chunkModel = modelChunk;
     if (!vu1Data)
         return false;
+    // A model chunk's inputs, once, whatever becomes of this draw (M5).
+    if (chunkModel && retained != 0u && chunkModel->define && chunkModel->inputs && !chunkModel->inputs->empty())
+    {
+        native::RetainedMesh kept;
+        kept.id = retained;
+        kept.list = chunkModel->list;
+        kept.model = *chunkModel->inputs;
+        native::push(std::move(kept));
+    }
     // A retained mesh's vertices, once, whatever becomes of this draw.
     if (retained != 0u && !mesh.vertices.empty())
     {
@@ -2164,6 +2174,13 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         draw.guardBand = h.guardBand != 0u;
         draw.backface = h.backface != 0u;
         draw.clips = h.clips != 0u;
+        if (chunkModel && chunkModel->row)
+        {
+            draw.hasModelRow = true;
+            draw.modelRow = *chunkModel->row;
+            if (chunkModel->palette)
+                draw.palette = *chunkModel->palette;
+        }
     }
     for (int i = 0; i < 4; ++i)
         draw.fog[i] = h.fog[i] * kFogUnit;
