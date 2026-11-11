@@ -102,10 +102,21 @@ stacked PRs at the end).
   - The builder's map is in NATIVE-ONLY-NOTES.md; its shadow of each
     block is made from the calls and compared with the bytes; an owner
     whose shadows agree has its blocks drawn from the calls with no bytes
-    written (the guard is the comparison itself). Blocks were never read
-    before this branch (fixed here).
-  - Next: fonts as glyph records, region packs' glyph variants, the
-    composites the shadow does not follow, and whatever the census names.
+    written (the guard is the comparison itself; effects' blocks never).
+    Blocks were never read before this branch (fixed here).
+  - **For the play test of this branch**, the lines that say how far it
+    got: `[native-blocks]` (blocks read, the shadow's same / differing /
+    not followed, blocks the game did not write, lost: should stay 0),
+    `[native2d] pieces the converter made, by draw task` (what 2D is left
+    to move), `[native-env]` (libgraph's environment taken), `[vu1native]`
+    (chunks left to the VU1). Also the game thread's frame time (lists now
+    run on it).
+  - Next: fonts as glyph records, region packs' glyph variants (and CSA
+    palettes, which the producer refuses outright today: a glyph border
+    may be one), the six functions that inline the block's begin and end
+    (GfxBlitTexRect, GfxEndFrame, DrawListEmitFrameEnvMaybe,
+    DrawListClearScreen, GfxDrawPerfMeter, RefractionCaptureFrame), and
+    whatever the census names.
 - **M6's first step is in too** (on the same branch, as it needed no play
   data): the lists run on the game thread as they are sent; the VIF1
   thread is gone (see M6). Two more M5 declines were ported there too
