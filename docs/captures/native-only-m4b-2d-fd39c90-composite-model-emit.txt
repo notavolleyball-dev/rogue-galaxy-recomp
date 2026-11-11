@@ -1,0 +1,10 @@
+# composite and model-emit lines from native-only-m4b-2d-fd39c90-play.log
+[composite] 1 objects, 0 in layers, 0 tails not drawn
+[composite] 5000 objects, 0 in layers, 1339 tails not drawn
+[composite] 10000 objects, 0 in layers, 2171 tails not drawn
+[composite] 15000 objects, 0 in layers, 3220 tails not drawn
+[composite] 20000 objects, 0 in layers, 4026 tails not drawn
+[composite] 25000 objects, 0 in layers, 5043 tails not drawn
+[composite] 30000 objects, 0 in layers, 6295 tails not drawn
+[composite] 35000 objects, 0 in layers, 7987 tails not drawn
+# model-emit lines in the log: 0
