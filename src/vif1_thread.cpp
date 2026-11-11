@@ -302,6 +302,9 @@ thread_local const RegisterWrite *t_meshWrites = nullptr;
 // M6: a chunk drawn from a model call's record is drawn under the record's
 // draw registers (made where the game wrote the call), not the list's.
 thread_local const rg::drawstate::Registers *t_recordRegs = nullptr;
+// And a captured stream's chunks under the stream's (the game thread's where
+// the emitter wrote, then the stream's own writes, applied as they come).
+thread_local rg::drawstate::Registers *t_streamRegs = nullptr;
 thread_local uint32_t t_meshWriteCount = 0u;
 
 // The VIF1 thread's list's holes, and the first not yet passed (listHole).
@@ -835,6 +838,22 @@ public:
     // its span in EE memory to the item's VIF BASE and drawn as the list's
     // run draws a model chunk.
 public:
+    // M6: a captured stream (src/native_emit.h), replayed where its marker
+    // is: the VIF runs it as it would have run it in the list here (the
+    // runtime's VIF1 keeps its registers, not its position, between
+    // calls), its draws under the stream's registers.
+    void replayStream(uint32_t unit)
+    {
+        std::vector<uint8_t> bytes;
+        rg::drawstate::Registers regs;
+        if (!rg::nativeemit::takeStream(unit, bytes, regs) || bytes.empty())
+            return;
+        rg::drawstate::Registers *const outer = t_streamRegs;
+        t_streamRegs = &regs;
+        m_runtime.memory().processVIF1Data(bytes.data(), static_cast<uint32_t>(bytes.size()));
+        t_streamRegs = outer;
+    }
+
     void drawUnwritten(uint32_t unit)
     {
         rg::nativeemit::Call call;
@@ -1592,6 +1611,8 @@ void sendRaw(const uint8_t *data, uint32_t size)
 void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 {
     rg::drawstate::observeWrites(writes.data(), writes.size());
+    if (t_streamRegs)
+        t_streamRegs->write(writes.data(), writes.size());
     g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
     for (const auto &[reg, value] : writes)
         absorbRegister(reg, value);
@@ -1791,6 +1812,12 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
                 drawUnwritten(static_cast<uint32_t>(unit));
             return;
         }
+        if ((unit >> 24) == 8u)
+        {
+            // M6: an emitter's captured output (src/native_emit.h).
+            g_thread->replayStream(static_cast<uint32_t>(unit));
+            return;
+        }
         if ((unit >> 24) == 6u || (unit >> 24) == 7u)
         {
             if ((unit >> 24) == 6u)
@@ -1881,6 +1908,11 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
             rg::drawstate::Registers regs = *t_recordRegs;
             regs.write(t_meshWrites, t_meshWriteCount);
             state = regs.state();
+        }
+        else if (t_streamRegs)
+        {
+            t_streamRegs->write(t_meshWrites, t_meshWriteCount);
+            state = t_streamRegs->state();
         }
         else
             state = rg::drawstate::current();

@@ -1,5 +1,6 @@
 #include "native_emit.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -35,6 +36,15 @@ constexpr uint32_t kQueueSorted = 0x0014F0D0u;
 constexpr uint32_t kEmitBucket = 0x001405A0u;
 // The markers' kinds (the unit's high byte; 1 passes, 2 blocks).
 constexpr uint32_t kUnwritten = 5u;
+// A captured stream's marker (M6): what an emitter wrote into the list,
+// taken out and replayed where it was, under the game thread's state.
+constexpr uint32_t kStream = 8u;
+// EffModelDrawNodes and EffQuadDrawNodes (the effect models and particles:
+// NATIVE-ONLY-NOTES.md, "Entry points, and emitters that bypass
+// Prepare/Emit") write their packets into the list themselves.
+constexpr uint32_t kEffModelDrawNodes = 0x001A7B80u;
+constexpr uint32_t kEffQuadDrawNodes = 0x001A7890u;
+constexpr uint32_t kDrawCtxPointer = 0x004810A4u;
 // ModelMeshLinks: its chains are built once at load (static spans), so a
 // call of only these can be drawn from its record with nothing written.
 constexpr uint32_t kMeshLinks = 0x00470010u;
@@ -387,6 +397,233 @@ bool drawable(const Call &call)
     return whyWritten(call) == kDrawable;
 }
 
+// --- Captured streams (M6) ------------------------------------------------
+// What an emitter the records do not cover writes into the draw list (a
+// call the game still writes, the effect models and particles, the sorted
+// path's written nodes): the stretch it added is read, on the game thread
+// where it ends, into the VIF stream the list would have carried (each
+// tag's VIF codes and data, CALLs followed), the list cursor put back and a
+// marker written in its place. The list's run replays the stream at the
+// marker as the VIF would have run it there (the same uploads, programs,
+// chunks), its draws under the draw state the game thread had where the
+// emitter wrote (rg::drawstate::game(), then the stream's own writes), not
+// under the list's.
+struct Stream
+{
+    uint32_t unit = 0u;
+    std::vector<uint8_t> bytes;
+    rg::drawstate::Registers regs{};
+};
+std::deque<Stream> g_streams; // under g_mutex
+std::atomic<uint64_t> g_captured{0u}, g_captureFailed{0u};
+
+void appendFrom(std::vector<uint8_t> &out, uint32_t address, uint32_t bytes)
+{
+    const size_t at = out.size();
+    out.resize(at + bytes);
+    for (uint32_t i = 0; i < bytes; i += 16u)
+        std::memcpy(out.data() + at + i, g_rdram + physical(address + i), std::min<uint32_t>(16u, bytes - i));
+}
+
+// A CALLed chain, as the DMA runs it (TTE: each tag's two VIF codes before
+// its data), until its RET. False: not of that shape.
+bool gatherCallee(uint32_t at, std::vector<uint8_t> &out, int depth)
+{
+    for (int steps = 0; steps < 8192 && out.size() < (8u << 20); ++steps)
+    {
+        const uint64_t tag = read64(at);
+        const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu), id = static_cast<uint32_t>((tag >> 28) & 7u);
+        const uint32_t addr = static_cast<uint32_t>(tag >> 32) & 0x7FFFFFF0u;
+        if (addr & 0x70000000u)
+            return false; // (scratchpad: not read here)
+        appendFrom(out, at + 8u, 8u);
+        switch (id)
+        {
+        case 1u: // cnt
+            appendFrom(out, at + 16u, qwc * 16u);
+            at += 16u + qwc * 16u;
+            break;
+        case 2u: // next
+            appendFrom(out, at + 16u, qwc * 16u);
+            at = addr;
+            break;
+        case 3u: // ref
+        case 4u: // refs
+            appendFrom(out, addr, qwc * 16u);
+            at += 16u;
+            break;
+        case 5u: // call
+            appendFrom(out, at + 16u, qwc * 16u);
+            if (depth >= 2 || !gatherCallee(addr, out, depth + 1))
+                return false;
+            at += 16u + qwc * 16u;
+            break;
+        case 6u: // ret
+            appendFrom(out, at + 16u, qwc * 16u);
+            return true;
+        default: // refe, end: the list would end here
+            return false;
+        }
+    }
+    return false;
+}
+
+// The list's stretch [from, to): cnt and call tags (and refs), as the
+// emitters write them.
+bool gatherStretch(uint32_t from, uint32_t to, std::vector<uint8_t> &out)
+{
+    out.clear();
+    uint32_t at = from;
+    while (at < to && out.size() < (8u << 20))
+    {
+        const uint64_t tag = read64(at);
+        const uint32_t qwc = static_cast<uint32_t>(tag & 0xFFFFu), id = static_cast<uint32_t>((tag >> 28) & 7u);
+        const uint32_t addr = static_cast<uint32_t>(tag >> 32) & 0x7FFFFFF0u;
+        appendFrom(out, at + 8u, 8u);
+        if (id == 1u)
+        {
+            appendFrom(out, at + 16u, qwc * 16u);
+            at += 16u + qwc * 16u;
+        }
+        else if (id == 5u)
+        {
+            appendFrom(out, at + 16u, qwc * 16u);
+            if ((addr & 0x70000000u) || !gatherCallee(addr, out, 1))
+                return false;
+            at += 16u + qwc * 16u;
+        }
+        else if (id == 3u || id == 4u)
+        {
+            if (addr & 0x70000000u)
+                return false;
+            appendFrom(out, addr, qwc * 16u);
+            at += 16u;
+        }
+        else
+            return false;
+    }
+    return at == to;
+}
+
+// The stream's DIRECT payloads (the GS state it sets), as the VIF reads its
+// codes (UNPACK's size by STCYCL, as the runtime's VIF1 has it).
+template <typename Visit> void eachDirect(const std::vector<uint8_t> &bytes, Visit &&visit)
+{
+    uint32_t cl = 1u, wl = 1u;
+    size_t pos = 0u;
+    while (pos + 4u <= bytes.size())
+    {
+        uint32_t cmd;
+        std::memcpy(&cmd, bytes.data() + pos, 4u);
+        pos += 4u;
+        const uint32_t op = (cmd >> 24) & 0x7Fu, imm = cmd & 0xFFFFu, num = (cmd >> 16) & 0xFFu;
+        if (op == 0x01u)
+        {
+            cl = std::max(imm & 0xFFu, 1u);
+            wl = std::max((imm >> 8) & 0xFFu, 1u);
+        }
+        else if (op == 0x20u)
+            pos += 4u;
+        else if (op == 0x30u || op == 0x31u)
+            pos += 16u;
+        else if (op == 0x4Au)
+            pos += (num == 0u ? 256u : num) * 8u;
+        else if (op == 0x50u || op == 0x51u)
+        {
+            const size_t n = (imm == 0u ? 65536u : imm) * 16u;
+            if (pos + n <= bytes.size())
+                visit(bytes.data() + pos, static_cast<uint32_t>(n));
+            pos += n;
+        }
+        else if ((op & 0x60u) == 0x60u)
+        {
+            const uint32_t vn = (op >> 2) & 3u, vl = op & 3u, write = num == 0u ? 256u : num;
+            const uint32_t bits = (vl == 3u && vn == 3u) ? 16u : (vn + 1u) * (vl == 3u ? 16u : (32u >> vl));
+            uint32_t source = write;
+            if (cl < wl)
+                source = (write / wl) * cl + std::min(write % wl, cl);
+            pos += ((source * ((bits + 7u) / 8u)) + 3u) & ~3u;
+        }
+    }
+}
+
+// Where an emitter's call began: the list's cursor, and the snapshot of the
+// game thread's state there.
+struct CaptureStart
+{
+    uint32_t dctx = 0u, cursor = 0u;
+};
+std::vector<CaptureStart> g_captureStarts;
+
+CaptureStart beginCapture()
+{
+    CaptureStart start;
+    start.dctx = read32(kDrawCtxPointer);
+    start.cursor = start.dctx != 0u ? read32(start.dctx + 4u) : 0u;
+    return start;
+}
+
+// The emitter's stretch taken out of the list and kept under a marker.
+void endCapture(const CaptureStart &start)
+{
+    if (start.dctx == 0u || start.dctx != read32(kDrawCtxPointer))
+        return;
+    const uint32_t end = read32(start.dctx + 4u);
+    if (end <= start.cursor)
+        return; // (nothing written)
+    Stream stream;
+    if (end - start.cursor > (1u << 20) || !gatherStretch(start.cursor, end, stream.bytes))
+    {
+        ++g_captureFailed;
+        return; // (left in the list as written)
+    }
+    stream.regs = rg::drawstate::game().registers();
+    // The GS state it sets, on the game thread's as where it was written.
+    eachDirect(stream.bytes, [](const uint8_t *data, uint32_t size) { rg::drawstate::game().observe(data, size); });
+    write32(start.dctx + 4u, start.cursor);
+    g_units = (g_units + 1u) & 0xFFFFFFu;
+    g_units = g_units == 0u ? 1u : g_units;
+    stream.unit = g_units | (kStream << 24);
+    if (!rg::nativefx::writeMarker(stream.unit))
+    {
+        write32(start.dctx + 4u, end); // (no room: as it was)
+        ++g_captureFailed;
+        return;
+    }
+    ++g_captured;
+    std::lock_guard lock(g_mutex);
+    if (g_streams.size() >= 4096u)
+        g_streams.pop_front();
+    g_streams.push_back(std::move(stream));
+}
+
+void afterCaptured(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+{
+    if (g_captureStarts.empty())
+        return;
+    const CaptureStart start = g_captureStarts.back();
+    g_captureStarts.pop_back();
+    endCapture(start);
+}
+
+// The emitter's original, its output captured.
+void callCaptured(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    g_captureStarts.push_back(beginCapture());
+    rg::hooks::callThen(original, rdram, ctx, runtime, &afterCaptured, 0u);
+}
+
+PS2Runtime::RecompiledFunction g_effModelOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_effQuadOriginal = nullptr;
+void effModel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    callCaptured(g_effModelOriginal, rdram, ctx, runtime);
+}
+void effQuad(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    callCaptured(g_effQuadOriginal, rdram, ctx, runtime);
+}
+
 PS2Runtime::RecompiledFunction g_emitOriginal = nullptr;
 PS2Runtime::RecompiledFunction g_casterOriginal = nullptr;
 // The call's request (a2), for after it (game thread; the emitters do not
@@ -452,11 +689,11 @@ bool rebuildMeshes(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint3
 void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdram, R5900Context *ctx,
               PS2Runtime *runtime)
 {
-    // Inside an effect's call (the composite's parts), the effect's pass
-    // stands for the draws: not followed here.
+    // Inside an effect's call (the composite's parts, drawn into its layer)
+    // the call is written as the game writes it, and captured.
     if (rg::nativefx::inEffectCall() || (caster && read32(getRegU32(ctx, 5) + 0x3B90u) == 0u))
     {
-        original(rdram, ctx, runtime);
+        callCaptured(original, rdram, ctx, runtime);
         return;
     }
     g_units = (g_units + 1u) & 0xFFFFFFu;
@@ -495,7 +732,7 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
         }
     }
     ++g_writtenCalls;
-    original(rdram, ctx, runtime);
+    callCaptured(original, rdram, ctx, runtime);
 }
 
 void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -568,7 +805,7 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t t = read32(o + 8u + 4u * read32(o));
     if (rg::nativefx::inEffectCall() || t == 0u || g_sorted.empty())
     {
-        g_bucketOriginal(rdram, ctx, runtime);
+        callCaptured(g_bucketOriginal, rdram, ctx, runtime);
         return;
     }
     const auto done = [&](int32_t value) {
@@ -637,6 +874,9 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 continue;
             }
         }
+        // A node written as the game writes it, captured (its item's header
+        // CALLs above stay in the list).
+        const CaptureStart written = beginCapture();
         // DrawCtxAddChangedCallTags(dctx, e+0x18, e+0x14): six slots, a CALL
         // for each that differs from the cache at dctx+0x3C48.
         const uint32_t programs = read32(e + 0x18u), slots = read32(e + 0x14u);
@@ -660,6 +900,7 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         call(ha);
         call(chain);
+        endCapture(written);
     }
     // MemStackAllocQw(pk, 1): the RET+MSCAL quadword.
     if (read32(pk + 0x20u) == 0u && read32(pk + 0x2Cu) + 1u <= read32(pk + 0x34u))
@@ -683,9 +924,10 @@ void report()
                 why += std::string(" ") + kWhyNames[k] + "=" + std::to_string(c);
         std::fprintf(stderr,
                      "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu "
-                     "(emit calls by why:%s), records not found %llu\n",
+                     "(emit calls by why:%s), records not found %llu; emitters' output captured %llu (not %llu)\n",
                      (unsigned long long)n, (unsigned long long)g_writtenCalls.load(),
-                     why.empty() ? " none" : why.c_str(), (unsigned long long)g_unknown.load());
+                     why.empty() ? " none" : why.c_str(), (unsigned long long)g_unknown.load(),
+                     (unsigned long long)g_captured.load(), (unsigned long long)g_captureFailed.load());
     }
 }
 } // namespace
@@ -696,7 +938,9 @@ void install(PS2Runtime &runtime)
     if (!rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &emit, g_emitOriginal) ||
         !rg::timing::hookFunction(runtime, kModelEmitShadowCaster, &emitCaster, g_casterOriginal) ||
         !rg::timing::hookFunction(runtime, kQueueSorted, &queueSorted, g_queueOriginal) ||
-        !rg::timing::hookFunction(runtime, kEmitBucket, &emitBucket, g_bucketOriginal))
+        !rg::timing::hookFunction(runtime, kEmitBucket, &emitBucket, g_bucketOriginal) ||
+        !rg::timing::hookFunction(runtime, kEffModelDrawNodes, &effModel, g_effModelOriginal) ||
+        !rg::timing::hookFunction(runtime, kEffQuadDrawNodes, &effQuad, g_effQuadOriginal))
         std::fprintf(stderr, "[model-emit] the model emitters not all hooked\n");
 }
 
@@ -708,6 +952,21 @@ bool takeUnwritten(uint32_t unit, Call &out)
         {
             out = std::move(*it);
             g_calls.erase(it);
+            return true;
+        }
+    ++g_unknown;
+    return false;
+}
+
+bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs)
+{
+    std::lock_guard lock(g_mutex);
+    for (auto it = g_streams.begin(); it != g_streams.end(); ++it)
+        if (it->unit == unit)
+        {
+            bytes = std::move(it->bytes);
+            regs = it->regs;
+            g_streams.erase(it);
             return true;
         }
     ++g_unknown;

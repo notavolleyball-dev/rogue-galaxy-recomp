@@ -81,6 +81,10 @@ struct Call
 
 // A call the game did not write (its marker reached): its record.
 bool takeUnwritten(uint32_t unit, Call &out);
+// A captured stream's marker (kind 8) reached: what the emitter wrote, as
+// the VIF stream the list would have carried there, and the draw registers
+// the game thread had where it wrote it.
+bool takeStream(uint32_t unit, std::vector<uint8_t> &bytes, rg::drawstate::Registers &regs);
 
 // After loadELF(), with the native effects (the markers are theirs).
 void install(PS2Runtime &runtime);
