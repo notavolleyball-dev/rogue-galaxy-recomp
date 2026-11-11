@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "gs_writes.h"
 #include "native_types.h"
 
 namespace dq8::gfx::native
@@ -125,7 +126,7 @@ struct Program
 };
 
 // Whether the program's chunks are meshes (the model vertex stage's); if
-// not, the VIF1 thread sends buildChunk's packets.
+// not, the list's run applies buildChunk's writes.
 inline bool hasMesh(const Program &program)
 {
     return program.kind == Kind::Strip || program.kind == Kind::Projector;
@@ -151,7 +152,7 @@ const Program *identify(const uint8_t *code, uint32_t startPC);
 // vertices; world to window: the model matrix the identity, as
 // particleMesh's). False when a packet sets no RGBAQ: not drawn.
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
+                  std::vector<rg::gswrites::Write> (&writes)[2], rg::NativeMesh (&meshes)[2],
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette);
 
@@ -172,21 +173,24 @@ std::string describePieces(const uint8_t *code, uint32_t startPC);
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 
 // The base piece's run (MSCAL 0x000) on `data` as the VU1 would leave it
-// (quads 64-75, 100-102, 111), and the packet it kicks (FOGCOL): for an
-// item drawn from its emit call (src/native_emit.h).
-void runBaseOn(uint8_t *data, std::vector<std::vector<uint8_t>> &packets);
+// (quads 64-75, 100-102, 111), and the writes of the packet it kicks
+// (FOGCOL): for an item drawn from its emit call (src/native_emit.h).
+void runBaseOn(uint8_t *data, std::vector<rg::gswrites::Write> &writes);
 
-// The GS packets the program kicks for that chunk, in order: the base
-// piece's FOGCOL (the overlay's: none, its sprites are an ObjectLayer pass).
+// The register writes of what the program kicks for that chunk (M6: a
+// chunk's packets are read as writes where they are made, src/gs_writes.h):
+// the base piece's FOGCOL (the overlay's: none, its sprites are an
+// ObjectLayer pass).
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
-                std::vector<std::vector<uint8_t>> &packets);
+                std::vector<rg::gswrites::Write> &writes);
 
 // M5 of docs/NATIVE-ONLY.md: a strip program's chunks drawn by the
 // renderer's model vertex stage (native_model.vert), which runs B, F and C
 // on the GPU. modelOnGpu: whether it can (int16 inputs, a mesh).
 // modelChunkHash: an identity of the chunk's inputs (its header and
 // sections). modelChunk: its vertices as the program reads them (a strip,
-// or a list). modelHeader: buildMesh's packets and header with no vertices.
+// or a list). modelHeader: buildMesh's state writes (FOGCOL, the GIF
+// header's PRIM and PRMODE) and header with no vertices.
 // modelRow: the constants the stage reads for this draw (its layout is
 // native_model.vert's), and the bones' matrices the chunk uses.
 bool modelOnGpu(const Program &program);
@@ -194,29 +198,29 @@ bool modelOnGpu(const Program &program);
 // a particle (a list) and the row (flag 32) from which the stage makes each
 // billboard in world space; drawn with the model matrix the identity (the
 // caller's VU1 quads 60-63 made so).
-void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets,
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<rg::gswrites::Write> &writes,
                   rg::NativeMesh &mesh, std::vector<dq8::gfx::native::ModelInput> &inputs,
                   dq8::gfx::native::ModelRow &row);
 // The outline program's chunk for the model vertex stage (M5): its points
-// as inputs (in fours or twos, outlineEdge's count a edge), its packets
+// as inputs (in fours or twos, outlineEdge's count a edge), its writes
 // (PRIM, PRMODE), a header with the program's matrix to the window (quads
 // 68-71) and its guard band, and its row (the skinning's; flag 16: the
 // stage draws each edge as buildOutline's four lines, its silhouette test,
 // its fade and its color made there). False when it has no edges.
 bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
+                 std::vector<rg::gswrites::Write> &writes, rg::NativeMesh &mesh,
                  std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
                  dq8::gfx::native::ModelRow &row, std::vector<float> &palette);
 uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top);
 void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh);
+                 std::vector<rg::gswrites::Write> &writes, rg::NativeMesh &mesh);
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
               std::vector<float> &palette);
 
 // What the VIF1 thread did with each chunk: drawn natively (the model
-// vertex stage, or buildChunk's packets), or not drawn and why; a
+// vertex stage, or buildChunk's writes), or not drawn and why; a
 // line every two seconds. (The check mode that compared them with the
 // VU1's packets, the RG_VU1_REPLAY recordings, the oracle and the CPU mesh
 // path went in M5 of docs/NATIVE-ONLY.md: the GPU runs the programs now.)

@@ -303,27 +303,6 @@ thread_local const RegisterWrite *t_meshWrites = nullptr;
 // draw registers (made where the game wrote the call), not the list's.
 thread_local const rg::drawstate::Registers *t_recordRegs = nullptr;
 thread_local uint32_t t_meshWriteCount = 0u;
-// The packets as writes; false when they hold anything else (a vertex, a
-// transfer, image data): they then go as packets.
-bool packetsAsWrites(const std::vector<std::vector<uint8_t>> &packets, std::vector<RegisterWrite> &writes)
-{
-    writes.clear();
-    for (const std::vector<uint8_t> &packet : packets)
-    {
-        const size_t from = writes.size();
-        const rg::gswrites::Read read =
-            rg::gswrites::read(packet.data(), static_cast<uint32_t>(packet.size()), writes);
-        if (!read.whole || read.image || read.vertices)
-            return false;
-        for (size_t i = from; i < writes.size(); ++i)
-        {
-            const uint8_t reg = writes[i].first;
-            if ((reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister || reg >= 0x60u)
-                return false;
-        }
-    }
-    return true;
-}
 
 // The VIF1 thread's list's holes, and the first not yet passed (listHole).
 thread_local std::vector<Hole> *t_listHoles = nullptr;
@@ -724,9 +703,9 @@ public:
         {
             // M5: the shadow volumes to the model vertex stage,
             // twice (the facing ones' blend and the others').
-            m_nativePackets.clear();
+            m_nativeWrites.clear();
             m_shadowMesh = rg::vu1native::shadowMeshes(*native, data, top,
-                                                       m_shadowPackets, m_shadowMeshes, m_shadowInputs,
+                                                       m_shadowWrites, m_shadowMeshes, m_shadowInputs,
                                                        m_shadowRows, m_shadowPalette);
             if (!m_shadowMesh)
             {
@@ -735,7 +714,7 @@ public:
             }
         }
         else if (native->kind == rg::vu1native::Kind::Outline &&
-                 rg::vu1native::outlineDraw(*native, data, top, m_nativePackets,
+                 rg::vu1native::outlineDraw(*native, data, top, m_nativeWrites,
                                             m_nativeMesh, t_model.inputs, t_model.edge, t_model.row,
                                             t_model.palette))
         {
@@ -753,7 +732,7 @@ public:
         {
             // M5: the particles to the model vertex stage, which
             // makes each billboard in world space.
-            rg::vu1native::particleMesh(data, top, m_nativePackets, m_nativeMesh,
+            rg::vu1native::particleMesh(data, top, m_nativeWrites, m_nativeMesh,
                                         t_model.inputs, t_model.row);
             t_model.palette.clear();
             t_model.active = true;
@@ -777,7 +756,7 @@ public:
             t_model.transient = modelId == 0u;
             if (t_model.define || t_model.transient)
                 rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
-            rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
+            rg::vu1native::modelHeader(*native, data, top, m_nativeWrites, m_nativeMesh);
             rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
             t_model.active = true;
             t_model.edge = 0u;
@@ -786,7 +765,7 @@ public:
         }
         else
         {
-            rg::vu1native::buildChunk(*native, data, top, m_nativePackets);
+            rg::vu1native::buildChunk(*native, data, top, m_nativeWrites);
         }
         m_nativeMonitor.native(program);
         if (m_shadowMesh)
@@ -798,13 +777,9 @@ public:
             std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
             for (int i = 0; i < 2; ++i)
             {
-                // Its packets as the mesh's own writes (a record's state takes them).
-                const bool shadowWrites = packetsAsWrites(m_shadowPackets[i], m_nativeWrites);
-                if (!shadowWrites)
-                    for (const auto &packet : m_shadowPackets[i])
-                        deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-                t_meshWrites = m_nativeWrites.data();
-                t_meshWriteCount = shadowWrites ? static_cast<uint32_t>(m_nativeWrites.size()) : 0u;
+                // Its state packets' writes as the mesh's own.
+                t_meshWrites = m_shadowWrites[i].data();
+                t_meshWriteCount = static_cast<uint32_t>(m_shadowWrites[i].size());
                 t_model.active = true;
                 t_model.define = false;
                 t_model.list = true;
@@ -823,22 +798,16 @@ public:
             m_shadowMesh = false;
         }
         const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh || m_outlineMesh;
-        // A mesh's own register packets ride with it as writes.
-        const bool asWrites = meshed && packetsAsWrites(m_nativePackets, m_nativeWrites);
-        if (!asWrites)
-            for (const auto &packet : m_nativePackets)
-            {
-                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-            }
+        // A mesh's own register writes ride with it; a chunk with no mesh
+        // (the base piece's FOGCOL) leaves its writes in the list's state.
+        if (!meshed)
+            applyWrites(m_nativeWrites);
         if (meshed)
         {
             if (t_model.active)
                 t_retain = {m_modelId, false};
-            if (asWrites)
-            {
-                t_meshWrites = m_nativeWrites.data();
-                t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
-            }
+            t_meshWrites = m_nativeWrites.data();
+            t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
             if (m_particleMesh)
             {
                 // The corners are in world space: the model matrix
@@ -877,7 +846,6 @@ public:
         const auto put = [&](uint32_t q, const rg::nativeemit::Quad &v) {
             std::memcpy(data + (q & 1023u) * 16u, v.data(), 16u);
         };
-        std::vector<std::vector<uint8_t>> basePackets;
         std::vector<RegisterWrite> baseWrites;
         rg::drawstate::Registers regs;
         for (const rg::nativeemit::Item &item : call.items)
@@ -886,11 +854,8 @@ public:
                 put(60u + r, item.model[r]);
             // The base piece's packet (the object's FOGCOL): on the
             // record's registers, and the list's for what follows.
-            rg::vu1native::runBaseOn(data, basePackets);
-            if (!packetsAsWrites(basePackets, baseWrites))
-                baseWrites.clear();
-            for (const auto &packet : basePackets)
-                deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            rg::vu1native::runBaseOn(data, baseWrites);
+            applyWrites(baseWrites);
             put(76u, item.q76);
             put(77u, item.q77);
             put(78u, item.q78);
@@ -1145,14 +1110,13 @@ private:
     std::array<uint64_t, kCodeBlocks> m_blockHash{};
     bool m_codeSeenValid = false;
     rg::vu1native::Monitor m_nativeMonitor;
-    std::vector<std::vector<uint8_t>> m_nativePackets;
     std::vector<RegisterWrite> m_nativeWrites; // a mesh's, in their place
     rg::NativeMesh m_nativeMesh;
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     bool m_outlineMesh = false;           // the chunk is outlines for the model stage (outlineDraw)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
     bool m_shadowMesh = false;            // the chunk is shadow volumes as two meshes (shadowMeshes)
-    std::vector<std::vector<uint8_t>> m_shadowPackets[2];
+    std::vector<RegisterWrite> m_shadowWrites[2];
     rg::NativeMesh m_shadowMeshes[2];
     std::vector<dq8::gfx::native::ModelInput> m_shadowInputs;
     dq8::gfx::native::ModelRow m_shadowRows[2]{};

@@ -791,6 +791,15 @@ std::vector<uint8_t> gifPacket(const VuData &vu, uint32_t q)
     return packet;
 }
 
+// The register writes the packets make, in order (src/gs_writes.h): what a
+// chunk kicks besides its vertices, as the mesh's own state.
+void toWrites(const std::vector<std::vector<uint8_t>> &packets, std::vector<rg::gswrites::Write> &writes)
+{
+    writes.clear();
+    for (const std::vector<uint8_t> &packet : packets)
+        rg::gswrites::read(packet.data(), static_cast<uint32_t>(packet.size()), writes);
+}
+
 // out = rows * v as the VU's ACC sums it: ((r0 v.x + r1 v.y) + r2 v.z) + r3 v.w.
 Vec4 transform(const Vec4 rows[4], const Vec4 &v)
 {
@@ -1080,12 +1089,17 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
 } // namespace
 
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
+                  std::vector<rg::gswrites::Write> (&writes)[2], rg::NativeMesh (&meshes)[2],
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette)
 {
     const VuRounding rounding;
-    return shadowMeshFrom(program, data, top, packets, meshes, inputs, rows, palette);
+    thread_local std::vector<std::vector<uint8_t>> packets[2];
+    if (!shadowMeshFrom(program, data, top, packets, meshes, inputs, rows, palette))
+        return false;
+    toWrites(packets[0], writes[0]);
+    toWrites(packets[1], writes[1]);
+    return true;
 }
 
 const Program *identify(const uint8_t *code, uint32_t startPC)
@@ -1271,11 +1285,13 @@ namespace
 
 } // namespace
 
-void runBaseOn(uint8_t *data, std::vector<std::vector<uint8_t>> &packets)
+void runBaseOn(uint8_t *data, std::vector<rg::gswrites::Write> &writes)
 {
     const VuRounding rounding;
+    thread_local std::vector<std::vector<uint8_t>> packets;
     packets.clear();
     runBase(data, &packets);
+    toWrites(packets, writes);
 }
 
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
@@ -1298,34 +1314,29 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
     // M3's ObjectLayer pass (docs/NATIVE-ONLY-NOTES.md, "M5"): not kept.
 }
 
-void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
-                std::vector<std::vector<uint8_t>> &packets)
+void buildChunk(const Program &program, const uint8_t *data, uint32_t top, std::vector<rg::gswrites::Write> &writes)
 {
-    const VuRounding rounding;
-    if (program.kind == Kind::Overlay)
-    {
-        // The overlay B's sprites are drawn only inside a composite's tail,
-        // by M3's ObjectLayer pass from the overlay calls' arguments (the
-        // tail's packets withheld): nothing to send, nothing it leaves is
-        // read.
-        packets.clear();
-        return;
-    }
+    (void)top;
+    writes.clear();
+    // The overlay B's sprites are drawn only inside a composite's tail, by
+    // M3's ObjectLayer pass from the overlay calls' arguments: nothing to
+    // send, nothing it leaves is read. Every program but the base is the
+    // model vertex stage's.
     if (program.kind == Kind::Base)
     {
-        packets.clear();
-        packets.push_back(gifPacket(VuData(data), 19));
-        return;
+        const std::vector<uint8_t> fog = gifPacket(VuData(data), 19);
+        rg::gswrites::read(fog.data(), static_cast<uint32_t>(fog.size()), writes);
     }
-    packets.clear(); // (every other program is the model vertex stage's)
 }
 
 // --- M5: the strip programs on the GPU (native_model.vert) ---------------
 
-void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<rg::gswrites::Write> &writes, rg::NativeMesh &mesh,
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow &row)
 {
+    thread_local std::vector<std::vector<uint8_t>> packets;
     particleMesh(VuData(data), top, packets, mesh, inputs, row);
+    toWrites(packets, writes);
 }
 
 bool modelOnGpu(const Program &program)
@@ -1430,7 +1441,7 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
+                 std::vector<rg::gswrites::Write> &writes, rg::NativeMesh &mesh,
                  std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
                  dq8::gfx::native::ModelRow &row, std::vector<float> &palette)
 {
@@ -1448,6 +1459,7 @@ bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
         return false;
     // buildOutline's packets with no vertices: PRIM (lines) and PRMODE,
     // then the vertex tag, its loop none (its PRIM, when it has one).
+    thread_local std::vector<std::vector<uint8_t>> packets;
     packets.clear();
     std::vector<uint8_t> &state = packets.emplace_back();
     uint32_t tag[4];
@@ -1460,6 +1472,7 @@ bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
     std::memcpy(tag, vu.bytes(86), sizeof(tag));
     tag[0] = 0x8000u;
     putQuad(vertexTag, tag);
+    toWrites(packets, writes);
     // The header: 68-71 to the window, the guard band as buildOutline tests
     // it; no fog (the program writes 0), no backface rule (the stage's own
     // test), its z as it is.
@@ -1494,10 +1507,11 @@ bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh)
+                 std::vector<rg::gswrites::Write> &writes, rg::NativeMesh &mesh)
 {
     Chunk chunk;
     chunkHeader(program, VuData(data), top, chunk);
+    thread_local std::vector<std::vector<uint8_t>> packets;
     packets.clear();
     packets.push_back(std::move(chunk.fog));
     std::vector<uint8_t> &state = packets.emplace_back();
@@ -1507,6 +1521,7 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
     putQuad(state, tag);
     putQuad(state, chunk.header[1]);
     putQuad(state, chunk.header[2]);
+    toWrites(packets, writes);
     mesh.header = chunk.mesh.header;
     mesh.vertices.clear();
     if (program.kind == Kind::Projector)
