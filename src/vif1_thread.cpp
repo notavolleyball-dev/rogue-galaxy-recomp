@@ -851,7 +851,7 @@ public:
                     t_model.edge = 0u;
                     t_model.volume = false;
                     m_modelId = mark->chunk.id;
-                    rg::nativeemit::chunk(data);
+                    rg::nativeemit::chunk(data, m_nativeProgram);
                     m_particleMesh = false;
                     m_shadowMesh = false;
                     m_outlineMesh = false;
@@ -936,7 +936,7 @@ public:
                             rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
                         rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
                         rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
-                        rg::nativeemit::chunk(data);
+                        rg::nativeemit::chunk(data, native);
                         t_model.active = true;
                         t_model.edge = 0u;
                         t_model.volume = false;

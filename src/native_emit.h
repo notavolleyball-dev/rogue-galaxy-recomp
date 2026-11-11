@@ -22,9 +22,10 @@ void install(PS2Runtime &runtime);
 
 // The list side (game thread, as the list runs): a marker's unit (the begin
 // and end of an emit call's output), each MSCAL (0: an item's base, 0x320: a
-// group's A), and each model chunk drawn, with VU1 data memory as it is.
+// group's A), and each model chunk drawn, with VU1 data memory as it is
+// and the native program the list ran it with.
 bool marker(uint32_t unit);
 void mscal(uint32_t startPC);
-void chunk(const uint8_t *vu1Data);
+void chunk(const uint8_t *vu1Data, const void *program);
 
 } // namespace rg::nativeemit

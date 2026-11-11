@@ -12,6 +12,9 @@
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
+#include "vu1_native.h"
+
+#include <unordered_map>
 
 namespace rg::nativeemit
 {
@@ -46,6 +49,10 @@ Quad readQuad(uint32_t address)
 struct Group
 {
     Quad q82{}, q84{}, q86{}, q87{};
+    // The program the microcode table names (null: a slot left as it was,
+    // or pieces identify() does not know; not compared).
+    const rg::vu1native::Program *program = nullptr;
+    bool programKnown = false;
 };
 // An item's: the model matrix (60-63) and the mesh header (76-79, 81, 42),
 // from its packets p14 and p18; its groups, in the order they are drawn.
@@ -74,9 +81,72 @@ Quad unaligned(uint32_t address)
     return q;
 }
 
+// The program a group draws with (NATIVE-ONLY-NOTES.md, "The program a
+// group draws with"): the six slots' packets (A, F, E, B, C, D) the table at
+// 0x491280 names for the material's type and the item's flags, their MPG
+// code put in a micro memory image, identified as the list's run identifies
+// what the VU1 holds. False: a slot is the empty packet (it keeps whatever
+// code is resident) or not an MPG.
+constexpr uint32_t kProgramTable = 0x00491280u;
+constexpr uint32_t kEmptyPacket = 0x00436CA0u;
+bool programOf(uint32_t dctx, uint32_t t, uint32_t itemFlags, const rg::vu1native::Program *&out)
+{
+    const uint32_t type = g_rdram[physical(t + 0x0Au)] | (uint32_t(g_rdram[physical(t + 0x0Bu)]) << 8);
+    if (type >= 12u)
+        return false;
+    const uint32_t row = kProgramTable + type * 0x10u;
+    const auto s16 = [](uint32_t address) {
+        int16_t v;
+        std::memcpy(&v, g_rdram + physical(address), sizeof(v));
+        return int32_t(v);
+    };
+    const int32_t c = s16(t + 0x18u) + ((itemFlags & 4u) ? 2 : 0);
+    const int32_t d = (s16(t + 0x1Au) + ((itemFlags & 8u) ? 2 : 0)) | (read32(dctx + 0x3CCCu) ? 4 : 0);
+    if (c < 0 || c >= 8 || d < 0 || d >= 8)
+        return false;
+    const uint32_t slots[6] = {read32(row), read32(row + 4u), read32(row + 8u),
+                               read32(read32(row + 0x300u) + 4u * (itemFlags & 3u)),
+                               read32(read32(row + 0x304u) + 4u * uint32_t(c)),
+                               read32(read32(row + 0x308u) + 4u * uint32_t(d))};
+    uint64_t key = 0x9E3779B97F4A7C15ull;
+    for (const uint32_t slot : slots)
+    {
+        if (slot == 0u || slot == kEmptyPacket)
+            return false;
+        key = (key ^ slot) * 0x100000001B3ull;
+    }
+    static std::unordered_map<uint64_t, const rg::vu1native::Program *> known;
+    if (const auto it = known.find(key); it != known.end())
+    {
+        out = it->second;
+        return true;
+    }
+    thread_local std::vector<uint8_t> image;
+    image.assign(PS2_VU1_CODE_SIZE, 0u);
+    for (const uint32_t slot : slots)
+    {
+        // A ret tag carrying NOP and MPG load,num; the code after it.
+        uint32_t words[4];
+        std::memcpy(words, g_rdram + physical(slot & ~15u), sizeof(words));
+        const uint32_t mpg = words[3];
+        if (((mpg >> 24) & 0x7Fu) != 0x4Au)
+            return false;
+        const uint32_t pairs = ((mpg >> 16) & 0xFFu) == 0u ? 256u : ((mpg >> 16) & 0xFFu);
+        const uint32_t load = (mpg & 0xFFFFu) * 8u;
+        if (load + pairs * 8u > PS2_VU1_CODE_SIZE)
+            return false;
+        std::memcpy(image.data() + load, g_rdram + physical((slot & ~15u) + 16u), pairs * 8u);
+    }
+    out = rg::vu1native::identify(image.data(), 0x320u);
+    if (known.size() > 4096u)
+        known.clear();
+    known.emplace(key, out);
+    return true;
+}
+
 // The call's items and groups, from inst a0, req a2 (read after the call:
 // ModelMesh's groups are rebuilt by it).
-void predict(uint32_t req, Call &call)
+void predict(uint32_t dctx, uint32_t req, Call &call)
 {
     const uint32_t key = read32(req + 0x40u);
     const uint32_t meshes = read32(read32(req + 0x0Cu) + 4u);
@@ -91,6 +161,7 @@ void predict(uint32_t req, Call &call)
         if (p14 == 0u || p18 == 0u)
             continue;
         const uint32_t mesh = read32(meshes + 4u * read32(it + 0x08u));
+        const uint32_t itemFlags = read32(it + 0x0Cu);
         if (mesh == 0u)
             continue;
         Item &item = call.items.emplace_back();
@@ -120,6 +191,7 @@ void predict(uint32_t req, Call &call)
             out.q84 = readQuad(pkt + 0x30u);
             out.q86 = readQuad(pkt + 0x50u);
             out.q87 = readQuad(pkt + 0x60u);
+            out.programKnown = programOf(dctx, t, itemFlags, out.program);
         }
     }
 }
@@ -127,14 +199,14 @@ void predict(uint32_t req, Call &call)
 PS2Runtime::RecompiledFunction g_emitOriginal = nullptr;
 // The call's request (a2), for after it (game thread; the emitter does not
 // nest outside effects, which are not followed).
-uint32_t t_pendingReq = 0u;
+uint32_t t_pendingReq = 0u, t_pendingDctx = 0u;
 
 void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
 {
     // data: the unit.
     Call call;
     call.unit = data;
-    predict(t_pendingReq, call);
+    predict(t_pendingDctx, t_pendingReq, call);
     rg::nativefx::writeMarker(kEnd << 24);
     std::lock_guard lock(g_mutex);
     if (g_calls.size() >= 4096u)
@@ -160,6 +232,7 @@ void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         return;
     }
     t_pendingReq = getRegU32(ctx, 6);
+    t_pendingDctx = getRegU32(ctx, 5);
     rg::hooks::callThen(g_emitOriginal, rdram, ctx, runtime, &afterEmit, unit);
 }
 
@@ -226,7 +299,7 @@ void mscal(uint32_t startPC)
         ++t_group;
 }
 
-void chunk(const uint8_t *vu1Data)
+void chunk(const uint8_t *vu1Data, const void *program)
 {
     if (!t_in)
         return;
@@ -270,6 +343,12 @@ void chunk(const uint8_t *vu1Data)
     check("84", 84u, group.q84);
     check("86", 86u, group.q86, 0xEu); // (its NLOOP is the chunk's)
     check("87", 87u, group.q87);
+    if (!what && group.programKnown && group.program != program)
+    {
+        what = "the program (the table's against what the VU1 holds)";
+        seen = Quad{uint32_t(reinterpret_cast<uintptr_t>(program)), 0u, 0u, 0u};
+        want = Quad{uint32_t(reinterpret_cast<uintptr_t>(group.program)), 0u, 0u, 0u};
+    }
     if (!what)
     {
         ++g_same;
