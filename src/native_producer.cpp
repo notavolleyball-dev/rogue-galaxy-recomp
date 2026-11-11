@@ -1696,11 +1696,11 @@ void cutRegion(State &s, uint64_t clamp, native::Material &m);
 void replaceRegion(State &s, const rg::DrawState &state, const rg::NativeMesh &mesh, native::Material &m);
 namespace
 {
-// Locked. The 16 entries of palette `id` from `first` as a palette record
-// of their own (a CSA window); 0 when it has fewer.
-native::Id paletteWindow(State &s, native::Id id, uint32_t first)
+// Locked. The `count` entries (16 or 256) of palette `id` from `first` as a
+// palette record of their own (a CSA window); 0 when it has fewer.
+native::Id paletteWindow(State &s, native::Id id, uint32_t first, uint32_t count = 16u)
 {
-    const uint64_t key = (uint64_t(id) << 32) | first;
+    const uint64_t key = (uint64_t(id) << 32) | (uint64_t(count) << 16) | first;
     if (const auto known = s.paletteWindows.find(key); known != s.paletteWindows.end())
         return known->second;
     const auto colors = s.paletteColors.find(id);
@@ -1708,16 +1708,16 @@ native::Id paletteWindow(State &s, native::Id id, uint32_t first)
         return 0u;
     // The entry size from the record's bytes: CT16 2, CT32 4 (256 or 16 entries).
     const size_t bytes = colors->second->size();
-    const uint32_t entryBytes = (bytes == 256u * 2u || bytes == 16u * 2u) ? 2u : 4u;
-    if (bytes < size_t(first + 16u) * entryBytes)
+    const uint32_t entryBytes = (bytes == 512u * 2u || bytes == 256u * 2u || bytes == 16u * 2u) ? 2u : 4u;
+    if (bytes < size_t(first + count) * entryBytes)
         return 0u;
     auto window = std::make_shared<std::vector<uint8_t>>(colors->second->begin() + first * entryBytes,
-                                                         colors->second->begin() + (first + 16u) * entryBytes);
+                                                         colors->second->begin() + (first + count) * entryBytes);
     native::Palette record;
     record.format = entryBytes == 2u ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
     record.scale = texelScale(record.format);
     record.id = s.nextPalette++;
-    record.entries = 16u;
+    record.entries = static_cast<uint16_t>(count);
     s.paletteColors[record.id] = window;
     record.colors = std::move(window);
     s.paletteWindows[key] = record.id;
@@ -2514,10 +2514,9 @@ bool sourceOf(State &s, const rg::Tex0Reg &t, native::Material &m)
         // there (the window is those); one that does not reads what an
         // earlier load left, taken as the CBP's 256-entry CLUT's entries
         // from 16 CSA on (sub-palettes of one CLUT, the common use). A T8
-        // with an offset is not drawn.
+        // reads 256 entries the same way (from its CBP's first when its
+        // TEX0 loads them, else from 16 CSA on).
         const bool t4 = !(psm == kT8 || psm == 0x1Bu);
-        if (t.csa != 0u && !t4)
-            return false;
         const uint32_t entries = (psm == kT8 || psm == 0x1Bu) ? 256u : 16u;
         const auto p = s.residentPalette.find(t.cbp);
         State::HostImage *hostClut = hostImageFor(s, t.cbp, t.cpsm & 0x3Fu, 0u, true);
@@ -2535,7 +2534,7 @@ bool sourceOf(State &s, const rg::Tex0Reg &t, native::Material &m)
             return false;
         if (t.csa != 0u && t.cld == 0u)
         {
-            m.palette = paletteWindow(s, m.palette, 16u * t.csa);
+            m.palette = paletteWindow(s, m.palette, 16u * t.csa, t4 ? 16u : 256u);
             if (m.palette == 0u)
                 return false;
         }

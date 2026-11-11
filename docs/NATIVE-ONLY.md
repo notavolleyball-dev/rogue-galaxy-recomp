@@ -114,8 +114,8 @@ stacked PRs at the end).
   - CSA palettes are drawn now (they were refused outright): a T4 whose
     TEX0 loads its CLUT reads its CBP's first 16 entries; one that does
     not reads the CBP CLUT's entries from 16 CSA on (a derived palette
-    record); region packs name them by that window. A T8 with an offset
-    is still refused.
+    record); region packs name them by that window. A T8 reads its 256
+    entries by the same rule.
   - Next: fonts as glyph records, region packs' glyph variants, and
     whatever the census names. (The functions that frame
     their own block, GfxBlitTexRect, DrawListEmitFrameEnvMaybe,
