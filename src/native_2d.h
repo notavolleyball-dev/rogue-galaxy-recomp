@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/gs/gs_types.h"
+#include "native_types.h"
 
 // The native pipeline's 2D (docs/NATIVE-PIPELINE.md, step 5b): every GIF
 // packet on its way to the GS goes through the converter first. Its
@@ -36,7 +36,7 @@ struct Piece
     // the input is.
     const uint8_t *view = nullptr;
     uint32_t viewSize = 0u;
-    GSNativeMesh mesh; // otherwise
+    rg::NativeMesh mesh; // otherwise
     // The mesh's triangles, three indices into mesh.vertices each: a sprite
     // or a line's quad is four vertices, not six. (mesh.vertices alone is
     // not a triangle list: expand through these for one.)

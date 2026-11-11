@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "runtime/gs/gs_types.h"
+#include "native_types.h"
 
 namespace dq8::gfx::native
 {
@@ -152,7 +152,7 @@ const Program *identify(const uint8_t *code, uint32_t startPC);
 // particleMesh's). False when a packet sets no RGBAQ: the caller keeps
 // buildChunk's packets.
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                  std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette);
 
@@ -192,7 +192,7 @@ bool modelOnGpu(const Program &program);
 // billboard in world space; drawn with the model matrix the identity (the
 // caller's VU1 quads 60-63 made so).
 void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets,
-                  GSNativeMesh &mesh, std::vector<dq8::gfx::native::ModelInput> &inputs,
+                  rg::NativeMesh &mesh, std::vector<dq8::gfx::native::ModelInput> &inputs,
                   dq8::gfx::native::ModelRow &row);
 // The outline program's chunk for the model vertex stage (M5): its points
 // as inputs (in fours or twos, outlineEdge's count a edge), its packets
@@ -201,14 +201,14 @@ void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uin
 // stage draws each edge as buildOutline's four lines, its silhouette test,
 // its fade and its color made there). False when it has no edges.
 bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
                  std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
                  dq8::gfx::native::ModelRow &row, std::vector<float> &palette);
 uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top);
 void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh);
+                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh);
 // `knownSlots`: the palette's size (modelSlots) when the chunk's sections
 // are not in memory (a chunk the list no longer carries); ~0u: read them.
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,

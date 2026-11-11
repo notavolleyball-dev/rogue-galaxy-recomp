@@ -3,8 +3,7 @@
 #include <array>
 #include <vector>
 
-#include "runtime/gs/ps2_gs_psmt4.h"
-#include "runtime/gs/ps2_gs_psmt8.h"
+#include "gs_swizzle.h"
 
 // xxHash's XXH3, the hash PCSX2 names its textures by.
 #define XXH_INLINE_ALL
@@ -28,10 +27,10 @@ struct BlockOrder
     {
         for (uint32_t y = 0u; y < 16u; ++y)
             for (uint32_t x = 0u; x < 16u; ++x)
-                t8[y * 16u + x] = static_cast<uint16_t>(GSPSMT8::addrPSMT8(0u, 2u, x, y) & 0xFFu);
+                t8[y * 16u + x] = static_cast<uint16_t>(rg::swizzle::psmt8::addrPSMT8(0u, 2u, x, y) & 0xFFu);
         for (uint32_t y = 0u; y < 16u; ++y)
             for (uint32_t x = 0u; x < 32u; ++x)
-                t4[y * 32u + x] = static_cast<uint16_t>(GSPSMT4::addrPSMT4(0u, 2u, x, y) & 0x1FFu);
+                t4[y * 32u + x] = static_cast<uint16_t>(rg::swizzle::psmt4::addrPSMT4(0u, 2u, x, y) & 0x1FFu);
     }
 };
 

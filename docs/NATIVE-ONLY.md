@@ -1004,6 +1004,22 @@ the draw stage still consumes on its own thread and finishes each list
 list's decode is now on it; `vif1 busy` in the stats is now the game
 thread's share).
 
+**Step 2 in code (on `native-only/m4b-2d`): the draw path's types are
+src/'s own.** `src/native_types.h` (`rg::NativeMesh`, `rg::DrawState` and
+its registers, `rg::nativeFtoi`/`nativeReciprocal`) and `src/gs_swizzle.h`
+(GS memory's block and column tables, for the producer's and the packs'
+addresses) replace the runtime's `gs_types.h` and `ps2_gs_psm*.h`; the
+draw-state mirror keeps its own registers (patch 0031's
+`GS::DrawRegisters` and its `readBack` are no longer used); the `GS &`
+the delivery functions and the draw stage carried, and the program and
+camera tags for the GS backend's profiles, are gone. What of the
+runtime's GS `src/` still uses: the VU1 interpreter's own `GS` (its
+XGKICK), `GSRegisters` for SIGNAL, FINISH and LABEL, the libgraph stubs'
+register sink (patch 0034), the null backend (`gs_null.*`) and the
+presenter's front end (`graphics.cpp`). So patches 0019, 0020, 0021,
+0028, 0030 and 0031 have no user in `src/` now; dropping them needs the
+submodule checked out again (patches/README.md), left for the end.
+
 **Done early (2026-11-11, on `native-only/m5-geometry`):**
 - The VU1 parity tooling went with M5: check mode, `RG_VU1_REPLAY`,
   `RG_VU1_HARVEST`, `RG_VU1_CAPTURE` and the oracle.

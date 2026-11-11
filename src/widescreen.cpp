@@ -200,7 +200,7 @@ void reshape(uint32_t owner, std::vector<rg::nativeblocks::BlockMesh> &meshes)
         if (!m.textured || m.mesh->vertices.empty())
             continue;
         float x0 = 1e30f, y0 = 1e30f;
-        for (const GSNativeMesh::Vertex &v : m.mesh->vertices)
+        for (const rg::NativeMesh::Vertex &v : m.mesh->vertices)
         {
             x0 = std::min(x0, rg::nativeblocks::vertexX(*m.mesh, v));
             y0 = std::min(y0, rg::nativeblocks::vertexY(*m.mesh, v));

@@ -62,17 +62,17 @@ constexpr uint32_t kBuilderFirstOpen = 0xF0u;
 // A block's pieces, kept by unit until the VIF1 thread reaches the block.
 struct KeptPiece
 {
-    GSNativeMesh mesh;
+    rg::NativeMesh mesh;
     std::vector<uint32_t> indices;
     bool texels = false;
-    GSDrawState state{};
+    rg::DrawState state{};
     uint8_t layer = 0u;
 };
 struct Block
 {
     uint32_t unit = 0u;
     std::vector<KeptPiece> pieces;
-    GSDrawState end{}; // the game thread's state at its end
+    rg::DrawState end{}; // the game thread's state at its end
     // A block the game did not write (its packets never reach the draw
     // stage): its register writes, in order, for the stage's state.
     std::vector<std::pair<uint8_t, uint64_t>> writes;
@@ -500,15 +500,15 @@ thread_local Block t_last; // the block emit() sent, for compare()
 } // namespace
 
 // A fogged piece's clip is (x w, y w, 0, w), w its z (native_2d's closeMesh).
-bool fogged(const GSNativeMesh &mesh)
+bool fogged(const rg::NativeMesh &mesh)
 {
     return mesh.header.matrix[3][3] == 0.0f && mesh.header.matrix[2][3] == 1.0f;
 }
 
-void transform(GSNativeMesh &mesh, float sx, float sy, float tx, float ty)
+void transform(rg::NativeMesh &mesh, float sx, float sy, float tx, float ty)
 {
     const bool fog = fogged(mesh);
-    for (GSNativeMesh::Vertex &v : mesh.vertices)
+    for (rg::NativeMesh::Vertex &v : mesh.vertices)
     {
         const float w = fog ? v.z : 1.0f;
         v.x = sx * v.x + tx * w;
@@ -516,12 +516,12 @@ void transform(GSNativeMesh &mesh, float sx, float sy, float tx, float ty)
     }
 }
 
-float vertexX(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v)
+float vertexX(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v)
 {
     return fogged(mesh) && v.z != 0.0f ? v.x / v.z : v.x;
 }
 
-float vertexY(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v)
+float vertexY(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v)
 {
     return fogged(mesh) && v.z != 0.0f ? v.y / v.z : v.y;
 }
@@ -587,8 +587,8 @@ void compare(uint32_t unit)
     const Block &block = t_last;
     if (block.unit != unit)
         return;
-    const GSDrawState now = rg::drawstate::current();
-    const GSContext &a = now.context, &b = block.end.context;
+    const rg::DrawState now = rg::drawstate::current();
+    const rg::DrawContext &a = now.context, &b = block.end.context;
     const bool same = a.frame.fbp == b.frame.fbp && a.tex0.tbp0 == b.tex0.tbp0 && a.tex0.psm == b.tex0.psm &&
                       a.alpha == b.alpha && a.test == b.test && a.scissor.x1 == b.scissor.x1 &&
                       a.scissor.y1 == b.scissor.y1 && a.xyoffset.ofx == b.xyoffset.ofx;

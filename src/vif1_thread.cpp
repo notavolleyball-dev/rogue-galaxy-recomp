@@ -120,23 +120,15 @@ thread_local bool t_onVif1Thread = false;
 // Set on the VIF1 thread only: with the draw stage on, what its lists make
 // for the GS goes there (toDrawStage).
 thread_local bool t_listDecoder = false;
-// The VU1 program the VIF1 thread is running, as DQ8_GFX_PROFILE_CYCLE names
-// it for the draw tables (0 outside one, and unless the cycle is armed or
-// RG_JITTER is set):
-// 0x80000000 | its entry (a pair index) << 16 | a hash of the microcode there.
-thread_local uint32_t t_vu1Tag = 0;
 // The native program whose chunk is being made a mesh on this thread, as its
 // meshes' MeshDraw::source (0: none): what the renderer's draw labels name
-// (a frame capture's; debug/bug_mark.h). Not t_vu1Tag, which only the
-// tagged profile runs set and the GS's batches follow.
+// (a frame capture's; debug/bug_mark.h).
 thread_local uint32_t t_vu1Source = 0;
 uint32_t programSource(const rg::vu1native::Program *program)
 {
     const uint64_t address = reinterpret_cast<uintptr_t>(program);
     return program ? static_cast<uint32_t>(address ^ (address >> 32)) | 0x80000000u : 0u;
 }
-// And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
-thread_local uint32_t t_vu1Camera = 0;
 // The native pipeline's effects (src/native_effects.h); read at first use,
 // after the menu's setting.
 bool nativeEffects()
@@ -159,7 +151,6 @@ thread_local size_t t_listSize = 0u;
 thread_local const std::vector<std::pair<uint32_t, uint32_t>> *t_listOrigins = nullptr;
 // The piece of t_listOrigins the last listAddress found (listAddress).
 thread_local size_t t_listOriginAt = 0u;
-const bool g_tagPrograms = std::getenv("DQ8_GFX_PROFILE_CYCLE") != nullptr || std::getenv("RG_JITTER") != nullptr;
 } // namespace
 namespace
 {
@@ -697,11 +688,11 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
 }
 
 // A GS packet on its way, as the memory's GIF callback sends it (below).
-void deliverPacket(GS &gs, const uint8_t *data, uint32_t size);
+void deliverPacket(const uint8_t *data, uint32_t size);
 // A native strip likewise, in order with the packets. `vu1Data`: the VU1
 // data memory a program's mesh was built from, for the native pipeline's
 // mesh draw (rg::nativeproducer::mesh); null for others.
-void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data = nullptr);
+void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data = nullptr);
 // An effect's packets held on the VIF1 thread go on, as the renderer's
 // effect or as they are (below).
 void flushEffect();
@@ -712,11 +703,11 @@ void discardHeld();
 // deliverPacket with the packet's place known: its EE address in the list
 // (~0u for none) and, for one a VU1 program kicked, that of the VIF code
 // that started the program (~0u when not looked up).
-void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor);
+void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor);
 // A texture continued over DIRECT packets (PS2Memory's image callback).
-void deliverImage(GS &gs, const uint8_t *data, uint32_t size);
+void deliverImage(const uint8_t *data, uint32_t size);
 // A hole's image data (gatherChain), which never left guest memory.
-void deliverElidedImage(GS &gs, uint32_t size, uint32_t phys, uint64_t hash);
+void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash);
 // A list's last record has run (Vif1Thread::listFinished).
 void finishList();
 bool absorbing();
@@ -748,7 +739,7 @@ std::atomic<uint64_t> g_drawBusyNanos{0u};
 class DrawStage
 {
 public:
-    explicit DrawStage(GS &gs) : m_gs(gs)
+    DrawStage()
     {
         m_thread = std::thread([this] { run(); });
         m_id = m_thread.get_id();
@@ -802,7 +793,7 @@ public:
     }
     // A VU1 program's mesh, with the quads of VU1 memory the producer reads
     // when `vu1Data` is given.
-    void mesh(const GSNativeMesh &mesh, const uint8_t *vu1Data)
+    void mesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
     {
         if (t_model.active)
             model(t_model);
@@ -811,12 +802,12 @@ public:
         const MeshRetain retain = t_retain;
         const uint32_t vertices = retain.id != 0u && !retain.define
                                       ? 0u
-                                      : static_cast<uint32_t>(mesh.vertices.size() * sizeof(GSNativeMesh::Vertex));
+                                      : static_cast<uint32_t>(mesh.vertices.size() * sizeof(rg::NativeMesh::Vertex));
         // Its own register writes behind everything else, their count in
         // the record's address.
         const uint32_t writes = t_meshWriteCount;
         static_assert(sizeof(RegisterWrite) == 16u);
-        const uint32_t size = static_cast<uint32_t>(sizeof(GSNativeMesh::Header)) + vertices +
+        const uint32_t size = static_cast<uint32_t>(sizeof(rg::NativeMesh::Header)) + vertices +
                               (vu1Data ? kVu1Bytes : 0u) + writes * 16u;
         static_assert(kVu1Bytes == 16u * 16u, "the quads below");
         uint8_t *at = append(Kind::Mesh, size, writes, retain.id != 0u ? retain.id : ~0u, vu1Data ? 1u : 0u);
@@ -877,8 +868,8 @@ private:
         uint32_t address;
         uint32_t cursor;
         uint32_t mxcsr; // as GifStage's, without the sticky flags
-        uint32_t tag;   // t_vu1Tag in a tagged run (g_tagPrograms), else t_vu1Source
-        uint32_t camera; // t_vu1Camera
+        uint32_t source; // t_vu1Source
+        uint32_t unused;
         uint32_t vu1;   // a mesh: the VU1 quads follow its vertices
     };
     static_assert(sizeof(Header) == 32u);
@@ -893,7 +884,7 @@ private:
         if (m_staged.size() >= kPublishBytes)
             publish();
         const Header header{kind,        size, address, cursor, _mm_getcsr() & ~kMxcsrFlags,
-                            g_tagPrograms ? t_vu1Tag : t_vu1Source, t_vu1Camera, vu1};
+                            t_vu1Source, 0u, vu1};
         const size_t at = m_staged.size();
         m_staged.resize(at + sizeof(Header) + ((static_cast<size_t>(size) + 15u) & ~size_t{15u}));
         std::memcpy(m_staged.data() + at, &header, sizeof(header));
@@ -948,33 +939,31 @@ private:
                     _mm_setcsr(header.mxcsr);
                     mxcsr = header.mxcsr;
                 }
-                t_vu1Tag = g_tagPrograms ? header.tag : 0u;
-                t_vu1Source = g_tagPrograms ? 0u : header.tag;
-                t_vu1Camera = header.camera;
+                t_vu1Source = header.source;
                 try
                 {
                     switch (header.kind)
                     {
                     case Kind::Packet:
-                        deliverPacketAt(m_gs, data, header.size, header.address, header.cursor);
+                        deliverPacketAt(data, header.size, header.address, header.cursor);
                         break;
                     case Kind::Image:
-                        deliverImage(m_gs, data, header.size);
+                        deliverImage(data, header.size);
                         break;
                     case Kind::ImageElided:
                     {
                         Elided elided;
                         std::memcpy(&elided, data, sizeof(elided));
-                        deliverElidedImage(m_gs, elided.bytes, elided.phys, elided.hash);
+                        deliverElidedImage(elided.bytes, elided.phys, elided.hash);
                         break;
                     }
                     case Kind::Mesh:
                     {
                         const uint32_t writes = header.address;
-                        const uint32_t vertices = header.size - static_cast<uint32_t>(sizeof(GSNativeMesh::Header)) -
+                        const uint32_t vertices = header.size - static_cast<uint32_t>(sizeof(rg::NativeMesh::Header)) -
                                                   (header.vu1 ? kVu1Bytes : 0u) - writes * 16u;
                         std::memcpy(&m_mesh.header, data, sizeof(m_mesh.header));
-                        m_mesh.vertices.resize(vertices / sizeof(GSNativeMesh::Vertex));
+                        m_mesh.vertices.resize(vertices / sizeof(rg::NativeMesh::Vertex));
                         if (vertices)
                             std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header), vertices);
                         m_meshWrites.resize(writes);
@@ -997,7 +986,7 @@ private:
                             quads = m_vu1;
                         }
                         t_retain = {header.cursor != ~0u ? header.cursor : 0u, vertices != 0u};
-                        deliverMesh(m_gs, m_mesh, quads);
+                        deliverMesh(m_mesh, quads);
                         t_retain = {};
                         t_model.active = false;
                         t_meshWriteCount = 0u;
@@ -1028,9 +1017,7 @@ private:
                         break;
                     }
                     case Kind::ListEnd:
-                        t_vu1Tag = 0u;
                         t_vu1Source = 0u;
-                        t_vu1Camera = 0u;
                         flushEffect();
                         flushComposites();
                         if (vifwait::g_on)
@@ -1074,7 +1061,6 @@ private:
     static constexpr size_t kPoolSize = 16u;
     static constexpr uint32_t kMxcsrFlags = 0x3Fu;
 
-    GS &m_gs;
     std::thread m_thread;
     std::thread::id m_id;
     std::mutex m_mutex;
@@ -1082,7 +1068,7 @@ private:
     std::deque<Bytes> m_buffers; // guarded by m_mutex
     std::vector<Bytes> m_pool;   // guarded by m_mutex
     Bytes m_staged;              // the VIF1 thread's
-    GSNativeMesh m_mesh;                        // the stage's
+    rg::NativeMesh m_mesh;                        // the stage's
     std::vector<RegisterWrite> m_meshWrites;    // the stage's: the mesh's own register writes
     alignas(16) uint8_t m_vu1[64u * 16u] = {};  // the stage's: a mesh's VU1 quads, in place
     size_t m_outstanding = 0u;                  // guarded by m_mutex
@@ -1173,24 +1159,6 @@ public:
         VU1Interpreter &vu1 = m_runtime.vu1();
         vu1.state().dBitEnabled = m_current.dBit;
         vu1.state().tBitEnabled = m_current.tBit;
-        if (g_tagPrograms)
-        {
-            // A continuation (MSCNT) is the same program; a DIRECT packet
-            // after the program ends carries no tag.
-            if (!resume)
-            {
-                m_programTag = programTag(memory, startPC);
-            }
-            t_vu1Tag = m_programTag;
-            // The matrices this program transforms with: viewport (4-7),
-            // projection (8-11) and view (24-27). Quads are 16-byte rows.
-            ps2_gs_detail::SceneCamera camera;
-            const uint8_t *data = memory.getVU1Data();
-            std::memcpy(camera.viewport, data + 4u * 16u, sizeof(camera.viewport));
-            std::memcpy(camera.projection, data + 8u * 16u, sizeof(camera.projection));
-            std::memcpy(camera.view, data + 24u * 16u, sizeof(camera.view));
-            t_vu1Camera = ps2_gs_detail::CameraRegistry::add(camera);
-        }
         // RG_VU1_NATIVE: the chunk of a program done natively, built from the
         // data memory before the VU1 changes it. The MSCAL names the program
         // (once per code image and entry), its MSCNTs run the chunks; or the
@@ -1380,7 +1348,7 @@ public:
                     for (int i = 0; i < 2; ++i)
                     {
                         for (const auto &packet : m_shadowPackets[i])
-                            deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                            deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
                         t_model.active = true;
                         t_model.define = false;
                         t_model.list = true;
@@ -1391,7 +1359,7 @@ public:
                         t_model.row = m_shadowRows[i];
                         t_model.palette = m_shadowPalette;
                         t_retain = {};
-                        deliverMesh(m_runtime.gs(), m_shadowMeshes[i], m_particleQuads);
+                        deliverMesh(m_shadowMeshes[i], m_particleQuads);
                         t_model.active = false;
                         t_model.volume = false;
                     }
@@ -1404,7 +1372,7 @@ public:
                 if (!asWrites)
                     for (const auto &packet : m_nativePackets)
                     {
-                        deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                        deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
                     }
                 if (meshed)
                 {
@@ -1422,10 +1390,10 @@ public:
                         std::memcpy(m_particleQuads, memory.getVU1Data(), sizeof(m_particleQuads));
                         const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                         std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
-                        deliverMesh(m_runtime.gs(), m_nativeMesh, m_particleQuads);
+                        deliverMesh(m_nativeMesh, m_particleQuads);
                     }
                     else
-                        deliverMesh(m_runtime.gs(), m_nativeMesh, memory.getVU1Data());
+                        deliverMesh(m_nativeMesh, memory.getVU1Data());
                     t_retain = {};
                     t_model.active = false;
                     t_meshWriteCount = 0u;
@@ -1435,9 +1403,7 @@ public:
                 rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
             }
         }
-        t_vu1Tag = 0u;
         t_vu1Source = 0u;
-        t_vu1Camera = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
     }
@@ -1547,35 +1513,6 @@ public:
     // The tag of the program starting at pair `startPC`: the entry and a hash
     // of the 1 KiB of microcode from it, which names the program whatever else
     // the code memory holds. Kept until the code memory is next written.
-    uint32_t programTag(PS2Memory &memory, uint32_t startPC)
-    {
-        const uint64_t generation = memory.getVU1CodeGeneration();
-        if (generation != m_tagGeneration)
-        {
-            m_tagCache.clear();
-            m_tagGeneration = generation;
-        }
-        const auto [entry, inserted] = m_tagCache.try_emplace(startPC, 0u);
-        if (inserted)
-        {
-            const uint32_t first = std::min<uint32_t>(startPC * 8u, PS2_VU1_CODE_SIZE);
-            const uint32_t last = std::min<uint32_t>(first + 1024u, PS2_VU1_CODE_SIZE);
-            const uint8_t *code = memory.getVU1Code();
-            uint64_t hash = 1469598103934665603ull;
-            for (uint32_t at = first; at < last; ++at)
-            {
-                hash = (hash ^ code[at]) * 1099511628211ull;
-            }
-            const uint32_t folded = static_cast<uint16_t>(hash ^ (hash >> 16) ^ (hash >> 32) ^ (hash >> 48));
-            entry->second = 0x80000000u | ((startPC & 0x7FFu) << 16) | folded;
-            static std::atomic<uint32_t> logged{0u};
-            if (logged.fetch_add(1u, std::memory_order_relaxed) < 6u)
-            {
-                std::fprintf(stderr, "[profile] VU1 program: pc 0x%03x, tag %08x\n", startPC & 0x7FFu, entry->second);
-            }
-        }
-        return entry->second;
-    }
 
     // VPU_STAT's VU1 D/T stop bits after the last MSCAL/MSCNT.
     uint32_t takeVpuStat() const { return m_vpuStat.load(std::memory_order_acquire); }
@@ -1712,9 +1649,6 @@ private:
     static constexpr size_t kPoolSize = 8u;
     std::vector<Bytes> m_pool; // guarded by m_mutex
     std::atomic<uint32_t> m_vpuStat{0u};
-    // The VIF1 thread's: the running program's tag, and the tags by entry for
-    // the current contents of the code memory (programTag).
-    uint32_t m_programTag = 0u;
     // RG_VU1_NATIVE: the program the last MSCAL started, for its MSCNTs, the
     // code image it was found in, and the packets of a chunk.
     const rg::vu1native::Program *m_nativeProgram = nullptr;
@@ -1765,13 +1699,13 @@ private:
     rg::vu1native::Monitor m_nativeMonitor;
     std::vector<std::vector<uint8_t>> m_nativePackets;
     std::vector<RegisterWrite> m_nativeWrites; // a mesh's, in their place
-    GSNativeMesh m_nativeMesh;
+    rg::NativeMesh m_nativeMesh;
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     bool m_outlineMesh = false;           // the chunk is outlines for the model stage (outlineDraw)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
     bool m_shadowMesh = false;            // the chunk is shadow volumes as two meshes (shadowMeshes)
     std::vector<std::vector<uint8_t>> m_shadowPackets[2];
-    GSNativeMesh m_shadowMeshes[2];
+    rg::NativeMesh m_shadowMeshes[2];
     std::vector<dq8::gfx::native::ModelInput> m_shadowInputs;
     dq8::gfx::native::ModelRow m_shadowRows[2]{};
     std::vector<float> m_shadowPalette;
@@ -1786,8 +1720,6 @@ private:
     size_t m_markAt = 0u, m_spanAt = 0u;
     int32_t m_learnSpan = -1;
     bool m_learnNamed = false;
-    uint64_t m_tagGeneration = 0u;
-    std::unordered_map<uint32_t, uint32_t> m_tagCache;
     uint64_t m_submitted = 0u;
     uint64_t m_completed = 0u;
     uint64_t m_reported = 0u;
@@ -2239,7 +2171,7 @@ void absorbRegister(uint8_t reg, uint64_t value)
 }
 
 // A packet to the GS as it is.
-void sendRaw(GS &gs, const uint8_t *data, uint32_t size)
+void sendRaw(const uint8_t *data, uint32_t size)
 {
     if (uploadsTaken())
     {
@@ -2271,7 +2203,7 @@ void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
     for (const auto &[reg, value] : writes)
         absorbRegister(reg, value);
 }
-void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
+void sendWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 {
     bool direct = uploadsTaken() && absorbing() && t_upload.imageBytes == 0u;
     for (size_t i = 0; direct && i < writes.size(); ++i)
@@ -2284,7 +2216,7 @@ void sendWrites(GS &gs, const std::vector<std::pair<uint8_t, uint64_t>> &writes)
     {
         g_writesAsPackets.fetch_add(1u, std::memory_order_relaxed);
         const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
-        sendRaw(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        sendRaw(packet.data(), static_cast<uint32_t>(packet.size()));
         return;
     }
     g_writesDirect.fetch_add(1u, std::memory_order_relaxed);
@@ -2339,13 +2271,13 @@ void countConverted(size_t pieces)
                  line.c_str());
 }
 
-void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
+void deliverPiece(const rg::native2d::Piece &piece)
 {
     if (!t_onVif1Thread)
     {
         g_thread->drain(); // the lists in flight first, as for the GS
     }
-    const GSDrawState state = rg::drawstate::current();
+    const rg::DrawState state = rg::drawstate::current();
     if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs, t_layer, piece.indices))
     {
         ++g_piecesMade;
@@ -2357,7 +2289,7 @@ void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
 
 // A packet on to the GS. Under the native pipeline's 2D its primitives
 // become the producer's draws and only the rest goes on (src/native_2d.h).
-void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
+void sendPacket(const uint8_t *data, uint32_t size)
 {
     if (native2D() && data && size >= 16u)
     {
@@ -2375,7 +2307,7 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
                 if (quick == rg::native2d::Quick::Writes)
                     applyWrites(writes);
                 else
-                    sendRaw(gs, data, size);
+                    sendRaw(data, size);
                 return;
             }
         }
@@ -2394,11 +2326,11 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
             for (const rg::native2d::Piece &piece : pieces)
             {
                 if (piece.isWrites())
-                    sendWrites(gs, piece.writes);
+                    sendWrites(piece.writes);
                 else if (piece.isPacket())
-                    sendRaw(gs, piece.bytes(), piece.size());
+                    sendRaw(piece.bytes(), piece.size());
                 else
-                    deliverPiece(gs, piece);
+                    deliverPiece(piece);
             }
             const uint64_t count = ++g_packetsConverted;
             if (count == 1u || count % 100000u == 0u)
@@ -2423,7 +2355,7 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
         }
         rg::native2d::observe(data, size);
     }
-    sendRaw(gs, data, size);
+    sendRaw(data, size);
 }
 
 // The packets of an effect the producer may draw (src/native_effects.h),
@@ -2433,7 +2365,6 @@ struct HeldEffect
 {
     rg::nativefx::Effect effect = rg::nativefx::Effect::None;
     uint32_t unit = 0u; // the colour filter's colour
-    GS *gs = nullptr;
     std::vector<std::vector<uint8_t>> packets;
 };
 thread_local HeldEffect t_held;
@@ -2514,7 +2445,6 @@ void flushEffect()
     {
         return;
     }
-    GS &gs = *t_held.gs;
     // M4: a 2D block made on the game thread: its pieces to the producer,
     // its packets on without their kicks (the mirror follows them). Not
     // found: the converter takes the packets.
@@ -2525,7 +2455,7 @@ void flushEffect()
         {
             if (made)
                 rg::nativefx::withholdKicks(packet);
-            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+            sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
         }
         if (made)
             rg::nativeblocks::compare(t_held.unit);
@@ -2546,7 +2476,7 @@ void flushEffect()
     {
         if (pass)
             rg::nativefx::withholdKicks(packet);
-        sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
     }
     t_held.effect = rg::nativefx::Effect::None;
     t_held.unit = 0u;
@@ -2576,7 +2506,7 @@ struct CompositeBatch
     bool routed = false;    // its draws go to a layer, its tail held
     bool waiting = false;   // tails sent that no kComposite has drawn yet
     bool uploading = false; // an upload's data goes on too
-    GS *gs = nullptr;
+    bool active = false;    // a batch under way
     rg::nativefx::Box box;
     std::vector<std::vector<uint8_t>> head; // the head's packets until its box is known
     std::vector<std::vector<uint8_t>> tail;
@@ -2611,7 +2541,7 @@ void decideHead()
         compositeRun();
     }
     for (const std::vector<uint8_t> &packet : batch.head)
-        sendPacket(*batch.gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
     batch.head.clear();
     batch.decided = true;
     const uint64_t units = ++g_compositeUnits;
@@ -2631,7 +2561,6 @@ void finishTail()
     CompositeBatch &batch = t_batch;
     if (batch.tail.empty())
         return;
-    GS &gs = *batch.gs;
     const bool sent = rg::nativefx::emitPass(rg::nativefx::Effect::CompositeTail, batch.unit, batch.routed);
     if (!sent)
     {
@@ -2646,7 +2575,7 @@ void finishTail()
     for (std::vector<uint8_t> &packet : batch.tail)
     {
         rg::nativefx::withholdKicks(packet);
-        sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+        sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
     }
     batch.waiting = sent;
     batch.tail.clear();
@@ -2668,7 +2597,7 @@ void endObject()
 // At a list's end, or before anything that is no composite's.
 void flushComposites()
 {
-    if (!t_batch.gs)
+    if (!t_batch.active)
         return;
     endObject();
     compositeRun();
@@ -2720,10 +2649,10 @@ bool uploadOrFlush(const uint8_t *data, uint32_t size)
 
 // A packet of a composite (its place in the list's EE memory, or for what a
 // VU1 program kicked, the part being run): true when it was taken.
-bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
+bool compositePacket(const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
 {
     CompositeBatch &batch = t_batch;
-    batch.gs = &gs;
+    batch.active = true;
     rg::nativefx::Place place;
     // What a VU1 program kicked: the part whose list holds the MSCAL
     // (cursor, looked up by the caller).
@@ -2766,7 +2695,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             }
             decideHead();
         }
-        sendPacket(gs, data, size);
+        sendPacket(data, size);
         return true;
     }
     // (Unit 0: the fixed chain every tail calls.)
@@ -2791,7 +2720,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
         std::memcpy(&tag, data, 8);
         if (((tag >> 58) & 3u) == 2u)
         {
-            sendPacket(gs, data, size);
+            sendPacket(data, size);
             return true;
         }
     }
@@ -2805,7 +2734,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
         endObject();
         uint32_t first, last;
         batch.uploading = rg::nativefx::uploadPages(data, size, first, last);
-        sendPacket(gs, data, size);
+        sendPacket(data, size);
         return true;
     }
     compositeOther(rg::nativefx::name(place.effect), address, cursor);
@@ -2819,7 +2748,7 @@ uint32_t packetCursor(uint32_t address)
     return composites() && address == ~0u && g_vif1Memory ? listAddress(g_vif1Memory->vif1Cursor()) : ~0u;
 }
 
-void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
+void deliverPacket(const uint8_t *data, uint32_t size)
 {
     const uint32_t address = t_onVif1Thread ? listAddress(data) : ~0u;
     const uint32_t cursor = t_onVif1Thread ? packetCursor(address) : ~0u;
@@ -2828,10 +2757,10 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
         g_drawStage->packet(data, size, address, cursor);
         return;
     }
-    deliverPacketAt(gs, data, size, address, cursor);
+    deliverPacketAt(data, size, address, cursor);
 }
 
-void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
+void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
 {
     // M3 step 2: a pass marker, where a function the hook did not run would
     // have put its packets: the pass, in the stream's order.
@@ -2875,7 +2804,7 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             flushEffect();
         }
     }
-    if (composites() && t_onVif1Thread && compositePacket(gs, data, size, address, cursor))
+    if (composites() && t_onVif1Thread && compositePacket(data, size, address, cursor))
     {
         return;
     }
@@ -2886,7 +2815,6 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
         {
             t_held.effect = effect;
             t_held.unit = unit;
-            t_held.gs = &gs;
             t_held.packets.emplace_back(data, data + size);
             return;
         }
@@ -2910,20 +2838,20 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             {
                 std::vector<uint8_t> packet(data, data + size);
                 rg::nativefx::withholdKicks(packet);
-                sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+                sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
             }
             else
             {
-                sendPacket(gs, data, size);
+                sendPacket(data, size);
             }
             countEffect(drawn, rg::nativefx::Effect::Flip, "the producer cannot draw it", {});
             return;
         }
     }
-    sendPacket(gs, data, size);
+    sendPacket(data, size);
 }
 
-void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
+void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
 {
     if (toDrawStage())
     {
@@ -2938,7 +2866,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
     }
     if (composites() && t_onVif1Thread)
     {
-        t_batch.gs = &gs;
+        t_batch.active = true;
         if (t_batch.state == CompositeBatch::State::Head)
         {
             if (!t_batch.decided)
@@ -2966,7 +2894,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
             const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
             const uint32_t count = t_meshWriteCount;
             t_meshWriteCount = 0u;
-            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
+            sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
             t_meshWriteCount = count;
         }
     }
@@ -2977,7 +2905,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
     {
         if (!t_onVif1Thread)
             g_thread->drain();
-        const GSDrawState state = rg::drawstate::current();
+        const rg::DrawState state = rg::drawstate::current();
         rg::nativeproducer::ModelDraw model;
         if (t_model.active)
         {
@@ -3170,15 +3098,11 @@ void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         if (!writes.empty())
         {
             const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
-            sendPacket(runtime->gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+            sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
         }
         return;
     }
     g_gsWaiters[Index].second(rdram, ctx, runtime);
-    // The stubs write the front end's registers themselves (sceGsPutDrawEnv,
-    // sceGsSwapDBuff's environments and clear): the native pipeline's
-    // draw-state mirror reads them back.
-    rg::drawstate::readBack(runtime->gs());
 }
 
 template <size_t... I>
@@ -3257,7 +3181,7 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     applyWrites(writes);
     if (sprite && corners == 2)
     {
-        const GSDrawState state = rg::drawstate::current();
+        const rg::DrawState state = rg::drawstate::current();
         if (rg::nativeproducer::clear(state, xy[0][0], xy[0][1], xy[1][0], xy[1][1], rgba, z == 0u))
             ++g_drawEnvClears;
     }
@@ -3286,7 +3210,7 @@ namespace
 // behind a synthesized IMAGE tag.
 // What image data ends before it is looked at: an object's composite batch
 // and a held effect.
-void beforeImage(GS &gs)
+void beforeImage()
 {
     // A held effect goes on first: a composite's head decided here sends
     // its packets.
@@ -3296,7 +3220,7 @@ void beforeImage(GS &gs)
     }
     if (composites() && t_onVif1Thread)
     {
-        t_batch.gs = &gs;
+        t_batch.active = true;
         if (t_batch.state == CompositeBatch::State::Head)
         {
             if (!t_batch.decided)
@@ -3309,9 +3233,9 @@ void beforeImage(GS &gs)
     }
 }
 
-void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
+void deliverImage(const uint8_t *data, uint32_t size)
 {
-    beforeImage(gs);
+    beforeImage();
     if (uploadsTaken())
     {
         // A withheld upload's rest goes no further; another's is
@@ -3332,12 +3256,12 @@ void deliverImage(GS &gs, const uint8_t *data, uint32_t size)
 // else (no upload being withheld, another record's, part of it already seen
 // as bytes) takes the bytes from guest memory now, later than the send
 // would have copied them, and goes the usual way; counted, and said once.
-void deliverElidedImage(GS &gs, uint32_t size, uint32_t phys, uint64_t hash)
+void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash)
 {
     UploadWithhold &u = t_upload;
     if (uploadsTaken() && u.imageBytes >= size && u.expectHash == hash && u.seen.empty())
     {
-        beforeImage(gs);
+        beforeImage();
         u.imageBytes -= size;
         u.expectBytes = 0u;
         rg::nativeproducer::noteElided(size, false);
@@ -3353,7 +3277,7 @@ void deliverElidedImage(GS &gs, uint32_t size, uint32_t phys, uint64_t hash)
     thread_local std::vector<uint8_t> bytes;
     const uint8_t *ram = g_runtime->memory().getRDRAM();
     bytes.assign(ram + phys, ram + phys + size);
-    deliverImage(gs, bytes.data(), size);
+    deliverImage(bytes.data(), size);
 }
 
 // A packet or image the VIF hands over from the list, against the list's
@@ -3417,20 +3341,20 @@ void install(PS2Runtime &runtime)
     // and the VIF1 paths already drained it after each one.
     PS2Memory &memory = runtime.memory();
     memory.setGifArbiter(nullptr);
-    g_drawStage = new DrawStage(runtime.gs());
+    g_drawStage = new DrawStage();
     // From the VIF1 thread through the GIF stage. From any other thread (the
     // game's own GIF transfers, after the drain every DMA start does) straight
     // to the GS, behind whatever the stage still holds.
-    memory.setGifPacketCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+    memory.setGifPacketCallback([](const uint8_t *data, uint32_t size) {
         if (t_listDecoder)
         {
             listHole(data, size, false);
         }
-        deliverPacket(gs, data, size);
+        deliverPacket(data, size);
     });
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
-    memory.setGifImageCallback([&gs = runtime.gs()](const uint8_t *data, uint32_t size) {
+    memory.setGifImageCallback([](const uint8_t *data, uint32_t size) {
         if (toDrawStage())
         {
             if (const Hole *hole = listHole(data, size, true))
@@ -3439,7 +3363,7 @@ void install(PS2Runtime &runtime)
                 g_drawStage->image(data, size);
             return;
         }
-        deliverImage(gs, data, size);
+        deliverImage(data, size);
     });
     // DMA the game starts through the registers rather than sceDmaSend.
     // VU1 started by the lists, without the guest thread context the

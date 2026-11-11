@@ -532,7 +532,7 @@ struct Beam
     {
         for (uint32_t i = 0; i < 4u; ++i)
             col[i] = vu.quad(72u + i);
-        const float inverse = gsNativeReciprocal(col[3].w);
+        const float inverse = rg::nativeReciprocal(col[3].w);
         centerX = col[3].x * inverse;
         centerY = 0.0f - col[3].y * inverse;
         const Vec4 material = vu.quad(82);
@@ -546,7 +546,7 @@ struct Beam
         const float x = ((col[0].x * p[0] + col[1].x * p[1]) + col[2].x * p[2]) + col[3].x * 1.0f;
         const float y = ((col[0].y * p[0] + col[1].y * p[1]) + col[2].y * p[2]) + col[3].y * 1.0f;
         const float w = ((col[0].w * p[0] + col[1].w * p[1]) + col[2].w * p[2]) + col[3].w * 1.0f;
-        const float inverse = gsNativeReciprocal(w);
+        const float inverse = rg::nativeReciprocal(w);
         const float dx = x * inverse - centerX;
         const float dy = (0.0f - y * inverse) - centerY;
         u = ((dx * scale + shiftX) + 1.0f) * 0.5f;
@@ -688,7 +688,7 @@ struct Chunk
 {
     std::vector<uint8_t> fog;
     uint8_t header[4][16] = {};
-    GSNativeMesh mesh;
+    rg::NativeMesh mesh;
 };
 
 // The chunk's header (readChunk's first part): the FOGCOL packet, the GIF
@@ -722,7 +722,7 @@ void chunkHeader(const Program &program, const VuData &vu, uint32_t top, Chunk &
     std::memcpy(chunk.header[2], prmodeWords, 16u);
     std::memcpy(chunk.header[3], tag, 16u);
 
-    GSNativeMesh::Header &h = chunk.mesh.header;
+    rg::NativeMesh::Header &h = chunk.mesh.header;
     for (uint32_t row = 0; row < 4u; ++row)
     {
         const Vec4 m = vu.quad(68u + row);
@@ -784,7 +784,7 @@ uint32_t outlinePoints(const VuData &vu, uint32_t top)
 uint32_t outlineLoopWord(const VuData &vu, uint32_t top)
 {
     const float share = outlinePoints(vu, top) == 4u ? 0.25f : 0.5f;
-    return static_cast<uint32_t>(gsNativeFtoi(static_cast<float>(vu.half(top, 1)) * share + 32768.0f, 1.0f));
+    return static_cast<uint32_t>(rg::nativeFtoi(static_cast<float>(vu.half(top, 1)) * share + 32768.0f, 1.0f));
 }
 
 // The GIF packet at quad `q` as XGKICK sends it: tags and their data up to
@@ -927,14 +927,14 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
         for (uint32_t j = 0; j < 6u; ++j)
         {
             Vec4 &s = screen[j] = transform(projection, corners[j]);
-            const float q = gsNativeReciprocal(s.w);
+            const float q = rg::nativeReciprocal(s.w);
             s.x *= q;
             s.y *= q;
             s.z *= q;
             const float lanes[4] = {s.x, s.y, s.z, s.w};
             for (int i = 0; i < 4; ++i)
             {
-                fixed[j][i] = static_cast<uint32_t>(gsNativeFtoi(lanes[i], 16.0f));
+                fixed[j][i] = static_cast<uint32_t>(rg::nativeFtoi(lanes[i], 16.0f));
             }
         }
         // The fans: front 0-2, back 3-5, and the corners each takes, and
@@ -973,7 +973,7 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
 // 43) is the RGBAQ its packet sets; false when one sets none (the caller
 // keeps the packets).
 bool shadowMeshFrom(const Program &program, const uint8_t *data, uint32_t top,
-                    std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                    std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
                     std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                     std::vector<float> &palette)
 {
@@ -1048,8 +1048,8 @@ bool shadowMeshFrom(const Program &program, const uint8_t *data, uint32_t top,
         putQuad(prim, tag);
         putWords(prim, 3u, 0u, 0u, 0u); // a triangle list
         putWords(prim, vu.half(87, 0), 0u, 27u, 0u);
-        GSNativeMesh::Header &h = meshes[i].header;
-        h = GSNativeMesh::Header{};
+        rg::NativeMesh::Header &h = meshes[i].header;
+        h = rg::NativeMesh::Header{};
         for (uint32_t r = 0; r < 4u; ++r)
         {
             h.matrix[r][0] = world[r].x;
@@ -1138,7 +1138,7 @@ void runBase(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 // from 60-63) in world space. The header's matrix world to window (quads
 // 8-11, 24-27, 12-15), no cull. The state packets are buildParticles'
 // (FOGCOL, then the GIF header, PRIM and PRMODE).
-void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow &row)
 {
     packets.clear();
@@ -1170,8 +1170,8 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
     }
     for (uint32_t i = 0; i < 4u; ++i)
         rows[i] = transform(window, transform(camera, vu.quad(24u + i)));
-    GSNativeMesh::Header &h = mesh.header;
-    h = GSNativeMesh::Header{};
+    rg::NativeMesh::Header &h = mesh.header;
+    h = rg::NativeMesh::Header{};
     for (uint32_t r = 0; r < 4u; ++r)
     {
         h.matrix[r][0] = rows[r].x;
@@ -1269,10 +1269,10 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
                                  {to.x + xyOffset.x, to.y + xyOffset.y, to.z + xyOffset.z, to.w + xyOffset.w}};
         for (uint32_t i = 0; i < 4u; ++i)
         {
-            const uint32_t fixed[4] = {static_cast<uint32_t>(gsNativeFtoi(corners[i].x, 16.0f)),
-                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].y, 16.0f)),
-                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].z, 16.0f)),
-                                       static_cast<uint32_t>(gsNativeFtoi(corners[i].w, 16.0f))};
+            const uint32_t fixed[4] = {static_cast<uint32_t>(rg::nativeFtoi(corners[i].x, 16.0f)),
+                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].y, 16.0f)),
+                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].z, 16.0f)),
+                                       static_cast<uint32_t>(rg::nativeFtoi(corners[i].w, 16.0f))};
             store(tag + 1u + i, fixed);
         }
         if (packets)
@@ -1296,7 +1296,7 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 } // namespace
 
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                  std::vector<std::vector<uint8_t>> (&packets)[2], rg::NativeMesh (&meshes)[2],
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette)
 {
@@ -1574,7 +1574,7 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 
 // --- M5: the strip programs on the GPU (native_model.vert) ---------------
 
-void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow &row)
 {
     particleMesh(VuData(data), top, packets, mesh, inputs, row);
@@ -1682,7 +1682,7 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh,
                  std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
                  dq8::gfx::native::ModelRow &row, std::vector<float> &palette)
 {
@@ -1715,8 +1715,8 @@ bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
     // The header: 68-71 to the window, the guard band as buildOutline tests
     // it; no fog (the program writes 0), no backface rule (the stage's own
     // test), its z as it is.
-    GSNativeMesh::Header &h = mesh.header;
-    h = GSNativeMesh::Header{};
+    rg::NativeMesh::Header &h = mesh.header;
+    h = rg::NativeMesh::Header{};
     for (uint32_t r = 0; r < 4u; ++r)
     {
         const Vec4 q = vu.quad(68u + r);
@@ -1746,7 +1746,7 @@ bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
-                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+                 std::vector<std::vector<uint8_t>> &packets, rg::NativeMesh &mesh)
 {
     Chunk chunk;
     chunkHeader(program, VuData(data), top, chunk);
@@ -1765,7 +1765,7 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
     {
         // projectorMesh's: its C culls and caps as the strip D pieces do.
         const VuData vu(data);
-        GSNativeMesh::Header &h = mesh.header;
+        rg::NativeMesh::Header &h = mesh.header;
         h.guardBand = 1u;
         h.backface = 1u;
         h.winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? 1.0f : -1.0f);
@@ -1870,7 +1870,7 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
             const Vec4 t = transform(projector, vu.quad(60u + i));
             put(38u + i, t.x, t.y, t.z, t.w);
         }
-        const float alpha = static_cast<float>(gsNativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f));
+        const float alpha = static_cast<float>(rg::nativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f));
         put(3, 128.0f, 128.0f, 128.0f, alpha);
         row.q[0][3] = 6.0f; // C: the projector's color
         row.q[1][3] = 7.0f; // F: the projected UVs

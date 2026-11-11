@@ -16,9 +16,8 @@
 #include <vector>
 
 #include "gfx/native/native_pipeline.h"
-#include "runtime/gs/ps2_gs_psmct32.h"
-#include "runtime/gs/ps2_gs_psmt8.h"
-#include "runtime/gs/gs_types.h"
+#include "gs_swizzle.h"
+#include "native_types.h"
 #include "draw_state_mirror.h"
 #include "guest_write_watch.h"
 #include "flip_pacing.h"
@@ -634,16 +633,16 @@ const std::vector<uint32_t> &unswizzle(const TextureLevel &l)
     uint32_t maxWord = 0u;
     for (uint32_t y = 0u; y < shape[1]; ++y)
         for (uint32_t x = 0u; x < shape[0]; ++x)
-            maxWord = std::max(maxWord, GSPSMCT32::addrPSMCT32(0u, shape[2], x, y) >> 2u);
+            maxWord = std::max(maxWord, rg::swizzle::psmct32::addrPSMCT32(0u, shape[2], x, y) >> 2u);
     std::vector<uint32_t> pixelOfWord(size_t(maxWord) + 1u, ~0u);
     for (uint32_t y = 0u; y < shape[1]; ++y)
         for (uint32_t x = 0u; x < shape[0]; ++x)
-            pixelOfWord[GSPSMCT32::addrPSMCT32(0u, shape[2], x, y) >> 2u] = y * shape[0] + x;
+            pixelOfWord[rg::swizzle::psmct32::addrPSMCT32(0u, shape[2], x, y) >> 2u] = y * shape[0] + x;
     byteOf.resize(size_t(shape[3]) * shape[4]);
     for (uint32_t y = 0u; y < shape[4]; ++y)
         for (uint32_t x = 0u; x < shape[3]; ++x)
         {
-            const uint32_t address = GSPSMT8::addrPSMT8(0u, shape[5], x, y);
+            const uint32_t address = rg::swizzle::psmt8::addrPSMT8(0u, shape[5], x, y);
             const uint32_t word = address >> 2u;
             if (word >= pixelOfWord.size() || pixelOfWord[word] == ~0u)
             {
@@ -1684,17 +1683,17 @@ bool ct16Read(uint32_t psm, uint32_t cpsm)
     return is16 || (indexedPsm(psm) && (cpsm == kCT16 || cpsm == kCT16S));
 }
 
-void texa16(native::Material &m, const GSTexaReg &texa)
+void texa16(native::Material &m, const rg::TexaReg &texa)
 {
     m.texaLow = float(texa.ta0) * kUnit;
     m.texaHigh = float(texa.ta1) * kUnit;
     m.alphaZeroOnBlack = texa.aem;
 }
 } // namespace
-bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
-void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m);
+bool sourceOf(State &s, const rg::Tex0Reg &t, native::Material &m);
+void replaceWhole(State &s, const rg::Tex0Reg &t, native::Material &m);
 void cutRegion(State &s, uint64_t clamp, native::Material &m);
-void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh, native::Material &m);
+void replaceRegion(State &s, const rg::DrawState &state, const rg::NativeMesh &mesh, native::Material &m);
 namespace
 {
 // Locked. The 16 entries of palette `id` from `first` as a palette record
@@ -1727,14 +1726,14 @@ native::Id paletteWindow(State &s, native::Id id, uint32_t first)
     return made;
 }
 
-bool materialOf(State &s, const GSDrawState &state, native::Material &m)
+bool materialOf(State &s, const rg::DrawState &state, native::Material &m)
 {
-    const GSContext &c = state.context;
+    const rg::DrawContext &c = state.context;
     bool known = true;
     m.colorClamp = kColorClamp;
     if (state.prim.tme)
     {
-        const GSTex0Reg &t = c.tex0;
+        const rg::Tex0Reg &t = c.tex0;
         // As a 2D piece's: a target drawn there, a produced texture, or a
         // host upload's image, whichever was written last (sourceOf).
         if (!sourceOf(s, t, m))
@@ -2032,7 +2031,7 @@ void nameSource(uint32_t source, const char *name)
     native::nameSource(source, name);
 }
 
-bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source,
+bool mesh(const rg::NativeMesh &mesh, const rg::DrawState *drawState, const uint8_t *vu1Data, uint32_t source,
           uint32_t retained, const ModelDraw *modelChunk)
 {
     const ModelDraw *const chunkModel = modelChunk;
@@ -2061,12 +2060,12 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     }();
     if (drawState && !hiddenBases().empty())
     {
-        const GSContext &hc = drawState->context;
+        const rg::DrawContext &hc = drawState->context;
         if (hiddenDraw(hc.frame.fbp * 32u, ((hc.test >> 16) & 1u) != 0u && ((hc.test >> 17) & 3u) >= 2u,
                        drawState->prim.tme != 0u, hc.tex0.tbp0))
             return true; // dropped
     }
-    GSNativeMesh::Header h = mesh.header;
+    rg::NativeMesh::Header h = mesh.header;
     if (h.clips && !guardClipped)
         h.guardBand = 0u;
 
@@ -2150,7 +2149,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         ++s.counts.meshesNoState;
         return false;
     }
-    const GSContext &c = drawState->context;
+    const rg::DrawContext &c = drawState->context;
     const float ofx = static_cast<float>(c.xyoffset.ofx) / 16.0f;
     const float ofy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
     if (split)
@@ -2247,7 +2246,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         s.drawnSeq[seqKey] = ++s.sequence;
     if (const uint64_t dumpFlip = triggeredDumpFlip(); dumpFlip != 0u && rg::graphics::guestFlips() == dumpFlip)
     {
-        const GSContext &c = drawState->context;
+        const rg::DrawContext &c = drawState->context;
         const native::Material &m = draw.material;
         uint32_t declaredW = 0u, declaredH = 0u;
         if (m.sourceTarget)
@@ -2329,7 +2328,7 @@ State::HostImage *hostImageFor(State &s, uint32_t base, uint32_t psm, uint32_t b
 
 // Locked. A record of a host image as a texture of the read's size (texels
 // past what was written are 0): the one made before while unchanged.
-native::Id hostTexture(State &s, const State::HostImage &image, const GSTex0Reg &t)
+native::Id hostTexture(State &s, const State::HostImage &image, const rg::Tex0Reg &t)
 {
     const uint32_t psm = t.psm & 0x3Fu;
     const uint32_t width = 1u << std::min<uint32_t>(t.tw, 10u), height = 1u << std::min<uint32_t>(t.th, 10u);
@@ -2424,7 +2423,7 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
 // Locked. The source a texturing draw state names: a target (whose base
 // TBP0 is), a texture the VIF1 thread last sent there (and its palette), or
 // what a host upload nobody took left there (step 6). False when none.
-bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
+bool sourceOf(State &s, const rg::Tex0Reg &t, native::Material &m)
 {
     const uint32_t psm = t.psm & 0x3Fu;
     // The game uploads textures into the same memory some of its buffers
@@ -2600,7 +2599,7 @@ native::PixelFormat blockFormat(int blocks)
 // larger than the game's, addressed at the game's size and filtered unless
 // the pack says "nearest". Not for a tile of a sheet (region clamp or
 // repeat), fetched by the game's texel.
-void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
+void replaceWhole(State &s, const rg::Tex0Reg &t, native::Material &m)
 {
     const bool dumping = wholeDumpDirectory() != nullptr;
     if ((!rg::texturePack::active() && !dumping) || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u)
@@ -2715,12 +2714,12 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
 // entry's raw value in index order. Not for what reads GS memory the
 // producer does not hold (a CLUT offset by CSA or TEXCLUT, a T8's CT16 CLUT
 // of 512 entries): counted.
-void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh, native::Material &m)
+void replaceRegion(State &s, const rg::DrawState &state, const rg::NativeMesh &mesh, native::Material &m)
 {
     if (!rg::texturePack::active() || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u ||
         mesh.vertices.empty())
         return;
-    const GSTex0Reg &t = state.context.tex0;
+    const rg::Tex0Reg &t = state.context.tex0;
     const uint32_t psm = t.psm & 0x3Fu, cpsm = t.cpsm, csm = t.csm;
     if (psm != kT8 && psm != kT4)
         return;
@@ -2739,7 +2738,7 @@ void replaceRegion(State &s, const GSDrawState &state, const GSNativeMesh &mesh,
     }
     // The UVs' rectangle (spriteTexelRect's), in texels.
     float u0 = mesh.vertices[0].u, u1 = u0, v0 = mesh.vertices[0].v, v1 = v0;
-    for (const GSNativeMesh::Vertex &v : mesh.vertices)
+    for (const rg::NativeMesh::Vertex &v : mesh.vertices)
     {
         u0 = std::min(u0, v.u);
         u1 = std::max(u1, v.u);
@@ -3223,7 +3222,7 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
     image.seq = s.uploadedSeq[dbp] = ++s.sequence;
 }
 
-bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, uint8_t layer,
+bool piece(const rg::NativeMesh &mesh, const rg::DrawState *drawState, bool texels, uint8_t layer,
            const std::vector<uint32_t> &indices)
 {
     State &s = state();
@@ -3235,12 +3234,12 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         ++s.counts.piecesNoState;
         return false;
     }
-    const GSContext &c = drawState->context;
+    const rg::DrawContext &c = drawState->context;
     if (!hiddenBases().empty() &&
         hiddenDraw(c.frame.fbp * 32u, ((c.test >> 16) & 1u) != 0u && ((c.test >> 17) & 3u) >= 2u,
                    drawState->prim.tme != 0u, c.tex0.tbp0))
         return true; // dropped
-    const GSNativeMesh::Header &h = mesh.header;
+    const rg::NativeMesh::Header &h = mesh.header;
     native::Draw2D draw;
     native::reuseMeshBuffers(draw);
     draw.source = kSource2d;
@@ -3423,7 +3422,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     draw.vertices.resize(mesh.vertices.size());
     for (size_t k = 0; k < mesh.vertices.size(); ++k)
     {
-        const GSNativeMesh::Vertex &in = mesh.vertices[k];
+        const rg::NativeMesh::Vertex &in = mesh.vertices[k];
         native::Vertex &out = draw.vertices[k];
         const float w = fogged && in.z != 0.0f ? in.z : 1.0f;
         out.position[0] = in.x / w - ofx;
@@ -3695,11 +3694,11 @@ bool pass(const PassRequest &request)
     return true;
 }
 
-bool clear(const GSDrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth)
+bool clear(const rg::DrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth)
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
-    const GSContext &c = drawState.context;
+    const rg::DrawContext &c = drawState.context;
     const uint32_t frameBase = c.frame.fbp * 32u;
     if (!s.targetAt.count(frameBase))
         return false;

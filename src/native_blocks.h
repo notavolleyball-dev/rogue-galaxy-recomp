@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "runtime/gs/gs_types.h"
+#include "native_types.h"
 
 class PS2Runtime;
 
@@ -37,15 +37,15 @@ bool emit(uint32_t unit);
 // whether it is textured.
 struct BlockMesh
 {
-    GSNativeMesh *mesh;
+    rg::NativeMesh *mesh;
     bool textured;
 };
 // x' = sx x + tx, y' = sy y + ty on a piece's vertices (a fogged piece's
 // x and y carry its w).
-void transform(GSNativeMesh &mesh, float sx, float sy, float tx, float ty);
+void transform(rg::NativeMesh &mesh, float sx, float sy, float tx, float ty);
 // A vertex's x and y as drawn (a fogged piece's w divided out).
-float vertexX(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v);
-float vertexY(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v);
+float vertexX(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v);
+float vertexY(const rg::NativeMesh &mesh, const rg::NativeMesh::Vertex &v);
 
 // After the block's packets went on: the VIF1 thread's mirror compared
 // with what the game thread's said at the block's end (counted).

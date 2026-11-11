@@ -26,9 +26,9 @@ std::vector<uint8_t> adPacket(const std::vector<std::pair<uint8_t, uint64_t>> &w
     return packet;
 }
 
-GSNativeMesh::Header screenHeader()
+rg::NativeMesh::Header screenHeader()
 {
-    GSNativeMesh::Header header{};
+    rg::NativeMesh::Header header{};
     header.matrix[0][0] = header.matrix[1][1] = header.matrix[2][2] = header.matrix[3][3] = 1.0f;
     header.fog[0] = header.fog[1] = 255.0f; // F = 255: no fog
     header.colorMax[0] = header.colorMax[1] = header.colorMax[2] = header.colorMax[3] = 255.0f;
@@ -161,7 +161,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
 {
     // The last call's meshes' vertex storage, for this call's meshes: a
     // packet's meshes would otherwise allocate and free it each time.
-    thread_local std::vector<std::vector<GSNativeMesh::Vertex>> spare;
+    thread_local std::vector<std::vector<rg::NativeMesh::Vertex>> spare;
     thread_local std::vector<std::vector<uint32_t>> spareIndices;
     // And its register writes' (one vector a flush).
     thread_local std::vector<std::vector<std::pair<uint8_t, uint64_t>>> spareWrites;
@@ -216,7 +216,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                 // Fogged: clip = (x w, y w, 0, w) with w = 1 + F/255, and
                 // F = -255 + 255 w gives each vertex its own F back (the
                 // shader's varyings are noperspective; Z is the vertex's own).
-                GSNativeMesh::Header &h = mesh.mesh.header;
+                rg::NativeMesh::Header &h = mesh.mesh.header;
                 h.matrix[2][2] = 0.0f;
                 h.matrix[2][3] = 1.0f;
                 h.matrix[3][3] = 0.0f;
@@ -227,7 +227,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                 // Texel UVs too: an FST draw reads gs_native.vert's
                 // coordinate, (u, v) / w, as texels, without dividing by Q.
                 const bool texels = (meshPrim & 0x110u) == 0x110u;
-                for (GSNativeMesh::Vertex &v : mesh.mesh.vertices)
+                for (rg::NativeMesh::Vertex &v : mesh.mesh.vertices)
                 {
                     v.x *= v.z;
                     v.y *= v.z;
@@ -268,7 +268,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         }
     };
     const auto vertexOf = [&](const rg::gif::GifEvent &e, const rg::gif::GifEvent &provoking, uint16_t prim, bool &ok) {
-        GSNativeMesh::Vertex v;
+        rg::NativeMesh::Vertex v;
         v.x = static_cast<float>(e.x) / 16.0f;
         v.y = static_cast<float>(e.y) / 16.0f;
         v.z = static_cast<float>(e.z);
@@ -318,8 +318,8 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         mesh.indices.insert(mesh.indices.end(), {base, base + 1u, base + 2u});
     };
     // Four corners, as the triangles (0, 1, 3) and (0, 3, 2).
-    const auto quad = [&](const GSNativeMesh::Vertex &v0, const GSNativeMesh::Vertex &v1,
-                          const GSNativeMesh::Vertex &v2, const GSNativeMesh::Vertex &v3) {
+    const auto quad = [&](const rg::NativeMesh::Vertex &v0, const rg::NativeMesh::Vertex &v1,
+                          const rg::NativeMesh::Vertex &v2, const rg::NativeMesh::Vertex &v3) {
         const uint32_t base = static_cast<uint32_t>(mesh.mesh.vertices.size());
         mesh.mesh.vertices.insert(mesh.mesh.vertices.end(), {v0, v1, v2, v3});
         mesh.indices.insert(mesh.indices.end(), {base, base + 1u, base + 3u, base, base + 3u, base + 2u});
@@ -333,10 +333,10 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
         corner[2].x = a.x; corner[2].y = b.y; corner[2].u = a.u; corner[2].v = b.v; corner[2].s = a.s; corner[2].t = b.t;
         corner[1].q = corner[2].q = b.q;
         corner[0].q = a.q;
-        const GSNativeMesh::Vertex v0 = vertexOf(corner[0], b, prim & ~0x08u, ok);
-        const GSNativeMesh::Vertex v1 = vertexOf(corner[1], b, prim & ~0x08u, ok);
-        const GSNativeMesh::Vertex v2 = vertexOf(corner[2], b, prim & ~0x08u, ok);
-        const GSNativeMesh::Vertex v3 = vertexOf(corner[3], b, prim & ~0x08u, ok);
+        const rg::NativeMesh::Vertex v0 = vertexOf(corner[0], b, prim & ~0x08u, ok);
+        const rg::NativeMesh::Vertex v1 = vertexOf(corner[1], b, prim & ~0x08u, ok);
+        const rg::NativeMesh::Vertex v2 = vertexOf(corner[2], b, prim & ~0x08u, ok);
+        const rg::NativeMesh::Vertex v3 = vertexOf(corner[3], b, prim & ~0x08u, ok);
         quad(v0, v1, v2, v3);
     };
 
@@ -433,7 +433,7 @@ bool build(const Span *packets, size_t count, std::vector<Piece> &out, std::stri
                         const float nx = length > 1e-6f ? -dy / length * 0.5f : 0.5f;
                         const float ny = length > 1e-6f ? dx / length * 0.5f : 0.0f;
                         openMesh(prim);
-                        GSNativeMesh::Vertex v[4] = {vertexOf(p0, p1, prim, ok), vertexOf(p0, p1, prim, ok),
+                        rg::NativeMesh::Vertex v[4] = {vertexOf(p0, p1, prim, ok), vertexOf(p0, p1, prim, ok),
                                                      vertexOf(p1, p1, prim, ok), vertexOf(p1, p1, prim, ok)};
                         v[0].x += nx; v[0].y += ny;
                         v[1].x -= nx; v[1].y -= ny;

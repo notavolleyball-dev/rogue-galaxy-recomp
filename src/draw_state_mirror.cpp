@@ -5,28 +5,41 @@
 #include <vector>
 
 #include "gif_events.h"
-#include "runtime/gs/gs_frontend.h"
 
 
 namespace rg::drawstate
 {
 namespace
 {
-// The front end's draw registers (patch 0031's GS::DrawRegisters) and the
-// effective PRIM (PRMODECONT applied), as GS::writeRegisterUnlocked decodes
-// them.
+// The draw registers (both contexts, PRIM and PRMODE apart, the rest) and
+// the effective PRIM (PRMODECONT applied), as the GS decodes them.
+struct DrawRegisters
+{
+    rg::DrawContext ctx[2]{};
+    rg::PrimReg primRegister{};
+    rg::PrimReg prmodeRegister{};
+    bool prmodecont = true;
+    rg::TexaReg texa{};
+    rg::TexClutReg texclut{};
+    bool pabe = false;
+    uint64_t scanmsk = 0;
+    uint64_t dimx = 0;
+    uint64_t dthe = 0;
+    uint64_t colclamp = 0;
+    uint8_t fogR = 0, fogG = 0, fogB = 0;
+};
 struct Mirror
 {
     std::mutex mutex;
-    GS::DrawRegisters r;
-    GSPrimReg prim{};
+    DrawRegisters r;
+    rg::PrimReg prim{};
 };
 Mirror g_mirror;
 
-GSPrimReg decodePrim(uint64_t value)
+rg::PrimReg decodePrim(uint64_t value)
 {
-    GSPrimReg prim{};
-    prim.type = static_cast<GSPrimType>(value & 0x7u);
+    rg::PrimReg prim{};
+    prim.type = static_cast<rg::PrimType>(value & 0x7u);
     prim.iip = ((value >> 3) & 1u) != 0u;
     prim.tme = ((value >> 4) & 1u) != 0u;
     prim.fge = ((value >> 5) & 1u) != 0u;
@@ -38,7 +51,7 @@ GSPrimReg decodePrim(uint64_t value)
     return prim;
 }
 
-void decodeTex0(GSTex0Reg &t, uint64_t value)
+void decodeTex0(rg::Tex0Reg &t, uint64_t value)
 {
     t.tbp0 = static_cast<uint32_t>(value & 0x3FFF);
     t.tbw = static_cast<uint8_t>((value >> 14) & 0x3F);
@@ -57,7 +70,7 @@ void decodeTex0(GSTex0Reg &t, uint64_t value)
 // One register write, as the front end takes it. Caller holds the mutex.
 void write(Mirror &m, uint8_t reg, uint64_t value)
 {
-    GS::DrawRegisters &r = m.r;
+    DrawRegisters &r = m.r;
     const int ci = (reg & 1u) ? 1 : 0;
     switch (reg)
     {
@@ -90,7 +103,7 @@ void write(Mirror &m, uint8_t reg, uint64_t value)
         break;
     case 0x1A: {
         r.prmodecont = (value & 1) != 0;
-        const GSPrimType type = r.primRegister.type;
+        const rg::PrimType type = r.primRegister.type;
         m.prim = r.prmodecont ? r.primRegister : r.prmodeRegister;
         m.prim.type = type;
         break;
@@ -99,7 +112,7 @@ void write(Mirror &m, uint8_t reg, uint64_t value)
         r.prmodeRegister = decodePrim(value);
         if (!r.prmodecont)
         {
-            const GSPrimType type = r.primRegister.type;
+            const rg::PrimType type = r.primRegister.type;
             m.prim = r.prmodeRegister;
             m.prim.type = type;
         }
@@ -189,21 +202,13 @@ void observe(const uint8_t *data, uint32_t size)
             write(g_mirror, e.reg, e.value);
 }
 
-void readBack(const GS &gs)
-{
-    std::lock_guard lock(g_mirror.mutex);
-    g_mirror.r = gs.drawRegisters();
-    GSPrimReg prim = g_mirror.r.prmodecont ? g_mirror.r.primRegister : g_mirror.r.prmodeRegister;
-    prim.type = g_mirror.r.primRegister.type;
-    g_mirror.prim = prim;
-}
 
 namespace
 {
-GSDrawState stateOf(const GS::DrawRegisters &r, const GSPrimReg &prim);
+rg::DrawState stateOf(const DrawRegisters &r, const rg::PrimReg &prim);
 }
 
-GSDrawState current()
+rg::DrawState current()
 {
     std::lock_guard lock(g_mirror.mutex);
     return stateOf(g_mirror.r, g_mirror.prim);
@@ -211,9 +216,9 @@ GSDrawState current()
 
 namespace
 {
-GSDrawState stateOf(const GS::DrawRegisters &r, const GSPrimReg &prim)
+rg::DrawState stateOf(const DrawRegisters &r, const rg::PrimReg &prim)
 {
-    GSDrawState state{};
+    rg::DrawState state{};
     state.context = r.ctx[prim.ctxt ? 1 : 0];
     state.prim = prim;
     state.texa = r.texa;
@@ -274,7 +279,7 @@ void Tracker::observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t c
             write(t.mirror, e.reg, e.value);
 }
 
-GSDrawState Tracker::current() const
+rg::DrawState Tracker::current() const
 {
     return stateOf(m_impl->mirror.r, m_impl->mirror.prim);
 }

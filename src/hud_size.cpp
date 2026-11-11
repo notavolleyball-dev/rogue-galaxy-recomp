@@ -127,14 +127,14 @@ Hud hudOf(uint32_t owner)
 
 // Each of a piece's quads (its triangles (b, b+1, b+3), (b, b+3, b+2), as
 // the converter makes a sprite) about its own centre.
-void scaleQuads(GSNativeMesh &mesh, float scale)
+void scaleQuads(rg::NativeMesh &mesh, float scale)
 {
-    std::vector<GSNativeMesh::Vertex> &v = mesh.vertices;
+    std::vector<rg::NativeMesh::Vertex> &v = mesh.vertices;
     for (size_t b = 0; b + 4u <= v.size(); b += 4u)
     {
         const float cx = (rg::nativeblocks::vertexX(mesh, v[b]) + rg::nativeblocks::vertexX(mesh, v[b + 3u])) * 0.5f;
         const float cy = (rg::nativeblocks::vertexY(mesh, v[b]) + rg::nativeblocks::vertexY(mesh, v[b + 3u])) * 0.5f;
-        GSNativeMesh one;
+        rg::NativeMesh one;
         one.header = mesh.header;
         one.vertices.assign(v.begin() + b, v.begin() + b + 4u);
         rg::nativeblocks::transform(one, scale, scale, cx * (1.0f - scale), cy * (1.0f - scale));
@@ -221,7 +221,7 @@ void reshape(uint32_t owner, std::vector<rg::nativeblocks::BlockMesh> &meshes)
         // Toward the view's bottom right corner (and the arrow after it).
         float left = 1e30f, right = -1e30f, bottom = -1e30f;
         for (const rg::nativeblocks::BlockMesh &m : meshes)
-            for (const GSNativeMesh::Vertex &v : m.mesh->vertices)
+            for (const rg::NativeMesh::Vertex &v : m.mesh->vertices)
             {
                 const float x = rg::nativeblocks::vertexX(*m.mesh, v), y = rg::nativeblocks::vertexY(*m.mesh, v);
                 left = std::min(left, x);

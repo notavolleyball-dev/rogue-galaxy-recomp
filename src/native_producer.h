@@ -11,8 +11,7 @@ struct ModelInput;
 struct ModelRow;
 } // namespace dq8::gfx::native
 
-struct GSNativeMesh;
-struct GSDrawState;
+#include "native_types.h"
 
 // The game side of the native pipeline (docs/NATIVE-PIPELINE.md): what turns
 // the game's GS-shaped data into the renderer's records. The renderer sees
@@ -134,7 +133,7 @@ struct ModelDraw
     const dq8::gfx::native::ModelRow *row = nullptr;
     const std::vector<float> *palette = nullptr;
 };
-bool mesh(const GSNativeMesh &mesh, const GSDrawState *state, const uint8_t *vu1Data, uint32_t source,
+bool mesh(const rg::NativeMesh &mesh, const rg::DrawState *state, const uint8_t *vu1Data, uint32_t source,
           uint32_t retained = 0u, const ModelDraw *model = nullptr);
 // A name for a `source`, for the renderer's draw labels (a frame capture's;
 // debug/bug_mark.h). A VU1 mesh's source stands for its native program.
@@ -151,7 +150,7 @@ uint64_t retainedEpoch();
 // why).
 // `indices`: the mesh's triangles into mesh.vertices (empty: the vertices
 // are a triangle list themselves).
-bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels, uint8_t layer,
+bool piece(const rg::NativeMesh &mesh, const rg::DrawState *state, bool texels, uint8_t layer,
            const std::vector<uint32_t> &indices = {});
 
 // Step 5c: an object's head draws into the buffer at `base` (`fbw`) go to
@@ -260,5 +259,5 @@ void frameBoundary();
 // with `depth`, its depth buffer, to the far plane) over the window
 // rectangle x0, y0 to x1, y1 (pixels, XYOFFSET in) in `rgba` (the GS's
 // RGBAQ, 0x80 = 1). False: its target is not one the producer knows.
-bool clear(const GSDrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth);
+bool clear(const rg::DrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth);
 } // namespace rg::nativeproducer
