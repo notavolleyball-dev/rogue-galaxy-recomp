@@ -6,6 +6,7 @@
 #include <limits>
 #include <utility>
 
+#include "native_effects.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
@@ -182,6 +183,8 @@ void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t b = getRegU32(ctx, 4);
         if (read32(b) == 0u)
             s->broken = true; // no memstack: the setters write into an old packet
+        else if (s->skip && rg::nativefx::inEffectCall())
+            s->broken = true; // an effect's segments inside a skipped block: written (its range, its pass)
         else
         {
             s->headerAt = s->bytes.size();

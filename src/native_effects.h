@@ -114,6 +114,10 @@ uint32_t listTop();
 // DIRECT 2, an A+D write of the unit to kPassRegister): the draw stage
 // sends what is kept under it there. False: no list being built.
 bool writeMarker(uint32_t unit);
+// An effect's hooked call is in progress (game thread), and how many have
+// begun so far: what a 2D block drawn inside one is.
+bool inEffectCall();
+uint64_t effectCallsBegun();
 void markBlock(uint32_t start, uint32_t end, uint32_t unit);
 uint8_t currentLayer();
 

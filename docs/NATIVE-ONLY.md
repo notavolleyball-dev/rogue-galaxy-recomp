@@ -762,6 +762,12 @@ Done:
     through something the shadow does not follow is lost that once and
     its owner goes back to writing (`lost` in the line; should stay 0).
     The line's `blocks the game did not write` counts the rest.
+    - Effects: a block begun inside an effect's hooked call, or with one
+      called inside it, is the effect's (its pass draws it, or its range
+      withholds it): its owner is never skipped (every effect hook goes
+      through `callEffect`, which counts the calls in progress). An effect
+      called inside an already skipped block has its segments written as
+      the game writes them; the rest of that block is lost that once.
 - **Fixed:** blocks were never read before (their range ended in RET
   tags; see the commit). The counts above are the first real ones.
 

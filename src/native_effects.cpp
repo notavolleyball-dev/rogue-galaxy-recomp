@@ -416,6 +416,32 @@ uint32_t findByName(uint32_t table, uint32_t nameAt)
     return 0u;
 }
 
+// The effect calls in progress (game thread), and how many have begun: a
+// 2D block drawn inside one is the effect's (src/native_blocks.cpp keeps
+// such blocks written as the game writes them).
+std::vector<rg::hooks::After> g_effectAfters;
+int g_effectDepth = 0;
+uint64_t g_effectCalls = 0u;
+void afterEffect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t data)
+{
+    const rg::hooks::After after = g_effectAfters.empty() ? nullptr : g_effectAfters.back();
+    if (!g_effectAfters.empty())
+        g_effectAfters.pop_back();
+    if (g_effectDepth > 0)
+        --g_effectDepth;
+    if (after)
+        after(rdram, ctx, runtime, data);
+}
+// rg::hooks::callThen for an effect's hook, counted.
+void callEffect(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
+                rg::hooks::After after, uint32_t data)
+{
+    ++g_effectDepth;
+    ++g_effectCalls;
+    g_effectAfters.push_back(after);
+    rg::hooks::callThen(original, rdram, ctx, runtime, &afterEffect, data);
+}
+
 PS2Runtime::RecompiledFunction g_glareOriginal = nullptr;
 
 void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
@@ -488,7 +514,7 @@ void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         g_passUnit = unit;
     }
-    rg::hooks::callThen(g_glareOriginal, rdram, ctx, runtime, &afterGlare, stackTop());
+    callEffect(g_glareOriginal, rdram, ctx, runtime, &afterGlare, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_shadowOriginal = nullptr;
@@ -536,7 +562,7 @@ void planeShadowEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         g_shadowUnit = keepPass(request);
     }
-    rg::hooks::callThen(g_shadowOriginal, rdram, ctx, runtime, &afterShadow, stackTop());
+    callEffect(g_shadowOriginal, rdram, ctx, runtime, &afterShadow, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_shadowBeginOriginal = nullptr;
@@ -548,7 +574,7 @@ void afterShadowBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 
 void planeShadowBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    rg::hooks::callThen(g_shadowBeginOriginal, rdram, ctx, runtime, &afterShadowBegin, stackTop());
+    callEffect(g_shadowBeginOriginal, rdram, ctx, runtime, &afterShadowBegin, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_cblurOriginal = nullptr;
@@ -595,7 +621,7 @@ void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             g_cblurUnit = keepPass(request);
         }
     }
-    rg::hooks::callThen(g_cblurOriginal, rdram, ctx, runtime, &afterCBlur, stackTop());
+    callEffect(g_cblurOriginal, rdram, ctx, runtime, &afterCBlur, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_bloomOriginal = nullptr;
@@ -640,7 +666,7 @@ void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         g_bloomUnit = unit;
     }
-    rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
+    callEffect(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
 }
 
 // ScreenColorFilterMaybe(r, g, b) (RGDecomp's C; GameSceneTintApply's, for
@@ -680,7 +706,7 @@ void colorFilter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         returnFromHook(ctx);
         return;
     }
-    rg::hooks::callThen(g_colorFilterOriginal, rdram, ctx, runtime, &afterColorFilter, stackTop());
+    callEffect(g_colorFilterOriginal, rdram, ctx, runtime, &afterColorFilter, stackTop());
 }
 
 // RG_DEBUG_COLOR_FILTER=RRGGBB: GameSceneTintApply (the grayscale filter
@@ -797,7 +823,7 @@ void cblurDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             g_cblurDrawUnit = keepPass(request);
         }
     }
-    rg::hooks::callThen(g_cblurDrawOriginal, rdram, ctx, runtime, &afterCBlurDraw, stackTop());
+    callEffect(g_cblurDrawOriginal, rdram, ctx, runtime, &afterCBlurDraw, stackTop());
 }
 
 // FocusFilterDrawMaybe and ShadowMapBlur: passes, as the bloom; both use the
@@ -860,7 +886,7 @@ void focusFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     request.sceneDepth = true;
     g_framesSet.clear();
     g_recordingFrames = true;
-    rg::hooks::callThen(g_focusOriginal, rdram, ctx, runtime, &afterFocus, stackTop());
+    callEffect(g_focusOriginal, rdram, ctx, runtime, &afterFocus, stackTop());
 }
 
 uint32_t g_shadowMapUnit = 0u; // game thread
@@ -906,7 +932,7 @@ void shadowMapBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         g_shadowMapUnit = keepPass(request);
     }
-    rg::hooks::callThen(g_shadowMapBlurOriginal, rdram, ctx, runtime, &afterShadowMapBlur, stackTop());
+    callEffect(g_shadowMapBlurOriginal, rdram, ctx, runtime, &afterShadowMapBlur, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_refractionOriginal = nullptr;
@@ -939,7 +965,7 @@ void refractionCaptureFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
     g_refractionCtx = getRegU32(ctx, 4);
     const uint32_t shift = getRegU32(ctx, 5);
     g_refractionSide = shift < 12u ? 1u << shift : 0u;
-    rg::hooks::callThen(g_refractionOriginal, rdram, ctx, runtime, &afterRefraction, stackTop());
+    callEffect(g_refractionOriginal, rdram, ctx, runtime, &afterRefraction, stackTop());
 }
 
 PS2Runtime::RecompiledFunction g_dofOriginal = nullptr;
@@ -998,7 +1024,7 @@ void dofFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         g_dofUnit = unit;
     }
-    rg::hooks::callThen(g_dofOriginal, rdram, ctx, runtime, &afterDof, stackTop());
+    callEffect(g_dofOriginal, rdram, ctx, runtime, &afterDof, stackTop());
 }
 
 // Stage E, an object at a time. The composite draws offscreen when its
@@ -1282,7 +1308,7 @@ void compositeAt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_composite.settings = settings;
     g_composite.object = getRegU32(ctx, 5);
     g_composite.alpha = ctx->f[13];
-    rg::hooks::callThen(g_compositeOriginal, rdram, ctx, runtime, &afterComposite, g_units);
+    callEffect(g_compositeOriginal, rdram, ctx, runtime, &afterComposite, g_units);
 }
 
 void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
@@ -1707,6 +1733,16 @@ uint32_t listTop()
 bool writeMarker(uint32_t unit)
 {
     return writePassMarker(unit);
+}
+
+bool inEffectCall()
+{
+    return g_effectDepth > 0;
+}
+
+uint64_t effectCallsBegun()
+{
+    return g_effectCalls;
 }
 
 void markBlock(uint32_t start, uint32_t end, uint32_t unit)

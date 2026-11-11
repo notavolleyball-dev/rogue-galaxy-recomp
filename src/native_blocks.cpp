@@ -105,6 +105,8 @@ struct OpenBlock
     uint32_t owner = 0u;
     bool skip = false;
     bool made = false;
+    bool effect = false;       // begun inside an effect's call
+    uint64_t effectsAt = 0u;   // the effect calls begun before it
 };
 std::vector<OpenBlock> g_open;
 
@@ -189,10 +191,15 @@ void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             g_owners[g_open.back().owner].bad = true;
     }
     ++g_depth;
+    // A block inside an effect's call is the effect's (its pass draws it,
+    // or its range withholds it): its owner never skipped.
+    const bool effect = rg::nativefx::inEffectCall();
+    if (effect)
+        g_owners[owner].bad = true;
     const auto known = g_owners.find(owner);
-    const bool skip = g_depth == 1 && known != g_owners.end() && !known->second.bad &&
+    const bool skip = g_depth == 1 && !effect && known != g_owners.end() && !known->second.bad &&
                       known->second.agreed >= kAgreed;
-    g_open.push_back({owner, skip, false});
+    g_open.push_back({owner, skip, false, effect, rg::nativefx::effectCallsBegun()});
     rg::gspkt::beginBlock(skip);
     g_envAt = g_envQwords = 0u;
     g_blockOwner = owner;
@@ -402,6 +409,9 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
         g_depth = 0;
         g_nested = false;
     }
+    // An effect called inside the block: its owner never skipped.
+    if (open.effect || rg::nativefx::effectCallsBegun() != open.effectsAt)
+        g_owners[open.owner].bad = true;
     if (!open.made)
     {
         g_blockOwner = open.owner;
@@ -423,6 +433,10 @@ void endPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (!g_open.empty() && g_open.back().skip && g_state)
     {
+        // (An effect called inside a skipped block: its 2D is lost; its
+        // owner is written from now on, above.)
+        if (rg::nativefx::effectCallsBegun() != g_open.back().effectsAt)
+            g_owners[g_open.back().owner].bad = true;
         g_blockOwner = g_open.back().owner;
         makeSkipped();
         g_open.back().made = true;
