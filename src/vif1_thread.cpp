@@ -2662,32 +2662,95 @@ void dmaSync(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     returnToCaller(ctx, 0);
 }
 
+// M4: a draw environment's register writes (libgraph's: its stubs' through
+// the register sink, sceGsPutDrawEnv's packet) taken without the converter:
+// the state's writes go to the draw state in order, and each clear sprite
+// (PRIM an untextured sprite, its RGBAQ, its two corners) becomes the
+// producer's Clear of the frame under the state before it. False, nothing
+// done: they hold something else (a textured sprite, UV or ST, a transfer).
+std::atomic<uint64_t> g_envWritesTaken{0u}, g_envClears{0u}, g_envWritesLeft{0u};
+bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
+{
+    for (const auto &[reg, value] : in)
+    {
+        if ((reg == 0x00u && (value & 0x10u) != 0u) || reg == 0x02u || reg == 0x03u ||
+            (reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister)
+        {
+            ++g_envWritesLeft;
+            return false;
+        }
+    }
+    std::vector<std::pair<uint8_t, uint64_t>> pending;
+    pending.reserve(in.size());
+    bool sprite = false;
+    uint8_t rgba[4] = {};
+    int corners = 0;
+    float xy[2][2] = {};
+    uint32_t z = 0u;
+    for (const auto &[reg, value] : in)
+    {
+        switch (reg)
+        {
+        case 0x00u: // PRIM
+            sprite = (value & 7u) == 6u;
+            corners = 0;
+            pending.emplace_back(reg, value);
+            break;
+        case 0x01u: // RGBAQ
+            for (int c = 0; c < 4; ++c)
+                rgba[c] = static_cast<uint8_t>(value >> (8 * c));
+            break;
+        case 0x05u: // XYZ2
+        case 0x0Du: // XYZ3
+            if (!sprite)
+                break; // (a vertex of no sprite: nothing the GS would fill here)
+            xy[corners][0] = static_cast<float>(value & 0xFFFFu) / 16.0f;
+            xy[corners][1] = static_cast<float>((value >> 16) & 0xFFFFu) / 16.0f;
+            z = static_cast<uint32_t>(value >> 32);
+            if (++corners == 2)
+            {
+                rg::native2d::observeWrites(pending.data(), pending.size());
+                applyWrites(pending);
+                pending.clear();
+                const rg::DrawState state = rg::drawstate::current();
+                if (rg::nativeproducer::clear(state, xy[0][0], xy[0][1], xy[1][0], xy[1][1], rgba, z == 0u))
+                    ++g_envClears;
+                corners = 0;
+            }
+            break;
+        default:
+            pending.emplace_back(reg, value);
+            break;
+        }
+    }
+    rg::native2d::observeWrites(pending.data(), pending.size());
+    applyWrites(pending);
+    if (++g_envWritesTaken == 1u)
+        std::fprintf(stderr, "[native-env] libgraph's environments taken as state and clears (no converter)\n");
+    return true;
+}
+
 // The libgraph stubs: the lists in flight first, then the stub.
 template <size_t Index>
 void gsWaiter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_thread->drain();
-    // Step 7a (docs/NATIVE-PIPELINE.md): under the native pipeline's 2D the
-    // stub's register writes (its draw environments, and the clear sprite)
-    // are taken instead of written to the GS (patch 0034), and go through
-    // the converter as one A+D packet, in order with the lists just drained:
-    // the mirror follows them, and the clear is a 2D piece like any other.
-    // The GS's own clear shortcut is dropped.
-    if (native2D())
-    {
-        thread_local GS::RegisterSink writes;
-        writes.clear();
-        GS::setRegisterSink(&writes);
-        g_gsWaiters[Index].second(rdram, ctx, runtime);
-        GS::setRegisterSink(nullptr);
-        if (!writes.empty())
-        {
-            const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
-            sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-        }
-        return;
-    }
+    // The stub's register writes (its draw environments, and the clear
+    // sprite) are taken instead of written to the GS (patch 0034): as state
+    // and clears (takeEnvironment); anything else through the converter as
+    // one A+D packet. The GS's own clear shortcut is dropped.
+    thread_local GS::RegisterSink writes;
+    writes.clear();
+    GS::setRegisterSink(&writes);
     g_gsWaiters[Index].second(rdram, ctx, runtime);
+    GS::setRegisterSink(nullptr);
+    if (writes.empty())
+        return;
+    const std::vector<std::pair<uint8_t, uint64_t>> pairs(writes.begin(), writes.end());
+    if (takeEnvironment(pairs))
+        return;
+    const std::vector<uint8_t> packet = rg::native2d::registerPacket(writes);
+    sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
 }
 
 template <size_t... I>
@@ -2706,7 +2769,7 @@ constexpr std::array<PS2Runtime::RecompiledFunction, sizeof...(I)> gsWaiterHooks
 // another shape goes as the game sends it.
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
 PS2Runtime::RecompiledFunction g_putDrawEnv = nullptr;
-std::atomic<uint64_t> g_drawEnvsTaken{0u}, g_drawEnvClears{0u}, g_drawEnvsLeft{0u};
+std::atomic<uint64_t> g_drawEnvsLeft{0u};
 void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t at = getRegU32(ctx, 4) & (PS2_RAM_SIZE - 1u) & ~15u;
@@ -2725,53 +2788,19 @@ void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     std::vector<std::pair<uint8_t, uint64_t>> writes;
     writes.reserve(nloop);
-    // The clear: PRIM a sprite, its RGBAQ, then its two corners.
-    bool sprite = false;
-    uint8_t rgba[4] = {};
-    int corners = 0;
-    float xy[2][2] = {};
-    uint32_t z = 0u;
     for (uint32_t i = 0; i < nloop; ++i)
     {
         uint64_t q[2];
         std::memcpy(q, rdram + at + 16u + i * 16u, sizeof(q));
-        const uint8_t reg = static_cast<uint8_t>(q[1] & 0xFFu);
-        const uint64_t value = q[0];
-        switch (reg)
-        {
-        case 0x00u: // PRIM
-            sprite = (value & 7u) == 6u;
-            corners = 0;
-            break;
-        case 0x01u: // RGBAQ
-            for (int c = 0; c < 4; ++c)
-                rgba[c] = static_cast<uint8_t>(value >> (8 * c));
-            break;
-        case 0x05u: // XYZ2
-        case 0x0Du: // XYZ3
-            if (sprite && corners < 2)
-            {
-                xy[corners][0] = static_cast<float>(value & 0xFFFFu) / 16.0f;
-                xy[corners][1] = static_cast<float>((value >> 16) & 0xFFFFu) / 16.0f;
-                z = static_cast<uint32_t>(value >> 32);
-                ++corners;
-            }
-            break;
-        default:
-            writes.emplace_back(reg, value);
-            break;
-        }
+        writes.emplace_back(static_cast<uint8_t>(q[1] & 0xFFu), q[0]);
     }
     g_thread->drain();
-    applyWrites(writes);
-    if (sprite && corners == 2)
+    if (!takeEnvironment(writes))
     {
-        const rg::DrawState state = rg::drawstate::current();
-        if (rg::nativeproducer::clear(state, xy[0][0], xy[0][1], xy[1][0], xy[1][1], rgba, z == 0u))
-            ++g_drawEnvClears;
+        ++g_drawEnvsLeft;
+        g_putDrawEnv(rdram, ctx, runtime);
+        return;
     }
-    if (++g_drawEnvsTaken == 1u)
-        std::fprintf(stderr, "[native-env] sceGsPutDrawEnv taken as state and clears (no GIF DMA)\n");
     returnToCaller(ctx, 0);
 }
 

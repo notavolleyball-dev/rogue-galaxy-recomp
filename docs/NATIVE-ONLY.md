@@ -806,12 +806,14 @@ Done:
 
 Not done:
 - fonts as glyph records;
-- libgraph, **in part:** `sceGsPutDrawEnv` (the swap's and the double
-  buffers' environments) is hooked: its A+D writes go to the draw state
-  directly and its clear sprite becomes the producer's `Clear` (frame,
-  and depth to the far plane when the sprite's z is 0); no GIF DMA, no
-  converter. `[native-env]` says when it is first taken. A packet not of
-  that shape goes as before. Left: the `sceGifPk` paths of the flip (M3's
+- libgraph, **in code:** `sceGsPutDrawEnv`'s packet and every libgraph
+  stub's register writes (`sceGsSwapDBuff`, `sceGsSetDefDBuff`,
+  `sceGsResetGraph`, ... through the register sink) go to the draw state
+  directly, and each clear sprite becomes the producer's `Clear` (frame,
+  and depth to the far plane when the sprite's z is 0): no GIF DMA, no
+  converter (`takeEnvironment`). `[native-env]` says when it is first
+  taken. Writes of another shape (a textured sprite, a transfer) go as
+  before. Left: the `sceGifPk` paths of the flip (M3's
   Capture pass already draws it) and of the uploads (images, not 2D);
 - ~~HUD size and widescreen as layer transforms~~ **in code:** neither
   writes the game's vertices or arguments any more. A block's 2D records
