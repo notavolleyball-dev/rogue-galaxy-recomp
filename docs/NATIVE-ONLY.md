@@ -121,10 +121,11 @@ stacked PRs at the end).
     entries by the same rule.
   - All of M4's and M6's code items are in (2026-11-11): uploads by
     marker, fonts as glyph records, the view, camera and light state
-    carried by the records. What is left is the play test (each
-    milestone's runtime "done when") and the user's agreement to the
-    cases listed by name (M5's declined chunks, which are counted and not
-    drawn; the lens flare's depth read answered a frame late).
+    carried by the records; M5's declines settled (fans and skinning
+    entries 9-10 drawn, the two undefined entries not drawn by the user's
+    agreement). What is left is the play test: each milestone's runtime
+    "done when" (the playthrough route, HUD size and widescreen as on the
+    tag, region packs loading), on the user's Linux machine.
 - **Earlier on this branch, M6 steps 1-4** (they needed no play data): the
   lists run on the game thread as they are sent (the VIF1 thread is gone);
   the draw path's types are src/'s own; the GS-only runtime patches
@@ -970,7 +971,8 @@ recovers.
     vi1-vi3, and decodes from what A left there, the vertex count among
     them), and an entry into the skinning B past pair 10 (inside its
     4-bone loop, after its setup). Garbage on the PS2 too; drawing nothing
-    is the closest defined result.
+    is the closest defined result. **Agreed by the user (2026-11-11):**
+    not drawn, counted by reason.
   - Unknown programs (identify finds no pieces) are counted and not drawn.
 - **Step 2 deleted (M6):** the learning of REF payloads and the MSCNT marks
   that stood for them in the list (`RG_MODEL_ELIDE`, `[model-elide]`) went
