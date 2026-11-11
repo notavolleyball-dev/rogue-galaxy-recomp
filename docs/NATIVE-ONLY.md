@@ -119,46 +119,20 @@ stacked PRs at the end).
     not reads the CBP CLUT's entries from 16 CSA on (a derived palette
     record); region packs name them by that window. A T8 reads its 256
     entries by the same rule.
-  - Next: uploads at their hooks, once the stats line says which upload
-    paths have users; fonts as glyph records (M4).
-- **M6 steps 1-4 are in too** (on the same branch, as they needed no
-  play data): the lists run on the game thread as they are sent (the
-  VIF1 thread is gone); the draw path's types are src/'s own; the
-  GS-only runtime patches without a user (0019, 0020, 0021, 0028, 0030,
-  0031) and the overlay's packet builder are deleted; the draw stage is
-  deleted (records go straight to the producer in the game's order). **After pulling,
-  check the submodule out again** (patches/README.md) so the deleted
-  patches leave the checkout. Two more M5 declines were ported here too.
-- **What M6 has left is one change of source:** the draw state still
-  comes from GS register writes (the mirror and the converter follow the
-  lists' packets: draw environments, the model materials' prebuilt
-  packets, uploads, the VU1 packet programs, unskipped blocks). Deleting
-  the mirror, `native_2d` and `gif_events` means every one of those
-  becomes a record from the game's own structures: the model draws from
-  `ModelPrepareDraw`/`ModelEmitDrawPackets` (NATIVE-ONLY-NOTES.md, "Model
-  draws", has their layout), materials from `MeshMaterial`, the draw
-  environment from `DrawEnv`, uploads from the texture load functions.
-  In progress, on the model side: the emit path is mapped
-  (NATIVE-ONLY-NOTES.md), every model draw's inputs are read at the emit
-  call and compared with the list's (`[model-emit]`), and calls whose
-  meshes agreed are no longer written: they are drawn from their records
-  (state from the material's GsEnv and the draw environment, geometry
-  from the spans, the ModelMesh class's rebuilt by its own method), on
-  the direct and the sorted path and for the shadow casters, with no
-  guard. Left: the view, camera and light packets (VU1 state the drawn
-  records still read where the list puts it).
-  - **What the rest of M4 and M6 waits on is the play test's counts.**
-    Both switches are guarded by the comparison itself (a block owner or
-    mesh is drawn from its record only once its records agreed with the
-    game's bytes, never otherwise), so the old paths are still the
-    fallbacks. Once a session shows `[native-blocks]` and `[model-emit]`
-    differing at 0 and the census shows what the converter still sees,
-    the guards become unconditional, the comparison code and the list
-    path for those draws are deleted, and with them the mirror,
-    `native_2d` and `gif_events`.
-  - **For the play test:** `[model-emit]` (the same / differing: should
-    be all the same; calls the game did not write: should grow), and
-    `[native-blocks]` as above.
+  - All of M4's and M6's code items are in (2026-11-11): uploads by
+    marker, fonts as glyph records, the view, camera and light state
+    carried by the records. What is left is the play test (each
+    milestone's runtime "done when") and the user's agreement to the
+    cases listed by name (M5's declined chunks, which are counted and not
+    drawn; the lens flare's depth read answered a frame late).
+- **Earlier on this branch, M6 steps 1-4** (they needed no play data): the
+  lists run on the game thread as they are sent (the VIF1 thread is gone);
+  the draw path's types are src/'s own; the GS-only runtime patches
+  without a user (0019, 0020, 0021, 0028, 0030, 0031) and the overlay's
+  packet builder are deleted; the draw stage is deleted (records go
+  straight to the producer in the game's order). **After pulling, check
+  the submodule out again** (patches/README.md) so the deleted patches
+  (now also 0002, 0013, 0015 and 0034) leave the checkout.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -717,8 +691,11 @@ What else changed:
   M4's 2D at its source.
 - **Lens flare and depth probe** (item 12): no route reached them. They
   stay a depth read answered a frame late.
-- **Object layers' box** still comes from the head's clear sprite
-  (`clearBox`), not from the parts' bounds.
+- ~~**Object layers' box** still comes from the head's clear sprite~~
+  (M6: from the head's clear block made from the builder's calls on the
+  game thread; the game makes that clear from the parts' bounds, united,
+  clamped to the viewport and padded by 8 pixels, so no packet is read for
+  it).
 
 **Handoff (what to play and expect).**
 - Every post effect is the renderer's own now. Look at:
