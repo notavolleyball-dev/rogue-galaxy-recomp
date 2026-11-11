@@ -73,23 +73,15 @@ stacked PRs at the end).
 - **M2 is done in code** on `native-only/m2-contract` (from M1's branch;
   see M2's status for what changed and the points kept differently from
   the draft contract, for the user's review).
-- **M3 is under way** on `native-only/m3-passes` (from M2's branch). The
-  mechanism: the effect's hook reads its arguments into a
-  `rg::nativeproducer::PassRequest` kept by the unit of its packet range
-  (`native_effects.cpp`'s `keepPass`); the VIF1 thread, reaching the range,
-  sends the `Pass` (`emitPass`) and drops the packets; the renderer expands
-  the pass into its own draws (`native_passes.cpp`). Done: glare, bloom,
-  colour filter, refraction capture, the flip's copy, the shadow map's
-  blur, DoF (a pass may test the scene's depth: `Pass::depth`, and GS Z
-  parameters become the renderer's depth in the producer), focus (its
-  buffers are the frames its call sets: `noteFrameDesc`). Left: plane
-  shadow, object layers, CBlur (its two functions are long; read
-  `CBlurTexBlurMaybe_1789e0`, `CBlurDrawMaybe_1784e0` and their helpers),
-  fades and captures, TexAnime, lens flare, depth probe; then delete the sprite builder
-  (`native_effects.cpp`'s `build`, `native_effect.h`, the producer's
-  `effect()`), the `RG_NATIVE_<EFFECT>` switches and the green-to-alpha
-  shuffle once CBlur no longer needs it. Each gets a note in
-  NATIVE-ONLY-NOTES.md.
+- **M3 is done in code** on `native-only/m3-passes` (from M2's branch):
+  every effect is a `Pass` built from its function's arguments, the
+  sprite builder is deleted, CT16 decoding and fade captures moved to the
+  GPU. See M3's status for what is carried over (step 2, TexAnime to M4,
+  lens flare and depth probe).
+- **Next: M4** on `native-only/m4-2d` (from M3's branch): 2D at its
+  source. Per the user's direction (see "Decisions"), the 2D layer's
+  transforms (HUD size, widescreen anchoring) go to the GPU as layer
+  transforms rather than vertex patches.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -122,6 +114,16 @@ stacked PRs at the end).
   to confirm, not to discover.
 - **One branch per milestone**, `native-only/mN-<name>`. Claude writes the
   code; the user builds, plays and reports (see "Handoff").
+- **Computation goes where it belongs, now** (the user, 2026-11-11). This
+  restructure is the time to move work, not only to port it: whatever the
+  GPU will need later (effects, upscaling, lighting) or whatever is easier
+  next to the GPU's other work moves there as each piece is touched. The
+  records carry the game's own data, and the shaders decode it:
+  - CT16 texels and CLUTs with the draw's TEXA (done in M3);
+  - captured frames kept at the renderer's resolution (done in M3);
+  - the M5 transforms, skinning, lighting and UV generation.
+  A CPU fallback, where a device lacks a format, lives in the renderer and
+  not in the producer.
 - **Platforms:** Windows, Linux and later Android, all through SDL GPU with
   SPIR-V. macOS is not a target: the native shaders are SPIR-V only, and
   the guest code assumes x86 rounding.
@@ -585,6 +587,58 @@ The `RG_NATIVE_<EFFECT>` switches, `native_effect.h`, the sprite builder and
 the held-effect plumbing in `vif1_thread.cpp` are deleted as their last user
 goes.
 
+**Status (2026-11-11): done in code, not play-tested**, on
+`native-only/m3-passes` (from M2's branch), each commit compile-checked.
+Every effect the sprite builder drew is now a pass the renderer expands
+(`native_passes.cpp`), built from the hooked function's arguments (notes for
+each in NATIVE-ONLY-NOTES.md):
+- glare, bloom, DoF, focus, colour filter, refraction capture, the flip's
+  copy, the shadow map's blur;
+- the plane shadow;
+- CBlur (`CBlur`, `CBlurDraw`), its buffers found by a port of the game's
+  name-table lookup;
+- object layers' tails (`ObjectLayer`, from the VU1 overlay calls'
+  arguments and the composite's settings).
+
+What else changed:
+- The sprite builder (`build`, `native_effect.h`, the producer's
+  `effect()`), the shadow setup's register mirror and the
+  `RG_NATIVE_<EFFECT>` switches are deleted. Object layers are routed by
+  `routeLayer`/`routeEnd`.
+- A pass's packets go on with their kicks withheld, so their uploads and
+  register writes still happen.
+- Two moves to the GPU (see "Decisions"):
+  - CT16 textures and CLUTs are `Ct16` records of the game's bytes, and the
+    shader applies the draw's TEXA;
+  - colour reads also keep their pixels on the GPU, and a fade's captured
+    frame is drawn from that copy at the renderer's resolution.
+
+**Not done, carried over:**
+- **Step 2 (skipping the original).** Every hooked function still runs and
+  builds its packets, so its side effects stay; M6 removes the packet path
+  once nothing needs it.
+- **TexAnime** is plain 2D sprites into a texture target, so it moves with
+  M4's 2D at its source.
+- **Lens flare and depth probe** (item 12): no route reached them. They
+  stay a depth read answered a frame late.
+- **Object layers' box** still comes from the head's clear sprite
+  (`clearBox`), not from the parts' bounds.
+
+**Handoff (what to play and expect).**
+- Every post effect is the renderer's own now. Look at:
+  - glare and bloom (bright areas);
+  - DoF and focus (cutscenes);
+  - the colour filter (tinted areas);
+  - refraction (water, glass);
+  - the plane shadow under characters (blurred or hard);
+  - the character blur (afterimages in fast moves, battle specials);
+  - characters with glow or outline (object layers);
+  - fades (wipes and cross-fades over a captured frame should now be as
+    sharp as the game at the chosen scale).
+- `tools/native-check.sh` lines 5 and 5c count effects whose pass was not
+  sent.
+- Bisect by commit: each effect is its own commit.
+
 **Done when:**
 - Salgin's first scene draws in at most about 25 render passes, with no
   feedback copies (stats line);
@@ -737,4 +791,11 @@ They wait until the plan is done, or until the user moves one in.
 - **TEXA baked into texels (M2, deferred to the user).** Kept as the
   material's `sourceAlpha` and `alphaZeroOnBlack`, which a target read
   needs anyway (a buffer read through the GS's CT24 view); baking it into
-  texture copies would add textures and remove no renderer code.
+  texture copies would add textures and remove no renderer code. M3 went
+  further the same way: CT16's TEXA (`texaLow`, `texaHigh`) is applied by
+  the shader too.
+- **More decoding to the GPU (candidates).**
+  - T4 textures are still widened to a byte a texel on the CPU.
+  - Pre-swizzled T8 uploads are still unswizzled on the CPU.
+  - Moving either touches the producer's tile cutter, its local-copy
+    mirror and the texture packs' hash, which read kept texels.
