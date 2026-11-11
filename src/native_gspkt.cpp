@@ -165,8 +165,6 @@ uint64_t rgbaq(uint32_t b, int32_t r, int32_t g, int32_t bl, int32_t a)
     X(SetXYZPixelVec, 0x0013EF70u)                                                                                 \
     X(SetXYZf, 0x0013F060u)                                                                                        \
     X(SetXYZfVec, 0x0013EFE0u)                                                                                     \
-    X(DrawSprite, 0x0013EA30u)                                                                                     \
-    X(AddTexSprite, 0x0013E520u)                                                                                   \
     X(ReserveQwords, 0x0013F230u)                                                                                  \
     X(AddDmaCallTag, 0x0013F1F0u)
 
@@ -245,12 +243,30 @@ void hookOpenGifTag(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_OpenGifTag(rdram, ctx, runtime);
 }
 
+// The open tag's data as the game wrote it: its segment is over scratch
+// (hookOpen), so the qwords from the game's open tag (+0x100) to the write
+// pointer (+0xF4) are the tag's data, the inline writes no hooked emitter
+// sees among them (the sprite composites' PACKED qwords, AddTexSprite's A+D
+// RGBAQ). They replace what the shadow has after its tag.
+bool takeWritten(Shadow &s, uint32_t b)
+{
+    const uint32_t tag = read32(b + 0x100u), end = read32(b + 0xF4u);
+    if (s.tagAt == SIZE_MAX || s.tagAt >= s.bytes.size() || tag == 0u || end < tag + 16u ||
+        end - tag > (256u << 10) || ((end - tag) & 15u) != 0u)
+        return false;
+    const size_t bytes = end - tag - 16u;
+    s.bytes.resize(s.tagAt + 16u + bytes);
+    for (size_t at = 0; at < bytes; at += 16u)
+        std::memcpy(s.bytes.data() + s.tagAt + 16u + at, g_rdram + physical(tag + 16u + uint32_t(at)), 16u);
+    return true;
+}
+
 // GsPktFinalizeTags: the open tag's NLOOP (PACKED: qwords / NREG).
 void hookFinalizeTags(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (Shadow *s = shadowFor(ctx))
     {
-        if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size())
+        if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || !takeWritten(*s, getRegU32(ctx, 4)))
             s->broken = true; // it would patch the header's tag, or a stale one
         else
         {
@@ -267,7 +283,8 @@ void hookClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // (The segment over scratch has +0xE8 1, but closes as written.)
     if (Shadow *s = shadowFor(ctx))
     {
-        if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed)
+        if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed ||
+            !takeWritten(*s, getRegU32(ctx, 4)))
             s->broken = true;
         else
         {
@@ -455,22 +472,13 @@ void hookSetXYZfVec(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_SetXYZfVec(rdram, ctx, runtime);
 }
 
-// What the shadow does not follow: the sprite composites write their PACKED
-// data themselves; raw writes and a DMA call put non-GIF data in the block.
+// What the shadow does not follow: raw writes and a DMA call put non-GIF
+// data in the block (the composite tail's overlay calls). (The sprite
+// composites' inline PACKED qwords are taken at FinalizeTags.)
 void spoil(const R5900Context *ctx)
 {
     if (Shadow *s = shadowFor(ctx))
         s->broken = true;
-}
-void hookDrawSprite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    spoil(ctx);
-    g_DrawSprite(rdram, ctx, runtime);
-}
-void hookAddTexSprite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    spoil(ctx);
-    g_AddTexSprite(rdram, ctx, runtime);
 }
 void hookReserveQwords(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {

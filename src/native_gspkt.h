@@ -14,10 +14,11 @@ class PS2Runtime;
 // is made on the game thread: the stream the block's DIRECTs would carry,
 // in order. The game writes no block: its segments are opened over scratch
 // and the shadow is the block's only copy (src/native_blocks.cpp makes its
-// 2D). A block written through anything the shadow does not follow (the
-// PACKED sprite composites that write their data themselves, raw writes,
-// a DMA call, no memstack) has no shadow, and is written as the game
-// writes it.
+// 2D). What the game writes inline into a tag's data (the sprite
+// composites' PACKED qwords, AddTexSprite's RGBAQ) is taken from the
+// scratch segment where the tag ends. A block written through anything
+// the shadow does not follow (a VU1 call or a DMA call in its data, no
+// memstack) has no shadow, and is written as the game writes it.
 namespace rg::gspkt
 {
 
