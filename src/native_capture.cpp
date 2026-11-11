@@ -23,6 +23,10 @@ namespace rg::nativecapture
 namespace
 {
 constexpr uint32_t kTexBuildUploadPkt = 0x00158610u;
+// GsBuildImageUploadRefPkt_158390(p, dbp, dpsm, dbw, addr, qwc, dsax, dsay,
+// rrw, rrh): an upload of qwc quadwords from addr, by reference (REF tags
+// of at most 0x7FF0 each, the first cut to a 128-byte boundary).
+constexpr uint32_t kGsBuildImageUploadRefPkt = 0x00158390u;
 // DrawEnvSetFrameFromDesc_144fe0(env, desc, flags).
 constexpr uint32_t kSetFrameFromDesc = 0x00144FE0u;
 // The getters that fill the frame's and the display buffer's descriptors.
@@ -114,6 +118,73 @@ void getDispFbTexDesc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // the width and height, pre-swizzled. Each palette and level is handed to
 // the producer from where the node keeps it. The arithmetic is the
 // function's own.
+// The upload by reference (M6): the packet the builder wrote, read for its
+// transfer (BITBLTBUF, TRXPOS, TRXREG at its fixed places), replaced by a
+// host marker (rg::nativeproducer::kHostRegister) of it and its source.
+PS2Runtime::RecompiledFunction g_uploadRefOriginal = nullptr;
+struct UploadRef
+{
+    uint32_t p = 0u, addr = 0u, qwc = 0u;
+};
+std::vector<UploadRef> g_uploadRefs;
+std::atomic<uint64_t> g_uploadRefsMarked{0u};
+
+uint32_t transferBits(uint32_t psm)
+{
+    switch (psm & 0x3Fu)
+    {
+    case 0x00u: return 32u;
+    case 0x01u: return 24u;
+    case 0x02u: case 0x0Au: return 16u;
+    case 0x13u: case 0x1Bu: return 8u;
+    case 0x14u: case 0x24u: case 0x2Cu: return 4u;
+    default: return 0u;
+    }
+}
+
+void afterUploadRef(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t)
+{
+    namespace producer = rg::nativeproducer;
+    if (g_uploadRefs.empty())
+        return;
+    const UploadRef r = g_uploadRefs.back();
+    g_uploadRefs.pop_back();
+    const uint32_t words = getRegU32(ctx, 2);
+    const uint32_t at = physical(r.p);
+    if (words < 16u || at + 0x70u > PS2_RAM_SIZE || (r.addr & 15u) != 0u)
+        return;
+    uint64_t bitblt, trxpos, trxreg;
+    std::memcpy(&bitblt, g_rdram + at + 48u, 8u);
+    std::memcpy(&trxpos, g_rdram + at + 64u, 8u);
+    std::memcpy(&trxreg, g_rdram + at + 80u, 8u);
+    const uint32_t dbp = uint32_t((bitblt >> 32) & 0x3FFFu), dbw = uint32_t((bitblt >> 48) & 0x3Fu),
+                   dpsm = uint32_t((bitblt >> 56) & 0x3Fu);
+    const uint32_t x = uint32_t((trxpos >> 32) & 0x7FFu), y = uint32_t((trxpos >> 48) & 0x7FFu);
+    const uint32_t w = uint32_t(trxreg & 0xFFFu), h = uint32_t((trxreg >> 32) & 0xFFFu);
+    const uint32_t bits = transferBits(dpsm);
+    if (bits == 0u || w == 0u || h == 0u || uint64_t(w) * h * bits / 8u > uint64_t(r.qwc) * 16u)
+        return;
+    const uint32_t head[8] = {3u | (1u << 28), 0u, 0u, 0x50000003u, 2u | 0x8000u, 0x10000000u, 0xEu, 0u};
+    const uint64_t writes[4] = {producer::takeValue(dbp, dbw, dpsm, w, h), producer::kHostRegister,
+                                uint64_t(physical(r.addr)) | (uint64_t(x) << 32) | (uint64_t(y) << 43),
+                                producer::kHostSourceRegister};
+    std::memcpy(g_rdram + at, head, sizeof(head));
+    std::memcpy(g_rdram + at + sizeof(head), writes, sizeof(writes));
+    setReturnS32(ctx, 4 * 4);
+    ++g_uploadRefsMarked;
+}
+
+void uploadRef(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (!rg::vif1::bindingTextures())
+    {
+        g_uploadRefOriginal(rdram, ctx, runtime);
+        return;
+    }
+    g_uploadRefs.push_back({getRegU32(ctx, 4), getRegU32(ctx, 8), getRegU32(ctx, 9)});
+    rg::hooks::callThen(g_uploadRefOriginal, rdram, ctx, runtime, &afterUploadRef, 0u);
+}
+
 // A take marker (rg::nativeproducer::kTakeRegister) of `takes` at `at`:
 // the words it takes, as TexBuildUploadPkt returns them.
 uint32_t writeTakeMarker(uint32_t at, const std::vector<uint64_t> &takes)
@@ -560,6 +631,8 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-capture] the target declarations could not be hooked\n");
     if (!rg::timing::hookFunction(runtime, kTexBuildUploadPkt, &texBuildUpload, g_texBuildUploadOriginal))
         std::fprintf(stderr, "[native-capture] TexBuildUploadPkt could not be hooked\n");
+    if (!rg::timing::hookFunction(runtime, kGsBuildImageUploadRefPkt, &uploadRef, g_uploadRefOriginal))
+        std::fprintf(stderr, "[native-capture] GsBuildImageUploadRefPkt could not be hooked\n");
     if (!rg::timing::hookFunction(runtime, kSceGsSetDefStoreImage, &setDefStoreImage, g_setDefStoreImageOriginal) ||
         !rg::timing::hookFunction(runtime, kSceGsExecStoreImage, &execStoreImage, g_execStoreImageOriginal))
         std::fprintf(stderr, "[native-capture] the GS memory reads could not be hooked: they stay GS transfers\n");

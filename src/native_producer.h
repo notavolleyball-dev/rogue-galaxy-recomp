@@ -99,6 +99,14 @@ inline uint64_t takeValue(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t wi
     return uint64_t(dbp & 0x3FFFu) | (uint64_t(dbw & 0x3Fu) << 14) | (uint64_t(dpsm & 0x3Fu) << 20) |
            (uint64_t(width & 0xFFFu) << 26) | (uint64_t(height & 0xFFFu) << 38);
 }
+// M6: an upload by reference the game builds (GsBuildImageUploadRefPkt),
+// as a marker in place of its packet: kHostRegister's write gives the
+// transfer (takeValue's layout), kHostSourceRegister's its source (the EE
+// address, bits 0-31; DSAX 32-42; DSAY 43-53). The list's run publishes the
+// hook's record of that transfer when one is queued (takeProduced), else
+// makes a host upload of the source as it is then (hostUpload): the DMA
+// would have read it there.
+constexpr uint8_t kHostRegister = 0x7Bu, kHostSourceRegister = 0x7Au;
 // How many records texture() and palette() have queued for takeProduced
 // so far (game thread: a hook tells whether every one it asked for was
 // made).
