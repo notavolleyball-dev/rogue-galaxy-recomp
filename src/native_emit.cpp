@@ -8,6 +8,7 @@
 #include <mutex>
 #include <vector>
 
+#include "draw_state_mirror.h"
 #include "native_effects.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
@@ -29,6 +30,12 @@ constexpr uint32_t kBegin = 3u, kEnd = 4u;
 uint32_t physical(uint32_t address)
 {
     return address & (PS2_RAM_SIZE - 1u);
+}
+uint64_t read64(uint32_t address)
+{
+    uint64_t v;
+    std::memcpy(&v, g_rdram + physical(address), sizeof(v));
+    return v;
 }
 uint32_t read32(uint32_t address)
 {
@@ -53,6 +60,11 @@ struct Group
     // or pieces identify() does not know; not compared).
     const rg::vu1native::Program *program = nullptr;
     bool programKnown = false;
+    // The GS state its texenv sets: the material's GsEnv (t+0x14: ALPHA,
+    // TEST, ZBUF's mask, FBA), TEX0 from its texture node, TEX1 and CLAMP
+    // from its packet (frozen at load).
+    uint64_t alpha = 0u, test = 0u, fba = 0u, tex0 = 0u, tex1 = 0u, clamp = 0u;
+    bool zmask = false, textured = false, stateKnown = false;
 };
 // An item's: the model matrix (60-63) and the mesh header (76-79, 81, 42),
 // from its packets p14 and p18; its groups, in the order they are drawn.
@@ -192,6 +204,20 @@ void predict(uint32_t dctx, uint32_t req, Call &call)
             out.q86 = readQuad(pkt + 0x50u);
             out.q87 = readQuad(pkt + 0x60u);
             out.programKnown = programOf(dctx, t, itemFlags, out.program);
+            const uint32_t env = t + 0x14u;
+            out.alpha = read64(env + 0x10u);
+            out.test = read64(env + 0x20u);
+            out.zmask = ((read64(env + 0x30u) >> 32) & 1u) != 0u;
+            out.fba = read64(env + 0x40u) & 1u;
+            const uint32_t texnode = read32(t + 0x0Cu);
+            out.textured = texnode != 0u && read32(t + 4u) >= 12u;
+            if (out.textured)
+            {
+                out.tex0 = read64(texnode + 0x38u);
+                out.tex1 = read64(pkt + 0xA0u);
+                out.clamp = read64(pkt + 0xB0u);
+            }
+            out.stateKnown = true;
         }
     }
 }
@@ -348,6 +374,33 @@ void chunk(const uint8_t *vu1Data, const void *program)
         what = "the program (the table's against what the VU1 holds)";
         seen = Quad{uint32_t(reinterpret_cast<uintptr_t>(program)), 0u, 0u, 0u};
         want = Quad{uint32_t(reinterpret_cast<uintptr_t>(group.program)), 0u, 0u, 0u};
+    }
+    if (!what && group.stateKnown)
+    {
+        const rg::DrawState state = rg::drawstate::current();
+        const rg::DrawContext &c = state.context;
+        const auto lo = [](uint64_t v) { return uint32_t(v); };
+        const auto hi = [](uint64_t v) { return uint32_t(v >> 32); };
+        const auto gs = [&](const char *name, uint64_t have, uint64_t expected) {
+            if (!what && have != expected)
+            {
+                what = name;
+                seen = Quad{lo(have), hi(have), 0u, 0u};
+                want = Quad{lo(expected), hi(expected), 0u, 0u};
+            }
+        };
+        gs("ALPHA", c.alpha, group.alpha);
+        gs("TEST", c.test, group.test);
+        gs("FBA", c.fba & 1u, group.fba);
+        gs("ZBUF's mask", c.zbuf.zmask ? 1u : 0u, group.zmask ? 1u : 0u);
+        if (group.textured)
+        {
+            gs("TEX0's TBP0", c.tex0.tbp0, group.tex0 & 0x3FFFu);
+            gs("TEX0's PSM", c.tex0.psm, (group.tex0 >> 20) & 0x3Fu);
+            gs("TEX0's CBP", c.tex0.cbp, (group.tex0 >> 37) & 0x3FFFu);
+            gs("TEX1", c.tex1, group.tex1);
+            gs("CLAMP", c.clamp, group.clamp);
+        }
     }
     if (!what)
     {
