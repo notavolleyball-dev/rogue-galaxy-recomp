@@ -388,6 +388,36 @@ void modelTriangles(const std::vector<ModelInput> &in, bool list, ModelVertex *o
     }
 }
 
+void outlineVertices(const std::vector<ModelInput> &in, uint32_t edge, ModelVertex *out)
+{
+    const uint32_t first = edge == 4u ? 1u : 0u;
+    for (size_t at = 0; at + edge <= in.size(); at += edge)
+    {
+        const ModelInput &a = in[at + (edge == 4u ? 0u : first)];
+        const ModelInput &b = in[at + first];
+        const ModelInput &c = in[at + first + 1u];
+        const ModelInput &d = in[at + (edge == 4u ? 3u : first + 1u)];
+        ModelVertex v{};
+        const ModelInput *corner[3] = {&a, &b, &c};
+        for (int i = 0; i < 3; ++i)
+        {
+            std::memcpy(v.position[i], corner[i]->position, sizeof(v.position[i]));
+            std::memcpy(v.bones[i], corner[i]->bones, sizeof(v.bones[i]));
+            std::memcpy(v.weights[i], corner[i]->weights, sizeof(v.weights[i]));
+        }
+        std::memcpy(v.normal, d.position, sizeof(v.normal));
+        v.uv[0] = d.bones[0] + 256.0f * d.bones[1];
+        v.uv[1] = d.bones[2] + 256.0f * d.bones[3];
+        std::memcpy(v.color, d.weights, sizeof(v.color));
+        v.parity = float(edge);
+        for (uint32_t k = 0; k < kOutlineEdgeVertices; ++k, ++out)
+        {
+            *out = v;
+            out->corner = float(k);
+        }
+    }
+}
+
 // A defining draw: its triangles into the buffer's pending part, under its
 // id. Taken at the record, not at the frame: a frame may be dropped, its
 // definitions may not.

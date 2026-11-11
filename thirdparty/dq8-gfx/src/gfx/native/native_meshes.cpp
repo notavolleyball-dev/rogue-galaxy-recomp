@@ -1062,12 +1062,17 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         const MeshDraw &d = m_frameMeshes[n];
         if (!d.hasModelRow || d.retained != 0u || d.modelInputs.empty())
             continue;
-        const uint32_t triangles = modelTriangleCount(d.modelInputs.size(), d.modelList);
+        const uint32_t triangles =
+            d.modelEdge != 0u ? uint32_t(d.modelInputs.size() / d.modelEdge) * (kOutlineEdgeVertices / 3u)
+                              : modelTriangleCount(d.modelInputs.size(), d.modelList);
         if (triangles == 0u)
             continue;
         const size_t at = m_transientVertices.size();
         m_transientVertices.resize(at + size_t(triangles) * 3u);
-        modelTriangles(d.modelInputs, d.modelList, m_transientVertices.data() + at);
+        if (d.modelEdge != 0u)
+            outlineVertices(d.modelInputs, d.modelEdge, m_transientVertices.data() + at);
+        else
+            modelTriangles(d.modelInputs, d.modelList, m_transientVertices.data() + at);
         m_transient[n] = {static_cast<uint32_t>(at), triangles * 3u, true, true};
         ++m_modelTransient;
     }

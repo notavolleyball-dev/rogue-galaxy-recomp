@@ -402,6 +402,8 @@ struct ModelPayload
 {
     // transient: drawn this once, its inputs with it (no id yet, or ever).
     bool active = false, define = false, list = false, transient = false;
+    // An outline chunk's: its points a edge (4 or 2), its inputs edges.
+    uint32_t edge = 0u;
     std::vector<dq8::gfx::native::ModelInput> inputs;
     dq8::gfx::native::ModelRow row{};
     std::vector<float> palette;
@@ -980,7 +982,7 @@ public:
                               inputs * static_cast<uint32_t>(sizeof(dq8::gfx::native::ModelInput));
         uint8_t *at = append(Kind::Model, size, ~0u, ~0u, 0u);
         const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u) | (m.transient ? 4u : 0u), inputs,
-                                  floats, 0u};
+                                  floats, m.edge};
         std::memcpy(at, head, sizeof(head));
         at += 16u;
         std::memcpy(at, &m.row, sizeof(m.row));
@@ -1204,6 +1206,7 @@ private:
                         m.define = (head[0] & 1u) != 0u;
                         m.list = (head[0] & 2u) != 0u;
                         m.transient = (head[0] & 4u) != 0u;
+                        m.edge = head[3];
                         std::memcpy(&m.row, from, sizeof(m.row));
                         from += sizeof(m.row);
                         m.palette.resize(head[2]);
@@ -1459,9 +1462,11 @@ public:
                     t_model.define = false;
                     t_model.transient = false;
                     t_model.list = false;
+                    t_model.edge = 0u;
                     m_modelId = mark->chunk.id;
                     m_particleMesh = false;
                     m_shadowMesh = false;
+                    m_outlineMesh = false;
                     native = m_nativeProgram;
                     m_nativeMonitor.native(*native);
                 }
@@ -1490,6 +1495,7 @@ public:
                     t_model.active = false;
                     m_particleMesh = false;
                     m_shadowMesh = false;
+                    m_outlineMesh = false;
                     if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Shadow &&
                         rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top, m_shadowPackets,
                                                     m_shadowMeshes))
@@ -1499,6 +1505,21 @@ public:
                         m_nativeBounds.made = false;
                         m_shadowMesh = true;
                         m_nativePackets.clear();
+                    }
+                    else if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Outline &&
+                             rg::vu1native::outlineDraw(*native, memory.getVU1Data(), top, m_nativePackets,
+                                                        m_nativeMesh, t_model.inputs, t_model.edge, t_model.row,
+                                                        t_model.palette))
+                    {
+                        // M5: the outlines to the model vertex stage, which
+                        // tests each edge and draws its four lines.
+                        m_nativeBounds.made = false;
+                        t_model.active = true;
+                        t_model.define = false;
+                        t_model.list = false;
+                        t_model.transient = true;
+                        m_modelId = 0u;
+                        m_outlineMesh = true;
                     }
                     else if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Particles)
                     {
@@ -1527,6 +1548,7 @@ public:
                         rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
                         m_nativeBounds.made = false;
                         t_model.active = true;
+                        t_model.edge = 0u;
                         m_modelId = modelId;
                     }
                     else if (gpu)
@@ -1579,7 +1601,7 @@ public:
                     }
                     m_shadowMesh = false;
                 }
-                const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh;
+                const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh || m_outlineMesh;
                 // A mesh's own register packets ride with it as writes.
                 const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
                                       packetsAsWrites(m_nativePackets, m_nativeWrites);
@@ -2001,6 +2023,7 @@ private:
     GSNativeMesh m_nativeMesh;
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
+    bool m_outlineMesh = false;           // the chunk is outlines for the model stage (outlineDraw)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
     bool m_shadowMesh = false;            // the chunk is shadow volumes as two meshes (shadowMeshes)
     std::vector<std::vector<uint8_t>> m_shadowPackets[2];
@@ -3178,6 +3201,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
             model.inputs = &t_model.inputs;
             model.row = &t_model.row;
             model.palette = &t_model.palette;
+            model.edge = t_model.edge;
         }
         if (rg::nativeproducer::mesh(mesh, &state, vu1Data, t_vu1Source, t_retain.id,
                                      t_model.active ? &model : nullptr))

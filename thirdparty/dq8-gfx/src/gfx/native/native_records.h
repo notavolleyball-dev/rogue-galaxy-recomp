@@ -368,6 +368,11 @@ struct MeshDraw
     // inputs ride with the draw (a strip, or a list with modelList).
     std::vector<ModelInput> modelInputs;
     bool modelList = false;
+    // An outline chunk's (its row's flag 16): its inputs are edges of this
+    // many points (4: the far corner of the first triangle, the edge's two
+    // ends, the second's far corner; 2: the edge alone), each drawn as four
+    // lines (native_model.vert's outline()).
+    uint32_t modelEdge = 0u;
 };
 
 // What a 2D draw belongs to, for passes that treat the layers apart (the

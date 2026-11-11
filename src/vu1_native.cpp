@@ -2571,6 +2571,70 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
     }
 }
 
+bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
+                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                 std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
+                 dq8::gfx::native::ModelRow &row, std::vector<float> &palette)
+{
+    const VuData vu(data);
+    edge = outlinePoints(vu, top);
+    const uint32_t count = vu.half(top, 1);
+    if (count < edge)
+        return false;
+    // Its points as modelChunk reads a strip's (the positions and the
+    // skinning; the rest unused).
+    bool list = false;
+    modelChunk(program, data, top, inputs, list);
+    inputs.resize(std::min<size_t>(inputs.size(), count / edge * edge));
+    if (inputs.empty())
+        return false;
+    // buildOutline's packets with no vertices: PRIM (lines) and PRMODE,
+    // then the vertex tag, its loop none (its PRIM, when it has one).
+    packets.clear();
+    std::vector<uint8_t> &state = packets.emplace_back();
+    uint32_t tag[4];
+    std::memcpy(tag, vu.bytes(0), sizeof(tag));
+    tag[0] |= 0x8000u;
+    putQuad(state, tag);
+    putWords(state, 1u, 0u, 0u, 0u);
+    putWords(state, vu.half(87, 0), 0u, 27u, 0u);
+    std::vector<uint8_t> &vertexTag = packets.emplace_back();
+    std::memcpy(tag, vu.bytes(86), sizeof(tag));
+    tag[0] = 0x8000u;
+    putQuad(vertexTag, tag);
+    // The header: 68-71 to the window, the guard band as buildOutline tests
+    // it; no fog (the program writes 0), no backface rule (the stage's own
+    // test), its z as it is.
+    GSNativeMesh::Header &h = mesh.header;
+    h = GSNativeMesh::Header{};
+    for (uint32_t r = 0; r < 4u; ++r)
+    {
+        const Vec4 q = vu.quad(68u + r);
+        h.matrix[r][0] = q.x;
+        h.matrix[r][1] = q.y;
+        h.matrix[r][2] = q.z;
+        h.matrix[r][3] = q.w;
+    }
+    const Vec4 viewport = vu.quad(16), band = vu.quad(17), offset = vu.quad(18);
+    h.bandScale[0] = band.x * viewport.x;
+    h.bandScale[1] = band.y * viewport.y;
+    h.bandScale[2] = band.z;
+    h.bandOffset[0] = offset.x;
+    h.bandOffset[1] = offset.y;
+    h.bandOffset[2] = offset.z;
+    h.guardBand = 1u;
+    h.triangleList = 1u;
+    for (float &c : h.colorMax)
+        c = 255.0f;
+    mesh.vertices.clear();
+    // The row: the skinning's constants; no color or UV piece.
+    modelRow(program, data, top, row, palette);
+    row.q[0][3] = 0.0f;
+    row.q[1][3] = 0.0f;
+    row.q[2][3] = 16.0f;
+    return true;
+}
+
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
                  std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
 {

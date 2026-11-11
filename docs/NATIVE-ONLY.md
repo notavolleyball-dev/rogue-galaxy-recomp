@@ -94,8 +94,6 @@ stacked PRs at the end).
     and sent in the stream's order.
   - M6, early: the GS front end gets nothing any more (see M6).
   - Left:
-    - M5: the outlines as records (their silhouette test needs both
-      triangles' facing; still window packets).
     - M6: the records made at game time are still sent from the VIF1
       stream (passes, blocks, model draws). Next: send them from the
       gather in its order, and the VIF1 thread no longer decodes for the
@@ -818,11 +816,16 @@ recovers.
     renderer's backface rule keeps the facing triangles in one and the
     others in the other, from the same projected corners. A packet that
     sets no RGBAQ keeps the old window packets;
+  - the outlines in the model vertex stage (`outline()` in
+    `native_model.vert`, flag 16 of the row): each edge's points go as
+    inputs (skinned there), 24 vertices an edge; the shader makes
+    buildOutline's guard band and silhouette tests, its fade and color,
+    and its four lines offset by +-h, each a quad half a game pixel either
+    side (so they scale with the output, as the 2D path's lines);
   - the retained static meshes (`native_mesh_static.vert`, `StaticVertex`,
     `RG_MESH_RETAIN`) deleted.
   - The CPU raw path stays for `RG_MODEL_GPU=0` and for the programs the
-    stage does not take (affine, raw color), and outlines and shadow
-    volumes are still window packets.
+    stage does not take (affine, raw color).
 - **Step 3 in code too** (`src/native_models.*`):
   - The game thread's gather reads every VIF1 list as the VIF would: its
     own VU1 data and code memory and draw state; UNPACK, MPG, the base

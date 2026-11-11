@@ -209,6 +209,16 @@ bool modelOnGpu(const Program &program);
 // the model matrix the identity (the caller's VU1 quads 60-63 made so).
 void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets,
                   GSNativeMesh &mesh);
+// The outline program's chunk for the model vertex stage (M5): its points
+// as inputs (in fours or twos, outlineEdge's count a edge), its packets
+// (PRIM, PRMODE), a header with the program's matrix to the window (quads
+// 68-71) and its guard band, and its row (the skinning's; flag 16: the
+// stage draws each edge as buildOutline's four lines, its silhouette test,
+// its fade and its color made there). False when it has no edges.
+bool outlineDraw(const Program &program, const uint8_t *data, uint32_t top,
+                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                 std::vector<dq8::gfx::native::ModelInput> &inputs, uint32_t &edge,
+                 dq8::gfx::native::ModelRow &row, std::vector<float> &palette);
 uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top);
 void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);

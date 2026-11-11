@@ -75,7 +75,8 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //     2 reflection, 3 swell, 4 beam, 5 ramp, 6 wave, 7 projected)
 //  2: quad 79 (UV scale) xy, z: the bones (0: not skinned), w: flags (1
 //     white, 2 87.y & 0x100, 4 skin the normals, 8 the inputs are floats:
-//     the position, normal and UV taken as they are)
+//     the position, normal and UV taken as they are; 16 an outline draw,
+//     outline())
 //  3: the base color; 4-6: the lights' directions (quads 100-102, lane i
 //     light i); 7-10: their colors times the material; 11: the ambient
 //  12-15: the point lights' positions (w: falloff); 16-19: their colors
@@ -223,7 +224,75 @@ void project(vec3 v, out float px, out float py, out float q, out bool outside) 
     outside = draw.cull.y != 0.0 && (any(greaterThan(g, vec3(1.0))) || any(lessThan(g, vec3(-1.0))));
 }
 
+// The outline C (src/vu1_native.cpp's buildOutline), flag 16: an edge drawn
+// as four lines, moved by +-h in x, then in y, h = alpha / 2, alpha = clamp(
+// 10/9 - w / 360, 0, 1) of its first end (w through the program's matrix),
+// colored (16, 16, 16, alpha * 64); none when an end is outside the guard
+// band or, with four points, the edge's two triangles face apart on screen.
+// Each line is a quad half a game pixel either side of it (as the 2D path
+// widens the GS's lines): this vertex is corner.x's of the edge's 24.
+void outline() {
+    vec3 e0 = position(inB, inBonesB, inWeightsB, vec3(0.0));
+    vec3 e1 = position(inC, inBonesC, inWeightsC, vec3(0.0));
+    float x0, y0, q0, x1, y1, q1;
+    bool o0, o1;
+    project(e0, x0, y0, q0, o0);
+    project(e1, x1, y1, q1, o1);
+    bool hidden = o0 || o1;
+    if (inCorner.y > 3.0) {
+        vec3 f0 = position(inA, inBonesA, inWeightsA, vec3(0.0));
+        vec4 bonesD = vec4(mod(inUv.x, 256.0), floor(inUv.x / 256.0), mod(inUv.y, 256.0), floor(inUv.y / 256.0));
+        vec3 f1 = position(inNormal, bonesD, inColor, vec3(0.0));
+        float xa, ya, qa, xd, yd, qd;
+        bool oa, od;
+        project(f0, xa, ya, qa, oa);
+        project(f1, xd, yd, qd, od);
+        precise float nearCross = (x0 - xa) * (y1 - ya) - (x1 - xa) * (y0 - ya);
+        precise float farCross = (x1 - x0) * (yd - y0) - (xd - x0) * (y1 - y0);
+        hidden = hidden || nearCross * farCross < 0.0;
+    }
+    precise float w0 = e0.x * draw.cullMatrix[0].w + e0.y * draw.cullMatrix[1].w + e0.z * draw.cullMatrix[2].w +
+                       draw.cullMatrix[3].w;
+    precise float alpha = clamp(uintBitsToFloat(0xbb360b61u) * w0 + uintBitsToFloat(0x3f8e38e4u), 0.0, 1.0);
+    float h = 0.5 * alpha;
+
+    int k = int(inCorner.x + 0.5);
+    int lineAt = k / 6;
+    int which = k - lineAt * 6;
+    // The quad's six: (end, side) as native_2d's quad(v0, v1, v3, v2).
+    int end = (which == 2 || which == 4 || which == 5) ? 1 : 0;
+    float side = (which == 1 || which == 5) ? -1.0 : 1.0;
+    vec2 shift = lineAt == 0 ? vec2(h, 0.0) : (lineAt == 1 ? vec2(-h, 0.0) : (lineAt == 2 ? vec2(0.0, -h) : vec2(0.0, h)));
+
+    vec4 clip0 = draw.clip * vec4(e0, 1.0), clip1 = draw.clip * vec4(e1, 1.0);
+    vec4 window0 = draw.viewport * clip0, window1 = draw.viewport * clip1;
+    // In the target's game pixels: the line's normal, half a pixel.
+    vec2 halfSize = draw.target.xy * 0.5;
+    vec2 d = (window1.xy / clip1.w - window0.xy / clip0.w) * halfSize;
+    float span = sqrt(dot(d, d));
+    vec2 n = span > 1e-6 ? vec2(-d.y, d.x) / span * 0.5 : vec2(0.5, 0.0);
+    vec2 pixels = shift + n * side;
+
+    vec3 p = end == 0 ? e0 : e1;
+    vec4 clip = end == 0 ? clip0 : clip1;
+    vec4 window = end == 0 ? window0 : window1;
+    outDraw = inDraw;
+    outUv = vec2(0.0);
+    outColor = min(vec4(16.0, 16.0, 16.0, floor(alpha * 64.0)), draw.colorMax) * draw.vertexUnits.x;
+    outFog = clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
+    float depth = dot(draw.depthRow, vec4(p, 1.0));
+    if (draw.depthLimit.y != 0.0 && clip.w > 0.0)
+        depth = min(depth, draw.depthLimit.x * clip.w);
+    gl_Position = vec4(window.xy + pixels / halfSize * clip.w, depth + draw.target.w * clip.w, clip.w);
+    if (hidden)
+        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+}
+
 void main() {
+    if ((uint(M.q[2].w) & 16u) != 0u) {
+        outline();
+        return;
+    }
     vec3 a = position(inA, inBonesA, inWeightsA, inNormal);
     vec3 b = position(inB, inBonesB, inWeightsB, inNormal);
     vec3 c = position(inC, inBonesC, inWeightsC, inNormal);

@@ -84,6 +84,14 @@ static_assert(sizeof(ModelVertex) == 176u, "tightly packed");
 constexpr uint32_t kModelVertices = 1u << 18; // 44 MiB
 uint32_t modelTriangleCount(size_t count, bool list);
 void modelTriangles(const std::vector<ModelInput> &in, bool list, ModelVertex *out);
+// An outline draw's (MeshDraw::modelEdge): 24 vertices an edge, its four
+// lines two triangles each. Each vertex: A, B, C the far corner of the
+// first triangle (B again for an edge alone), the edge's two ends; the
+// second triangle's far corner in normal (its position), uv (its bones, two
+// a value: b0 + 256 b1, b2 + 256 b3) and color (its weights); corner.x the
+// vertex (line x 6 + which of the six), corner.y the points an edge.
+constexpr uint32_t kOutlineEdgeVertices = 24u;
+void outlineVertices(const std::vector<ModelInput> &in, uint32_t edge, ModelVertex *out);
 
 // Bumped when the renderer lets go of every retained mesh (its buffer
 // filled): the ids the producer handed out before are no longer drawn, and
