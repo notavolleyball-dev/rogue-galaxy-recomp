@@ -1052,9 +1052,15 @@ the series applies to a clean checkout of the submodule without them
 (checked 2026-11-11). **An existing checkout keeps them applied** until
 the submodule is checked out again: `git -C thirdparty/PS2Recomp checkout
 -- .`, delete `thirdparty/PS2Recomp/.rg-patches-applied`, then `cmake -S .
--B build/game` (patches/README.md). Left of the plan's list: 0002, 0013,
-0015 (the threaded GS worker, which the null backend still sits behind)
-and 0034 (the libgraph stubs' register sink, still used).
+-B build/game` (patches/README.md). **Since:** 0002, 0013 and 0015 are
+deleted too: they patch the runtime's `GSThreadedBackend`, which nothing
+creates (the null backend is installed directly); the series applies to a
+clean checkout without them (checked 2026-11-11). Left of the plan's list:
+0034 (the libgraph stubs' register sink). Removing it means replacing the
+runtime's libgraph stubs (`sceGsSwapDBuff`, `sceGsResetGraph`,
+`sceGsPutDrawEnv`, ...) with hooks that keep their privileged display
+registers and take their general writes from their arguments: kept until
+it can be checked by play (a wrong DISPFB is a black screen).
 
 **Step 4 in code: the draw stage is deleted.** A list runs on the game
 thread and what it makes goes straight to the producer (packets to the
