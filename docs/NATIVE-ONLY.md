@@ -82,8 +82,11 @@ stacked PRs at the end).
   for 2D from the running draw task. The rest of M4 waits for M5 (see
   "Decisions").
 - **Now: M5** on `native-only/m5-geometry` (from M4's branch): geometry
-  off VU1 memory, with transforms, skinning, lighting and UV generation on
-  the GPU.
+  off VU1 memory. Step 1 is in code (see M5's status): strip chunks are
+  drawn by the renderer's model vertex stage, with skinning, lighting and
+  UV generation on the GPU. Next: step 2 (the list stops carrying the
+  geometry), then the packet programs (outlines, shadow volumes,
+  particles) as records, then the CPU strip path's deletion once played.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -714,6 +717,28 @@ recovers.
 6. **The packet programs as records:** outlines as lines, shadow volumes for
    M3's plane-shadow pass, particles as instanced quads, overlay sprites.
 7. **Clipping on the GPU**, so no chunk falls back to the compiled VU1.
+
+**Status (2026-11-11): step 1 in code, not play-tested.**
+- Done:
+  - `[model-census]` lines count the model emitters' items by mesh class;
+  - T4 textures are packed on the GPU;
+  - `vu1_native`'s `modelChunk`, `modelChunkHash`, `modelRow` and
+    `modelHeader`;
+  - the renderer's `native_model.vert` and its buffers;
+  - the VIF1 thread's model table (a chunk gets an id the second time its
+    inputs are seen) and the Model record through the draw stage.
+- Handoff:
+  - The stats line's `model chunks: defined so far N, draws M` should
+    grow and settle in the field.
+  - Characters, scenery and effects models should look as before:
+    skinned characters, lit surfaces, sphere-mapped and reflective
+    materials, point-lit areas.
+  - Faults to look for:
+    - a model drawn in its bind pose or exploded (the palette);
+    - wrong lighting (the C variants);
+    - wrong UVs (F);
+    - missing triangles (the backface rule).
+  - `RG_MODEL_GPU=0` puts every chunk back on the CPU, to compare.
 
 **How (decided 2026-11-11, from the notes in NATIVE-ONLY-NOTES.md, "M5").**
 The notes change the order of the steps above:
