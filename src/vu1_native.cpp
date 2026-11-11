@@ -1594,9 +1594,6 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         return "triangle list not of whole triangles (D's own path)";
     if (primType != 3u && primType != 4u)
         return "neither strip nor triangle list";
-    const uint32_t flags = vu.half(87, 1);
-    if ((flags & 0x100u) && (program.color == Color::PerVertex || program.color == Color::LitVertex))
-        return "quad 87.y & 0x100 (C's other loop)";
     // The reflection's loop reads three vertices before it first looks at the
     // count.
     if (program.uv == Uv::Reflect && vu.half(top, 1) < 3u)
@@ -1605,8 +1602,10 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         return "swell over fewer than two vertices (slot F)";
     if (program.uv == Uv::Beam && vu.half(top, 1) < 4u)
         return "beam over fewer than four vertices (slot F)";
-    if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f))
-        return "scrolling UVs (slot F)";
+    // The scroll's loop is pipelined over two vertices (a guess: one would
+    // run past the end); the model stage moves the UVs by quad 88.xy.
+    if (program.uv == Uv::Plain && (vu.quad(88).x != 0.0f || vu.quad(88).y != 0.0f) && vu.half(top, 1) < 2u)
+        return "scrolling UVs over fewer than two vertices (slot F)";
     return nullptr;
 }
 
@@ -1950,6 +1949,13 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
     for (uint32_t i = 0; i < 4u; ++i)
         put(32u + i, beam.col[i].x, beam.col[i].y, beam.col[i].z, beam.col[i].w);
     put(36, swell.lane[0], swell.lane[1], swell.lane[2], swell.lane[3]);
+    // The scroll F (d3f6f631): the UVs moved by quad 88.xy (0 but for the
+    // effect models).
+    if (program.uv == Uv::Plain)
+    {
+        const Vec4 scroll = vu.quad(88);
+        put(42, scroll.x, scroll.y, 0.0f, 0.0f);
+    }
     if (program.kind == Kind::Projector)
     {
         // projectorMesh's: the texture matrix (the object's through the

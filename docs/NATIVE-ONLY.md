@@ -869,10 +869,11 @@ recovers.
   "left to the VU1"):** chunks `declineChunk` refuses still run the VU1
   interpreter: an entry into B other than its first (quad 76.z), a
   skinning B whose entry is not read, PRIM neither strip nor list, a list
-  not of whole triangles, quad 87.y & 0x100 with the vertex-color C pieces
-  (C's other loop), scrolling UVs (quad 88.xy, slot F), and the
-  reflection, swell and beam F pieces over fewer vertices than they read
-  before testing the count. Each needs its VU code read (tools/vu1) before
+  not of whole triangles, and the scroll, reflection, swell and beam F
+  pieces over fewer vertices than they read before testing the count.
+  (Since on `native-only/m4b-2d`: the scroll F, quad 88.xy, and the
+  vertex-color C pieces' additive rule, 87.y & 0x100, are the model
+  stage's: row 42 and flag 2.) Each needs its VU code read (tools/vu1) before
   it can be drawn; none is seen to be frequent, but a play session's
   counts will say. Unknown programs (identify finds no pieces) run the VU1
   too.

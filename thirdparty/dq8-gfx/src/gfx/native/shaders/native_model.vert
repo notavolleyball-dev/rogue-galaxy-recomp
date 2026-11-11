@@ -88,7 +88,8 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //     far and 1 / far; 32-35: the beam's columns (quads 72-75)
 //  36: the swell's lanes (quads 68-71 w); 37.x: the palette's base
 //  38-41: the projector's texture matrix (C 6 and F 7: the projected
-//     texture, its color the base)
+//     texture, its color the base); 42.xy: the scroll F's offset (quad
+//     88.xy, F 0)
 //  flag 32 (particle()): 20-23 the model, 27 the eye, nothing else.
 //  flag 64 (volume()): 38-41 the light's push (the model times quads
 //     30-33), 42 the direction to the light and w the lit threshold, 43
@@ -483,10 +484,20 @@ void main() {
 
     // The UV: the scaled int, or what F makes of it.
     precise vec2 uv = floats() ? inUv : vec2(itof15(inUv.x) * M.q[2].x, itof15(inUv.y) * M.q[2].y);
+    // The scroll F (Uv 0): moved by quad 88.xy (row 42; 0 when it is off).
+    if (uvKind == 0u)
+        uv = uv + M.q[42].xy;
     // The color: the base, times the vertex color for C 0.
     vec4 base = M.q[3];
     precise vec4 cv = vec4(itof15(inColor.x), itof15(inColor.y), itof15(inColor.z), itof15(inColor.w)) * 256.0;
     precise vec4 color = colorKind == 0u ? base * cv : base;
+    // 70362be4 with 87.y & 0x100 (flag 2): the vertex color added (the raw
+    // int16, cv * 128), its alpha still multiplied.
+    if (colorKind == 0u && (uint(M.q[2].w) & 2u) != 0u) {
+        precise vec3 added = base.rgb + cv.rgb * 128.0;
+        precise float alpha = base.a * cv.a;
+        color = vec4(added, alpha);
+    }
     if (uvKind == 4u) {
         // The beam: the position projected through quads 72-75.
         vec4 c0 = M.q[32], c1 = M.q[33], c2 = M.q[34], c3 = M.q[35];
@@ -553,8 +564,17 @@ void main() {
                 color.rgb = max((l * cv.rgb) * sign, (l + cv.rgb * 128.0) * -sign);
                 color.a = lc.a * cv.a;
             }
-            if (colorKind == 3u)
-                color = lc * cv;
+            if (colorKind == 3u) {
+                // 2460e528: times the vertex color, or with 87.y & 0x100
+                // (flag 2) plus it (the raw int16), the alpha times it.
+                if ((flags & 2u) != 0u) {
+                    precise vec3 added = lc.rgb + cv.rgb * 128.0;
+                    precise float alpha = lc.a * cv.a;
+                    color = vec4(added, alpha);
+                } else {
+                    color = lc * cv;
+                }
+            }
         }
         if (uvKind == 1u) {
             // The sphere map: the normal through the view's rotation, (n + 1) / 2.
