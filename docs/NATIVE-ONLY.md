@@ -51,6 +51,48 @@ terms:
 - **At the start of every session**, read this section and the current
   milestone. Then state which milestone item the session advances.
 
+## Now
+
+The only place the current state and the next step are written. Rewrite it
+(do not append) at the end of every session.
+
+**State (2026-11-11, branch `native-only/m0-plan`).** M0 is done apart from
+two points:
+- the compile check's first full build (see M0);
+- the user's review of the record contract v2. M2 waits on that review; M1
+  does not.
+
+**Next: M1, in this order.** Branch `native-only/m1-gs-backend` from
+`native-only/m0-plan`.
+1. **Whole-texture packs on the native path.** Read `src/texture_pack.cpp`
+   and the hashing in `sdlgpu_textures.cpp` (PCSX2's XXH3 over GS blocks and
+   palette). Reproduce the hash in the producer when it makes a texture
+   record, from the guest bytes the texture hook already reads. Send the
+   pack's texels in the record. Move `xxhash.h` out of the backend.
+2. **The native pipeline as the only path.** Remove `RG_NATIVE_PIPELINE`,
+   `RG_NATIVE_RENDERER`, the F1 switch and `native_renderer.*`. Default
+   `RG_VU1_NATIVE` to `gpu` with no user-facing modes (`check` stays until
+   M5).
+3. **The presenter as its own interface.** Take it off `GSRasterBackend` and
+   `PresentationFrame`. Give the runtime a null `GSRasterBackend` that logs
+   any call once, replacing `gs_tripwire.*`. Then:
+   - `SdlGpuDevice::create` without the GS shaders;
+   - scale changes without the target cache;
+   - the stats line and the F1 stats page from the native renderer.
+4. **Delete** everything M1 lists. The compile check must build after each
+   large deletion.
+5. **Hand off:** push the branch, then give the user what to play and the
+   counters to expect.
+
+**Working setup** (development machine: macOS, arm64):
+- The game cannot be built or run here. Only `tools/docker/compile-check.sh`
+  (all; `build` for a `src/` change) checks compilation. The user tests on
+  Linux.
+- `tools/fninfo.py` works from `disc/` (the extracted game, gitignored) and
+  `build/rgdecomp`.
+- `origin` is the user's working repository on their Linux machine. A push
+  to a branch that is checked out there is refused: ask the user to detach.
+
 ## Decisions (2026-11-11)
 
 - **The emulated GS path is removed**, not kept as a fallback. This
