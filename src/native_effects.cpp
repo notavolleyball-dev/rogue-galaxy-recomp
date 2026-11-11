@@ -484,13 +484,52 @@ void refractionCaptureFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runti
 
 PS2Runtime::RecompiledFunction g_dofOriginal = nullptr;
 
+uint32_t g_dofUnit = 0u; // game thread
+
 void afterDof(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Dof);
+    addRange(top, stackTop(), Effect::Dof, g_dofUnit);
+    g_dofUnit = 0u;
 }
 
+// ProjectDepth_15d0a0(d): the GS window Z of the point (0, 0, -d, 1) through
+// the matrix at *(*(0x4810A4) + 0xF20) + 0x200 (row vector times matrix,
+// MtxMulPoint_13c890), z / w truncated.
+int32_t projectDepth(float d)
+{
+    const uint32_t ctx = read32(kDrawCtxPointer);
+    const uint32_t m = (ctx != 0u ? read32(ctx + 0xF20u) : 0u) + 0x200u;
+    const float m22 = readFloatAt(m + 0x28u), m23 = readFloatAt(m + 0x2Cu);
+    const float m32 = readFloatAt(m + 0x38u), m33 = readFloatAt(m + 0x3Cu);
+    const float z = -d * m22 + m32, w = -d * m23 + m33;
+    return static_cast<int32_t>(z * (1.0f / w));
+}
+
+// DofFilterDrawMaybe_17d150(n, distances, work, scale): see
+// docs/NATIVE-ONLY-NOTES.md. Each level's two depths are the GS Z of its
+// distance and of 1.1 times it.
 void dofFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t n = getRegU32(ctx, 4), distances = getRegU32(ctx, 5), work = getRegU32(ctx, 6);
+    g_dofUnit = 0u;
+    if (work != 0u && distances != 0u && n != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 2u; // native::PassKind::DepthOfField
+        request.workBases[0] = descriptorBase(work);
+        const uint32_t levels = std::min<uint32_t>(n, 7u);
+        request.params[0] = float(levels);
+        request.params[1] = float(static_cast<int32_t>(128.0f * ctx->f[12])) / 128.0f;
+        for (uint32_t i = 0; i < levels; ++i)
+        {
+            const float d = readFloatAt(distances + 4u * i);
+            request.params[2 + 2 * i] = float(projectDepth(d));
+            request.params[3 + 2 * i] = float(projectDepth(d / 10.0f + d));
+            request.depthParams |= 3u << (2 + 2 * i);
+        }
+        request.sceneDepth = true;
+        g_dofUnit = keepPass(request);
+    }
     rg::hooks::callThen(g_dofOriginal, rdram, ctx, runtime, &afterDof, stackTop());
 }
 
@@ -1682,7 +1721,7 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 bool isPass(Effect effect)
 {
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
-           effect == Effect::Refraction || effect == Effect::ShadowMapBlur;
+           effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

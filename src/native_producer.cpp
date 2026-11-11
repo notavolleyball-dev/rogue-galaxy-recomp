@@ -225,6 +225,9 @@ struct State
     std::map<std::pair<native::Id, uint64_t>, native::Id> cuts;
     std::unordered_map<native::Id, std::pair<native::Id, uint64_t>> cutOf;
     uint64_t packGeneration = 0u;
+    // The depth target the scene's 3D draws last used (a pass's that tests
+    // against the scene).
+    native::Id sceneDepth = 0u;
     // The depth targets drawn with since the frame began (frameBoundary):
     // each is cleared at its first use in a frame, as the game's clear
     // sprites (not records until M4 of docs/NATIVE-ONLY.md) leave it.
@@ -2147,6 +2150,8 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     }
     if (draw.material.depthTest != native::Compare::Always || draw.material.depthWrite)
         draw.depthTarget = depthTarget(s, c.zbuf.zbp * 32u, frameBase, draw.target);
+    if (draw.target == kSceneTarget && draw.depthTarget != 0u)
+        s.sceneDepth = draw.depthTarget;
     if (split)
     {
         // The camera over the target, its depth standard (reversed). The
@@ -3636,6 +3641,18 @@ bool pass(const PassRequest &request)
         return false;
     }
     std::copy(std::begin(request.params), std::end(request.params), record.params);
+    for (int i = 0; i < 16; ++i)
+        if (request.depthParams & (1u << i))
+            record.params[i] = standardDepth(record.params[i], s.lastDepthScale, s.lastDepthOffset);
+    if (request.sceneDepth)
+    {
+        record.depth = s.sceneDepth;
+        if (record.depth == 0u)
+        {
+            ++s.counts.passesRefused;
+            return false;
+        }
+    }
     ++s.counts.passesMade;
     native::push(std::move(record));
     return true;

@@ -95,7 +95,7 @@ from the code.
 - **Open:** the filter of the blur's sprites (not set in their blocks; taken
   as bilinear).
 
-### `DofFilterDrawMaybe_17d150` (1532 bytes; M3, not ported yet)
+### `DofFilterDrawMaybe_17d150` (1532 bytes; M3)
 
 - **Arguments:** `a0` = n, the number of levels; `a1` = an array of n
   distances (floats); `a2` = the work buffer's descriptor (copied into a
@@ -124,9 +124,16 @@ from the code.
   turns it into the renderer's depth (`standardDepth`). The Z tests:
   `GsPktEnableZTest(0)` is ALWAYS, `(1)` GEQUAL; `GsPktSetZTest(0, 1)` ALWAYS,
   `(2)` GEQUAL, `(3)` GREATER (`GsTestSetZTest_156f40`); the last call wins.
-- **Blocking (to read next):** the ALPHA register a fresh primitive block
-  carries (`DrawListBeginPrim_141b00` / `GsPktInit_13f7f0`'s template),
-  which decides how `128 scale` blends. With those, the
+- **The default ALPHA:** a fresh primitive block's template
+  (`GsPktInit_13f7f0` -> `GsEnvInit_1573b0` -> `GsEnvSetDefaults_1572d0`)
+  takes preset 1 of the table at `0x449EF0`: `(Cs - Cd) As + Cd`, ordinary
+  alpha blending; the strip blends at alpha `128 scale`.
+- **The hook emits:** a `Pass` (`PassKind::DepthOfField`): the levels'
+  count, the alpha, and per level the two GS Z (`ProjectDepth` computed in
+  the hook), which the producer turns into the renderer's depth; the depth
+  target is the one the scene's 3D draws last used.
+- **Open:** the work buffer's format (the strip reads it with `TEXA` 0x80:
+  taken as read without its alpha, 1). With those, the
   pass is: the levels as blurred copies, each laid over the frame where
   the scene's depth is behind the level's distance (the renderer's depth
   from the producer's `standardDepth` of the two Z values), at the

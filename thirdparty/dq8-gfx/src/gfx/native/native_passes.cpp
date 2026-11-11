@@ -385,6 +385,106 @@ bool Renderer::expandPass(const Pass &pass)
         }
         return true;
     }
+    case PassKind::DepthOfField:
+    {
+        // DofFilterDrawMaybe_17d150. Each level: the one before (first the
+        // frame) copied into the next rectangle of the work buffer, half the
+        // frame's size then 2/3 of the one before, side by side down and
+        // right, half a pixel up and left, bilinear; then laid over the
+        // frame as a strip of 16 columns, alpha-blended at params 1, only
+        // where the scene is behind it (depth test GEQUAL, no depth write),
+        // its depth alternating column by column between the level's two.
+        // The arithmetic is the game's, in sixteenths of a pixel.
+        const Id frame = pass.frame, work = pass.work[0], depth = pass.depth;
+        float fw = 0.0f, fh = 0.0f, ww = 0.0f, wh = 0.0f;
+        if (!size(frame, fw, fh) || !size(work, ww, wh) || depth == 0u)
+            return false;
+        const Id scratch = passScratch(3u, work);
+        if (scratch == 0u)
+            return false;
+        struct Rect16
+        {
+            int32_t u0, v0, u1, v1;
+        };
+        const int32_t w16 = int32_t(fw) * 16, h16 = int32_t(fh) * 16;
+        Rect16 c{0, 0, int32_t(fw) * 8, int32_t(fh) * 8};
+        Rect16 d{0, 0, w16, h16};
+        Id source = frame;
+        const int levels = std::clamp(int(pass.params[0]), 0, 7);
+        for (int i = 0; i < levels; ++i)
+        {
+            // The copy: from the source's rectangle d into c, 8 up and left.
+            Material copy = spriteMaterial();
+            const float uv[4] = {d.u0 / 16.0f, d.v0 / 16.0f, d.u1 / 16.0f, d.v1 / 16.0f};
+            if (source == work)
+            {
+                // The level before is the work buffer's own: through the
+                // scratch, so no draw reads the target it writes.
+                Material plain = copy;
+                plain.linear = false;
+                passRect(scratch, work, uv, uv, 1.0f, plain);
+                source = scratch;
+            }
+            const float into[4] = {(c.u0 - 8) / 16.0f, (c.v0 - 8) / 16.0f, (c.u1 - 8) / 16.0f, (c.v1 - 8) / 16.0f};
+            passRect(work, source, into, uv, 1.0f, copy);
+            // The strip over the frame.
+            MeshDraw strip;
+            reuseMeshBuffers(strip);
+            strip.target = frame;
+            strip.depthTarget = depth;
+            strip.hasModel = false;
+            strip.scissor = {0, 0, int32_t(fw), int32_t(fh)};
+            Material &m = strip.material;
+            m = spriteMaterial();
+            m.sourceTarget = work;
+            m.sourceAlpha = 1.0f; // read with TEXA's 0x80
+            m.blending = true;
+            m.srcFactor = BlendFactor::SrcAlpha;
+            m.dstFactor = BlendFactor::InvSrcAlpha;
+            m.depthTest = Compare::GreaterEqual;
+            m.depthWrite = false;
+            m.colorWrite = 0x7u;
+            const float depths[2] = {pass.params[2 + 2 * i], pass.params[3 + 2 * i]};
+            const float dx = float(w16) / 16.0f, du = float(c.u1 - c.u0) / 16.0f;
+            float xx = 0.0f, uu = float(c.u0);
+            int sel = i % 2;
+            const auto column = [&](float x16, float u16, float z) {
+                for (int edge = 0; edge < 2; ++edge)
+                {
+                    Vertex v;
+                    v.position[0] = float(int32_t(x16)) / 16.0f;
+                    v.position[1] = edge == 0 ? 0.0f : fh;
+                    v.position[2] = z;
+                    v.uv[0] = float(int32_t(u16)) / 16.0f;
+                    v.uv[1] = edge == 0 ? (c.v0 + 16) / 16.0f : (c.v1 - 16) / 16.0f;
+                    v.color[0] = v.color[1] = v.color[2] = 1.0f;
+                    v.color[3] = pass.params[1];
+                    strip.vertices.push_back(v);
+                }
+            };
+            column(xx, uu, depths[0]);
+            while (xx < float(w16))
+            {
+                sel = !sel;
+                xx += dx;
+                uu += du;
+                column(xx, uu, depths[sel]);
+            }
+            for (uint32_t k = 0; k + 3 < strip.vertices.size(); k += 2)
+                strip.indices.insert(strip.indices.end(), {k, k + 1, k + 2, k + 1, k + 3, k + 2});
+            strip.source = 0x50415353u;
+            m_meshes.push_back(std::move(strip));
+            // The next level.
+            d = c;
+            const int32_t du16 = d.u1 - d.u0, dv16 = d.v1 - d.v0;
+            c.u0 += du16;
+            c.u1 = c.u0 + du16 * 2 / 3;
+            c.v0 += dv16;
+            c.v1 = c.v0 + dv16 * 2 / 3;
+            source = work;
+        }
+        return true;
+    }
     default:
         return false;
     }

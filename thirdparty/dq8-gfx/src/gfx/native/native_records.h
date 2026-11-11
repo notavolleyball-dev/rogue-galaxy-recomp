@@ -369,6 +369,10 @@ enum class PassKind : uint8_t
     // sixteenths of a pixel, 1-3 the color it is added onto the frame at,
     // 4 its alpha.
     Bloom,
+    // DofFilterDrawMaybe: work[0] the levels (each a blurred copy of the
+    // one before, side by side). params: 0 the levels' count (at most 7),
+    // 1 the alpha they are laid over the frame at, then two depths a level
+    // (the renderer's): where the scene is behind them, the level shows.
     DepthOfField,
     PlaneShadow,
     CBlur,
@@ -394,6 +398,7 @@ struct Pass
     PassKind kind = PassKind::Glare;
     Id frame = 0;
     Id work[4] = {};
+    Id depth = 0; // the frame's depth, for a pass that tests against it
     float params[16] = {};
 };
 
