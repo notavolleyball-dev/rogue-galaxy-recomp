@@ -20,8 +20,10 @@ author wants to redraw.
   after a restart.
 - F1 > Settings > Textures has a switch for each pack found
   ([OPTIONS.md](OPTIONS.md)). A switch takes effect at once.
-- Region packs are drawn above 1x (an internal scale of 2x or more). A
-  PCSX2 pack works at 1x too.
+- PCSX2 packs are drawn at any internal scale. Region packs (2D art) are
+  listed but not drawn at the moment: the renderer that drew them was
+  removed with the GS emulation, and they return when the 2D gets records
+  of its own (M4 of [NATIVE-ONLY.md](NATIVE-ONLY.md)).
 
 ## Where packs go
 
@@ -35,13 +37,14 @@ author wants to redraw.
 
 ## Collecting what a pack can replace
 
-`debug\RogueGalaxy-collect.bat` plays the game while writing each region
-that appears on the screen once into `textures\collected`. A region is the
-rectangle a sprite draws from a texture (a window piece, an icon, a label),
-named by its content: `TEXELS_CLUT_WxH.png`, the texels' hash, the palette's
-hash (both 16 hex digits) and the size in texels. The font's glyphs are
-regions too, one a glyph. The PNG's alpha is doubled (the console's 0x80 is
-opaque, written as 255).
+Collecting 2D art by region (`RG_TEXTURE_DUMP`,
+`debug\RogueGalaxy-collect.bat`) is gone with the GS emulation that saw
+the regions; it returns with the region packs (M4 of
+[NATIVE-ONLY.md](NATIVE-ONLY.md)). A region was the rectangle a sprite
+draws from a texture (a window piece, an icon, a label), named by its
+content: `TEXELS_CLUT_WxH.png`, the texels' hash, the palette's hash (both 16
+hex digits) and the size in texels, its alpha doubled (the console's 0x80 is
+opaque, written as 255). Packs collected so are still read and listed.
 
 ## A pack's files
 
@@ -100,10 +103,14 @@ region pack redraws them), whatever pictures of them the pack has. The story
 screen's starry background is drawn as 3D, and is replaced.
 
 The game names a texture as PCSX2 does, by an XXH3-64 hash: of the GS blocks it
-covers for an 8-bit or 4-bit texture, of its indices a byte each, row by row,
-for one smaller than a block or with its indices in a 32-bit word's high bits
-(8H, 4HL, 4HH). It draws the pack's picture, which is 2 to 8 times larger, in
-its place. Textures of direct colour (32, 24 and 16 bits, named
+would cover for an 8-bit or 4-bit texture (its indices laid out as the GS lays
+them, `src/pcsx2_hash.cpp`; no GS memory is kept), of its indices a byte each,
+row by row, for one smaller than a block. The native producer hashes each
+texture and palette pair a mesh draws once, and draws the pack's picture, a
+whole multiple of the texture's size (1 to 16 times), in its place, filtered
+unless the pack says `"filter": "nearest"`. Not for a tile of a sheet (a draw
+with region clamp or repeat). The producer's stats line counts the pairs
+looked up, the pictures made and the draws given one. Textures of direct colour (32, 24 and 16 bits, named
 `TEX0HASH-BITS`) are not replaced: in the packs seen they are mostly captures
 of the screen, which change every frame. The
 palette's hash in the name is the hash PCSX2 makes of the palette's 16 or 256
@@ -116,17 +123,16 @@ GPU as they are and stay compressed there: a BC3 (DXT5) picture takes a
 quarter of the memory it would decoded. Walking through Salgin's town at 3x,
 a US pack's pictures took 28 MB instead of 114. A format the GPU does not
 sample is decoded as before, and `RG_TEXTURE_PACK_DECODE=1` decodes them all,
-to compare. The 2D art's pictures are always decoded: their alpha is halved
-and the texels a draw does not show are cleared, which blocks do not allow.
+to compare.
 
-`RG_TEXTURE_DUMP_WHOLE=DIR` writes each such texture the game builds, whole
+`RG_TEXTURE_DUMP_WHOLE=DIR` writes each such texture the game draws, whole
 and in colour, as `TEX0HASH-CLUTHASH-BITS.pam` (RGBA, alpha as the GS's),
 to make a pack for the textures the game really uses. The two textures that
 differ only by palette get a file each. The disc does not give the list
 beforehand: the game builds most of its 8-bit textures in memory from several
 pieces, so only what the game draws names them.
 
-xxHash (`xxhash.h`, in `thirdparty/dq8-gfx`) is Yann Collet's, BSD 2-Clause.
+xxHash (`src/xxhash.h`) is Yann Collet's, BSD 2-Clause.
 
 ## Not yet
 

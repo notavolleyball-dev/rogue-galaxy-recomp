@@ -643,7 +643,7 @@ struct SdlGpuPresenter::Impl {
         last = now;
         // The first call sets the baseline.
         struct Previous {
-            uint64_t presentNanos, submissions, refreshes;
+            uint64_t presentNanos, submissions, refreshes, gpuCalls, meshes, passes, copies;
             uint64_t getPictureNanos, getPictureCount, writeFrameNanos, writeFrameCount, demuxNanos, demuxCount;
             uint64_t refused, dispatches, throws, suspends, loops, resumes, pumps, enters;
         };
@@ -652,6 +652,11 @@ struct SdlGpuPresenter::Impl {
         is.presentNanos = presentNanos;
         is.submissions = device.submissions();
         is.refreshes = counts.refreshes;
+        const native::Renderer::Totals totals = renderer.totals();
+        is.gpuCalls = totals.gpuCalls;
+        is.meshes = totals.meshesDrawn;
+        is.passes = totals.passes;
+        is.copies = totals.copies;
         is.getPictureNanos = g_mpegGetPictureNanos.load(std::memory_order_relaxed);
         is.getPictureCount = g_mpegGetPictureCount.load(std::memory_order_relaxed);
         is.writeFrameNanos = g_mpegWriteFrameNanos.load(std::memory_order_relaxed);
@@ -676,14 +681,16 @@ struct SdlGpuPresenter::Impl {
             return seconds > 0.0 ? static_cast<double>(nanosNow - nanosWas) / 1e9 / seconds * 100.0 : 0.0;
         };
         std::fprintf(stderr,
-                     "[present] %.1f fps (presenting %.0f%% of wall) over %u frames | submits=%llu refreshes=%llu"
-                     " | scale %ux | longest frame %.1f ms\n"
+                     "[gfx] %.1f fps (backend %.0f%% of wall) over %u frames | draws=%llu meshes=%llu passes=%llu"
+                     " copies=%llu submits=%llu refreshes=%llu | scale %ux | longest frame %.1f ms\n"
                      "  movie: get-picture=%llu (%.0f%%) write-frame=%llu (%.0f%%) demux=%llu (%.0f%%) refused=%llu"
                      " es-buffer-peak=%lluKiB | threads: demux=%u get-picture=%u | ee-dispatches=%llu (%llu/frame)"
                      " throws=%llu\n"
                      "  sched: loop=%llu (%.0f/s) resumes=%llu pumps=%llu enter-guest=%llu suspends=%llu\n",
                      seconds > 0.0 ? static_cast<double>(interval) / seconds : 0.0,
-                     share(is.presentNanos, was.presentNanos), interval, d(is.submissions, was.submissions),
+                     share(is.presentNanos, was.presentNanos), interval, d(is.gpuCalls, was.gpuCalls),
+                     d(is.meshes, was.meshes), d(is.passes, was.passes), d(is.copies, was.copies),
+                     d(is.submissions, was.submissions),
                      d(is.refreshes, was.refreshes), scale, longestGap * 1e3, d(is.getPictureCount, was.getPictureCount),
                      share(is.getPictureNanos, was.getPictureNanos), d(is.writeFrameCount, was.writeFrameCount),
                      share(is.writeFrameNanos, was.writeFrameNanos), d(is.demuxCount, was.demuxCount),

@@ -10,10 +10,10 @@ if pgrep -x roguegalaxy > /dev/null; then echo "a game is running; not starting"
 export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-1
 LOAD="909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5"
 export RG_INPUT="$LOAD${EXTRA:+,$EXTRA}"
-export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_GS_SCALE=1
+export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_SCALE=1
 rm -rf build/run/mc0-run; cp -r build/run/mc0-late build/run/mc0-run
 export RG_MC0_DIR=build/run/mc0-run RG_SETTINGS_FILE=build/run/native-on.ini
-export RG_VU1_HARVEST=build/harvest RG_VU1_NATIVE=check RG_VU1_NATIVE_CHECK_EVERY=16 RG_NATIVE_RENDERER=1
+export RG_VU1_HARVEST=build/harvest RG_VU1_NATIVE=check RG_VU1_NATIVE_CHECK_EVERY=16
 export DQ8_GFX_SCREENSHOT_DIR=build/run/shots/$NAME DQ8_GFX_SCREENSHOT_EVERY=$SHOT
 for assignment in "$@"; do export "$assignment"; done
 rm -rf build/run/shots/$NAME; mkdir -p build/run/shots/$NAME

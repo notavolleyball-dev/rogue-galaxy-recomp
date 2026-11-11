@@ -2,7 +2,7 @@
 # cyc.sh NAME BIN: the unpaced walk; 20 s of hardware counters on the game
 # thread once it is unpaced; cycles and instructions per frame.
 S=$(dirname "$0"); NAME=$1; BIN=$2
-(RG_DIR=$PWD RG_BIN=$BIN RG_NATIVE_PIPELINE=1 $S/walk.sh $NAME gpu 130 3000 >/dev/null 2>&1 &)
+(RG_DIR=$PWD RG_BIN=$BIN $S/walk.sh $NAME gpu 130 3000 >/dev/null 2>&1 &)
 sleep 80
 pid=$(pgrep -x "$(basename $BIN | cut -c1-15)"); tid=$(ps -L -o tid=,comm= -p $pid | awk '$2=="GameThread"{print $1}'); vtid=$(ps -L -o tid=,comm= -p $pid | awk '$2=="VIF1"{print $1}')
 L=$(grep -c "\[gfx\] [0-9.]* fps" build/run/$NAME.log)

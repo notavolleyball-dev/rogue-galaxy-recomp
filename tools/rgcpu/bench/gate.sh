@@ -22,11 +22,10 @@ run() { # NAME BIN SCALE [ENV...]
     local name=$1 bin=$2 scale=$3; shift 3
     (
         export RG_INPUT="909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5,2223:CIRCLE:5,2277:CIRCLE:5,2900:LUP:240"
-        export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_GS_SCALE=$scale
+        export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_SCALE=$scale
         export RG_MC0_DIR=build/run/mc0-bench RG_SETTINGS_FILE="build/run/gate-$name.ini" RG_STALL_WATCH=0
-        export RG_GS_FRAMELOG="build/run/gate-$name.txt@3000"
         for e in "$@"; do export "$e"; done
-        rm -f "build/run/gate-$name.txt" "build/run/gate-$name.txt.vram" "build/run/gate-$name.ini"
+        rm -f "build/run/gate-$name.ini"
         "$bin" disc/SCUS_974.90 > "build/run/gate-$name.log" 2>&1 &
         pid=$!
         for _ in $(seq 1 240); do sleep 1; [ -s "build/run/gate-$name.txt.vram" ] && grep -q "frame logged" "build/run/gate-$name.log" && break; kill -0 $pid 2>/dev/null || break; done

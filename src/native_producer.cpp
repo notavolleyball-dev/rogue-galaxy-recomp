@@ -2377,7 +2377,9 @@ native::PixelFormat blockFormat(int blocks)
 
 // Locked. Texture packs (texture_pack.h): an indexed texture with its
 // palette, drawn from the pack's picture of it when it has one, as the GS
-// backend's texture cache drew it until M1 of docs/NATIVE-ONLY.md. The
+// backend's texture cache drew it until M1 of docs/NATIVE-ONLY.md: on the 3D
+// alone (a mesh's material), not on the 2D pieces (sprites: the menus, the
+// icons, the minimap), which stay as the game draws them. The
 // picture is a texture record of its own (RGBA8, or the pack's BC blocks),
 // larger than the game's, addressed at the game's size and filtered unless
 // the pack says "nearest". Not for a tile of a sheet (region clamp or
@@ -2870,7 +2872,6 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             native::TextureFunction::Highlight2};
         m.function = functions[c.tex0.tfx & 3u];
         m.textureAlpha = c.tex0.tcc != 0u;
-        replaceWhole(s, c.tex0, m);
     }
     if (drawState->prim.abe)
         if (!blendOf(c.alpha, m))

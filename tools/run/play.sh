@@ -1,22 +1,21 @@
 #!/bin/bash
-# Play perf/native-cpu with the native pipeline on; RG_NATIVE_CPU=1 by default.
+# Play with RG_NATIVE_CPU=1 by default.
 #   tools/run/play.sh cpu0     the old checkpoint unwinds instead (flag off), to compare
 #   tools/run/play.sh          your normal saves
 #   tools/run/play.sh late     a fresh copy of the end-game save (mc0-late)
-#   tools/run/play.sh gs       the GS path instead (flags off), to compare
+#   (the GS path is gone: build the tag gs-path-final to compare)
 #   tools/run/play.sh rdoc     under RenderDoc, so F8 bug marks carry the frame:
 #                              F8 with the mouse over the fault, then tools/bugmark/bugmark.py
 #   tools/run/play.sh late RG_NATIVE_DOF=0   any VAR=value is passed through
 cd "$(dirname "$0")/../.." || exit 1
 export RG_SETTINGS_FILE=build/run/native-on.ini
 export RG_LOG_FILE=build/run/play.log
-export RG_NATIVE_RENDERER=1 RG_NATIVE_PIPELINE=1 RG_NATIVE_CPU=1 DQ8_GFX_STATS_EVERY=600
+export RG_NATIVE_CPU=1 DQ8_GFX_STATS_EVERY=600
 for a in "$@"; do
   case $a in
     late) rm -rf build/run/mc0-play; cp -r build/run/mc0-late build/run/mc0-play
           export RG_MC0_DIR=build/run/mc0-play ;;
     cpu0) unset RG_NATIVE_CPU ;;
-    gs)   unset RG_NATIVE_PIPELINE; export RG_NATIVE_RENDERER=0 ;;
     rdoc) # RenderDoc's layer built with Wayland support (the Arch package has none, and
           # through X11 the picture flashed): ~/.local/share/renderdoc-wayland.
           export VK_ADD_IMPLICIT_LAYER_PATH=$HOME/.local/share/renderdoc-wayland ENABLE_VULKAN_RENDERDOC_CAPTURE=1 ;;

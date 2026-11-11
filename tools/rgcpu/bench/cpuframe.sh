@@ -3,7 +3,7 @@
 # (Main: the presenter). RG_BIN picks the binary, as walk.sh.
 NAME=$1
 cd "$(dirname "$0")/../../.." || exit 1
-(XDG_RUNTIME_DIR=/run/user/$(id -u) RG_WALK_SHOTS=0 RG_DRAW_STAGE=1 RG_NATIVE_CPU=1 RG_DIR=$PWD RG_NATIVE_PIPELINE=1 bash tools/rgcpu/bench/walk.sh $NAME gpu 110 3000 >/dev/null 2>&1 &)
+(XDG_RUNTIME_DIR=/run/user/$(id -u) RG_WALK_SHOTS=0 RG_DRAW_STAGE=1 RG_NATIVE_CPU=1 RG_DIR=$PWD bash tools/rgcpu/bench/walk.sh $NAME gpu 110 3000 >/dev/null 2>&1 &)
 for i in $(seq 1 100); do sleep 1; f=$(grep -oE '\[gfx\] [0-9]+' build/run/$NAME.log | tail -1 | grep -oE '[0-9]+'); [ "${f:-0}" -gt 200 ] && break; done; sleep 2
 pid=$(pgrep -x roguegalaxy)
 f0=$(grep -c '\[gfx\] [0-9.]* fps' build/run/$NAME.log)

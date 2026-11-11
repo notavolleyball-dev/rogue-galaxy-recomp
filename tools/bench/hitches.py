@@ -12,8 +12,7 @@ created and the VU1 pairs that ran on the interpreter. F9 marks and overlay
 loads and profile windows are rows of their own. --over MS keeps only the intervals whose
 longest frame exceeds MS (and the marks).
 
-A bench's frame capture (RG_GS_FRAMELOG, "[gs-census] frame logged") is a
-hitch of its own, a quarter to half a second: not the game's. A hitch that
+A hitch that
 holds the main thread as an interval's line is printed shows its longest
 frame in that row and its main stall in the next.
 """

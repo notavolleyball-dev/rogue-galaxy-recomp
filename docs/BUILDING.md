@@ -32,10 +32,10 @@ python setup.py check
 
 From the repository root. The generated code is built with clang (the flags
 are GNU-style; on Windows an LLVM MinGW clang works). Configuring the game
-downloads raylib and SDL3, glslang (for the GPU backend's shaders) when no
+downloads raylib and SDL3, glslang (for the renderer's shaders) when no
 GLSL compiler is installed, and, on Windows, a prebuilt LGPL FFmpeg whose
-hash the framework pins. `-DRG_GS_SDLGPU=OFF` at configure leaves out the
-GPU backend, and with it the menu: the game draws with the software GS.
+hash the framework pins. The game needs a GPU with Vulkan: it is drawn by
+the native renderer (SPIR-V shaders), and there is no software fallback.
 
 ```bash
 # 1. The recompiler: applies patches/ps2recomp to the pinned framework, then

@@ -9,9 +9,9 @@ S = os.path.join(ROOT, 'build/run/gbisect'); os.makedirs(S, exist_ok=True)
 os.chdir(ROOT)
 addrs = sorted(int(l.split()[0], 16) for l in open('build/generated/native/funcs.txt') if l.strip() and not l.startswith('#'))
 env = dict(os.environ)
-env.update(RG_NATIVE_CPU='1', RG_NATIVE_PIPELINE='1', RG_NATIVE_RENDERER='1', RG_VU1_NATIVE='gpu',
+env.update(RG_NATIVE_CPU='1', RG_VU1_NATIVE='gpu',
     RG_INPUT="909:CROSS:5,999:CROSS:5,1059:DOWN:5,1118:CROSS:5,1238:CROSS:5,1358:CROSS:5,1478:CROSS:5,1569:CROSS:5,1629:CROSS:5,2019:CROSS:5,2069:CROSS:5,2223:CIRCLE:5,2277:CIRCLE:5",
-    RG_INPUT_CLOCK='pad', RG_MUTE='1', DQ8_GFX_HIDDEN_WINDOW='1', RG_FPS='60', RG_GS_SCALE='1',
+    RG_INPUT_CLOCK='pad', RG_MUTE='1', DQ8_GFX_HIDDEN_WINDOW='1', RG_FPS='60', RG_SCALE='1',
     RG_MC0_DIR='build/run/mc0-bench', RG_SETTINGS_FILE='build/run/bench-settings.ini', RG_STALL_WATCH='0')
 env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
 def run(lo, hi, tag, limit=80):

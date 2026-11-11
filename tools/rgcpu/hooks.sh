@@ -26,8 +26,8 @@ boot() { # NAME ENV...
     )
 }
 boot defaults
-boot pipeline RG_NATIVE_RENDERER=1 RG_NATIVE_PIPELINE=1
-boot options RG_NATIVE_RENDERER=1 RG_TEXT_LANG=FR RG_DIRECTOR_CUT_BALANCE=1 RG_DIRECTOR_CUT_ENEMIES=1 \
+boot pipeline
+boot options RG_TEXT_LANG=FR RG_DIRECTOR_CUT_BALANCE=1 RG_DIRECTOR_CUT_ENEMIES=1 \
     RG_DIRECTOR_CUT_PARTY_AI=1 RG_MOUSE_CAMERA=1 RG_DEV_TOOLS=1
 F=config/SCUS_974.90/native-hooks.txt
 { grep '^#' "$F"; cat "$OUT"/*.txt <(grep -v '^#' "$F") | tr 'A-F' 'a-f' | sort -u; } > "$OUT/merged"

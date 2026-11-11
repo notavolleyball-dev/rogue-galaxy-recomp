@@ -207,12 +207,11 @@ fi
 # MC0=DIR: another card, e.g. build/run/mc0-battle holding only the
 # player's File 03 (two characters, a field where walking meets a battle).
 export RG_MC0_DIR=${MC0:-build/run/mc0-bench}
-export RG_GS_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GFX_STATS_EVERY=${STATS_EVERY:-60}
+export RG_SCALE=$SCALE RG_SETTINGS_FILE="build/run/bench-settings.ini" DQ8_GFX_STATS_EVERY=${STATS_EVERY:-60}
 # FRAME=N logs the frame at another pad read (the battle script: 5400).
-export RG_GS_FRAMELOG="build/run/$NAME.txt@${FRAME:-2660}"
 # Either way, over the bench settings' 60 frames per second switch.
 if [ "$FPS" = "60" ]; then export RG_FPS=60; else export RG_FPS=30; fi
-unset RG_GS_FRAMESKIP RG_TIME_TRACE RG_PROFILE RG_POS_TRACE
+unset RG_TIME_TRACE RG_PROFILE RG_POS_TRACE
 # TIME_TRACE=1: the 60 fps mode's timing lines ([timing] frame time and
 # scale every 300 updates).
 if [ "$TIME_TRACE" = "1" ]; then export RG_TIME_TRACE=1; fi
