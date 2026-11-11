@@ -598,6 +598,129 @@ bool Renderer::expandPass(const Pass &pass)
         }
         return true;
     }
+    case PassKind::PlaneShadow:
+    {
+        // DrawListEndPlaneShadowPass_146cc0. The volumes were drawn into the
+        // mask (VU1 meshes, before the pass); the mask less 1 (clamped at 0,
+        // as the GS's blend was); then either the frame darkened where the
+        // mask is not black, or the mask blurred into its copy (the mask's
+        // shadowed texels 0x27 strong, six shifted adds), and the copy laid
+        // over the frame darkening, colored, or subtracting.
+        const Id frame = pass.frame, mask = pass.work[0], blurred = pass.work[1];
+        float fw = 0.0f, fh = 0.0f, mw = 0.0f, mh = 0.0f, bw = 0.0f, bh = 0.0f;
+        if (!size(frame, fw, fh) || !size(mask, mw, mh) || !size(blurred, bw, bh))
+            return false;
+        const Id scratchMask = passScratch(5u, mask), scratch = passScratch(6u, blurred);
+        if (scratchMask == 0u || scratch == 0u)
+            return false;
+        const float strength = pass.params[0], clampTo = pass.params[5];
+        const int flags = int(pass.params[4]);
+        const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float maskRect[4] = {0.0f, 0.0f, mw, mh}, frameRect[4] = {0.0f, 0.0f, fw, fh};
+        const float blurRect[4] = {0.0f, 0.0f, bw, bh};
+        // The mask less 1, clamped through the scratch.
+        {
+            Material less = spriteMaterial();
+            less.blending = true;
+            less.srcFactor = BlendFactor::One;
+            less.dstFactor = BlendFactor::One;
+            less.blendOp = BlendOp::ReverseSubtract;
+            passRect(mask, 0u, maskRect, none, 1.0f, less);
+            Material copy = spriteMaterial();
+            copy.linear = false;
+            copy.colorClamp = clampTo;
+            passRect(scratchMask, mask, maskRect, maskRect, 1.0f, copy);
+            passRect(mask, scratchMask, maskRect, maskRect, 1.0f, copy);
+        }
+        if ((flags & 1) == 0)
+        {
+            // The frame times (1 - the strength) where the mask is not black
+            // (read without its alpha: the strength, 0 on black; alpha test
+            // GEQUAL 1/128).
+            Material dark = spriteMaterial();
+            dark.sourceAlpha = strength;
+            dark.alphaZeroOnBlack = true;
+            dark.alphaTest = Compare::GreaterEqual;
+            dark.alphaReference = 1.0f / 128.0f;
+            dark.alphaFail = AlphaFail::Nothing;
+            dark.blending = true;
+            dark.srcFactor = BlendFactor::Zero;
+            dark.dstFactor = BlendFactor::InvSrcAlpha;
+            passRect(frame, mask, frameRect, maskRect, 1.0f, dark);
+            return true;
+        }
+        // The mask into its copy: its shadowed texels at 0x27, as
+        // HIGHLIGHT2 (Ct + Af) times that alpha, three quarters of a pixel
+        // up and left.
+        {
+            Material in = spriteMaterial();
+            in.sourceAlpha = 0x27 / 128.0f;
+            in.alphaZeroOnBlack = true;
+            in.function = TextureFunction::Highlight2;
+            in.blending = true;
+            in.srcFactor = BlendFactor::SrcAlpha;
+            in.dstFactor = BlendFactor::Zero;
+            const float rect[4] = {-0.75f, -0.75f, bw - 0.75f, bh - 0.75f};
+            passRect(blurred, mask, rect, maskRect, 1.0f, in);
+        }
+        // Six adds of itself, shifted (through the scratch).
+        {
+            Material plain = spriteMaterial();
+            plain.linear = false;
+            Material add = additive(spriteMaterial());
+            const float rgba[4] = {0x24 / 128.0f, 0x24 / 128.0f, 0x24 / 128.0f, 0x10 / 128.0f};
+            for (int k = 0; k < 6; ++k)
+            {
+                passRect(scratch, blurred, blurRect, blurRect, 1.0f, plain);
+                const float ox = pass.params[6 + 2 * k], oy = pass.params[7 + 2 * k];
+                const float rect[4] = {ox, oy, bw + ox, bh + oy};
+                passRect(blurred, scratch, rect, blurRect, rgba, add);
+            }
+            Material clamped = plain;
+            clamped.colorClamp = clampTo;
+            passRect(scratch, blurred, blurRect, blurRect, 1.0f, clamped);
+            if (flags & 2)
+            {
+                Material swap = plain;
+                swap.function = TextureFunction::Decal;
+                swap.shuffle = ChannelShuffle::RedGreenToBlueAlpha;
+                passRect(blurred, scratch, blurRect, blurRect, 1.0f, swap);
+            }
+            else
+                passRect(blurred, scratch, blurRect, blurRect, 1.0f, plain);
+        }
+        // The copy over the frame, the frame's alpha kept.
+        {
+            Material over = spriteMaterial();
+            over.blending = true;
+            over.colorWrite = 0x7u;
+            float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            if ((flags & 2) && (flags & 4))
+            {
+                for (int c = 0; c < 3; ++c)
+                    rgba[c] = float(int32_t(128.0f * pass.params[1 + c])) / 128.0f;
+                rgba[3] = float(int32_t(128.0f * (1.0f - strength))) / 128.0f;
+                over.srcFactor = BlendFactor::SrcAlpha; // preset 1: (Cs - Cd) As + Cd
+                over.dstFactor = BlendFactor::InvSrcAlpha;
+            }
+            else if (flags & 2)
+            {
+                rgba[3] = float(int32_t(128.0f * strength)) / 128.0f;
+                over.srcFactor = BlendFactor::Zero; // preset 7: Cd (1 - As)
+                over.dstFactor = BlendFactor::InvSrcAlpha;
+            }
+            else
+            {
+                const float c = float(int32_t(128.0f * strength)) / 128.0f;
+                rgba[0] = rgba[1] = rgba[2] = c;
+                over.srcFactor = BlendFactor::One; // preset 10: Cd - Cs
+                over.dstFactor = BlendFactor::One;
+                over.blendOp = BlendOp::ReverseSubtract;
+            }
+            passRect(frame, blurred, frameRect, blurRect, rgba, over);
+        }
+        return true;
+    }
     default:
         return false;
     }

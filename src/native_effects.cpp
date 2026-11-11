@@ -216,13 +216,54 @@ void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 PS2Runtime::RecompiledFunction g_shadowOriginal = nullptr;
 
+uint32_t g_shadowUnit = 0u; // game thread
+
 void afterShadow(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Shadow);
+    addRange(top, stackTop(), Effect::Shadow, g_shadowUnit);
+    g_shadowUnit = 0u;
 }
 
+// DrawListEndPlaneShadowPass_146cc0(ctx): nothing unless ctx+0x3890 (set by
+// the begin); the mask's node at ctx+0x38D0, the blurred copy's at
+// ctx+0x39B0, flags at ctx+0x39A0 (blur), +0x39A4 (red and green onto blue
+// and alpha), +0x39A8 (colored), the strength at +0x3A18 and the color at
+// +0x3A20; the blur's offsets are the tables at 0x449CD0 and 0x449CF0
+// (docs/NATIVE-ONLY-NOTES.md). The call runs: it also reapplies the
+// camera and writes the light state's packet.
 void planeShadowEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t a = getRegU32(ctx, 4);
+    g_shadowUnit = 0u;
+    if (a != 0u && read32(a + 0x3890u) != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 3u; // native::PassKind::PlaneShadow
+        const uint32_t mask = a + 0x38D0u, blurred = a + 0x39B0u;
+        request.workBases[0] = descriptorBase(mask);
+        request.workBases[1] = descriptorBase(blurred);
+        const auto side = [](uint32_t node, uint32_t at) {
+            int16_t v = 0;
+            std::memcpy(&v, g_rdram + physical(node + at), sizeof(v));
+            return v > 0 ? static_cast<uint32_t>(v) : 0u;
+        };
+        request.workSizes[0][0] = side(mask, 2u);
+        request.workSizes[0][1] = side(mask, 4u);
+        request.workSizes[1][0] = side(blurred, 2u);
+        request.workSizes[1][1] = side(blurred, 4u);
+        request.params[0] = readFloatAt(a + 0x3A18u);
+        for (int c = 0; c < 3; ++c)
+            request.params[1 + c] = readFloatAt(a + 0x3A20u + 4u * c);
+        request.params[4] = float((read32(a + 0x39A0u) != 0u ? 1 : 0) | (read32(a + 0x39A4u) != 0u ? 2 : 0) |
+                                  (read32(a + 0x39A8u) != 0u ? 4 : 0));
+        request.params[5] = 255.0f / 128.0f;
+        for (int k = 0; k < 6; ++k)
+        {
+            request.params[6 + 2 * k] = float(static_cast<int32_t>(read32(0x449CD0u + 4u * k)) - 8) / 16.0f;
+            request.params[7 + 2 * k] = float(static_cast<int32_t>(read32(0x449CF0u + 4u * k)) - 8) / 16.0f;
+        }
+        g_shadowUnit = keepPass(request);
+    }
     rg::hooks::callThen(g_shadowOriginal, rdram, ctx, runtime, &afterShadow, stackTop());
 }
 
@@ -1773,7 +1814,7 @@ bool isPass(Effect effect)
 {
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
            effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof ||
-           effect == Effect::Focus;
+           effect == Effect::Focus || effect == Effect::Shadow;
 }
 
 bool emitPass(Effect effect, uint32_t unit)

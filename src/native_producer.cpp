@@ -3641,7 +3641,7 @@ bool pass(const PassRequest &request)
         return false;
     }
     std::copy(std::begin(request.params), std::end(request.params), record.params);
-    for (int i = 0; i < 16; ++i)
+    for (int i = 0; i < 24; ++i)
         if (request.depthParams & (1u << i))
             record.params[i] = standardDepth(record.params[i], s.lastDepthScale, s.lastDepthOffset);
     if (request.sceneDepth)

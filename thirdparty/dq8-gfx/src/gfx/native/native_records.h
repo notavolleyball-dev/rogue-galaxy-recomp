@@ -374,6 +374,11 @@ enum class PassKind : uint8_t
     // 1 the alpha they are laid over the frame at, then two depths a level
     // (the renderer's): where the scene is behind them, the level shows.
     DepthOfField,
+    // DrawListEndPlaneShadowPass: work[0] the shadow volumes' mask,
+    // work[1] its blurred copy. params: 0 the shadow's strength, 1-3 its
+    // color, 4 flags (1 blurred, 2 its red and green made its blue and
+    // alpha, 4 colored), 5 the color clamp, 6-17 the blur's six offsets
+    // (x, y) in pixels.
     PlaneShadow,
     CBlur,
     // ScreenColorFilterMaybe: the frame's alpha rebuilt from its green, its
@@ -404,7 +409,7 @@ struct Pass
     Id frame = 0;
     Id work[4] = {};
     Id depth = 0; // the frame's depth, for a pass that tests against it
-    float params[16] = {};
+    float params[24] = {};
 };
 
 // A target, or a rectangle of it, set to a color, a depth or both, in order

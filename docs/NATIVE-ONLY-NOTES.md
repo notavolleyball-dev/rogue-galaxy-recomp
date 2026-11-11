@@ -221,3 +221,37 @@ from the code.
   among the second rounds.
 - **Open:** the CT16 copy under frame mask 3 is taken as the shadow map's
   (blue = red, alpha = green).
+
+### `DrawListEndPlaneShadowPass_146cc0` (M3)
+
+- **Arguments:** `a0` = the draw context. Nothing is drawn unless
+  `+0x3890` (set by the begin) is nonzero. The mask's node is at `+0x38D0`
+  and its blurred copy's at `+0x39B0` (TEX0 at `+0x38`, width `+2`, height
+  `+4`). Flags: `+0x39A0` (blur), `+0x39A4` (red and green onto blue and
+  alpha), `+0x39A8` (colored). Strength at `+0x3A18` (f), color at
+  `+0x3A20..+0x3A28` (f). The blur's offsets come from the six-entry s32
+  tables at `0x449CD0` (x) and `0x449CF0` (y), in sixteenths.
+- **What it draws:**
+  - On the mask, still its environment, an untextured whole sprite, preset
+    3 (`Cd - Cs As`, Cs and As 1.0): the mask less one step, clamped at 0
+    by the GS.
+  - Without the blur: on the frame, the mask read as CT24 with TEXA
+    `TA0 = 128 strength`, AEM 1 (black gives alpha 0), alpha test GEQUAL 1,
+    preset 7 (`Cd (1 - As)`), the whole frame from the whole mask.
+  - With the blur:
+    - Into the copy, the mask as CT24 with `TA0 = 0x27`, AEM, HIGHLIGHT2,
+      preset 8 (`Cs As`), offset by -12 sixteenths.
+    - Six rounds of the copy added onto itself, shifted by the table's
+      offsets less 8 sixteenths, color `(0x24, 0x24, 0x24, 0x10)`.
+    - With `+0x39A4`, the copy's red and green onto its blue and alpha (the
+      CT16 self-copy).
+    - On the frame, the copy over it, color only (alpha kept):
+      - colored: color `128 (r, g, b)`, alpha `128 (1 - strength)`, preset 1;
+      - `+0x39A4` without color: alpha `128 strength`, preset 7;
+      - otherwise: color `128 strength`, preset 10 (`Cd - Cs`).
+- **Side effects:** `ViewReapplyCameraRec`, `LightStateWritePacket` (VU1
+  data, not GS packets), so the call keeps running and only its GS packets
+  are dropped.
+- **The hook emits:** a `Pass` (`PassKind::PlaneShadow`); the renderer
+  clamps the mask and the copy through scratches (float targets don't clamp
+  the way the GS's COLCLAMP did).
