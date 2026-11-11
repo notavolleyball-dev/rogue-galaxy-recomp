@@ -1174,6 +1174,7 @@ enum class UploadPath : uint8_t
     Withheld,   // a record the texture hook made, published here
     Host,       // a host upload nobody made a record of (captured)
     LocalCopy,  // a local-to-local copy (mirrored)
+    Taken,      // a take marker's record (no transfer in the list)
 };
 void countUpload(UploadPath path);
 
@@ -1296,8 +1297,9 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
             // A+D: a transfer's registers alone, its TRXDIR host to local?
             uint64_t bitbltbuf = 0u, trxreg = 0u, trxdir = ~0ull;
             uint32_t others = 0u;
-            thread_local std::vector<uint64_t> binds;
+            thread_local std::vector<uint64_t> binds, takes;
             binds.clear();
+            takes.clear();
             for (uint32_t at = pos + 16u; at + 16u <= end; at += 16u)
             {
                 uint64_t value = 0u;
@@ -1311,8 +1313,37 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     trxdir = value;
                 else if (reg == producer::kBindRegister)
                     binds.push_back(value);
+                else if (reg == producer::kTakeRegister)
+                    takes.push_back(value);
                 else if (reg != 0x51u)
                     ++others;
+            }
+            if (!takes.empty())
+            {
+                // A take marker (the texture hook's records, M6): each
+                // published here as its transfer would have been.
+                for (const uint64_t v : takes)
+                {
+                    bool palette = false;
+                    uint64_t hash = 0u;
+                    uint32_t hashed = 0u;
+                    const uint32_t dbp = uint32_t(v & 0x3FFFu), dbw = uint32_t((v >> 14) & 0x3Fu),
+                                   dpsm = uint32_t((v >> 20) & 0x3Fu), w = uint32_t((v >> 26) & 0xFFFu),
+                                   h = uint32_t((v >> 38) & 0xFFFu);
+                    if (producer::takeProduced(dbp, dbw, dpsm, w, h, palette, hash, hashed))
+                        countUpload(UploadPath::Taken);
+                    else
+                        producer::notePassed(producer::Passed::NotProduced);
+                }
+                if (others == 0u && trxdir == ~0ull && binds.empty())
+                {
+                    drop = true;
+                    if (!copying)
+                    {
+                        kept.assign(data, data + pos);
+                        copying = true;
+                    }
+                }
             }
             if (!binds.empty())
             {
@@ -1659,16 +1690,17 @@ void countUndrawn()
 void countUpload(UploadPath path)
 {
     static std::mutex mutex;
-    static std::unordered_map<uint32_t, uint64_t> byTask[3];
+    static std::unordered_map<uint32_t, uint64_t> byTask[4];
     static uint64_t total = 0u, nextReport = 1u;
     std::lock_guard lock(mutex);
     byTask[static_cast<int>(path)][t_task] += 1u;
     if (++total < nextReport)
         return;
     nextReport = total + 2000u;
-    static const char *const names[3] = {"withheld (hook's record)", "host (no record)", "local copies"};
+    static const char *const names[4] = {"withheld (hook's record)", "host (no record)", "local copies",
+                                         "taken at a marker (no transfer)"};
     std::string line;
-    for (int k = 0; k < 3; ++k)
+    for (int k = 0; k < 4; ++k)
     {
         std::vector<std::pair<uint64_t, uint32_t>> top;
         for (const auto &[task, count] : byTask[k])
@@ -1701,7 +1733,8 @@ void sendPacket(const uint8_t *data, uint32_t size)
         countUndrawn();
     bool transfer = read.image || !read.whole;
     for (const auto &[reg, value] : writes)
-        transfer |= (reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister;
+        transfer |= (reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister ||
+                    reg == rg::nativeproducer::kTakeRegister;
     if (transfer || t_upload.imageBytes != 0u)
     {
         sendRaw(data, size);

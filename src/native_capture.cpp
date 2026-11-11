@@ -130,6 +130,9 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t base = static_cast<uint16_t>(readAt<int16_t>(tex + 0x34u));
         const uint32_t clut = readAt<uint32_t>(tex + 0x60u);
         const uint32_t fn = readAt<uint32_t>(obj + 0x1F4u);
+        // What the producer has queued before this node (the take marker
+        // below, when every palette and level becomes a record).
+        const uint64_t producedBefore = rg::nativeproducer::producedCount();
         uint32_t tbp = static_cast<uint32_t>(tex0 & 0x3FFFu);
         uint32_t tbw = static_cast<uint32_t>((tex0 >> 14) & 0x3Fu);
         uint32_t psm = static_cast<uint32_t>((tex0 >> 20) & 0x3Fu);
@@ -279,6 +282,37 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         for (const producer::TextureLevel &level : levels)
             producer::texture(level);
+        // M6: every palette and level a record (the draw lists' mode, not the
+        // manager's own palette callback): a take marker in place of the
+        // upload packets, and the function not run, as the bind marker.
+        const uint32_t palettes = (n > 0u && clut != 0u) ? count : 0u;
+        const bool takeable = mode == 0u && !callback && !(n > 0u && clut == 0u && count > 0u) &&
+                              rg::vif1::bindingTextures();
+        const uint32_t k = palettes + static_cast<uint32_t>(levels.size());
+        const uint32_t at = physical(dst);
+        if (takeable && k != 0u && producer::producedCount() - producedBefore == k &&
+            at + (2u + k) * 16u <= PS2_RAM_SIZE)
+        {
+            const uint32_t head[8] = {(1u + k) | (1u << 28), 0u, 0u, 0x50000000u | (1u + k),
+                                      k | 0x8000u, 0x10000000u, 0xEu, 0u};
+            std::memcpy(g_rdram + at, head, sizeof(head));
+            uint32_t q = 0u;
+            const auto put = [&](uint64_t value) {
+                const uint64_t pair[2] = {value, producer::kTakeRegister};
+                std::memcpy(g_rdram + at + sizeof(head) + q * 16u, pair, sizeof(pair));
+                ++q;
+            };
+            const uint32_t paletteEntries = nodeBpp == 8 ? 256u : 16u;
+            for (uint32_t i = 0u; i < palettes; ++i)
+                put(producer::takeValue((base + i * n) & 0x3FFFu, 1u, cpsm, paletteEntries == 256u ? 16u : 8u,
+                                        paletteEntries == 256u ? 16u : 2u));
+            for (const producer::TextureLevel &level : levels)
+                put(producer::takeValue(level.tbp, level.transferBufferWidth, level.transferPsm,
+                                        level.transferWidth, level.transferHeight));
+            setReturnS32(ctx, static_cast<int32_t>((2u + k) * 4u));
+            ctx->pc = getRegU32(ctx, 31);
+            return;
+        }
     }
     g_texBuildUploadOriginal(rdram, ctx, runtime);
 }

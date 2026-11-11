@@ -178,6 +178,7 @@ struct State
     uint64_t sequence = 0u;
     std::unordered_map<uint32_t, uint64_t> uploadedSeq, drawnSeq;
     std::deque<Produced> produced;
+    uint64_t producedTotal = 0u; // noteProduced's, ever (producedCount)
     // When the VIF1 thread last took a produced texture (by TBP) or palette
     // (by CBP), against a host image's (step 6).
     std::unordered_map<uint32_t, uint64_t> takenSeq, takenPaletteSeq;
@@ -514,6 +515,7 @@ void noteProduced(State &s, uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t 
     // Never sent ones age out; a bound in case the VIF1 thread takes none.
     if (s.produced.size() >= 8192u)
         s.produced.pop_front();
+    ++s.producedTotal;
     s.produced.push_back(
         {dbp & 0x3FFFu, std::max(dbw, 1u), dpsm & 0x3Fu, width, height, palette, key, psm, id, hash, bytes});
 }
@@ -1298,6 +1300,13 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
     std::lock_guard lock(s.mutex);
     (void)bufferWidth;
     declare(s, base, width, height, psm, kind);
+}
+
+uint64_t producedCount()
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    return s.producedTotal;
 }
 
 bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette,

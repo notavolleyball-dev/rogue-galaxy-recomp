@@ -87,6 +87,22 @@ struct BindEntry
     uint16_t cbp;     // an indexed texture's palette block
 };
 static_assert(sizeof(BindEntry) == 16u, "an A+D qword");
+// M6: a node the marker above could not bind, but whose palettes and levels
+// all became records at the hook (texture(), palette()): in place of its
+// upload packets, a marker of the same shape whose writes to this register
+// each name one record's transfer (DBP bits 0-13, DBW 14-19, DPSM 20-25,
+// width 26-37, height 38-49); the list's run publishes them in the
+// stream's order (takeProduced), as it did where the transfer was.
+constexpr uint8_t kTakeRegister = 0x7Cu;
+inline uint64_t takeValue(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height)
+{
+    return uint64_t(dbp & 0x3FFFu) | (uint64_t(dbw & 0x3Fu) << 14) | (uint64_t(dpsm & 0x3Fu) << 20) |
+           (uint64_t(width & 0xFFFu) << 26) | (uint64_t(height & 0xFFFu) << 38);
+}
+// How many records texture() and palette() have queued for takeProduced
+// so far (game thread: a hook tells whether every one it asked for was
+// made).
+uint64_t producedCount();
 // Whether a level is one a record can be made of (its format, its size, a
 // pre-swizzled one's layout): the hook writes a marker for a node only when
 // every level of it is, and leaves the others their uploads (game thread).
