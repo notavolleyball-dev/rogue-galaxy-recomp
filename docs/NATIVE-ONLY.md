@@ -953,22 +953,25 @@ recovers.
   stream (`src/native_models.*`, its `[model-game]` count and
   `RG_MODEL_GAME_TIME`) went with that: it duplicated what the list's own
   run now does on the same thread.
-- **Left, by name (the user's to agree; `[vu1native]` lines count each as
-  "left to the VU1"):** chunks `declineChunk` refuses still run the VU1
-  interpreter: a chunk whose A enters a plain B past its first entry
-  (quad 76.z and TOP+1.w both set; A jumps to pair 300 + TOP+1.w), a
-  skinning B entered at 7 or past its table (7 is a JR: the VU decodes
-  nothing; 1, 3 and 5 fall into the next branch and are drawn), and PRIM neither strip nor list (a fan: the D
-  pieces' strip window of ADC over a fan's triangles). (Since: chunks of
-  no whole triangle, edge or particle, and those of fewer vertices than a
-  pipelined F piece reads, are the model stage's: it draws the whole ones
-  they have, the VU would run past the chunk's end.)
-  (Since on `native-only/m4b-2d`: the scroll F, quad 88.xy, and the
-  vertex-color C pieces' additive rule, 87.y & 0x100, are the model
-  stage's: row 42 and flag 2.) Each needs its VU code read (tools/vu1) before
-  it can be drawn; none is seen to be frequent, but a play session's
-  counts will say. Unknown programs (identify finds no pieces) run the VU1
-  too.
+- **Declines, settled from the VU code (2026-11-11; the code images
+  expanded from the manifest and the skinning B read from the ELF, its
+  recorded image being partial).** `[vu1native]` counts each by reason
+  under "not drawn".
+  - **Fans (PRIM 5): drawn.** The model stage draws a fan as the list of its
+    triangles (v0, vi, vi+1), each facing as the first.
+  - **The skinning B's entries:** 0-6 as before; **9 and 10 are drawn** (9
+    runs the JR's delay slot, a NOP, into the 4-bone loop at pair 10).
+    **7 and 8** reach its JR: nothing is decoded and the program draws the
+    chunk's raw int16 words as positions (denormal floats at the model's
+    origin), which shows nothing; not drawn, as the VU shows it.
+  - **Not drawn, by name, because the VU itself draws no defined mesh:** an
+    entry into a plain B past its first pair (A jumps to pair 300 +
+    TOP+1.w; the B then skips its own loads of the sections' addresses,
+    vi1-vi3, and decodes from what A left there, the vertex count among
+    them), and an entry into the skinning B past pair 10 (inside its
+    4-bone loop, after its setup). Garbage on the PS2 too; drawing nothing
+    is the closest defined result.
+  - Unknown programs (identify finds no pieces) are counted and not drawn.
 - **Step 2 deleted (M6):** the learning of REF payloads and the MSCNT marks
   that stood for them in the list (`RG_MODEL_ELIDE`, `[model-elide]`) went
   once the model draw calls were drawn from their records: the list no

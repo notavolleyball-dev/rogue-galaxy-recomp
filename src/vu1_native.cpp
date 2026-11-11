@@ -368,11 +368,18 @@ float fromBits(uint32_t bits)
 uint32_t bonesOf(const Program &program, const VuData &vu, uint32_t top)
 {
     // The skinning Bs' entry table (26a933a5, 542b235c, 89123290, 36d686cd
-    // alike): pairs 0, 2, 4, 6 branch to the 1-, 2-, 4- and 4-bone loops; an
-    // odd entry runs its pair's NOP and falls into the next branch (1: 2
-    // bones, 3 and 5: 4); 7 lands on a JR (nothing decoded, not drawn).
+    // alike; read from the ELF, 2026-11-11): pairs 0, 2, 4, 6 branch to the
+    // 1-, 2-, 4- and 4-bone loops; an odd entry runs its pair's NOP and
+    // falls into the next branch (1: 2 bones, 3 and 5: 4); 7 and 8 reach the
+    // JR at pair 8 (nothing decoded: declineChunk's); 9 runs the JR's slot,
+    // a NOP, into the 4-bone loop at pair 10, and 10 is that loop. Past 10
+    // an entry lands inside the loop, after its setup.
     const uint32_t entry = vu.half(76, 2) != 0u ? vu.half(top + 1u, 3) : 0u;
-    const uint32_t bones = entry == 0u ? 1u : entry <= 2u ? 2u : entry <= 6u ? 4u : 0u;
+    const uint32_t bones = entry == 0u                  ? 1u
+                           : entry <= 2u                ? 2u
+                           : entry <= 6u                ? 4u
+                           : entry == 9u || entry == 10u ? 4u
+                                                         : 0u;
     return bones <= program.maxBones ? bones : 0u;
 }
 
@@ -723,13 +730,15 @@ void chunkHeader(const Program &program, const VuData &vu, uint32_t top, Chunk &
     h.winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? 1.0f : -1.0f);
     h.guardBand = program.cull != Cull::None ? 1u : 0u;
     h.backface = program.cull == Cull::GuardBandAndBackface ? 1u : 0u;
-    h.vertexCount = count;
+    // A fan (PRIM 5) is drawn as the list of its triangles (modelChunk's).
+    const bool fan = (prim & 7u) == 5u;
+    h.vertexCount = fan ? (count >= 3u ? (count - 2u) * 3u : 0u) : count;
     if (program.depthBounds)
     {
         h.depthScale = vu.quad(87).z;
         h.depthMax = vu.quad(1).y;
     }
-    h.triangleList = (prim & 7u) == 3u ? 1u : 0u;
+    h.triangleList = ((prim & 7u) == 3u || fan) ? 1u : 0u;
     // A chunk slot E clips (the beam's E is a stub): E's clip space is
     // quads 72-75 (the base program's view times its clip matrix, rows as
     // 68-71's), and the renderer clips the strip at its z = -w and z = w.
@@ -1205,10 +1214,20 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
         return nullptr;
     // A enters B at pair 300 + (76.z ? TOP+1.w : 0) (0x450-0x480): with a
     // plain B only the first entry is known.
+    // An entry into a plain B past its first pair skips its own loads of
+    // the sections' addresses (vi1-vi3) and decodes from what A left there
+    // (the vertex count among them): the VU draws no defined mesh, and
+    // nothing is drawn (docs/NATIVE-ONLY.md, M5: by name).
     if (program.decode == Decode::Plain && vu.half(76, 2) != 0u && vu.half(top + 1u, 3) != 0u)
-        return "quad 76.z and TOP+1.w set (an entry into a plain B other than its first)";
+        return "an entry into a plain B past its first pair (the VU decodes from A's registers: no mesh)";
     if (program.decode == Decode::Skinned && bonesOf(program, vu, top) == 0u)
-        return "an entry into the skinning B not read";
+    {
+        const uint32_t entry = vu.half(top + 1u, 3);
+        return entry == 7u || entry == 8u
+                   ? "skinning B entry 7 or 8: its JR, nothing decoded (the VU draws nothing visible)"
+                   : entry <= 10u ? "skinning B: more bones than the program's"
+                                  : "skinning B entered inside its 4-bone loop (past its setup)";
+    }
     // A chunk of no whole edge, triangle or particle, or of fewer vertices
     // than a pipelined F piece reads before it tests the count (the VU would
     // run past the chunk's end there): the model stage draws the whole ones
@@ -1223,8 +1242,8 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     // list's whole triangles; the backface pieces' own list path would run
     // past the end of another count, the model stage draws what it has).
     const uint32_t primType = vu.half(top, 0) & 7u;
-    if (primType != 3u && primType != 4u)
-        return "neither strip nor triangle list";
+    if (primType != 3u && primType != 4u && primType != 5u)
+        return "neither strip, triangle list nor fan";
     return nullptr;
 }
 
@@ -1358,7 +1377,8 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
 {
     const VuData vu(data);
     const Sections s = sectionsOf(program, vu, top);
-    list = (vu.half(top, 0) & 7u) == 3u;
+    const uint32_t primType = vu.half(top, 0) & 7u;
+    list = primType == 3u || primType == 5u;
     out.resize(s.count);
     for (uint32_t k = 0; k < s.count; ++k)
     {
@@ -1385,6 +1405,20 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
             v.bones[b] = used ? slotOf(vu.half(s.skin + k * 2u, b)) : 0.0f;
             v.weights[b] = used ? float(vu.word(s.skin + k * 2u + 1u, b)) : 0.0f;
         }
+    }
+    // A fan (PRIM 5): the list of its triangles (v0, vi, vi+1), all as the
+    // first one faces.
+    if (primType == 5u)
+    {
+        thread_local std::vector<dq8::gfx::native::ModelInput> fan;
+        fan.clear();
+        for (size_t i = 1; i + 1u < out.size(); ++i)
+        {
+            fan.push_back(out[0]);
+            fan.push_back(out[i]);
+            fan.push_back(out[i + 1u]);
+        }
+        out.swap(fan);
     }
 }
 
