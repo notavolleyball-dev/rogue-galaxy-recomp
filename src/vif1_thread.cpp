@@ -3180,6 +3180,85 @@ constexpr std::array<PS2Runtime::RecompiledFunction, sizeof...(I)> gsWaiterHooks
     return {&gsWaiter<I>...};
 }
 
+// M4: libgraph's sceGsPutDrawEnv(packet), the draw environment the game
+// sets between frames and at a double buffer's swap: a GIF tag and its A+D
+// writes (a sceGsDrawEnv1; with sceGsSetDefDrawEnv's clear, a sprite over
+// the frame after them), which it sends by GIF DMA started from the
+// registers. Taken here instead: the state's writes go to the draw state in
+// order (behind the lists before them), the sprite becomes the producer's
+// Clear of the frame; no DMA, no packet for the converter. A packet of
+// another shape goes as the game sends it.
+constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
+PS2Runtime::RecompiledFunction g_putDrawEnv = nullptr;
+std::atomic<uint64_t> g_drawEnvsTaken{0u}, g_drawEnvClears{0u}, g_drawEnvsLeft{0u};
+void putDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t at = getRegU32(ctx, 4) & (PS2_RAM_SIZE - 1u) & ~15u;
+    uint64_t tag[2] = {};
+    if (uint64_t(at) + 16u <= PS2_RAM_SIZE)
+        std::memcpy(tag, rdram + at, sizeof(tag));
+    const uint32_t nloop = static_cast<uint32_t>(tag[0] & 0x7FFFu);
+    const uint32_t flg = static_cast<uint32_t>((tag[0] >> 58) & 3u);
+    const uint32_t nreg = static_cast<uint32_t>((tag[0] >> 60) & 0xFu);
+    const bool ad = flg == 0u && nreg == 1u && (tag[1] & 0xFu) == 0xEu;
+    if (!ad || nloop == 0u || nloop > 64u || uint64_t(at) + 16u + nloop * 16u > PS2_RAM_SIZE)
+    {
+        ++g_drawEnvsLeft;
+        g_putDrawEnv(rdram, ctx, runtime);
+        return;
+    }
+    std::vector<std::pair<uint8_t, uint64_t>> writes;
+    writes.reserve(nloop);
+    // The clear: PRIM a sprite, its RGBAQ, then its two corners.
+    bool sprite = false;
+    uint8_t rgba[4] = {};
+    int corners = 0;
+    float xy[2][2] = {};
+    uint32_t z = 0u;
+    for (uint32_t i = 0; i < nloop; ++i)
+    {
+        uint64_t q[2];
+        std::memcpy(q, rdram + at + 16u + i * 16u, sizeof(q));
+        const uint8_t reg = static_cast<uint8_t>(q[1] & 0xFFu);
+        const uint64_t value = q[0];
+        switch (reg)
+        {
+        case 0x00u: // PRIM
+            sprite = (value & 7u) == 6u;
+            corners = 0;
+            break;
+        case 0x01u: // RGBAQ
+            for (int c = 0; c < 4; ++c)
+                rgba[c] = static_cast<uint8_t>(value >> (8 * c));
+            break;
+        case 0x05u: // XYZ2
+        case 0x0Du: // XYZ3
+            if (sprite && corners < 2)
+            {
+                xy[corners][0] = static_cast<float>(value & 0xFFFFu) / 16.0f;
+                xy[corners][1] = static_cast<float>((value >> 16) & 0xFFFFu) / 16.0f;
+                z = static_cast<uint32_t>(value >> 32);
+                ++corners;
+            }
+            break;
+        default:
+            writes.emplace_back(reg, value);
+            break;
+        }
+    }
+    g_thread->drain();
+    applyWrites(writes);
+    if (sprite && corners == 2)
+    {
+        const GSDrawState state = rg::drawstate::current();
+        if (rg::nativeproducer::clear(state, xy[0][0], xy[0][1], xy[1][0], xy[1][1], rgba, z == 0u))
+            ++g_drawEnvClears;
+    }
+    if (++g_drawEnvsTaken == 1u)
+        std::fprintf(stderr, "[native-env] sceGsPutDrawEnv taken as state and clears (no GIF DMA)\n");
+    returnToCaller(ctx, 0);
+}
+
 bool hook(PS2Runtime &runtime, uint32_t address, PS2Runtime::RecompiledFunction replacement,
           PS2Runtime::RecompiledFunction &original)
 {
@@ -3311,11 +3390,6 @@ const Hole *listHole(const uint8_t *data, uint32_t size, bool image)
 
 void install(PS2Runtime &runtime)
 {
-    const char *mode = std::getenv("RG_VIF1_THREAD");
-    if (mode && std::strcmp(mode, "0") == 0)
-    {
-        return;
-    }
     if (!runtime.lookupFunction(kSceDmaSend) || !runtime.lookupFunction(kSceDmaSendN) ||
         !runtime.lookupFunction(kSceDmaSendI) || !runtime.lookupFunction(kSceDmaSync))
     {
@@ -3378,6 +3452,7 @@ void install(PS2Runtime &runtime)
     hook(runtime, kSceDmaSendN, &dmaSendN, g_dmaSendN);
     hook(runtime, kSceDmaSendI, &dmaSendI, g_dmaSendI);
     hook(runtime, kSceDmaSync, &dmaSync, g_dmaSync);
+    hook(runtime, kSceGsPutDrawEnv, &putDrawEnv, g_putDrawEnv);
     constexpr size_t kWaiters = std::size(kGsWaiters);
     static constexpr auto hooks = gsWaiterHooks(std::make_index_sequence<kWaiters>{});
     g_gsWaiters.resize(kWaiters);

@@ -732,8 +732,13 @@ Done:
 
 Not done:
 - fonts as glyph records;
-- libgraph's `sceGsPutDrawEnv`/`sceGsSwapDBuff` clears and the `sceGifPk`
-  paths (still the converter's);
+- libgraph, **in part:** `sceGsPutDrawEnv` (the swap's and the double
+  buffers' environments) is hooked: its A+D writes go to the draw state
+  directly and its clear sprite becomes the producer's `Clear` (frame,
+  and depth to the far plane when the sprite's z is 0); no GIF DMA, no
+  converter. `[native-env]` says when it is first taken. A packet not of
+  that shape goes as before. Left: the `sceGifPk` paths of the flip (M3's
+  Capture pass already draws it) and of the uploads (images, not 2D);
 - ~~HUD size and widescreen as layer transforms~~ **in code:** neither
   writes the game's vertices or arguments any more. A block's 2D records
   are reshaped at its end by its owner (`native_blocks`'s `BlockMesh`,
@@ -932,7 +937,7 @@ differ slightly, and those differences are listed.
 
 **Step 1 in code (2026-11-11, on `native-only/m4b-2d`): the lists run on
 the game thread.** `send()` runs each VIF1 list where the game sends it
-(`Vif1Thread::runList`): VIF decode, the native programs and the VU1
+(`Vif1Thread::runList`; `RG_VIF1_THREAD` is gone): VIF decode, the native programs and the VU1
 interpreter for what is left to it, at the default floating-point
 environment, with its records going to the draw stage in the game's order
 among the records the game's hooks make. The VIF1 worker thread is gone;

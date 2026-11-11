@@ -3648,6 +3648,42 @@ bool pass(const PassRequest &request)
     return true;
 }
 
+bool clear(const GSDrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    const GSContext &c = drawState.context;
+    const uint32_t frameBase = c.frame.fbp * 32u;
+    if (!s.targetAt.count(frameBase))
+        return false;
+    const native::Id target =
+        targetFor(s, frameBase, c.scissor.x1 + 1u, c.scissor.y1 + 1u, c.frame.psm);
+    if (target == 0u)
+        return false;
+    const float ofx = static_cast<float>(c.xyoffset.ofx) / 16.0f;
+    const float ofy = static_cast<float>(c.xyoffset.ofy) / 16.0f;
+    native::Clear record;
+    record.target = target;
+    record.rect.x0 = static_cast<int32_t>(std::floor(std::min(x0, x1) - ofx));
+    record.rect.y0 = static_cast<int32_t>(std::floor(std::min(y0, y1) - ofy));
+    record.rect.x1 = static_cast<int32_t>(std::ceil(std::max(x0, x1) - ofx));
+    record.rect.y1 = static_cast<int32_t>(std::ceil(std::max(y0, y1) - ofy));
+    record.color = c.frame.fbmsk != 0xFFFFFFFFu;
+    for (int i = 0; i < 4; ++i)
+        record.rgba[i] = float(rgba[i]) * kUnit;
+    native::push(native::Clear(record));
+    if (depth && !c.zbuf.zmask)
+    {
+        native::Clear depthRecord;
+        depthRecord.target = depthTarget(s, c.zbuf.zbp * 32u, frameBase, target);
+        depthRecord.rect = record.rect;
+        depthRecord.depth = true;
+        depthRecord.depthValue = 0.0f;
+        native::push(std::move(depthRecord));
+    }
+    return true;
+}
+
 void frameBoundary()
 {
     State &s = state();

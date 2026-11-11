@@ -254,4 +254,11 @@ bool pass(const PassRequest &request);
 // After the flip's Present record: the next frame begins. Its Clear records
 // (the scene's, and each depth target's at its first use) follow from here.
 void frameBoundary();
+
+// M4: a clear the game draws as a sprite over its draw environment (libgraph's
+// sceGsPutDrawEnv with sceGsSetDefDrawEnv's clear): `state`'s frame (and,
+// with `depth`, its depth buffer, to the far plane) over the window
+// rectangle x0, y0 to x1, y1 (pixels, XYOFFSET in) in `rgba` (the GS's
+// RGBAQ, 0x80 = 1). False: its target is not one the producer knows.
+bool clear(const GSDrawState &drawState, float x0, float y0, float x1, float y1, const uint8_t rgba[4], bool depth);
 } // namespace rg::nativeproducer

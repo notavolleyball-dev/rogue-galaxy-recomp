@@ -173,7 +173,6 @@ The presenter, the VIF1 and VU1 threads, and the native VU1 work.
 
 | Variable | Effect |
 |---|---|
-| `RG_VIF1_THREAD=0` | Run VIF1 lists (VU1) on the game's thread instead of their own |
 | `RG_CROP=N` | Game pixels left off each edge of the picture (default 2: the border the game leaves black or half drawn, which a television's overscan hid; 0 shows the whole frame) |
 | `RG_VU0_NATIVE=0` | The game's one VU0 micro program (the matrix from scale, rotation and translation behind `MatFromSRTVu0` and `MatRotateVu0`) on the VU0 rather than natively (`src/vu0_native.cpp`; on unless `0`). Recognised by the hash of its code at entry 0, else the VU0 runs it. `cmake --build build/game --target rg_vu0_check` then `build/game/src/rg_vu0_check disc/SCUS_974.90` compares it with the VU0 on synthetic inputs, every register bit for bit |
 | `PS2X_VU_FMAC_FLAGS=1` | Compiled VU1 programs queue the flags of every FMAC result, not only the ones a flag reader can still see (patch 0006); for comparisons |
