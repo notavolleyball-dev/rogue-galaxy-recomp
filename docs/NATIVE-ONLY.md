@@ -94,13 +94,19 @@ stacked PRs at the end).
   - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
     and sent in the stream's order;
   - M6, early: the GS front end gets nothing any more (see M6).
-- **Now: the rest of M4** on `native-only/m4b-2d` (from M5's branch): 2D
-  records from the `GsPkt*` setters (no GIF decode of blocks), fonts as
-  glyph records, libgraph's paths, HUD size and widescreen as layer
-  transforms, region packs.
+- **Now: the rest of M4** on `native-only/m4b-2d` (from M5's branch).
+  - In code: HUD size and the wide movie reshape the block's records (no
+    vertex or argument patches); libgraph's `sceGsPutDrawEnv` is state
+    and clears; a census names the draw tasks whose 2D the converter
+    still makes (`[native2d] pieces the converter made, by draw task`).
+  - Next: 2D records from the `GsPkt*` builder's calls (no GIF decode of
+    blocks; the builder's map is being written into
+    NATIVE-ONLY-NOTES.md), fonts as glyph records, region packs' glyph
+    variants, and whatever the census names.
 - **M6's first step is in too** (on the same branch, as it needed no play
   data): the lists run on the game thread as they are sent; the VIF1
-  thread is gone (see M6).
+  thread is gone (see M6). Two more M5 declines were ported there too
+  (the scroll F, the additive vertex colors).
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
