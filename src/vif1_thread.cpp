@@ -22,7 +22,6 @@
 
 #include "ThreadNaming.h"
 #include "debug/vu1_replay.h"
-#include "native_renderer.h"
 #include "vu1_native.h"
 #include "draw_state_mirror.h"
 #include "native_2d.h"
@@ -137,10 +136,9 @@ uint32_t programSource(const rg::vu1native::Program *program)
 }
 // And the camera it ran under (ps2_gs_detail::CameraRegistry), 0 for none.
 thread_local uint32_t t_vu1Camera = 0;
-// RG_VU1_NATIVE (src/vu1_native.h): while a chunk done natively runs on the
-// VU1, its packets are collected (check) or dropped (replace).
+// RG_VU1_NATIVE=check (src/vu1_native.h): while a chunk done natively runs
+// on the VU1, its packets are collected.
 thread_local std::vector<std::vector<uint8_t>> *t_vu1Packets = nullptr;
-thread_local bool t_dropVu1Packets = false;
 // The native pipeline's effects (src/native_effects.h); read at first use,
 // after the menu's setting.
 bool nativeEffects()
@@ -163,8 +161,6 @@ thread_local size_t t_listSize = 0u;
 thread_local const std::vector<std::pair<uint32_t, uint32_t>> *t_listOrigins = nullptr;
 // The piece of t_listOrigins the last listAddress found (listAddress).
 thread_local size_t t_listOriginAt = 0u;
-// Read when the thread starts, after the menu's native renderer setting
-// (static initializers run before the menu hands it over).
 rg::vu1native::Mode nativeMode()
 {
     static const rg::vu1native::Mode mode = rg::vu1native::modeFromEnvironment();
@@ -177,10 +173,9 @@ const uint32_t g_checkEvery = [] {
     const unsigned long every = value ? std::strtoul(value, nullptr, 10) : 1ul;
     return static_cast<uint32_t>(every == 0ul ? 1ul : every);
 }();
-// Whether the GPU path takes the chunks slot E clips: only with the native
-// renderer, and there under the native pipeline or with
-// RG_VU1_CLIP_ON_GPU=1 (=0 keeps them on the VU1 even under the pipeline).
-// Otherwise off: the field walk of October 29 lost the near wall's texture
+// Whether the GPU path takes the chunks slot E clips: unless
+// RG_VU1_CLIP_ON_GPU=0, which keeps them on the VU1. It was off without the
+// native pipeline: the field walk of October 29 lost the near wall's texture
 // and part of the ledge with them on the GPU (the clipper's new vertices
 // take a depth made of each corner's capped, clamped one, which is not
 // linear outside E's planes). The pipeline has no GS to draw the VU1's
@@ -192,12 +187,10 @@ struct GpuClips
     operator bool() const
     {
         static const bool on = [] {
-            if (!rg::nativerenderer::enabled())
-                return false;
             const char *gpu = std::getenv("RG_VU1_CLIP_ON_GPU");
             if (gpu && *gpu)
                 return std::strcmp(gpu, "0") != 0;
-            return rg::nativeproducer::pipelineOn();
+            return true;
         }();
         return on;
     }
@@ -410,7 +403,7 @@ bool retainingMeshes()
 {
     static const bool on = [] {
         const char *value = std::getenv("RG_MESH_RETAIN");
-        return rg::nativeproducer::pipelineOn() && !(value && std::strcmp(value, "0") == 0);
+        return !(value && std::strcmp(value, "0") == 0);
     }();
     return on;
 }
@@ -1596,7 +1589,6 @@ public:
         // (once per code image and entry), its MSCNTs run the chunks; or the
         // MSCAL is the chunk (drawsAtCall).
         const rg::vu1native::Program *native = nullptr;
-        if (nativeMode() != rg::vu1native::Mode::Off)
         {
             if (!resume)
             {
@@ -1635,11 +1627,11 @@ public:
             if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
-                // The chunks that clip (slot E) go to the GPU with the native
-                // renderer, under the pipeline or with RG_VU1_CLIP_ON_GPU=1: the mesh carries E's near
-                // and far planes and the shader clips there (gl_ClipDistance),
-                // so no driver is left to cut at the eye on its own.
-                // Otherwise, and in the packet modes, they go to the VU1.
+                // The chunks that clip (slot E) go to the GPU unless
+                // RG_VU1_CLIP_ON_GPU=0: the mesh carries E's near and far
+                // planes and the shader clips there (gl_ClipDistance), so no
+                // driver is left to cut at the eye on its own. In check mode
+                // they go to the VU1.
                 const char *reason =
                     rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, gpu && g_gpuClips);
                 if (reason)
@@ -1669,7 +1661,7 @@ public:
             }
             m_nativeMonitor.tick();
         }
-        if (!native || (nativeMode() != rg::vu1native::Mode::Skip && nativeMode() != rg::vu1native::Mode::Gpu))
+        if (!native || nativeMode() == rg::vu1native::Mode::Check)
         {
             if (native && nativeMode() == rg::vu1native::Mode::Check)
             {
@@ -1679,7 +1671,6 @@ public:
                 m_checkData.assign(memory.getVU1Data(), memory.getVU1Data() + PS2_VU1_DATA_SIZE);
                 m_checkState = vu1.state();
             }
-            t_dropVu1Packets = native && nativeMode() == rg::vu1native::Mode::Replace;
             static const bool replay = rg::vu1replay::enabled();
             if (replay)
             {
@@ -1701,7 +1692,6 @@ public:
                 rg::vu1replay::end(vu1.state(), memory.getVU1Data());
             }
             t_vu1Packets = nullptr;
-            t_dropVu1Packets = false;
         }
         if (native)
         {
@@ -1724,7 +1714,7 @@ public:
             }
             else
             {
-                const bool meshed = nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native);
+                const bool meshed = rg::vu1native::hasMesh(*native);
                 // A mesh's own register packets ride with it as writes.
                 const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
                                       packetsAsWrites(m_nativePackets, m_nativeWrites);
@@ -1746,16 +1736,12 @@ public:
                     t_retain = {};
                     t_meshWriteCount = 0u;
                 }
-                // What the VU1 would have left in its memory, where it did not run.
-                if (nativeMode() != rg::vu1native::Mode::Replace)
-                {
-                    // In the GPU mode the VU1 did not run: its memory is what
-                    // buildMesh read the mesh from, so the bounds come from it.
-                    const bool built = nativeMode() == rg::vu1native::Mode::Gpu && rg::vu1native::hasMesh(*native);
-                    rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top,
-                                                      built ? &m_nativeMesh : nullptr,
-                                                      built ? &m_nativeBounds : nullptr);
-                }
+                // What the VU1 would have left in its memory, where it did
+                // not run: its memory is what buildMesh read the mesh from,
+                // so the bounds come from it.
+                rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top,
+                                                  meshed ? &m_nativeMesh : nullptr,
+                                                  meshed ? &m_nativeBounds : nullptr);
             }
         }
         t_vu1Tag = 0u;
@@ -2043,15 +2029,16 @@ void finishList()
     g_thread->listFinished();
 }
 
-// Steps 3b and 6 of docs/NATIVE-PIPELINE.md, under the native pipeline:
-// uploads the producer made records of are withheld from the GS, a record
-// whose memory the game changed after the texture hook is made again from
-// what was sent, and host uploads nobody took and local copies are handed
-// to the producer (which keeps them as images) on their way to the GS.
-bool uploadsTaken()
+// Steps 3b and 6 of docs/NATIVE-PIPELINE.md: uploads the producer made
+// records of are withheld from the GS, a record whose memory the game
+// changed after the texture hook is made again from what was sent, and host
+// uploads nobody took and local copies are handed to the producer (which
+// keeps them as images) on their way to the GS. Always, now that the native
+// pipeline is the only one; the withholding itself goes in M6
+// (docs/NATIVE-ONLY.md).
+constexpr bool uploadsTaken()
 {
-    static const bool on = rg::nativeproducer::pipelineOn();
-    return on;
+    return true;
 }
 
 // The transfer registers as the packets set them (this thread's).
@@ -3281,7 +3268,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
     // Steps 4a and 4c of docs/NATIVE-PIPELINE.md: a VU1 program's mesh as a
     // native mesh draw, under the draw state the GS would draw it with; made
     // one, it does not go to the GS at all.
-    if (vu1Data && rg::drawstate::enabled())
+    if (vu1Data)
     {
         if (g_stage && !t_onVif1Thread)
             g_thread->drain();
@@ -3674,10 +3661,6 @@ void install(PS2Runtime &runtime)
         if (t_vu1Packets)
         {
             t_vu1Packets->emplace_back(data, data + size);
-        }
-        if (t_dropVu1Packets)
-        {
-            return;
         }
         if (t_listDecoder)
         {

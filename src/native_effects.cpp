@@ -1048,8 +1048,6 @@ bool compositesBatched()
 bool enabled()
 {
     static const bool on = [] {
-        if (!rg::nativeproducer::pipelineOn())
-            return false;
         const auto flag = [](const char *name) {
             const char *value = std::getenv(name);
             return !(value && std::strcmp(value, "0") == 0);

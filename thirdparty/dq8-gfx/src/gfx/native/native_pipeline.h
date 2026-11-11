@@ -24,14 +24,7 @@
 
 namespace dq8::gfx::native
 {
-// The switch: RG_NATIVE_PIPELINE=1, and only under the game's native
-// renderer flag, which the game provides as `outer` (it is decided once,
-// after the game's settings are read). Decided at the first enabled() call
-// after setOuterSwitch; false until a query is set.
-void setOuterSwitch(bool (*outer)());
-bool enabled();
-
-// Any thread. Dropped when the pipeline is off.
+// Any thread.
 void push(Record &&record);
 
 // Debug: with draw labels on, the renderer puts a label before each mesh

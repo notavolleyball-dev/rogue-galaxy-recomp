@@ -417,8 +417,6 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 void install(PS2Runtime &runtime)
 {
-    if (!rg::nativeproducer::pipelineOn())
-        return;
     g_rdram = runtime.memory().getRDRAM();
     rg::writewatch::init(g_rdram, PS2_RAM_SIZE);
     if (!rg::timing::hookFunction(runtime, kSetFrameFromDesc, &setFrameFromDesc, g_setFrameFromDescOriginal) ||

@@ -8,7 +8,6 @@
 #include <emmintrin.h>
 #include <xmmintrin.h>
 
-#include "native_renderer.h"
 #include "ps2_runtime.h"
 
 // The game's one VU0 micro program, done natively (docs/VU1-NATIVE.md,
@@ -389,10 +388,9 @@ void run(Vu &u)
 bool hook(R5900Context *ctx, uint8_t *code, uint8_t *data, uint32_t startPC, uint64_t generation)
 {
     (void)data;
-    // Decided at first use, after the menu's native renderer setting.
     static const bool enabled = [] {
         const char *value = std::getenv("RG_VU0_NATIVE");
-        const bool on = value && *value ? std::strcmp(value, "0") != 0 : rg::nativerenderer::enabled();
+        const bool on = !(value && *value && std::strcmp(value, "0") == 0);
         std::fprintf(stderr, on ? "[rg] VU0's matrix program native (RG_VU0_NATIVE=0 leaves it to the VU0)\n"
                                 : "[rg] VU0's matrix program on the VU0\n");
         return on;

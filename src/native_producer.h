@@ -14,15 +14,8 @@ struct GSNativeEffect;
 // ids only; the tables from the game's GS addresses to those ids are kept
 // here, for the producers of draws (step 4). A producer may know the GS
 // (this file does: the layouts the game uploads in); the renderer may not.
-//
-// Every function is a no-op unless the native pipeline is on
-// (RG_NATIVE_PIPELINE=1 under the native renderer flag).
 namespace rg::nativeproducer
 {
-// Whether the native pipeline is on (for the game's other switches that
-// only make sense with the GS).
-bool pipelineOn();
-
 // One mip level of an image node, as TexBuildUploadPkt sends it (game
 // thread). `ram` is the level's bytes in EE memory, `ramBytes` how many
 // are readable there.

@@ -16,7 +16,6 @@
 #include <xmmintrin.h>
 #endif
 
-#include "native_renderer.h"
 #include "gif_events.h"
 
 // The strip programs, piece by piece (byte addresses):
@@ -2258,17 +2257,12 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 Mode modeFromEnvironment()
 {
     const char *value = std::getenv("RG_VU1_NATIVE");
-    if (!value || !*value)
-        return rg::nativerenderer::enabled() ? Mode::Gpu : Mode::Off;
-    if (std::strcmp(value, "0") == 0)
-        return Mode::Off;
-    if (std::strcmp(value, "check") == 0)
+    if (value && std::strcmp(value, "check") == 0)
         return Mode::Check;
-    if (std::strcmp(value, "skip") == 0)
-        return Mode::Skip;
-    if (std::strcmp(value, "gpu") == 0)
-        return Mode::Gpu;
-    return Mode::Replace;
+    if (value && *value && std::strcmp(value, "gpu") != 0)
+        std::fprintf(stderr, "[vu1native] RG_VU1_NATIVE=%s ignored: the modes are gpu (the default) and check\n",
+                     value);
+    return Mode::Gpu;
 }
 
 void Monitor::declined(const Program &program, const char *reason)
@@ -2347,10 +2341,7 @@ void Monitor::tick()
         left += " [" + reason + "]=" + std::to_string(count);
     }
     std::fprintf(stderr, "[vu1native] %s: native chunks%s; left to the VU1%s", 
-                 m_mode == Mode::Check  ? "check"
-                 : m_mode == Mode::Skip ? "skip"
-                 : m_mode == Mode::Gpu  ? "gpu"
-                                        : "replace",
+                 m_mode == Mode::Check ? "check" : "gpu",
                  line.empty() ? " none" : line.c_str(), left.empty() ? " none" : left.c_str());
     if (m_mode == Mode::Check)
     {

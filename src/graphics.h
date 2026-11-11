@@ -2,7 +2,6 @@
 
 #include <memory>
 
-class GSRasterBackend;
 class PS2Runtime;
 namespace dq8::gfx
 {
@@ -36,7 +35,9 @@ public:
     void install(PS2Runtime &runtime);
 
 private:
-    std::unique_ptr<GSRasterBackend> m_backend;
+    // The window, the device and the native renderer. Held here, not by the
+    // runtime, whose GS has no backend (gs_null.h).
+    std::unique_ptr<dq8::gfx::SdlGpuBackend> m_presenter;
     // The window's owner, which the runtime keeps after install(); the menu
     // draws over it and comes down before it does.
     dq8::gfx::SdlGpuBackend *m_window = nullptr;

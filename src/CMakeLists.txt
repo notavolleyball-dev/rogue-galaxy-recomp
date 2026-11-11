@@ -98,12 +98,11 @@ add_executable(roguegalaxy
     button_glyphs.cpp
     camera_view.cpp
     dc_balance.cpp
-    depth_reads.cpp
     dev_tools.cpp
     draw_distance.cpp
     ee_fpu.cpp
     flip_pacing.cpp
-    gs_tripwire.cpp
+    gs_null.cpp
     free_camera.cpp
     mouse_camera.cpp
     movie_audio.cpp
@@ -113,7 +112,6 @@ add_executable(roguegalaxy
     libc_rand.cpp
     loading_screen.cpp
     map_chests.cpp
-    native_renderer.cpp
     opening.cpp
     text_language.cpp
     voice_language.cpp
@@ -142,8 +140,6 @@ add_executable(roguegalaxy
     debug/bug_mark.cpp
     debug/call_trace.cpp
     debug/crash_report.cpp
-    debug/gs_census.cpp
-    debug/gs_timing.cpp
     debug/host_stacks.cpp
     debug/hw_watch.cpp
     debug/input_script.cpp
@@ -189,16 +185,14 @@ add_executable(rg_vu1_oracle EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/rg_vu1_oracle.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/gif_events.cpp"
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vu1_native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/native_renderer.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/vu1_native.cpp")
 target_include_directories(rg_vu1_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/debug" "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(rg_vu1_oracle PRIVATE ps2_runtime)
 # tools/vu1/oracle/vu0_check.cpp: the native VU0 program against the VU0 on
 # synthetic inputs. cmake --build build/game --target rg_vu0_check
 add_executable(rg_vu0_check EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/vu0_check.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vu0_native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/native_renderer.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/vu0_native.cpp")
 target_include_directories(rg_vu0_check PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(rg_vu0_check PRIVATE ps2_runtime)
 # The commit this build is from, for the menu's About window (as of the last

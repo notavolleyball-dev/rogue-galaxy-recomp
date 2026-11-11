@@ -20,8 +20,6 @@ namespace dq8::gfx::native
 {
 namespace
 {
-std::atomic<bool (*)()> g_outer{nullptr};
-
 struct Queue
 {
     std::mutex mutex;
@@ -152,7 +150,7 @@ bool waitColorRead(uint32_t id, std::vector<uint8_t> &rgba, uint32_t timeoutMs)
 
 bool readDepth(const DepthBlock &block, std::vector<float> &out)
 {
-    if (!enabled() || block.target == 0u || block.width == 0u || block.height == 0u ||
+    if (block.target == 0u || block.width == 0u || block.height == 0u ||
         block.width > kMaxDepthSide || block.height > kMaxDepthSide)
         return false;
     DepthMailbox &m = depthMailbox();
@@ -168,27 +166,6 @@ bool readDepth(const DepthBlock &block, std::vector<float> &out)
         return false;
     out = a.values;
     return true;
-}
-
-void setOuterSwitch(bool (*outer)())
-{
-    g_outer.store(outer, std::memory_order_release);
-}
-
-bool enabled()
-{
-    static const bool on = [] {
-        bool (*outer)() = g_outer.load(std::memory_order_acquire);
-        const char *v = std::getenv("RG_NATIVE_PIPELINE");
-        const bool asked = v && *v && *v != '0';
-        const bool result = asked && outer && outer();
-        if (asked && !result)
-            std::fprintf(stderr, "[native-pipeline] RG_NATIVE_PIPELINE ignored: the native renderer is off\n");
-        else if (result)
-            std::fprintf(stderr, "[native-pipeline] on\n");
-        return result;
-    }();
-    return on;
 }
 
 namespace
@@ -309,8 +286,6 @@ void (*meshCull())(MeshDraw &draw)
 
 void push(Record &&record)
 {
-    if (!enabled())
-        return;
     Queue &q = queue();
     std::lock_guard lock(q.mutex);
     q.records.push_back(std::move(record));

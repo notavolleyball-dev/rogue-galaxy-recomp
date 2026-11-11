@@ -43,7 +43,6 @@
 #include "text_language.h"
 #include "voice_language.h"
 #include "map_chests.h"
-#include "native_renderer.h"
 #include "hud_size.h"
 #include "inventory.h"
 #include "opening.h"
@@ -192,11 +191,7 @@ int run(int argc, char **argv)
     rg::freecamera::install(runtime);
     rg::settingspages::install(runtime);
     rg::quickscenes::install();
-    // Read here, after the menu's settings and before anything native sets
-    // itself up, so the whole run sees one answer.
-    if (rg::nativerenderer::enabled())
-        std::fprintf(stderr, "[rg] native renderer on\n");
-    // The native pipeline's game hooks, with it on (RG_NATIVE_PIPELINE=1).
+    // The native pipeline's game hooks.
     rg::nativecapture::install(runtime);
     rg::nativefx::install(runtime);
     // After the game's hooks, so a forced function another one replaced runs

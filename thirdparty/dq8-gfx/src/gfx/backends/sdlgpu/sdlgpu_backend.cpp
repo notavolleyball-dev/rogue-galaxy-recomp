@@ -3998,8 +3998,7 @@ struct SdlGpuBackend::Impl {
             longestPresentGap = 0.0;
             line += buf;
             std::fprintf(stderr, "%s\n", line.c_str());
-            if (native::enabled())
-                std::fputs(nativeRenderer.statsLine().c_str(), stderr);
+            std::fputs(nativeRenderer.statsLine().c_str(), stderr);
         }
 
         previous = stats;
@@ -4847,7 +4846,7 @@ struct SdlGpuBackend::Impl {
 
         // The native pipeline shows its own scene, not what the GS's display
         // registers name (Rogue Galaxy: added; RG_NATIVE_PIPELINE).
-        if (window != nullptr && native::enabled()) {
+        if (window != nullptr) {
             presentNative(stage);
             return;
         }
@@ -5497,7 +5496,7 @@ void SdlGpuBackend::serveNativeReads() {
     if (!native::colorReadsWaiting() && !m_impl->nativeRenderer.dumpPending())
         return;
     std::lock_guard lock(m_impl->mutex);
-    if (!native::enabled() || !m_impl->device.valid())
+    if (!m_impl->device.valid())
         return;
     // What is pending goes to the GPU first.
     std::string error;

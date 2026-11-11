@@ -1,8 +1,6 @@
 #include "native_producer.h"
 #include "fminmax.h"
 
-#if defined(RG_HAS_SDLGPU)
-
 #include <algorithm>
 #include <cstddef>
 #include <type_traits>
@@ -834,8 +832,6 @@ native::Id bindPalette(State &s, const uint8_t *ram, uint32_t ramBytes, uint32_t
 // hook's old way: the upload follows and is withheld, takeProduced).
 void texture(const TextureLevel &l)
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     bool format = false;
     const size_t bytes = levelBytes(l, format);
@@ -856,8 +852,6 @@ void texture(const TextureLevel &l)
 
 void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm, uint32_t entries)
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     cpsm &= 0x3Fu;
     uint32_t bytes = 0u;
@@ -878,7 +872,7 @@ void palette(const uint8_t *ram, uint32_t ramBytes, uint32_t cbp, uint32_t cpsm,
 bool bindable(const TextureLevel &l)
 {
     bool format = false;
-    return native::enabled() && levelBytes(l, format) != 0u && (!l.preSwizzled || !unswizzle(l).empty());
+    return levelBytes(l, format) != 0u && (!l.preSwizzled || !unswizzle(l).empty());
 }
 
 uint64_t retainedEpoch()
@@ -888,8 +882,6 @@ uint64_t retainedEpoch()
 
 void bindBegin()
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     std::lock_guard lock(s.mutex);
     forgetEvicted(s);
@@ -905,7 +897,7 @@ uint64_t bindResolve(const uint8_t *rdram, uint32_t ramSize, const BindEntry &e)
     const bool isPalette = (e.flags & kBindPalette) != 0u;
     const uint64_t place = (uint64_t(e.at & 0x3FFFu) << 32) | (uint64_t(e.psm & 0x3Fu) << 46) |
                            (uint64_t(isPalette ? 1u : 0u) << 52);
-    if (!native::enabled() || e.source >= ramSize)
+    if (e.source >= ramSize)
         return place;
     State &s = state();
     native::Id id = 0u;
@@ -934,7 +926,7 @@ uint64_t bindResolve(const uint8_t *rdram, uint32_t ramSize, const BindEntry &e)
 
 void bound(const uint64_t *values, size_t count)
 {
-    if (!native::enabled() || count == 0u)
+    if (count == 0u)
         return;
     State &s = state();
     std::lock_guard lock(s.mutex);
@@ -1116,7 +1108,7 @@ native::Id viewTarget(State &s, uint32_t base, uint32_t fbw, uint32_t width, uin
 
 void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height, uint32_t psm, int kind)
 {
-    if (!native::enabled() || width == 0u || height == 0u)
+    if (width == 0u || height == 0u)
         return;
     State &s = state();
     std::lock_guard lock(s.mutex);
@@ -1127,8 +1119,6 @@ void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height
 bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uint32_t height, bool &palette,
                   uint64_t &hash, uint32_t &bytes)
 {
-    if (!native::enabled())
-        return false;
     State &s = state();
     std::lock_guard lock(s.mutex);
     constexpr size_t kLookahead = 64u;
@@ -1174,7 +1164,7 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
 void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, uint32_t height, const uint8_t *data,
                    uint32_t bytes)
 {
-    if (!native::enabled() || !data)
+    if (!data)
         return;
     State &s = state();
     std::lock_guard lock(s.mutex);
@@ -1812,7 +1802,7 @@ void nameSource(uint32_t source, const char *name)
 bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t *vu1Data, uint32_t source,
           uint32_t retained)
 {
-    if (!native::enabled() || !vu1Data)
+    if (!vu1Data)
         return false;
     // A retained mesh's vertices, once, whatever becomes of this draw.
     if (retained != 0u && !mesh.vertices.empty())
@@ -2484,8 +2474,6 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
                    uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height)
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     std::lock_guard lock(s.mutex);
     static uint32_t told = 0u;
@@ -2505,8 +2493,6 @@ void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint3
 void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                 const uint8_t *data, uint32_t bytes)
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     std::lock_guard lock(s.mutex);
     const uint32_t psm = dpsm & 0x3Fu, bits = hostBits(psm);
@@ -2567,8 +2553,6 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
 
 bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, const std::vector<uint32_t> &indices)
 {
-    if (!native::enabled())
-        return false;
     State &s = state();
     std::lock_guard lock(s.mutex);
     forgetEvicted(s);
@@ -2813,8 +2797,6 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
 
 void noteEffect(const GSNativeEffect &e)
 {
-    if (!native::enabled())
-        return;
     State &s = state();
     std::lock_guard lock(s.mutex);
     ++s.counts.effects[e.command < 5u ? e.command : 7u];
@@ -2953,8 +2935,6 @@ bool layerCommand(State &s, const GSNativeEffect &e)
 
 bool effect(const GSNativeEffect &e)
 {
-    if (!native::enabled())
-        return false;
     const bool tail = e.command == GSNativeEffect::kObjectTail && e.opCount != 0u;
     if (e.command != GSNativeEffect::kSprites && !tail)
     {
@@ -3123,11 +3103,6 @@ uint64_t uploadHash(const uint8_t *data, size_t size)
     return imageHash(data, size);
 }
 
-bool pipelineOn()
-{
-    return native::enabled();
-}
-
 uint32_t textureAt(uint32_t tbp, uint32_t psm)
 {
     State &s = state();
@@ -3168,8 +3143,6 @@ uint32_t captureTarget(uint32_t base)
 bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                std::vector<uint8_t> &out)
 {
-    if (!native::enabled())
-        return false;
     psm &= 0x3Fu;
     const uint32_t bytesPerPixel = psm == 0x30u ? 4u : psm == 0x31u ? 3u : (psm == 0x32u || psm == 0x3Au) ? 2u : 0u;
     if (bytesPerPixel == 0u || width == 0u || height == 0u || width > native::kMaxDepthSide ||
@@ -3220,40 +3193,4 @@ bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t wid
 }
 } // namespace rg::nativeproducer
 
-#else
 
-namespace rg::nativeproducer
-{
-void texture(const TextureLevel &) {}
-void palette(const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t) {}
-void bindBegin() {}
-uint64_t retainedEpoch() { return 0u; }
-bool bindable(const TextureLevel &) { return false; }
-uint64_t bindResolve(const uint8_t *, uint32_t, const BindEntry &) { return 0u; }
-void bound(const uint64_t *, size_t) {}
-void target(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, int) {}
-void noteWithheld(bool, uint32_t) {}
-bool sourceUnchanged(const uint8_t *, size_t, uint64_t &) { return false; }
-void noteElided(uint32_t, bool) {}
-void notePassed(Passed) {}
-void noteSplit() {}
-bool takeProduced(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool &, uint64_t &, uint32_t &) { return false; }
-void noteContinuedInPacket() {}
-bool mesh(const GSNativeMesh &, const GSDrawState *, const uint8_t *, uint32_t, uint32_t) { return false; }
-bool pipelineOn() { return false; }
-uint64_t uploadHash(const uint8_t *, size_t) { return 0u; }
-uint32_t captureTarget(uint32_t) { return 0u; }
-bool readDepth(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, std::vector<uint8_t> &) { return false; }
-void replaceUpload(bool, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
-void hostUpload(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const uint8_t *, uint32_t) {}
-void noteEffect(const GSNativeEffect &) {}
-bool piece(const GSNativeMesh &, const GSDrawState *, bool, const std::vector<uint32_t> &) { return false; }
-bool effect(const GSNativeEffect &) { return false; }
-void noteLocalCopy(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
-                   uint32_t, uint32_t) {}
-uint32_t textureAt(uint32_t, uint32_t) { return 0u; }
-uint32_t paletteAt(uint32_t) { return 0u; }
-uint32_t targetAt(uint32_t) { return 0u; }
-} // namespace rg::nativeproducer
-
-#endif

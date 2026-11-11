@@ -12,13 +12,10 @@
 #include <utility>
 
 #include "debug/bug_mark.h"
-#include "debug/gs_census.h"
-#include "debug/gs_timing.h"
 #include "debug/sampler.h"
 #include "debug/stall_watch.h"
-#include "depth_reads.h"
 #include "flip_pacing.h"
-#include "gs_tripwire.h"
+#include "gs_null.h"
 #include "battle_rates.h"
 #include "button_glyphs.h"
 #include "update_check.h"
@@ -32,7 +29,6 @@
 #include "text_language.h"
 #include "voice_language.h"
 #include "map_chests.h"
-#include "native_renderer.h"
 #include "loading_screen.h"
 #include "opening.h"
 #include "quick_scenes.h"
@@ -46,10 +42,8 @@
 #include "widescreen.h"
 #include "ps2_runtime.h"
 #include "stick_response.h"
-#include "runtime/gs/gs_cpu_backend.h"
 #include "Stubs/Pad.h"
 #include "runtime/gs/gs_frontend.h"
-#include "runtime/gs/gs_threaded_backend.h"
 
 #if defined(RG_HAS_SDLGPU)
 #include <SDL3/SDL.h>
@@ -410,8 +404,6 @@ void applyGameOption(const std::string &key, bool on)
         rg::mapchests::setEnabled(on);
     else if (key == "dev_tools")
         rg::devtools::setEnabled(on);
-    else if (key == "native_renderer")
-        rg::nativerenderer::setPreferred(on);
     else if (key == "free_camera")
         rg::freecamera::setEnabled(on);
     else if (key == "faster_camera")
@@ -651,8 +643,6 @@ void writeNativeScreenshot(const PresentationFrame &frame)
 // window and the menu keep up.
 bool presentNative(void *userData, bool newTick)
 {
-    if (!dq8::gfx::native::enabled())
-        return false;
     auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
     backend->serveNativeReads();
     if (!newTick)
@@ -681,7 +671,6 @@ bool presentNative(void *userData, bool newTick)
 bool pump(void *userData)
 {
     auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
-    debug::notePresenterLoop();
     static const bool watching = SDL_AddEventWatch(&countMarkKeys, nullptr);
     (void)watching;
     {
@@ -741,11 +730,10 @@ bool pump(void *userData)
         // With the profile launcher, the mark also opens a profile window.
         debug::requestProfileWindow();
     }
-    // F7 logs the next GS frame with RG_GS_CAPTURE (debug\RogueGalaxy-capture.bat).
+    // F7 asks for the scene timing's state report.
     for (unsigned n = g_f7Presses.exchange(0u, std::memory_order_relaxed); n > 0u; --n)
     {
-        std::fprintf(stderr, "[mark] F7: frame capture requested\n");
-        debug::requestFrameCapture();
+        std::fprintf(stderr, "[mark] F7: state report requested\n");
         rg::timing::requestStateReport();
     }
     // F10 writes the stall watchdog's report now (the guest threads, their
@@ -1113,11 +1101,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          "once and pick your Japanese disc image. Without them the voices stay English. A few lines have no "
          "Japanese voice and play silent. Takes effect the next time the game starts.",
          false, 0, 0, 0, "", 1, true, true, "language"},
-        {"native_renderer", "Native renderer",
-         "Experimental, for development: the models and the post effects drawn by the PC's renderer instead of "
-         "through the emulation of the PS2's graphics chip, as that work lands; for now the models. Off, "
-         "everything goes through the emulation. Takes effect the next time the game starts.",
-         false, 0, 0, 0, "", 1, true, true},
         {"dev_tools", "Developer tools",
          "The tools the developers left in the game, switched off for release. Main menu: R3 shows every item's "
          "icon, R1 + R3 a list of them, and Cross gives one of the one picked. Help pages and info list: R1 + "
@@ -1146,7 +1129,6 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
         {"sixty_fps", "Camera and view"},
         {"skip_opening", "Convenience"},
         {"encounter_rate", "Battles and rewards"},
-        {"native_renderer", "Rendering"},
         {"dev_tools", "Developers"},
     };
     // The game's own Settings screen shows them on pages of its own.
@@ -1309,7 +1291,7 @@ Setup::Setup(PS2Runtime &runtime)
         }
         std::printf("[rg] GS: sdlgpu (%s), internal scale %ux%s\n", sdl->driverName().c_str(),
                     sdl->resolutionScale(), m_menu ? ", menu on F1" : "");
-        m_backend = std::move(sdl);
+        m_presenter = std::move(sdl);
         m_name = "sdlgpu";
     }
 #else
@@ -1333,46 +1315,11 @@ Setup::~Setup()
 
 void Setup::install(PS2Runtime &runtime)
 {
-#if defined(RG_HAS_SDLGPU)
-    // RG_NATIVE_PIPELINE counts only under the native renderer flag; decided
-    // at its first use, after the menu's settings (docs/NATIVE-PIPELINE.md).
-    dq8::gfx::native::setOuterSwitch(&rg::nativerenderer::enabled);
-#endif
-    std::unique_ptr<GSRasterBackend> backend = std::move(m_backend);
-    if (!backend)
-    {
-        backend = std::make_unique<GSCpuBackend>();
-    }
-#if defined(RG_HAS_SDLGPU)
-    // Step 7's structural check (docs/NATIVE-PIPELINE.md): under the native
-    // pipeline nothing is meant to reach the GS backend, so there is no GS
-    // around it (no worker thread or queue, census, timing, depth serving
-    // or flip pacing), and any call that still gets there names itself
-    // (gs_tripwire.h). The backend stays as the window and the native
-    // renderer's host.
-    if (dq8::gfx::native::enabled())
-    {
-        runtime.gs().setRasterBackend(tripOnGs(std::move(backend)));
-        std::printf("[rg] GS backend: none under the native pipeline (%s as window and native renderer only)\n",
-                    m_name);
-        return;
-    }
-#endif
-    // In 3D scenes the software rasterizer was more than half of the game
-    // thread's time; behind the queue it runs beside the game instead.
-    if (env("RG_GS_WORKER", "1") != "0")
-    {
-        // The queue counts an upload's bytes in full, and the game uploads
-        // about 4 MB of textures a frame: at the framework's 4 MiB the VIF1
-        // thread spent a sixth of its time waiting for the worker to drain.
-        constexpr size_t kQueueBytes = 16u * 1024u * 1024u;
-        backend = std::make_unique<GSThreadedBackend>(debug::timeGsBackend(std::move(backend), "worker"),
-                                                      kQueueBytes);
-    }
-    backend = paceOnFlips(serveDepthReadsLocally(
-        debug::censusGsBackend(debug::timeGsBackend(std::move(backend), "frontend"))));
-    runtime.gs().setRasterBackend(std::move(backend));
-    std::printf("[rg] GS backend: %s%s\n", m_name, env("RG_GS_WORKER", "1") != "0" ? " on its own thread" : "");
+    // The game is drawn by the native pipeline from records
+    // (docs/NATIVE-ONLY.md): the runtime's GS front end has no backend to
+    // draw with, and any call that still gets there names itself (gs_null.h).
+    runtime.gs().setRasterBackend(nullGsBackend());
+    std::printf("[rg] GS backend: none (the native pipeline draws; %s presents)\n", m_name);
 }
 
 } // namespace rg::graphics

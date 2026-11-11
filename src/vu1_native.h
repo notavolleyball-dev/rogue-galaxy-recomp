@@ -178,18 +178,14 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
                std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds = nullptr);
 
 // RG_VU1_NATIVE, in the game (src/vif1_thread.cpp), for the chunks done
-// natively: `check` runs the VU1 as before and compares its packets with the
-// native ones; `1` runs the VU1 (its state stays as it was) and sends the
-// native packets instead of its own; `skip` sends the native packets without
-// running the VU1; `gpu` sends the chunk as a mesh the renderer transforms,
-// without running the VU1. Unset or 0: off.
+// natively: unset, each is sent as a mesh the renderer transforms, without
+// running the VU1; `check` runs the VU1 as before and compares its packets
+// with the native ones (for the oracle's work; goes in M5 of
+// docs/NATIVE-ONLY.md).
 enum class Mode : uint8_t
 {
-    Off,
-    Check,
-    Replace,
-    Skip,
     Gpu,
+    Check,
 };
 Mode modeFromEnvironment();
 

@@ -191,7 +191,6 @@ void begin(SDL_Window *window)
         std::fprintf(info, "flip %llu\n", static_cast<unsigned long long>(rg::graphics::guestFlips()));
         std::fprintf(info, "pad_read %u\n", padReads());
         std::fprintf(info, "guest_frame %llu\n", static_cast<unsigned long long>(ps2PadCurrentGuestFrame()));
-        std::fprintf(info, "native_pipeline %d\n", dq8::gfx::native::enabled() ? 1 : 0);
         std::fprintf(info, "window %d %d\n", width, height);
         std::fprintf(info, "window_pixels %d %d\n", pixelWidth, pixelHeight);
         // In window pixels, as the swapchain image has them; -1 -1 when the
@@ -238,11 +237,8 @@ void begin(SDL_Window *window)
     std::fprintf(stderr, "[bugmark] begin %s (flip %llu, pad read %u, %s)\n", directory.string().c_str(),
                  static_cast<unsigned long long>(rg::graphics::guestFlips()), padReads(),
                  capture ? "with a RenderDoc capture" : "no RenderDoc: no frame capture");
-    if (dq8::gfx::native::enabled())
-    {
-        touch("build/run/dump-now");
-        touch("build/run/depth-log-now");
-    }
+    touch("build/run/dump-now");
+    touch("build/run/depth-log-now");
 }
 
 // The pieces that came since: the depth logs, and the log from a little

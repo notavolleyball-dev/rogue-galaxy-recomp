@@ -59,7 +59,7 @@ bool enabled()
 {
     static const bool on = [] {
         const char *value = std::getenv("RG_NATIVE_2D");
-        return rg::nativeproducer::pipelineOn() && !(value && std::strcmp(value, "0") == 0);
+        return !(value && std::strcmp(value, "0") == 0);
     }();
     return on;
 }

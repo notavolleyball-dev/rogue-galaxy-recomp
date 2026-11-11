@@ -7,9 +7,6 @@
 #include "gif_events.h"
 #include "runtime/gs/gs_frontend.h"
 
-#if defined(RG_HAS_SDLGPU)
-#include "gfx/native/native_pipeline.h"
-#endif
 
 namespace rg::drawstate
 {
@@ -156,21 +153,12 @@ void write(Mirror &m, uint8_t reg, uint64_t value)
 }
 } // namespace
 
-bool enabled()
-{
-#if defined(RG_HAS_SDLGPU)
-    return dq8::gfx::native::enabled();
-#else
-    return false;
-#endif
-}
-
 // The vertex state a packet leaves for the next, per sending thread.
 thread_local rg::gif::GifState t_carried;
 
 void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
 {
-    if (!enabled() || count == 0u)
+    if (count == 0u)
         return;
     thread_local std::vector<rg::gif::GifEvent> events;
     events.clear();
@@ -184,7 +172,7 @@ void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
 
 void observe(const uint8_t *data, uint32_t size)
 {
-    if (!enabled() || !data || size < 16u)
+    if (!data || size < 16u)
         return;
     rg::gif::GifState &carried = t_carried;
     thread_local std::vector<rg::gif::GifEvent> events;
@@ -203,8 +191,6 @@ void observe(const uint8_t *data, uint32_t size)
 
 void readBack(const GS &gs)
 {
-    if (!enabled())
-        return;
     std::lock_guard lock(g_mirror.mutex);
     g_mirror.r = gs.drawRegisters();
     GSPrimReg prim = g_mirror.r.prmodecont ? g_mirror.r.primRegister : g_mirror.r.prmodeRegister;
