@@ -2231,3 +2231,563 @@ When the snapshot happens (for producing records):
 (The side note this map ended with, that `native_blocks` read past
 `GsPktEnd`'s RET and so read no block, was right; fixed on
 `native-only/m4b-2d`.)
+
+### Building model draws at Emit time: a recipe from EE structures
+
+Static reading only (SCUS_974.90 disassembly, RGDecomp C, and the VU1 pieces decoded out of the ELF).
+Nothing here has been checked in a running game. Tags: **[dis]** read in the disassembly at the given
+address. **[C]** read in the RGDecomp C only. **[tool]** decoded from disc/SCUS_974.90 by a script (it is in
+the scratchpad `py/`, and it reuses tools/vu1/census.py's MPG walker and FNV hash, so the hashes match
+`identify()`). **[guess]** a guess.
+This extends docs/NATIVE-ONLY-NOTES.md "Model draws (M5)" and the sections next to it. What is already there
+is not repeated unless it is corrected.
+
+---------------------------------------------------------------------------------------------------
+
+#### 0. Summary: a model draw record
+
+Hook arguments: `inst = a0`, `dctx = a1`, `req = a2`. One record per **(item, group)**. Item nodes come from
+`req+0x44` (`node+0x10` is the item, written `it` below). A group is the i-th entry of the mesh's group list.
+
+```
+record {
+  // --- identity / geometry -------------------------------------------------------------------
+  mesh        = (*(req+0xC))->p4[it+0x08]                    ([dis] 0x14edd4-0x14ede8); class = *(mesh+0x50)
+  matIdx      = group+0xC        group list: Links mesh+0x130, ModelMesh mesh+0xF0 ([dis] 0x15aeb0, 0x15b150)
+  chain       = group+0x10       REF list -> chunk spans (section 4). Links: static, keyed by (phys, bytes) of each REF
+  chunkFormat = parsed from the span bytes (section 4.3); vertex count TOP.y = word at chunk+0xC
+  // --- per item --------------------------------------------------------------------------------
+  model[4]    = frame+0xA0 == p14+0x10..0x4F,  frame = (*(inst+0x104))->p4[it+0x04]       -> VU 60-63
+  q76         = p18+0x20 {mesh+0x08, mesh+0x0C, mesh+0x124 (palette base, 0 = unskinned), 0}
+  q77..79     = p18+0x30/+0x40/+0x50 (dequant scales; Mode1 differs, section 4.4)
+  q81         = p18+0x6C..0x7B {info.mode, 0, 0, info.scale}  (unaligned: the data follows the UNPACK word at +0x68)
+  q42         = p18+0x80 (info.col)
+  palette     = p1C: qwc = (*(u32*)p1C & 0xFFFF); if > 0, nb = mesh+0x128, quads p1C+0x20.., bone nb-1 first
+  itemFlags   = it+0x0C: 1 skinned, 2 quantized positions, 4 point light near, 8 guard band (mode&1), 0x10 depth sort
+  // --- per group: program (section 1) ---------------------------------------------------------
+  t           = (*(req+0x8))->p4[matIdx]  (MeshMaterial)
+  type        = (u16) t+0xA         column of the program table, always plane 0
+  B = Bs[itemFlags & 3]; F, E by type; C = Cs[t+0x18 + (itemFlags&4 ? 2:0)];
+  D = Ds[(t+0x1A + (itemFlags&8 ? 2:0)) | (dctx+0x3CCC ? 4:0)]
+  // --- per group: VU constants of the material (section 2) ------------------------------------
+  q82 = t+6 ? t+0x20 : *(t->pkt+0x10);  q83 = 0;  q84 = *(t->pkt+0x30)
+  q86 = *(t->pkt+0x50) (vertex GIF tag; NLOOP from TOP.z);  q87 = *(t->pkt+0x60) {PRMODE bits, flags, depth scale, 0};  q88 = 0
+  // --- per group: GS state (section 3) --------------------------------------------------------
+  env  = *(dctx+0x270)
+  ALPHA/TEST/FBA = GsEnv t+0x14: +0x10 / +0x20 / +0x40
+  ZBUF  = (t+0x14)+0x30 with ZBP,PSM replaced by env+0x90 (ZMSK kept from the material)
+  FRAME = env+0x80, but FBMSK (high word) kept from (t+0x14)+0x50 when (t+0x14)+0x5C != -1
+  TEX0  = texnode+0x38 now (texnode = t+0xC); TEX1/CLAMP = t->pkt+0xA0 / +0xB0 (load-time copies of texnode+0x40/+0x48)
+  PRMODE = q87.x;  PRIM type = TOP.x (3 list, 4 strip);  FOGCOL = q41 (low word 0 if q87.y & 0x10)
+  XYOFFSET env+0xA0, SCISSOR env+0xB0, PRMODECONT env+0xC0, COLCLAMP env+0xD0, DTHE env+0xE0
+  TEXA  = GS-only (last TEXA written by anything): not in any model structure
+  // --- per view / lights (VU1 state set elsewhere in the list; section 2.2) ----------------------
+  q0..19 = view packet *(dctx+0x36B0)+0x10;  q24..28 = last DrawPktBuildCameraMatrix output (no stored pointer)
+  q30..51 = last light packet CALLed (LightStateWritePacket output), or q30..33 = projector matrix
+  base outputs (64-66, 68-75, 100-102, 111.z) = runBase(60-63, 24-27, 4-11, 30-32): confirmed (section 2.1)
+}
+```
+
+What makes a group **not** buildable from EE structures alone (all in section 2.3): wave (type 7) reads
+quad 900.z, and the type-8 E reads 901/902. Nothing in the main ELF writes those quads. Swell (type 11) runs
+whatever C piece is left in micro memory. A chunk section that the chunk does not carry is read from stale
+VU1 memory. In the sorted path, quads 24-28 are whatever is current at flush time.
+
+Corrections to the existing notes:
+* `dctx+0x3C40` (the table plane) is only ever stored as **0** (`sw zero` at 0x1426ac in
+  DrawListFrameBegin and at 0x145a84 in DrawCtxInit; an immediate-offset scan of all text found no other store).
+  Effect models hard-code plane 0 too (VuProgSelInit, 0x14e410). So planes 1-3, with their own A/E pieces,
+  are dead **[dis]**.
+* In Emit and ShadowCaster, `DrawListDepthToSortKey` (0x14eea8, 0x14ea50) is pure and its result is
+  **discarded**. Flag 0x10 does nothing there. Only ModelQueueSortedPackets uses it (0x14f38c) **[dis]**.
+* The texenv cache (`req+8 -> +8[]`) lasts **one Prepare/Emit pair**, not one frame. Prepare zeroes it at its
+  end (0x14fe38-0x14fe58) **[dis]**.
+* `ModelMeshMode1` is the **PrimBatch** class (particles). The PrimBatch* functions at 0x164130-0x1645b0 sit
+  in its range, and EffQuad drives them. Inside a model it emits only an empty chain: cnt(0) {STCYCL} then
+  ret {FLUSH} (0x164620). So it draws nothing **[C]**.
+* desc+0x52 != 0 also adds 4 to t+0x1A (MeshMaterialBuildPkt, [C]). Depth-scaled materials therefore always
+  use the depth-and-bounds D pieces, not only inside composites.
+
+---------------------------------------------------------------------------------------------------
+
+#### 1. The program a group draws with
+
+##### 1.1 The table (`D_00491280`, built at boot by `VuMicrocodeTableInitMaybe_152830`)
+`struct { void *a[4][12][4]; void **b[4][12][4]; }` at 0x491280 (0x300 bytes each half) **[C, spot-checked dis
+0x152904-0x152a38]**. The table is **not static data**: StaticInitVuMicrocodeTable_469180 fills it at run time.
+The pointers it stores are static, so the table can be rebuilt from the ELF (done below).
+* `row = 0x491280 + plane*0xC0 + type*0x10`, where plane = `dctx+0x3C40` (always 0) and type = `t+0xA` (the
+  material type, desc+0x40).
+* `row+0/+4/+8` are A, F, E: one packet each.
+* `row+0x300/+0x304/+0x308` each point to an **array of packet pointers**: B[4], C[8], D[8].
+* Every entry is the **address of a DMA packet in .data**: a `ret` tag (qwc = n) whose upper words are
+  `NOP; MPG load,pairs`, followed by the code. `DrawCtxAddChangedCallTags_13fd70(dctx, ptrs[6], 6)` emits one
+  `call` tag per slot whose pointer differs from the cache at `dctx+0x3C48 + 4*slot`. The slot order is
+  A, F, E, B, C, D (stack array at sp+0x1c0, filled at 0x14efd8-0x14f024) **[dis]**.
+* **Entry → hash:** parse the packet (`ret` qwc, then the MPG code), hash the MPG's bytes with FNV-1a (as
+  census.py does). The load address is in the MPG code. **0x436CA0 is `ret(0)`**, an empty packet: nothing is
+  uploaded and the slot keeps its old code, but the cache now holds 0x436CA0. That is how the game marks a slot
+  as "whatever is there" or "invalid".
+
+##### 1.2 Plane 0, decoded **[tool]** (hash first 8 digits, load address; `*` = in vu1_native.cpp)
+
+B[itemFlags & 3]: bit 0 skinned, bit 1 quantized positions (ModelMeshGetVuVariantFlags 0x14e430 [C]).
+* Strip types: `[0] 857fbbc2@960` (float, unskinned: a bare `JR vi15`, **not in kDecodes**), `[1] 36d686cd*`
+  (float, skinned), `[2] af62ff64*`, `[3] 26a933a5*`.
+* Types 1 and 4: `[0] 857fbbc2`, `[1] 89123290*`, `[2] a293001f*`, `[3] 542b235c*`.
+* Type 5: all empty.
+
+C[t+0x18 + (itemFlags&4 ? 2:0)] for strip types: `780d503e*, 91f542d0*, 780d503e*, 127ca0b4*, 70362be4*,
+2460e528*, 70362be4*, e3bca52a*`. This matches the notes' table.
+
+D[(t+0x1A + (itemFlags&8 ? 2:0)) | (3CCC ? 4:0)] for most strip types:
+`4b7b81f2*, a786efab*, 126a58a3*, a786efab*, b8ea8ed5*, 93cfd2f5*, 634107b0*, 93cfd2f5*`.
+* Bit 0: backface (mat 0x40).
+* Bit 1: guard band (info.mode & 1).
+* Bit 2: depth scale and bounds (desc+0x52 != 0, or inside a composite).
+* Backface always comes with the guard band.
+
+| type | A | F (0x39d0) | E (0x2620) | C column | D column |
+|---|---|---|---|---|---|
+| 0 plain | 07151c25* | d3f6f631* scroll | 6e420ef8 clip | strip C | strip D |
+| 1 outline | 3f6df595* | – | – | – | 3689bac9* **@0x10e0** (the outline C, put in the D column) |
+| 2 sphere | 07151c25* | 150031ee* | 6e420ef8 | strip C | strip D |
+| 3 ramp | 07151c25* | 0594a063* | 6e420ef8 | strip C | strip D |
+| 4 shadow vol | 821b638f* | – | – | – | dc8dbfe4* **@0x10e0** |
+| 5 particles | 0b1031ae* | – | 8ecadb3a* **@0x1900** (the D, put in the E column) | – | – |
+| 6 beam | c8143ab4* | b1d29245* | 2aa11602* stub | strip C | 1bd1b5c0* (all 8) |
+| 7 wave | 07151c25* | 9df36d6a* | 6e420ef8 | strip C | strip D |
+| 8 refraction | c8143ab4* (beam A) | 2aa11602@0x39d0 (stub, not in kUvs) | **ab37fe79** | strip C | 2feaa9a1* (all 8) |
+| 9 reflection | 07151c25* | ad209cd3* | 6e420ef8 | strip C | strip D |
+| 10 projector | 4beba151* | 15be21a5* | 860dd144 | 3b890d00* (all 8) | – |
+| 11 swell | 07151c25* | a04c11ce* | 2aa11602* stub | **– (empty)** | 312d076b* (all 8) |
+
+"–" means 0x436CA0 (empty). The non-starred hashes are E pieces: 6e420ef8, ab37fe79, 860dd144. Planes 1 and 2
+(dead) replace A/E for types 0 and 2 with 8855d9e7 plus 56d6683a (plane 1) or c9e1cecc (plane 2).
+
+What this means for `identify()`:
+* An unskinned mesh with 32-bit positions gets B 857fbbc2. identify() rejects it today (no kDecodes entry).
+  B returns at once, so positions, normals and UVs are raw floats.
+* Type 8 has the beam A but E = ab37fe79, not kBeamE, so identify() rejects it. The beam A calls E
+  unconditionally. ab37fe79 reads 60-63.xz, 72-75, 84.xyz, **901, 902**.
+* Type 11's C slot is empty: it runs whatever C is resident (section 2.3). identify()'s "swell needs C ==
+  Material" is a constraint on that leftover, not on the table.
+* Type 6's E is a stub, and so is type 11's, so clipping (81.x & 2) is a no-op for them.
+
+##### 1.3 Field meanings
+* `t+0xA` (s16, read `lhu` 0x14ef94): material type = desc+0x40.
+* `t+0x18` (s16): C base = `(flags&1 ? 4:0) + (flags&4 ? 1:0)`, where flags = desc+0x44 after the edits
+  (0x200 clears 4).
+* `t+0x1A` (s16): D base = `(flags&0x40 ? 1:0) + (desc+0x52 != 0 ? 4:0)` **[C MeshMaterialBuildPkt]**.
+* `t+0x08`: PRMODE bits (also in q87.x).
+* `t+0x1C`: final flags (also in q87.y).
+* `dctx+0x3C44`: the cached count for the generic n≠6 path of AddChangedCallTags.
+* `dctx+0x3C48..0x3C5C`: the last packet CALLed per slot (A, F, E, B, C, D). Cleared (32 words) by
+  DrawListFrameBegin (0x1426c4) and by the composite (DrawCtxCallTagCacheClear_13fd40, from 0x16b608).
+
+##### 1.4 Effect models choose differently
+EffModelDrawNodes (0x1a7c7c-0x1a7d04):
+* B index = the mesh's variant flags.
+* **C index 0** (780d503e, one colour) and **D index 2** (126a58a3, guard band), whatever the material says.
+* Only the **first group** is drawn: MSCAL+CALL of `A[0]` (0x1a7e1c).
+* There is no p1C (no palette).
+
+---------------------------------------------------------------------------------------------------
+
+#### 2. Every VU1 quad a strip chunk reads, and where it comes from at Emit
+
+##### 2.1 Reads per piece **[tool: every `LQ/ILW n(vi0)` / `SQ/ISW n(vi0)` in the disassembled pieces]**
+* **A 07151c25**: reads 0, 16, 17, 18, 76.xz, 81.x, 86.yzw, 87.x. Writes scratch 103-106, 109, 110.
+* **B**: af62ff64 / 26a933a5 read 77, 78, 79.xy (plus the palette through registers: 900 + 2·idx).
+  36d686cd and 857fbbc2 read nothing absolute.
+* **F**:
+  * d3f6f631: 88.xy
+  * 150031ee: 24-26.xy, 64-66
+  * 0594a063: 100-102.x
+  * b1d29245: 72-75.xyw, 82.xyz
+  * 9df36d6a: 84.xy, **900.z**
+  * ad209cd3: 28, 60-63, 64-66
+  * a04c11ce: 8, 12-15.x, 68-71.w, 81.w, 82, 84.xy
+* **C**: all read 81.w and 82.
+  * 780d503e / 70362be4: 42, 43, 83, 87.y
+  * Lit pieces: 33-37, 100-102 (2460e528 also 87.y)
+  * Point pieces: 44-51, 60-63, 64-66 in addition
+* **D**: all read 19.yzw, 39, 40, 41, 68-71, 87.y.
+  * Guard band pieces: 109, 110
+  * Backface pieces: 111.z
+  * Depth pieces: 1.y, 87.z
+  * Bounds pieces: read and write 98, 99
+* **E 6e420ef8**: 1.y, 12-15, 19, 39-41, 72-75, 87.yz, 111.z.
+* **Base 12ad73d2**: reads 4-11, 24-27, 30-32, 60-63. Writes 64-66, 68-75, 100-102, 111.z. This confirms
+  runBase's inputs exactly; it also re-reads its own 64-66.
+
+Nothing in any piece in the ELF stores to 76-88, 42 or 895-1022 by absolute address. The only absolute stores
+in that range are 98 (the bounds D pieces).
+
+##### 2.2 Source of each quad at Emit time
+
+| quads | from | EE structure at Emit | notes |
+|---|---|---|---|
+| TOP.. | chunk span | REF payload (section 4) | |
+| 0, 1, 2-3, 4-7, 8-11, 12-15, 16-18, 19 | view packet (CameraWriteViewPacket_148740) | `*(dctx+0x36B0)` + 0x10 (the last view packet added; DrawListAddViewPacket / EnsureViewPacket store it) **[C]**; also `cam = *(dctx+0xF20)` fields per notes | ShadowMapRender also sets 36B0 (0x146928) |
+| 24-27, 28 | camera-matrix packet (DrawPktBuildCameraMatrix_1486c0) | **no stored pointer**; usually `cam+0xB0`, `cam+0x170` | hook 1486c0 and track its CALL |
+| 30-51 | light packet (LightStateWritePacket_1484a0) | `*(dctx+0x36B4)` is the *current* record, but VU1 holds the *last packet CALLed*. LightStateEmitOnce (0x142950) writes a packet only if rec+0x04 == 0, so switching back to an already-emitted record sends nothing **[C]**; track by CALL | |
+| 30-33 | projector matrix (ShadowMapWriteTexMtxPktMaybe_147e30) | overwrites the directional lights | |
+| 42 | p18 (info.col) | `p18+0x80`; `*(frame+0x20)+0x10` or env+0xC0 | the light packet's 42 is always overwritten per item |
+| 43 | light packet | rec+0xD0 | |
+| 60-63 | p14 | `frame+0xA0` | |
+| 64-66, 68-75, 100-102, 111.z | base (MSCAL 0 in p14) | computed: runBase(60-63, 24-27, 4-11, 30-32) | |
+| 76-79, 81 | p18 | `p18+0x20..0x5F`, `+0x6C..0x7B` | |
+| 82 | material packet, overridden by texenv | `t+6 ? t+0x20 : *(t->pkt+0x10)`; EffModel: `MeshPktWriteColour` (= t+0x20 after VecMul) | t+6 is written by the material animators: AnimBlendTwoApplyMaterials_153500, AnimApplyMaterialKeys_154200, AnimSlotApplyToMaterial_154540, InsectModelApplyColorRec_3913f0 |
+| 83 | material packet | always 0 | |
+| 84 | material packet | `*(t->pkt+0x30)` (= t+0x30 at load; type 11: y forced 800 if ≤ 2) | |
+| 86, 87 | material packet | `*(t->pkt+0x50)`, `*(t->pkt+0x60)` | |
+| 88 | material packet | 0; EffModel only: `MeshPktWriteOffset` (UNPACK → 88, 0x14ab30) | |
+| 98, 99 | DrawListResetClipRangeMaybe_148040 (composite) | ±2^24 at the reset, then the bounds D pieces widen them | composite only |
+| 900-4nb..899 | p1C | palette (ModelBuildSkinMtxPacket: UNPACK addr mesh+0x124, NUM 4·nb, data from p1C+0x20) | |
+| **900.z, 901, 902** | **nothing found** | **VU1-memory only** | section 2.3 |
+
+The record must use the light, view and camera-matrix packets that are *CALLed before this draw in list
+order*, not the EE "current" pointers at Emit time. Usually these agree; when they do not, VU1 is what
+counts. Recommendation **[guess]**: hook the three packet writers (1484a0, 148740, 1486c0) and
+ShadowMapWriteTexMtxPkt (147e30), keep their outputs by packet address, and resolve the CALLs in list order
+on the consumer side. The sorted path stores its view and light packet addresses per node anyway (section 5).
+
+##### 2.3 Inputs that exist only in VU1 memory (left by an earlier draw)
+1. **900.z (wave F, type 7)** and **901 / 902 (type 8 E ab37fe79)**.
+   * A scan of the main ELF finds no writer: every `addiu/ori` immediate 0x384-0x386 and every UNPACK code
+     word in the data ends at 899.
+   * No VU1 piece stores there.
+   * Model chunks never reach 900: BASE 0x8C, OFFSET 0x17C (or less) puts the buffers at 140..519 and
+     520..899, minus 4nb when skinned.
+   * Not scanned: the overlays (functions_factory/insect/insmenu/normal/title) and the PrimBatch/particle
+     buffers (Mode1 BASE/OFFSET not read).
+   * The existing native `Wave` reads 900 from VU memory, so it works today. At Emit there is nothing to read.
+   * **Open**: who writes 900-902. A guess: a particle or effect program's input buffer.
+2. **Swell's C (type 11)**: the C slot is empty, so it runs whichever C was resident: any strip C, the
+   outline C 3689bac9 (loaded at 0x10e0 by a type-1 group), the shadow C, or the projector C. Model this as
+   "the last C actually loaded".
+3. **Sections a chunk does not carry.** BuildUnpackPkt sends normals, UVs and colours only when the item has
+   that index list and the mesh has that stream (15b2a0 [C]). The header offsets are always written, so B and
+   C read stale VU1 memory where a stream is absent. Walk the UNPACK addresses (section 4.3) to tell which
+   sections are present. **[guess]** the material flags agree with the streams in practice: no vertex colours
+   without a colour stream, no lighting or sphere map without normals.
+4. **TOP+1.w** for unskinned chunks: never written (stale), and never read, because A reads it only when
+   76.z != 0.
+5. **98/99**: only inside a composite (existing notes).
+6. **Quads 24-28 in the sorted path**: the bucket replay re-CALLs each node's view and light packets but not
+   a camera-matrix packet. Base runs at flush time with whatever camera-matrix packet was CALLed last.
+7. GS-side state the model path never writes (section 3): **TEXA**. **PRMODECONT** is also never written by
+   the models; it is restored from env+0xC0 by every DrawListEndPrim / env packet.
+
+---------------------------------------------------------------------------------------------------
+
+#### 3. GS state per group
+
+##### 3.1 The material packet (`t+0` = phys address, `t+4` = qwc 8 or 12; built at load by MeshMaterialBuildPkt_14ac90 **[C]**)
+```
++0x00  {0, 0, STCYCL 1,1 (0x01000101), UNPACK V4-32 x3 -> 82 (0x6C030052)}
++0x10  q82 = colour (desc+0x00; w * desc+0x53/128, clamped to [0,1], * 0.993 (D_0047D41C) when flags & 0x80)
++0x20  q83 = 0
++0x30  q84 = desc+0x20 (type 11: .y = 800 if <= 2)
++0x40  {0, 0, STCYCL 1,1, UNPACK V4-32 x3 -> 86 (0x6C030056)}
++0x50  q86 = vertex GIF tag
+       0x8000 | NREG/FLG word | REGS:
+       type 1: 0x90000000, 0x44444441, 4         (RGBAQ + 8 XYZF2)
+       type 4: 0x10000000, 4                     (XYZF2)
+       type 5: 0xD0000000, 0x24124120, 0x41241   (PRIM + 4 x (ST, RGBAQ, XYZF2))
+       other:  0x30000000, 0x412                 (ST, RGBAQ, XYZF2)
++0x60  q87 = {bits = (TME 0x10 if flags&2) | (FGE 0x20 if flags&8) | (ABE 0x40 if flags&0x20) | (IIP 8 if desc+0x4C),
+              flags, 1 + 0.01 * (s8)desc+0x52, 0}
++0x70  q88 = 0
+if texnode (t+0xC):
++0x80  {0, 0, STCYCL 1,1, DIRECT 3 (0x50000003)}                (D_0047DE80)
++0x90  GIF tag {0x8002 NLOOP 2 EOP, NREG 1, REGS 0xE A+D}       (D_0047DE90)
++0xA0  TEX1_1  = texnode+0x40 at load, addr 0x14
++0xB0  CLAMP_1 = texnode+0x48 at load, addr 0x08
+```
+* flags = desc+0x44, edited before use:
+  * type 6: `|= 0x400`, and desc+0x4E (alpha ref) is set to 0 in the resource itself;
+  * type 11: `&= ~2`;
+  * 0x200 clears 4;
+  * type 4: `|= 0x20`.
+* texnode is the refraction node for types 6 and 8, otherwise `NameTableFindByName(dctx+0x3BA0, desc+0x34)`.
+* **TEX1 and CLAMP are frozen at load.** Take them from the packet, not from the texture node.
+
+##### 3.2 The texenv packet (DrawListWriteTexEnvPacket_148370 + TexEnvBuildDmaChainMaybe_14abb0, **[dis]**)
+Built at the current buffer the first time material `matIdx` is used in this Prepare/Emit pair, then reused
+for the rest of the pair.
+```
+cnt(6) | NOP, DIRECT 6                          (0x10000006 / 0x50000006, 0x1483c4-0x1483e4)
+  GsEnv copy (6 qw): GIF A+D NLOOP 5: ALPHA_1 (+0x10), TEST_1 (+0x20), ZBUF_1 (+0x30), FBA_1 (+0x40), FRAME_1 (+0x50)
+     before copying: GsZbufCopyBaseFmt(env, *(dctx+0x270)+0x90)  -> ZBUF.ZBP (9 bits), ZBUF.PSM (4 bits) from the draw env
+                     GsFrameSet(env, *(dctx+0x270)+0x80)          -> FRAME = env FRAME; FBMSK kept when GsEnv+0x5C != -1
+ref(t+4) -> t+0                                  (0x3000xxxx, 0x14abd4)
+[t+6 != 0]  cnt(1) | STCYCL, UNPACK x1 -> 82, t+0x20   (0x14abf8)
+[t+0xC != 0] cnt(2) | STCYCL, DIRECT 2, GIF A+D NLOOP 1, TEX0_1 = texnode+0x38   (D_0047DEA0/B0, 0x14ac38)
+ret
+```
+* The GsEnv at t+0x14 (0x60 bytes) is set at load:
+  * GsEnvInit, then GsEnvSetDefaultsMaybe: ALPHA preset 1 (0x44); TEST ATE=1 GEQUAL AREF=1, ZTE=1 GEQUAL;
+    FBA 0; +0x5C = -1.
+  * Then from the descriptor: blend preset desc+0x48; alpha func and ref desc+0x4D/0x4E;
+    AFAIL = 1 if flags & 0x2000; DATM/DATE desc+0x4F; ZTST desc+0x50; ZMSK desc+0x51.
+  * FBA = 1 if flags & 0x80.
+  * GsFrameSetMaskMode(1) if flags & 0x400 (0x156d30): +0x5C = 1 and **FBMSK = 0xFF000000**, so alpha is not
+    written.
+* Edge cases (never expected):
+  * `t+0x14 == 0`: the function returns 0 and Emit still CALLs `s3`, the next free byte.
+  * `t+0 == 0` or `t+4 == 0`: the chain has no `ret`.
+
+##### 3.3 Other GS state between a group's start and its MSCAL, and in the chunk's own output
+* In the group's own list segment there is nothing else: program CALLs (microcode only), the texenv CALL, then
+  CNT{MSCAL 0x64} (qw 0x47DE60 = `cnt(0) | NOP, MSCAL 0x064`) and CALL chain (0x14f028-0x14f038).
+* The chunk's GIF output (A and D pieces):
+  * Template tag = q0 from the view packet: NLOOP 1, NREG 2, regs PRIM, A+D.
+  * PRIM = TOP.x.
+  * A+D PRMODE (reg 0x1B) = q87.x.
+  * Then the vertex tag (q86 with NLOOP = TOP.z) and ST/RGBAQ/XYZF2 per vertex.
+  * Before the chunk, D kicks FOGCOL: tag q19.yzw with NLOOP 1, then q41 (A+D FOGCOL; low word zeroed if
+    q87.y & 0x10).
+* Inherited from the draw env (`*(dctx+0x270)`, written by env packets in the list):
+  * XYOFFSET +0xA0, SCISSOR +0xB0, PRMODECONT +0xC0 (AC must be 0 for PRMODE to apply;
+    DrawEnvSetFrame_1575e0 clears bit 0, per the GsPkt notes; still open there), COLCLAMP +0xD0, DTHE +0xE0.
+* **TEXA, TEXCLUT, TEX2** are never written by the model path; they are whatever was last written.
+  native_producer's materialOf() uses `state.texa` for CT24/CT16 alpha: that state is GS-side only.
+* TEX0 is refreshed per Emit pair from texnode+0x38. Texture *contents* can change through 2D draws into the
+  texture page (TexAnimeTableApplyMaybe_162f50 runs GsPkt draws and VRAM copies from ModelObjExDraw before
+  Emit), so texture identity must still be resolved in list order on the consumer side.
+* Which registers native_producer::mesh()/materialOf() consume, and where each comes from in the record:
+
+  | register / field | record source |
+  |---|---|
+  | `prim.tme`, `prim.abe`, `prim.fge` | q87.x bits 0x10, 0x40, 0x20 |
+  | `tex0` | texnode+0x38 |
+  | `clamp` | packet +0xB0 |
+  | `linearFilter` | TEX1 at packet +0xA0 |
+  | `alpha` | GsEnv +0x10 |
+  | `test` | GsEnv +0x20 |
+  | `zbuf.zmask` / `zbuf.zbp` | GsEnv +0x30 / env +0x90 |
+  | `fba` | GsEnv +0x40 |
+  | `frame` (fbp, fbw, psm, fbmsk) | env +0x80, plus the material mask (section 0) |
+  | `xyoffset`, `scissor` | env |
+  | `texa` | GS-only |
+  | `fogR/G/B` | q41 |
+
+---------------------------------------------------------------------------------------------------
+
+#### 4. Geometry per group, per mesh class
+
+##### 4.1 `ModelMeshLinks` (vptr 0x470010): static
+* GetGroupPkts (0x15aeb0, [dis]) only copies `{group+0xC, group+0x10}` from the list at `mesh+0x130`. It writes
+  nothing and returns 0.
+* `group+0x10` is a REF list in the model's persistent MemStack:
+  * one quad per item: `{0x30000000 | qwc, addr & 0x0FFFFFFF, 0, 0}`;
+  * then `{0x60000000, 0, 0x11000000 (FLUSH), 0}`.
+* Each REF payload is all of one item's chunks, back to back. Multi-pass items reuse the first item's
+  `xC/x10` (15b2a0, `e->x14` branch), so two groups can REF the same bytes.
+* **Key = (REF addr, qwc·16)**, exactly vif1_thread.cpp's `LearnedSpan` key (phys << 32 | bytes), vouched for
+  by the write watch.
+* **[guess]** Use only `group+0xC/+0x10` after load. The item (`ents`) nodes and index lists were built in the
+  temp heap, which BuildFromRes frees.
+
+##### 4.2 `ModelMesh` (vptr 0x470040, MODEL_RM): rebuilt every Emit
+* GetGroupPkts (0x15b150, [dis]) calls `vtbl+0x28` (BuildUnpackPkt_15b2a0) into Emit's current buffer, copies
+  `{+0xC, +0x10}` from the list at `mesh+0xF0`, and returns the qwc written.
+* Sources:
+  * positions, normals, UVs, colours: `mesh+0xB4 / +0xBC / +0xC4 / +0xCC` (heap copies; cloth writes the
+    positions);
+  * skin table: `mesh+0xD0`, 12-byte entries `{s8 idx[4], u8 w[4], s32 n}`;
+  * formats: `mesh+0x64 / 68 / 6C`;
+  * index lists: per item, `+0x18/+0x1C/+0x20/+0x24` → `Sub+4` (u16 arrays).
+* BuildUnpackPkt **rewrites `item.xC/x10` and `group.x10`** in the mesh's own list each time. Those pointers
+  point into this frame's buffer.
+* Key the draw by mesh object plus a content hash (or a dirty signal from ClothWriteMeshVerts_1850f0 /
+  VertsPackQuantized_164bb0).
+* A hook that skips GetGroupPkts must still give the caller a qwc and keep `cur` consistent (section 5).
+
+##### 4.3 Chunk byte layout, readable without the VIF (15b2a0 + MeshPktUnpack*; **[C]**, VIF codes from the C)
+A span is a run of chunks, each starting quad-aligned. Byte offsets from the chunk start:
+```
++0x00 0x01000101                 STCYCL 1,1
++0x04 0x6C028000                 UNPACK V4-32, NUM 2, TOP+0 (FLG)
++0x08 TOP.x  prim id (3 list, 4 strip, 0x11/0x13 outline edges; PG+0x04)
++0x0C TOP.y  n = vertex count (with the strip overlap: chunks after the first carry 2 more)
++0x10 TOP.z  n | 0x8000
++0x14 TOP.w  m = n + 1          (normals at TOP+2+m)
++0x18 TOP+1.x 2m  (UVs)   +0x1C 3m (colours)   +0x20 4m (skin)
++0x24 TOP+1.w (bones-1)*2 when skinned (0/2/4/6), else stale
++0x28 first section's UNPACK code
+```
+Sections, in this order. Each is `code | FLG | NUM n << 16 | addr`, followed by its data padded to a word.
+Present only as noted.
+* positions → addr 2: V3-32 0x68 / V3-16 0x69 / V3-8 0x6A, signed. Always present.
+* normals → 2+m: same codes, normal format. Only if the item has a normal list and the mesh has normals.
+* UVs → 2+2m: V2-32 0x64 / V2-16 0x65 / V2-8 0x66, unsigned (USN 0x4000). Only if a UV list.
+* colours → 2+3m: V4-8 0x6E, unsigned. Only if a colour list; always 8-bit.
+* skin → 2+4m: `0x01000102` (STCYCL CL=2 WL=1), then UNPACK indices (signed, FLG) at 2+4m, then weights
+  (USN) at 2+4m+1. The type is S-8 0x62 for 1 bone, V2-8 0x66 for 2, V4-8 0x6E for 3-4. Indices are `-2x-2`,
+  weights 0..255. Only for skinned meshes.
+* Then `0x17000000` (MSCNT), then zero words up to the next 16 bytes. **If the MSCNT word ends on a quad
+  boundary, a whole extra zero quad follows** (`4 - m` with m = 0).
+
+Data sizes: `ceil(n * comps * bits / 32)` words (skin: n entries each). The quantized formats decode as the
+notes say: `/32768 * q77/78/79`, with 8-bit scales ×256.
+
+Walking the VIF codes is enough: each code is self-describing, and UNPACK vn/vl give the size. Matching each
+UNPACK's address against 2, 2+m, 2+2m, 2+3m, 2+4m tells which sections the chunk carries.
+
+##### 4.4 `ModelMeshMode1` (vptr 0x4701c0)
+* GetGroupPkts (0x1645c0, [dis]): one group, material `mesh+0xA8`, chain `mesh+0xC0`. BuildDmaHeader_164620
+  writes the chain as two quads, `cnt(0){STCYCL}` then `ret{FLUSH}`, and returns 2.
+* With no MSCNT, the MSCAL 0x64 runs A's entry, which only ends. **Nothing is drawn.**
+* Its header (WriteVuHeader 0x1646a0) differs: q77 = `mesh+0x70` = (1,1,1) with w = (mesh+0x64 != 32);
+  q78 = `+0x80` (position scale); q79 = `+0x90` (UV scale). It is the PrimBatch object of EffQuad (section 6).
+
+---------------------------------------------------------------------------------------------------
+
+#### 5. What the emitters write that something depends on
+
+##### ModelEmitDrawPacketsMaybe_14ec20 (and ShadowCaster 14e780, same pattern)
+1. **DMA list** (`dctx+0x4` cursor), per item: CALL p14, p18, p1C. Per group: program CALLs, CALL texenv,
+   the MSCAL qw, CALL chain.
+   * p14 also runs **base**, whose outputs and FOGCOL kick later VU1 programs read (outline, shadow volume,
+     projector, particles: whatever the VIF1 thread still reconstructs from VU1 memory).
+   * Keep p14/p18/p1C unless every group of the item is native.
+2. **`dctx+0x3C48..0x3C5C`** (microcode cache). It must stay equal to what is really in the list. If the hook
+   drops the program CALLs of a native group, **do not call AddChangedCallTags at all**; then the cache stays
+   true. Calling it and then dropping its output would break the next VU1 draw.
+3. **Texenv cache** `(*(req+8))+8[matIdx]` (written at 0x14ef90; Prepare clears it).
+   * If a native group skips the texenv, leave its slot 0, so a later fallback group in the same pair builds
+     its own.
+   * GS state the texenv sets that later non-model packets may inherit: TEX0/TEX1/CLAMP (2D blocks rely on
+     "last written", per the GsPkt notes); ALPHA/TEST/ZBUF/FBA/FRAME (every GsPktOpen re-sends these, so they
+     are safe).
+4. **Current buffer**: `MemStackAllocQw(DrawListGetCurBuf(dctx), (s3 - start)/16)` at the end (0x14f090).
+   Return value = that qwc. Callers only add it up and return it:
+   * ModelDraw returns it;
+   * the composite sums it (0x16abfc, 0x16b010) and returns the sum;
+   * ModelObjExDraw sums it (0x1ad938);
+   * Character2Draw* returns it.
+   No consumer was found, but return something non-negative.
+5. **Stats** `dctx+0x3D10 += 1`, `+0x3D14..+0x3D20 += mesh+0x40..+0x4C` (0x14edf4-0x14ee68).
+   * Readers: none found by immediate-offset scan (only DrawListFrameBegin and DrawCtxInit zero them).
+   * **[guess]** a perf meter reads them through a pointer; keep the increments.
+6. A temp-heap allocation when `tbl->cnt >= 0x80` (allocated and freed inside).
+7. ModelMesh class only: `item.xC/x10`, `group.x10` rewritten (4.2).
+8. DepthToSortKey: pure, result unused here.
+
+##### ModelQueueSortedPackets_14f0d0
+Same reads as Emit, but nothing is drawn now. Per group it builds a 0x30-byte node and calls
+`DrawListAddNode_140a10(dctx, node, key)`.
+
+Per item, it writes 0x20 bytes at `cur`: `{viewPkt, lightPkt, p14, p18, p1C}`.
+* `viewPkt` = DrawListEnsureViewPacket: may write and CALL a view packet now, and sets `dctx+0x36B0`.
+* `lightPkt` = LightStateGetPacket: rec+0x04, 0 when `dctx+0xF20 == 0`.
+
+Per group, a further 0x20 bytes: the 6 program pointers (A, F, E, B, C, D, 0x14f494-0x14f524).
+
+The node (stack 0x5f0, copied 3 quads into `dctx+0x3BA4`'s stack):
+
+| offset | field |
+|---|---|
+| +0 | `t+0xC` (texture node: its first s16, mapped through `dctx+0x3BB8`, is the bucket id) |
+| +4 | id (written by AddNode) |
+| +8 | ? |
+| +0xC | 5 (header count) |
+| +0x10 | header* |
+| +0x14 | 6 |
+| +0x18 | program pointers* |
+| +0x1C | texenv |
+| +0x20 | chain |
+| +0x24 | link (written by AddNode) |
+
+* `key` = DepthToSortKey(depth) if item flag 0x10, else 0.
+* AddNode pushes the node on `dctx+0x3BCC[key]` and counts it in `dctx+0x3BC8[id]`.
+
+Replay happens later:
+* At `DrawListFlushAndFree_1404b0` (from DrawWorkHeapRelease_2f6ec0) or `DrawListEmitBucketById_140830`
+  (MapDrawGroupRange_1e1710).
+* Sorting (`DrawListSortBuckets_140890`): by bucket id; inside a bucket by key from `dctx+0x3BD4` down to 0,
+  each key list LIFO; EmitBucket then walks the array backwards.
+* For each bucket, FlushAndFree first calls **DrawListAddTexLoad(bucket)**: the textures are uploaded at replay
+  time, not at queue time.
+* EmitBucket_1405a0 [C], per node:
+  * CALL the header entries that changed from the previous node;
+  * AddChangedCallTags;
+  * CALL texenv if changed;
+  * CALL a shared `{ret | MSCAL 0x64}` qw;
+  * CALL chain.
+
+**So a native record for the sorted path must be queued and emitted at the bucket replay, in its sorted
+position**, with textures resolved after that bucket's tex load. Quads 24-28 then come from whatever
+camera-matrix packet is current at replay (2.3 item 6).
+
+##### ModelEmitShadowCasterPacketsMaybe_14e780
+* One material for all groups: `t = *(dctx+0x3B90)` (0x14e8dc), set by ShadowMapRender_146680 and
+  ShadowMapBuildProjMaterialMaybe_146b90.
+* Its texenv is built once per call at the start (0x14e8f8). If `t` or the texenv is 0, nothing is drawn.
+* The program row, C and D come from `t` (0x14eae0-0x14eb70). Otherwise as Emit.
+
+---------------------------------------------------------------------------------------------------
+
+#### 6. Entry points, and emitters that bypass Prepare/Emit
+
+| entry | → | callers |
+|---|---|---|
+| ModelDraw_14f6d0 | Prepare + Emit | MapSkyDrawLayers_17e760 ×8, ModelObjDraw_186970 (vtable), ProjectileDrawModel_317640, CompassHudRender_370fb0, DynClothDebugDrawColliders_1670a0 |
+| ModelDrawSorted_14f650 | Prepare + QueueSorted | ModelObjDrawSorted_186910 (vtable) |
+| ModelDrawShadowCaster_14f5d0 | Prepare + ShadowCaster | ModelObjDrawShadowCaster_1868d0, ModelObjDrawShadowModelCaster_1ad5e0 |
+| ModelObjExDraw_1ad7a0 | Prepare + Emit (also composite through ModelDrawOffscreenCompositeAt) | Character2Draw* ×4 |
+| ModelObjDrawShadowModel_1ad690 | plane-shadow matrix (DrawCtxGetPlaneShadowMtx), Prepare, Emit | vtable only |
+| ModelDrawOffscreenCompositeMaybe_16aac0 | Prepare + Emit (0x16abf4, 0x16b000) | |
+
+Only five functions call `DmaPktAddMscalCall_145b20`: Emit, ShadowCaster, EffQuad and EffModel; plus
+DrawListEmitBucket through its own MSCAL qw. Only these five, and the overlay (MSCAL 0x12C), start VU1
+model programs.
+
+**EffModelDrawNodes_1a7b80** (vtable, effect models; [dis] 0x1a7bc8-0x1a7e3c):
+* Writes its own packets into the draw list's write pointer:
+  1. CALL `mesh->WriteVuHeader` with MeshBuildParamInit's info: mode 0, scale 1.0, colour (128,128,128,128).
+  2. `mesh->GetGroupPkts` into the buffer (no CALL).
+  3. CALL texenv: no cache, rebuilt per call.
+* Program: VuProgSel with plane 0, type = `t+0xA`, B = variant flags, **C 0, D 2** (section 1.4).
+* Per node, each CALLed:
+  1. VifPktUploadMatrix → 60-63 and MSCAL base (node matrix, optionally billboarded);
+  2. `MeshPktWriteColour` → 82 = `t+0x20` after `VecMul(t+0x20, nodeColour, arg2[4])` (**this writes the
+     MeshMaterial's +0x20 in place**);
+  3. `MeshPktWriteOffset` → 88 = UV scroll;
+  4. AddChangedCallTags; MSCAL+CALL **A[0] only**.
+* No palette, no light or view packets of its own, no p14 cull.
+* The geometry is the mesh's static chain (Links), so the same chunk keys apply.
+
+**EffQuadDrawNodes_1a7890** (vtable, particles; [dis] 0x1a78d4-0x1a7b4c):
+1. One matrix upload plus base.
+2. MeshBuildParamInit, then CALL the PrimBatch object's (`self+0x10`, Mode1 class) WriteVuHeader.
+3. Per node, the CPU builds one particle with PrimBatchAddVertex_164130, into the current packet:
+   * `{pos, shape}` → TOP+2+2i;
+   * two corner quads → the second section;
+   * a UV quad and a colour quad.
+   Chunks are cut at `(xC-4)/13 - 1` particles, each `STCYCL; UNPACK V4-32 x2 → TOP` header, V4-32 sections,
+   MSCNT. A `ret{FLUSH}` closes the run.
+4. CALL texenv; AddChangedCallTags for type `t+0xA` (type 5: A 0b1031ae, D 8ecadb3a); CALL texenv again;
+   MSCAL+CALL the batch start.
+
+The geometry is per-frame CPU output: there is no static key. The existing `particleMesh` already reads this
+layout from VU1.
+
+---------------------------------------------------------------------------------------------------
+
+#### 7. Open questions
+1. Who writes VU1 quads 900-902. Wave and type 8 need it. Scan the overlays and the PrimBatch BASE/OFFSET
+   (ModelMeshMode1InitMaybe_164b10).
+2. Whether any material really uses an absent stream: unlit vs normals, textured vs UVs, flags&1 vs colours.
+   Count at load from the item index lists against the material flags.
+3. Whether retail ever runs type 11 (swell) or type 8 (refraction), and which C is resident for swell.
+4. Float-position meshes (B 857fbbc2 or 36d686cd) with non-float normals or UVs: B would read them raw
+   (int bits as floats). **[guess]** formats are uniform per mesh.
+5. LightStateEmitOnce (rec+0x04 already set → no re-CALL): does it ever leave VU1 lights different from
+   `*(dctx+0x36B4)` at an Emit? Check by play with a counter (hook 1484a0 and the CALLs).
+6. PRMODECONT.AC at model draws is assumed 0 (env +0xC0). The GsPkt notes flag the field naming as not yet
+   checked.
+7. `dctx+0x3D10..0x3D20` readers (pointer-based), and `node+0x08` of the sorted node.
