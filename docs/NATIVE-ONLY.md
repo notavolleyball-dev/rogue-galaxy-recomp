@@ -98,8 +98,10 @@ stacked PRs at the end).
   - In code: no GsPkt block is written (every segment over scratch, the
     sprite composites followed); composites and effects by markers only;
     every model draw from a record or a captured stream, under the game
-    thread's draw state; nothing runs the VU1 for a draw; the list's
-    mirror and its 2D converter are deleted (M6's status has the list).
+    thread's draw state; nothing runs the VU1 for a draw and its programs
+    are not compiled in; the list's mirror, its 2D converter and
+    gif_events are deleted; no runtime patch of the plan's list is left
+    (M6's status has the list, and what is left by what it waits on).
   - **For the play test of this branch**, the lines that say how far it
     got: `[native-blocks]` (blocks drawn from the builder's calls; lost
     should stay 0), `[gs-packets]` (packets that still draw, not drawn, by
@@ -115,9 +117,8 @@ stacked PRs at the end).
     not reads the CBP CLUT's entries from 16 CSA on (a derived palette
     record); region packs name them by that window. A T8 reads its 256
     entries by the same rule.
-  - Next: uploads at their hooks (the withholding and host capture go),
-    the libgraph stubs' register sink (patch 0034) as hooks, fonts as
-    glyph records.
+  - Next: uploads at their hooks, once the stats line says which upload
+    paths have users; fonts as glyph records (M4).
 - **M6 steps 1-4 are in too** (on the same branch, as they needed no
   play data): the lists run on the game thread as they are sent (the
   VIF1 thread is gone); the draw path's types are src/'s own; the
@@ -1185,6 +1186,25 @@ shadow does not follow, 2D outside the builder) and uploads.
   `draw_state_mirror` keeps the register file records carry (`Registers`)
   and the game thread's tracker (`game()`); a chunk from neither a record
   nor a stream is counted (`[vu1native] chunks in the list outside ...`).
+- **gif_events deleted:** native_2d reads the blocks' shadows through
+  `src/gs_writes.h` (with PACKED's RGBA-without-Q and ST's Q as two
+  pseudo-registers) and keeps the vertex state itself.
+- **The VU1 programs are not compiled into the game** (nothing runs the
+  VU1); `build/vu1-manifest` is still expanded for tools/vu1.
+- **Runtime patches 0002, 0013, 0015 and 0034 deleted;** the texture
+  binding and upload elision switches (`RG_TEXTURE_BIND`,
+  `RG_UPLOAD_ELIDE`) and dead lookups with them.
+
+**Left of M6, by what it waits on:**
+- **Uploads (play data):** the texture hook binds most uploads by marker
+  already; the rest are records made at the hook and published where the
+  list's transfer is (withheld), host uploads nobody made a record of
+  (captured from the list's image data) and local copies (mirrored). The
+  stats line's upload counts (`withheld`, `host uploads nobody took`,
+  `local copies mirrored`) say which of these have users; each one with
+  users needs its uploader found and hooked before its list path goes.
+- **The playthrough route** (the user's).
+
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
 sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
