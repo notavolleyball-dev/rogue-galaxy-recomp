@@ -5,29 +5,26 @@
 class PS2Runtime;
 namespace dq8::gfx
 {
-class SdlGpuBackend;
+class SdlGpuPresenter;
 }
 namespace dq8::ui
 {
 class Overlay;
 }
 
-// GS rendering. RG_GS picks the raster backend:
-//   sdlgpu  (default when built with it) the SDL3 GPU backend from
-//           DQ8-Recompiled, in its own window, with DQ8's in-game menu (F1)
-//           over it; RG_GS_SCALE=N sets the internal resolution for the run
-//           (the menu's saved setting otherwise, default 2),
-//           RG_GS_NO_WINDOW=1 presents through the runtime's window instead
-//   sw      the framework's software rasterizer
-// Either runs on its own thread behind an ordered queue unless RG_GS_WORKER=0.
+// The window, the renderer and the menu: the native renderer draws the
+// game's records (docs/NATIVE-ONLY.md), the presenter shows its frames in
+// its own window with DQ8's in-game menu (F1) over them. RG_SCALE=N sets the
+// internal resolution for the run (the menu's saved setting otherwise).
 namespace rg::graphics
 {
 
 class Setup
 {
 public:
-    // Before PS2Runtime::initialize(): a backend that owns the window has to
-    // be the presenter by then, or the runtime opens its own.
+    // Before PS2Runtime::initialize(): the window's owner has to be the
+    // runtime's presenter by then, or the runtime opens its own. Throws when
+    // there is no GPU device or window: nothing could be shown.
     explicit Setup(PS2Runtime &runtime);
     ~Setup();
 
@@ -35,14 +32,10 @@ public:
     void install(PS2Runtime &runtime);
 
 private:
-    // The window, the device and the native renderer. Held here, not by the
-    // runtime, whose GS has no backend (gs_null.h).
-    std::unique_ptr<dq8::gfx::SdlGpuBackend> m_presenter;
-    // The window's owner, which the runtime keeps after install(); the menu
-    // draws over it and comes down before it does.
-    dq8::gfx::SdlGpuBackend *m_window = nullptr;
+    // The window, the device and the native renderer. Held here: the
+    // runtime's GS has no backend (gs_null.h).
+    std::unique_ptr<dq8::gfx::SdlGpuPresenter> m_presenter;
     std::unique_ptr<dq8::ui::Overlay> m_menu;
-    const char *m_name = "sw";
 };
 
 } // namespace rg::graphics

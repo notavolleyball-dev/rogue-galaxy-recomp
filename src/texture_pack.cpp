@@ -20,12 +20,10 @@
 #include <vector>
 
 #include "dds.h"
-#include "gfx/backends/sdlgpu/sdlgpu_backend.h"
 #include "mini_json.h"
 #include "zip_reader.h"
 
-// raylib's stb_image and stb_image_write, which the runtime links in.
-extern "C" int stbi_write_png(const char *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
+// raylib's stb_image, which the runtime links in.
 extern "C" unsigned char *stbi_load_from_memory(const unsigned char *buffer, int len, int *x, int *y,
                                                 int *channels_in_file, int desired_channels);
 extern "C" void stbi_image_free(void *retval_from_stbi_load);
@@ -34,8 +32,6 @@ namespace rg::texturePack
 {
 namespace
 {
-
-dq8::gfx::SdlGpuBackend *g_backend = nullptr;
 
 // A region as the collected files name it.
 uint64_t regionKey(uint64_t texels, uint64_t clut, uint32_t width, uint32_t height)
@@ -47,14 +43,6 @@ uint64_t regionKey(uint64_t texels, uint64_t clut, uint32_t width, uint32_t heig
         key *= 1099511628211ull;
     }
     return key;
-}
-
-std::string collectedName(const dq8::gfx::RegionRequest &request)
-{
-    char name[64];
-    std::snprintf(name, sizeof name, "%016llX_%016llX_%ux%u.png", static_cast<unsigned long long>(request.texels),
-                  static_cast<unsigned long long>(request.clut), request.width, request.height);
-    return name;
 }
 
 std::string lowerCase(std::string text)
@@ -112,7 +100,7 @@ struct Merged
 struct Image
 {
     uint32_t width = 0u, height = 0u;
-    // RGBA8, or a DDS's blocks as they are (`blocks` is their kRegionBc*).
+    // RGBA8, or a DDS's blocks as they are (`blocks` is their kBc*).
     std::vector<uint8_t> rgba;
     int blocks = 0;
     bool nearest = false;
@@ -536,7 +524,7 @@ void rebuild()
     g_ready.clear();
 }
 
-const Entry *findEntry(const Merged &merged, const dq8::gfx::RegionRequest &request, uint64_t key)
+const Entry *findEntry(const Merged &merged, uint64_t texels, uint32_t width, uint32_t height, uint64_t key)
 {
     if (merged.ignored.count(key))
     {
@@ -546,7 +534,7 @@ const Entry *findEntry(const Merged &merged, const dq8::gfx::RegionRequest &requ
     {
         return &exact->second;
     }
-    const auto any = merged.wildcard.find(regionKey(request.texels, 0u, request.width, request.height));
+    const auto any = merged.wildcard.find(regionKey(texels, 0u, width, height));
     return any != merged.wildcard.end() ? &any->second : nullptr;
 }
 
@@ -562,10 +550,10 @@ bool keepBlocks(const std::vector<uint8_t> &bytes, int blockFormats, Image &imag
     int flag = 0;
     switch (header.kind)
     {
-    case dds::Kind::Bc1: flag = dq8::gfx::kRegionBc1; break;
-    case dds::Kind::Bc2: flag = dq8::gfx::kRegionBc2; break;
-    case dds::Kind::Bc3: flag = dq8::gfx::kRegionBc3; break;
-    case dds::Kind::Bc7: flag = dq8::gfx::kRegionBc7; break;
+    case dds::Kind::Bc1: flag = kBc1; break;
+    case dds::Kind::Bc2: flag = kBc2; break;
+    case dds::Kind::Bc3: flag = kBc3; break;
+    case dds::Kind::Bc7: flag = kBc7; break;
     default: return false;
     }
     if (!(blockFormats & flag) || header.width % 4u || header.height % 4u || header.width > kLargestPicture ||
@@ -655,7 +643,7 @@ void reader()
         Image image;
         if (!decodePicture(job.entry, image, job.blockFormats))
         {
-            std::fprintf(stderr, "[rg] larger 2D art: cannot read %s\n", job.entry.path.c_str());
+            std::fprintf(stderr, "[rg] texture pack: cannot read %s\n", job.entry.path.c_str());
             image = Image{};
         }
         image.nearest = job.entry.nearest;
@@ -668,142 +656,51 @@ void reader()
     }
 }
 
-// Collecting: each new region is written once, on a thread of its own.
-std::string g_dumpDirectory;
-struct Dump
-{
-    std::string name;
-    uint32_t width, height;
-    std::vector<uint8_t> rgba;
-};
-std::mutex g_dumpMutex;
-std::condition_variable g_dumpWake;
-std::deque<Dump> g_dumpQueue;
-std::unordered_set<std::string> g_dumped;
+} // namespace
 
-void writer()
+Lookup whole(uint64_t texels, uint64_t clut, uint32_t width, uint32_t height, int blockFormats, Picture &out)
 {
-    for (;;)
+    if (!g_anyPicture.load(std::memory_order_relaxed))
     {
-        Dump dump;
-        {
-            std::unique_lock<std::mutex> lock(g_dumpMutex);
-            g_dumpWake.wait(lock, [] { return !g_dumpQueue.empty(); });
-            dump = std::move(g_dumpQueue.front());
-            g_dumpQueue.pop_front();
-        }
-        // Alpha doubled, so the GS's 0x80 is opaque.
-        for (size_t index = 3u; index < dump.rgba.size(); index += 4u)
-        {
-            dump.rgba[index] = static_cast<uint8_t>(std::min(255u, dump.rgba[index] * 2u));
-        }
-        const std::string path = g_dumpDirectory + "/" + dump.name;
-        stbi_write_png(path.c_str(), static_cast<int>(dump.width), static_cast<int>(dump.height), 4,
-                       dump.rgba.data(), static_cast<int>(dump.width * 4u));
+        return Lookup::None;
     }
-}
-
-void collect(const dq8::gfx::RegionRequest &request)
-{
-    std::string name = collectedName(request);
-    std::lock_guard<std::mutex> lock(g_dumpMutex);
-    if (!g_dumped.insert(name).second)
-    {
-        return;
-    }
-    Dump dump{std::move(name), request.width, request.height, {}};
-    // The whole region: another draw of it may show the texels this one does not.
-    const uint8_t *whole = request.full ? request.full : request.rgba;
-    dump.rgba.assign(whole, whole + size_t(request.width) * request.height * 4u);
-    g_dumpQueue.push_back(std::move(dump));
-    g_dumpWake.notify_one();
-}
-
-// Whether the backend should hash the regions drawn with a palette at all.
-bool wanted(uint64_t)
-{
-    return !g_dumpDirectory.empty() || g_anyPicture.load(std::memory_order_relaxed);
-}
-
-int lookup(const dq8::gfx::RegionRequest &request, uint32_t &width, uint32_t &height, std::vector<uint8_t> &rgba)
-{
-    if (request.whole)
-    {
-        // The texture's own palette first, else any one of its texels' pictures.
-        const uint64_t key = regionKey(request.texels, request.clut, request.width, request.height);
-        std::lock_guard<std::mutex> lock(g_mutex);
-        const Entry *found = findEntry(*g_merged, request, key);
-        if (!found)
-        {
-            return dq8::gfx::kRegionNone;
-        }
-        if (const auto ready = g_ready.find(key); ready != g_ready.end())
-        {
-            Image image = std::move(ready->second);
-            g_ready.erase(ready);
-            g_asked.erase(key);
-            if (image.rgba.empty())
-            {
-                return dq8::gfx::kRegionNone;
-            }
-            width = image.width;
-            height = image.height;
-            rgba = std::move(image.rgba);
-            return dq8::gfx::kRegionReady | (image.nearest ? dq8::gfx::kRegionNearest : 0) | image.blocks;
-        }
-        if (g_asked.insert(key).second)
-        {
-            g_queue.push_back(Pending{key, g_generation, *found, request.blockFormats});
-            g_wake.notify_one();
-        }
-        return dq8::gfx::kRegionPending;
-    }
-    if (!g_dumpDirectory.empty())
-    {
-        collect(request);
-    }
-    if (request.border || request.shadow)
-    {
-        return dq8::gfx::kRegionNone;
-    }
-    const uint64_t key = regionKey(request.texels, request.clut, request.width, request.height);
+    // The texture's own palette first, else any one of its texels' pictures.
+    const uint64_t key = regionKey(texels, clut, width, height);
     std::lock_guard<std::mutex> lock(g_mutex);
-    const Entry *entry = findEntry(*g_merged, request, key);
-    if (!entry)
+    const Entry *found = findEntry(*g_merged, texels, width, height, key);
+    if (!found)
     {
-        return dq8::gfx::kRegionNone;
+        return Lookup::None;
     }
     if (const auto ready = g_ready.find(key); ready != g_ready.end())
     {
         Image image = std::move(ready->second);
         g_ready.erase(ready);
-        // Asked again if the GPU's copy is ever let go.
+        // Asked again should the renderer's copy be let go.
         g_asked.erase(key);
         if (image.rgba.empty())
         {
-            return dq8::gfx::kRegionNone;
+            return Lookup::None;
         }
-        width = image.width;
-        height = image.height;
-        rgba = std::move(image.rgba);
-        return image.nearest ? dq8::gfx::kRegionReady | dq8::gfx::kRegionNearest : dq8::gfx::kRegionReady;
+        out.width = image.width;
+        out.height = image.height;
+        out.data = std::move(image.rgba);
+        out.blocks = image.blocks;
+        out.nearest = image.nearest;
+        return Lookup::Ready;
     }
     if (g_asked.insert(key).second)
     {
-        g_queue.push_back(Pending{key, g_generation, *entry});
+        g_queue.push_back(Pending{key, g_generation, *found, blockFormats});
         g_wake.notify_one();
     }
-    return dq8::gfx::kRegionPending;
+    return Lookup::Pending;
 }
 
-} // namespace
-
-void refresh()
+uint64_t generation()
 {
-    if (g_backend)
-    {
-        g_backend->invalidateRegionReplacements();
-    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_generation;
 }
 
 std::vector<PackInfo> packs()
@@ -833,43 +730,25 @@ void setPackEnabled(const std::string &key, bool on)
             }
         }
     }
-    refresh();
 }
 
-void install(dq8::gfx::SdlGpuBackend &backend)
+void install()
 {
-    std::error_code error;
     if (const char *decode = std::getenv("RG_TEXTURE_PACK_DECODE"); decode && *decode == '1')
     {
         g_decodeAll = true;
     }
-    if (const char *dump = std::getenv("RG_TEXTURE_DUMP"); dump && *dump)
-    {
-        g_dumpDirectory = dump;
-        std::filesystem::create_directories(g_dumpDirectory, error);
-        // Files already there count as written.
-        for (const auto &file : std::filesystem::directory_iterator(g_dumpDirectory, error))
-        {
-            g_dumped.insert(file.path().filename().string());
-        }
-        std::thread(writer).detach();
-        std::printf("[rg] texture regions collected into %s\n", dump);
-    }
-
     scan();
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         rebuild();
         for (const Pack &pack : g_packs)
         {
-            std::printf("[rg] texture pack %s (%zu regions)%s\n", pack.name.c_str(), pack.regions,
-                        pack.enabled ? "" : ", off");
+            std::printf("[rg] texture pack %s (%zu pictures, %zu whole textures)%s\n", pack.name.c_str(),
+                        pack.regions, pack.wholes, pack.enabled ? "" : ", off");
         }
     }
     std::thread(reader).detach();
-    g_backend = &backend;
-    backend.setRegionReplacements(&lookup, &wanted);
-    backend.setRegionReplacementsEnabled(true);
 }
 
 } // namespace rg::texturePack

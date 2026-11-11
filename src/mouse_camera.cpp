@@ -8,9 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#if defined(RG_HAS_SDLGPU)
 #include <SDL3/SDL.h>
-#endif
 
 #include "Stubs/Pad.h"
 #include "runtime/ps2_pad_host.h"
@@ -202,7 +200,6 @@ void install()
     }
 }
 
-#if defined(RG_HAS_SDLGPU)
 // Whether the player plays with the keyboard and mouse: from a press (a bound
 // key, a click, the wheel) until the controller alone has been used this
 // long, the keys and the mouse untouched.
@@ -278,12 +275,6 @@ void pump(SDL_Window *window, bool letGo, const Use &use)
     }
     wasCaptured = captured;
 }
-#else
-// Without the SDL window (the software GS) there is no mouse to read.
-void pump(SDL_Window *, bool, const Use &)
-{
-}
-#endif
 
 bool enabled()
 {

@@ -474,11 +474,6 @@ void Overlay::drawDisplayPage() {
             markDirty();
         }
 
-        settingRow("Sharper picture", "Drops the PS2's line blending, a deflicker for TVs that only blurs on a monitor.");
-        if (toggle("sharper", &m_settings.display.removeLineBlend)) {
-            m_backend.setDisplayOptions(m_settings.display);
-            markDirty();
-        }
         endSettings();
     }
 }
@@ -1108,33 +1103,14 @@ void Overlay::drawStats() {
                 ImGui::Text(format, value);
             };
             row("Frames shown", "%.0f /s", rate(m_stats.presents, m_statsPrevious.presents));
-            row("Draw calls", "%.0f /s", rate(m_stats.drawCalls, m_statsPrevious.drawCalls));
-            row("Triangles", "%.1f K/s", rate(m_stats.trianglesDrawn, m_statsPrevious.trianglesDrawn) / 1000.0);
-            row("Render passes", "%.0f /s", rate(m_stats.renderPasses, m_statsPrevious.renderPasses));
-            row("Texture cache hits", "%.1f %%", m_stats.textureHitRate() * 100.0);
-            row("Textures built", "%.0f /s", rate(m_stats.textureBuilds, m_statsPrevious.textureBuilds));
-            row("Target resolves", "%.0f /s", rate(m_stats.colorResolves, m_statsPrevious.colorResolves));
-            row("Transfers", "%.0f KiB/s", rate(m_stats.transferBytes, m_statsPrevious.transferBytes) / 1024.0);
-            row("Pipelines", "%.0f", static_cast<double>(m_stats.pipelinesCreated));
-            ImGui::EndTable();
-        }
-        sectionHeader("Approximations");
-        if (ImGui::BeginTable("##approximations", 2, ImGuiTableFlags_None)) {
-            ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthFixed, em(11.0f));
-            ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthFixed, em(8.0f));
-            const auto row = [&](const char *name, uint64_t value) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                mutedText("%s", name);
-                ImGui::TableNextColumn();
-                ImGui::TextColored(color(value ? palette::kWarn : palette::kGood), "%llu",
-                                   static_cast<unsigned long long>(value));
-            };
-            row("Inexact blends", m_stats.inexactBlends);
-            row("Saturated factors", m_stats.saturatedBlendFactors);
-            row("Destination alpha", m_stats.destinationAlphaFactors);
-            row("Partial masks", m_stats.partialChannelMasks);
-            row("Alpha fail modes", m_stats.alphaFailModes);
+            row("Meshes drawn", "%.0f /s", rate(m_stats.meshesDrawn, m_statsPrevious.meshesDrawn));
+            row("GPU draw calls", "%.0f /s", rate(m_stats.gpuCalls, m_statsPrevious.gpuCalls));
+            row("Render passes", "%.0f /s", rate(m_stats.passes, m_statsPrevious.passes));
+            row("Target copies", "%.0f /s", rate(m_stats.copies, m_statsPrevious.copies));
+            row("Submissions", "%.0f /s", rate(m_stats.submissions, m_statsPrevious.submissions));
+            row("Textures held", "%.0f", static_cast<double>(m_stats.texturesHeld));
+            row("Texture memory", "%.0f MiB", static_cast<double>(m_stats.textureBytes) / (1024.0 * 1024.0));
+            row("Retained meshes", "%.0f", static_cast<double>(m_stats.retainedMeshes));
             ImGui::EndTable();
         }
     }

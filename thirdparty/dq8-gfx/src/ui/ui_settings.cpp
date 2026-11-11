@@ -115,7 +115,6 @@ void apply(Settings &s, const std::string &section, const std::string &key, cons
         else if (key == "sides") parseNamed(kSides, value, s.display.sides);
         else if (key == "fsr_sharpness") parseNumber(value, s.display.fsrSharpness, 0, 100);
         else if (key == "integer_scale") parseBool(value, s.display.integerScale);
-        else if (key == "remove_line_blend") parseBool(value, s.display.removeLineBlend);
         else if (key == "present") parseNamed(kPresentModes, value, s.display.presentMode);
     } else if (section == "sound") {
         if (key == "volume") parseNumber(value, s.volume, 0, 100);
@@ -184,7 +183,6 @@ std::string serializeSettings(const Settings &s) {
         << "\nsides = " << nameOf(kSides, s.display.sides)
         << "\nfsr_sharpness = " << s.display.fsrSharpness
         << "\ninteger_scale = " << flag(s.display.integerScale)
-        << "\nremove_line_blend = " << flag(s.display.removeLineBlend)
         << "\npresent = " << nameOf(kPresentModes, s.display.presentMode) << "\n\n"
         << "[sound]\nvolume = " << s.volume << "\nmuted = " << flag(s.muted)
         << "\nmute_in_background = " << flag(s.muteInBackground) << "\n\n"

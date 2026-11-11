@@ -823,6 +823,20 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
     return true;
 }
 
+Renderer::Totals Renderer::totals() const
+{
+    Totals t;
+    t.frames = m_meshCounts.frames;
+    t.meshesDrawn = m_meshCounts.drawn;
+    t.gpuCalls = m_meshCounts.calls;
+    t.passes = m_meshCounts.passes;
+    t.copies = m_meshCounts.copies;
+    t.texturesHeld = m_images.size() + m_palettes.size();
+    t.textureBytes = m_imageBytes;
+    t.retainedMeshes = m_retained.size();
+    return t;
+}
+
 std::string Renderer::statsLine()
 {
     std::string line = "[native-pipeline] records:";

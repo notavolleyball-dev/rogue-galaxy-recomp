@@ -45,7 +45,7 @@ std::string timestamp() {
 float easeOut(float t) { return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t); }
 } // namespace
 
-Overlay::Overlay(gfx::SdlGpuBackend &backend, Settings settings, std::string settingsPath, HostServices host)
+Overlay::Overlay(gfx::SdlGpuPresenter &backend, Settings settings, std::string settingsPath, HostServices host)
     : m_backend(backend), m_settings(std::move(settings)), m_settingsPath(std::move(settingsPath)),
       m_host(std::move(host)) {}
 

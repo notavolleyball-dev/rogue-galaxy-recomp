@@ -155,6 +155,13 @@ public:
 
     // The window since the last call: records by kind, textures held, and R1-R5.
     std::string statsLine();
+    // Totals since the start (and what is held now), for the menu's page.
+    struct Totals
+    {
+        uint64_t frames = 0, meshesDrawn = 0, gpuCalls = 0, passes = 0, copies = 0;
+        uint64_t texturesHeld = 0, textureBytes = 0, retainedMeshes = 0;
+    };
+    Totals totals() const;
 
     void release(SDL_GPUDevice *device);
 

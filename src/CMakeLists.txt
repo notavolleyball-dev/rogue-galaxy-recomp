@@ -149,7 +149,6 @@ add_executable(roguegalaxy
     debug/jump_trace.cpp
     debug/sampler.cpp
     debug/stall_watch.cpp
-    debug/selftest.cpp
     debug/vu1_replay.cpp
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -221,10 +220,7 @@ if(NOT RG_REVISION_RESULT EQUAL 0 OR RG_REVISION STREQUAL "")
     set(RG_REVISION "unknown")
 endif()
 target_compile_definitions(roguegalaxy PRIVATE RG_REVISION="${RG_REVISION}")
-if(RG_GS_SDLGPU)
-    target_link_libraries(roguegalaxy PRIVATE dq8_gfx_sdlgpu dq8_ui)
-    target_compile_definitions(roguegalaxy PRIVATE RG_HAS_SDLGPU=1)
-endif()
+target_link_libraries(roguegalaxy PRIVATE dq8_gfx_sdlgpu dq8_ui)
 # On Windows the runtime's FFmpeg is DLLs; put them beside the executable.
 ps2x_stage_ffmpeg_runtime_dlls(roguegalaxy)
 

@@ -23,7 +23,6 @@
 #include "debug/force_return.h"
 #include "debug/jump_trace.h"
 #include "debug/sampler.h"
-#include "debug/selftest.h"
 #include "debug/stall_watch.h"
 #include "overlay/overlay_manager.h"
 #include "flip_pacing.h"
@@ -237,10 +236,7 @@ int main(int argc, char **argv)
     rg::debug::installCrashReport();
     try
     {
-        if (!rg::debug::runSelfTestIfRequested(status))
-        {
-            status = run(argc, argv);
-        }
+        status = run(argc, argv);
     }
     catch (const std::exception &e)
     {

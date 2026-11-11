@@ -3,7 +3,7 @@
 // notifications and the frame-rate counter.
 #pragma once
 
-#include "gfx/backends/sdlgpu/sdlgpu_backend.h"
+#include "gfx/backends/sdlgpu/sdlgpu_presenter.h"
 #include "ui/ui_glyphs.h"
 #include "ui/ui_multiplier.h"
 #include "ui/ui_settings.h"
@@ -116,7 +116,7 @@ enum class SettingsPage : uint8_t { Display, Sound, Controls, Game, Language, Te
 
 class Overlay final : public gfx::SdlGpuOverlay {
 public:
-    Overlay(gfx::SdlGpuBackend &backend, Settings settings, std::string settingsPath, HostServices host);
+    Overlay(gfx::SdlGpuPresenter &backend, Settings settings, std::string settingsPath, HostServices host);
     ~Overlay() override;
     Overlay(const Overlay &) = delete;
     Overlay &operator=(const Overlay &) = delete;
@@ -283,7 +283,7 @@ private:
     SDL_GamepadType displayedControllerType() const;
     double now() const;
 
-    gfx::SdlGpuBackend &m_backend;
+    gfx::SdlGpuPresenter &m_backend;
     Settings m_settings;
     std::string m_settingsPath;
     HostServices m_host;
@@ -355,8 +355,8 @@ private:
     std::array<float, 64> m_fpsHistory{};
     size_t m_fpsHistoryNext = 0u;
 
-    gfx::SdlGpuStats m_stats{};
-    gfx::SdlGpuStats m_statsPrevious{};
+    gfx::SdlGpuPresenterStats m_stats{};
+    gfx::SdlGpuPresenterStats m_statsPrevious{};
     double m_statsAt = -1.0;
     double m_statsSpan = 0.0;
     double m_lastMouseMotion = 0.0;

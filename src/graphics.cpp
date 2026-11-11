@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -45,10 +46,9 @@
 #include "Stubs/Pad.h"
 #include "runtime/gs/gs_frontend.h"
 
-#if defined(RG_HAS_SDLGPU)
 #include <SDL3/SDL.h>
 
-#include "gfx/backends/sdlgpu/sdlgpu_backend.h"
+#include "gfx/backends/sdlgpu/sdlgpu_presenter.h"
 #include "gfx/native/native_pipeline.h"
 #include "ps2_host_present.h"
 #include "runtime/ee_scheduler.h"
@@ -64,7 +64,6 @@
 // stb_image, as the runtime's raylib builds it.
 extern "C" unsigned char *stbi_load(const char *filename, int *x, int *y, int *comp, int req_comp);
 extern "C" void stbi_image_free(void *retval_from_stbi_load);
-#endif
 
 namespace rg::graphics
 {
@@ -77,7 +76,6 @@ std::string env(const char *name, const char *fallback)
     return (value && *value) ? value : fallback;
 }
 
-#if defined(RG_HAS_SDLGPU)
 bool g_hasMenu = false;
 dq8::ui::Overlay *g_menu = nullptr;
 // The menu's pause (F2, or with the window's focus lost): the mouse camera
@@ -304,7 +302,7 @@ bool xboxLike(SDL_GamepadType type)
 // keyboard and mouse or the controller driving the game, as that controller
 // names it (a PlayStation or Nintendo pad keeps the game's). Before any
 // press, the game's own: scripted runs with no controller keep their frames.
-void updateButtonGlyphs(dq8::gfx::SdlGpuBackend &backend)
+void updateButtonGlyphs(dq8::gfx::SdlGpuPresenter &backend)
 {
     static auto last = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
@@ -597,54 +595,61 @@ uint32_t walkSticks(uint32_t sticks)
     return (sticks & 0xFFFF0000u) | (lx << 8u) | ly;
 }
 
-// DQ8_GFX_SCREENSHOT_DIR/_EVERY for the native present, as the GS's latch
-// writes them: frame_<guest vsync>.ppm.
-void writeNativeScreenshot(const PresentationFrame &frame)
+// DQ8_GFX_SCREENSHOT_DIR=DIR: the frame shown every DQ8_GFX_SCREENSHOT_EVERY
+// guest vsyncs (60 unless set), as DIR/frame_<guest vsync>.ppm.
+const char *screenshotDirectory()
 {
     static const char *directory = std::getenv("DQ8_GFX_SCREENSHOT_DIR");
+    return directory && *directory ? directory : nullptr;
+}
+
+// Whether the frame shown now is one to write.
+bool screenshotDue()
+{
     static const uint64_t every = [] {
         const char *value = std::getenv("DQ8_GFX_SCREENSHOT_EVERY");
         const long long parsed = value ? std::atoll(value) : 0;
         return parsed > 0 ? static_cast<uint64_t>(parsed) : 60ull;
     }();
-    if (!directory || !*directory || frame.width == 0u || frame.height == 0u)
-        return;
-    const uint32_t pitch = frame.rowPitchBytes ? frame.rowPitchBytes : frame.width * 4u;
-    if (frame.pixels.size() < static_cast<size_t>(pitch) * frame.height)
-        return;
-    const uint64_t tick = ps2PadCurrentGuestFrame();
     static uint64_t lastWritten = UINT64_MAX;
-    if (lastWritten != UINT64_MAX && tick < lastWritten + every)
-        return;
+    const uint64_t tick = ps2PadCurrentGuestFrame();
+    if (!screenshotDirectory() || (lastWritten != UINT64_MAX && tick < lastWritten + every))
+        return false;
     lastWritten = tick;
+    return true;
+}
+
+void writeScreenshot(const std::vector<uint8_t> &pixels, uint32_t width, uint32_t height)
+{
+    if (width == 0u || height == 0u || pixels.size() < static_cast<size_t>(width) * height * 4u)
+        return;
     char path[512];
-    std::snprintf(path, sizeof(path), "%s/frame_%06llu.ppm", directory, static_cast<unsigned long long>(tick));
+    std::snprintf(path, sizeof(path), "%s/frame_%06llu.ppm", screenshotDirectory(),
+                  static_cast<unsigned long long>(ps2PadCurrentGuestFrame()));
     FILE *out = std::fopen(path, "wb");
     if (!out)
         return;
-    std::fprintf(out, "P6\n%u %u\n255\n", frame.width, frame.height);
-    std::vector<uint8_t> rgb(static_cast<size_t>(frame.width) * 3u);
-    for (uint32_t y = 0; y < frame.height; ++y)
+    std::fprintf(out, "P6\n%u %u\n255\n", width, height);
+    std::vector<uint8_t> rgb(static_cast<size_t>(width) * 3u);
+    for (uint32_t y = 0; y < height; ++y)
     {
-        const uint8_t *row = frame.pixels.data() + static_cast<size_t>(y) * pitch;
-        for (uint32_t x = 0; x < frame.width; ++x)
+        const uint8_t *row = pixels.data() + static_cast<size_t>(y) * width * 4u;
+        for (uint32_t x = 0; x < width; ++x)
             std::memcpy(rgb.data() + x * 3u, row + x * 4u, 3u);
         std::fwrite(rgb.data(), 1, rgb.size(), out);
     }
     std::fclose(out);
 }
 
-// Step 7d of docs/NATIVE-PIPELINE.md: under the pipeline the presenting
-// thread shows the frame each flip closed (flip_pacing.cpp pushes its Present
-// record) through the backend's native present, in place of the GS's display
-// (PMODE/DISPFB). It also answers the game's colour reads, which wait on
-// the game's thread beside it. Without a flip for 200 ms (the game is not
-// drawing frames of its own) the last frame is shown at every vsync, so the
-// window and the menu keep up.
+// The presenting thread shows the frame each flip closed (flip_pacing.cpp
+// pushes its Present record; step 7d of docs/NATIVE-PIPELINE.md). It also
+// answers the game's colour reads, which wait on the game's thread beside
+// it. Without a flip for 200 ms (the game is not drawing frames of its own)
+// the last frame is shown at every vsync, so the window and the menu keep up.
 bool presentNative(void *userData, bool newTick)
 {
-    auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
-    backend->serveNativeReads();
+    auto *presenter = static_cast<dq8::gfx::SdlGpuPresenter *>(userData);
+    presenter->serveNativeReads();
     if (!newTick)
         return true;
     using Clock = std::chrono::steady_clock;
@@ -659,9 +664,18 @@ bool presentNative(void *userData, bool newTick)
     }
     else if (now - flipAt < std::chrono::milliseconds(200))
         return true;
-    const PresentationFrame frame = backend->presentNativeFrame();
-    if (frame.mode == GSPresentationMode::HostPixels)
-        writeNativeScreenshot(frame);
+    if (screenshotDue())
+    {
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0u, height = 0u;
+        if (presenter->presentFrame(&pixels, width, height))
+            writeScreenshot(pixels, width, height);
+    }
+    else
+    {
+        uint32_t width = 0u, height = 0u;
+        presenter->presentFrame(nullptr, width, height);
+    }
     return true;
 }
 
@@ -670,7 +684,7 @@ bool presentNative(void *userData, bool newTick)
 // to the runtime.
 bool pump(void *userData)
 {
-    auto *backend = static_cast<dq8::gfx::SdlGpuBackend *>(userData);
+    auto *backend = static_cast<dq8::gfx::SdlGpuPresenter *>(userData);
     static const bool watching = SDL_AddEventWatch(&countMarkKeys, nullptr);
     (void)watching;
     {
@@ -883,7 +897,7 @@ dq8::gfx::SdlGpuWindowPlacement initialWindowPlacement(const dq8::ui::Settings &
 // DQ8-Recompiled's in-game menu over the window: display, sound, controls
 // and the frame-rate counter (thirdparty/dq8-gfx/src/ui). What it asks of
 // the game goes through HostServices.
-std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlGpuBackend &backend,
+std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlGpuPresenter &backend,
                                              dq8::ui::Settings settings, const std::string &settingsPath)
 {
     dq8::ui::HostServices host;
@@ -1110,17 +1124,18 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
          false},
     };
     // One switch for each pack found, on a page of their own in the menu (F1 > Settings > Textures).
-    // A pack of 2D art alone does nothing at 1x.
+    // A pack of 2D art alone is not drawn yet (texture_pack.h).
     std::unordered_set<std::string> flatPacks;
     for (const rg::texturePack::PackInfo &pack : rg::texturePack::packs())
     {
         if (pack.wholes == 0u)
             flatPacks.insert("texture_pack_" + pack.key);
         dq8::ui::GameOption option{"texture_pack_" + pack.key, "Pack: " + pack.name,
-                                   "The game's art is drawn from this pack's " + std::to_string(pack.regions) +
-                                       " pictures, where it has them: 2D art above 1x, a PCSX2 pack's 3D at any "
-                                       "scale. Packs are read by name, a later one over an earlier one, textures\\hd "
-                                       "first.",
+                                   "The game's textures are drawn from this pack's " +
+                                       std::to_string(pack.wholes) +
+                                       " pictures of whole textures (a PCSX2 pack's), where it has them. Its "
+                                       "pictures of 2D art are not drawn yet. Packs are read by name, a later one "
+                                       "over an earlier one, textures\\hd first.",
                                    pack.enabled};
         option.page = "textures";
         host.gameOptions.push_back(std::move(option));
@@ -1145,10 +1160,8 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     host.gameOptionState = [](const std::string &key) { return key == "free_camera" && rg::freecamera::enabled(); };
     host.setGameNumber = &applyGameNumber;
     host.gameOptionBlocked = [&backend, flatPacks = std::move(flatPacks)](const std::string &key) -> const char * {
-        // The scale as Display shows it: one picked while paused counts.
-        const uint32_t scale = g_menu ? g_menu->shownResolutionScale() : backend.activeResolutionScale();
-        if (flatPacks.count(key) != 0u && scale <= 1u)
-            return "Its 2D art shows above 1x: raise Display > Internal resolution for this.";
+        if (flatPacks.count(key) != 0u)
+            return "Packs of 2D art are not drawn by the native renderer yet.";
         return gameOptionBlocked(key, backend.displayOptions().aspect);
     };
     host.gameChoiceBlocked = &gameChoiceBlocked;
@@ -1172,145 +1185,110 @@ std::unique_ptr<dq8::ui::Overlay> createMenu(PS2Runtime &runtime, dq8::gfx::SdlG
     }
     return menu;
 }
-#endif
 
 } // namespace
 
 Setup::Setup(PS2Runtime &runtime)
 {
-#if defined(RG_HAS_SDLGPU)
-    if (env("RG_GS", "sdlgpu") == "sdlgpu")
+    // RG_SHOW_FPS=1 turns the menu's counter on.
+    const bool showFps = env("RG_SHOW_FPS", "0") != "0";
+    std::string error;
+    std::unique_ptr<dq8::gfx::SdlGpuPresenter> presenter = dq8::gfx::SdlGpuPresenter::create(error);
+    if (!presenter)
     {
-        const bool noWindow = env("RG_GS_NO_WINDOW", "0") != "0";
-        // RG_SHOW_FPS=1 turns the menu's counter on; without a window of
-        // ours the backend's readout in the title stands in, which it reads
-        // under its DQ8-Recompiled name.
-        const bool showFps = env("RG_SHOW_FPS", "0") != "0";
-        if (showFps && noWindow)
-        {
-#if defined(_WIN32)
-            _putenv("DQ8_GFX_SHOW_FPS=1");
-#else
-            setenv("DQ8_GFX_SHOW_FPS", "1", 1);
-#endif
-        }
-        std::string error;
-        std::unique_ptr<dq8::gfx::SdlGpuBackend> sdl = dq8::gfx::createSdlGpuBackend(error);
-        if (!sdl)
-        {
-            std::fprintf(stderr, "[rg] SDL GPU backend unavailable (%s); using the software rasterizer\n",
-                         error.c_str());
-            return;
-        }
-        // The menu's settings, then the variables on top for this run only:
-        // they go to the backend, not into the settings the menu saves, so a
-        // test run's scale does not become the player's.
-        dq8::ui::Settings settings;
-        const std::string settingsPath = dq8::ui::defaultSettingsPath();
-        if (!dq8::ui::loadSettings(settingsPath, settings))
-        {
-            std::fprintf(stderr, "[rg] could not read %s; using default settings\n", settingsPath.c_str());
-        }
-        // A Steam Deck (Steam sets SteamDeck=1, natively and under Proton)
-        // starts in fullscreen: its Game Mode shows a window letterboxed.
-        if (settings.windowWidth < 320 && env("SteamDeck", "0") == "1")
-        {
-            settings.fullscreen = true;
-        }
-        // Steam keeps the Deck's Steam button: View + Menu is the only way to
-        // the game's menu there, so it cannot be left off.
-        if (env("SteamDeck", "0") == "1")
-        {
-            settings.backStartOpensMenu = true;
-        }
-        uint32_t runScale = settings.resolutionScale;
-        if (const std::string scale = env("RG_GS_SCALE", ""); !scale.empty())
-        {
-            runScale = std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
-        }
-        // The game leaves a border of its frame black or half drawn (a column
-        // each side, the top row and the last two), which the television's
-        // overscan hid, and at a raised scale its half-pixel effects leave a
-        // sliver beyond it: two GS pixels off each edge. RG_CROP=0 shows it.
-        settings.display.crop = static_cast<uint32_t>(std::strtoul(env("RG_CROP", "2").c_str(), nullptr, 10));
-        dq8::gfx::SdlGpuDisplayOptions runDisplay = settings.display;
-        if (const std::string mode = env("RG_PRESENT_MODE", ""); !mode.empty())
-        {
-            runDisplay.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
-                                     : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
-                                                           : SDL_GPU_PRESENTMODE_MAILBOX;
-        }
-        if (showFps)
-        {
-            settings.showFps = true;
-        }
-        sdl->setResolutionScale(runScale);
-        // The VIF1 thread's share of the wall on every stats line, beside the
-        // worker's: an F9 mark then says which thread was saturated.
-        dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport() + mainStallReport(); });
-        dq8::gfx::setPresentObserver(&debug::noteFrameTime);
-        // Aspect ratio Auto follows the Widescreen option.
-        sdl->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
-        rg::texturePack::install(*sdl);
-        sdl->setSideImageLoader(&loadBorderImage);
-        if (noWindow)
-        {
-            std::printf("[rg] GS: sdlgpu, presenting through the runtime window\n");
-        }
-        else
-        {
-            const auto [width, height] = initialWindowSize(settings);
-            std::string windowError;
-            if (sdl->openWindow("Rogue Galaxy Recompiled", width, height, windowError,
-                                initialWindowPlacement(settings)))
-            {
-                runtime.setExternalPresenter(&pump, sdl.get());
-                ps2SetHostPresentHook(&presentNative, sdl.get());
-                if (!sdl->supportsPresentMode(settings.display.presentMode))
-                {
-                    settings.display.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
-                }
-                if (!sdl->supportsPresentMode(runDisplay.presentMode))
-                {
-                    runDisplay.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
-                }
-                m_menu = createMenu(runtime, *sdl, settings, settingsPath);
-                g_hasMenu = m_menu != nullptr;
-                g_menu = m_menu.get();
-                // The game's Settings screen shows the menu's options.
-                rg::settingspages::setEnabled(g_hasMenu);
-                // After the menu applied the saved options: this run's.
-                sdl->setDisplayOptions(runDisplay);
-                m_window = sdl.get();
-            }
-            else
-            {
-                std::fprintf(stderr, "[rg] could not open the SDL window (%s); presenting through the runtime\n",
-                             windowError.c_str());
-            }
-        }
-        std::printf("[rg] GS: sdlgpu (%s), internal scale %ux%s\n", sdl->driverName().c_str(),
-                    sdl->resolutionScale(), m_menu ? ", menu on F1" : "");
-        m_presenter = std::move(sdl);
-        m_name = "sdlgpu";
+        throw std::runtime_error("no SDL GPU device for the renderer: " + error);
     }
-#else
-    (void)runtime;
-#endif
+    // The menu's settings, then the variables on top for this run only: they
+    // go to the presenter, not into the settings the menu saves, so a test
+    // run's scale does not become the player's.
+    dq8::ui::Settings settings;
+    const std::string settingsPath = dq8::ui::defaultSettingsPath();
+    if (!dq8::ui::loadSettings(settingsPath, settings))
+    {
+        std::fprintf(stderr, "[rg] could not read %s; using default settings\n", settingsPath.c_str());
+    }
+    // A Steam Deck (Steam sets SteamDeck=1, natively and under Proton)
+    // starts in fullscreen: its Game Mode shows a window letterboxed.
+    if (settings.windowWidth < 320 && env("SteamDeck", "0") == "1")
+    {
+        settings.fullscreen = true;
+    }
+    // Steam keeps the Deck's Steam button: View + Menu is the only way to
+    // the game's menu there, so it cannot be left off.
+    if (env("SteamDeck", "0") == "1")
+    {
+        settings.backStartOpensMenu = true;
+    }
+    uint32_t runScale = settings.resolutionScale;
+    if (const std::string scale = env("RG_SCALE", ""); !scale.empty())
+    {
+        runScale = std::clamp(static_cast<uint32_t>(std::strtoul(scale.c_str(), nullptr, 10)), 1u, 8u);
+    }
+    // The game leaves a border of its frame black or half drawn (a column
+    // each side, the top row and the last two), which the television's
+    // overscan hid, and at a raised scale its half-pixel effects leave a
+    // sliver beyond it: two game pixels off each edge. RG_CROP=0 shows it.
+    settings.display.crop = static_cast<uint32_t>(std::strtoul(env("RG_CROP", "2").c_str(), nullptr, 10));
+    dq8::gfx::SdlGpuDisplayOptions runDisplay = settings.display;
+    if (const std::string mode = env("RG_PRESENT_MODE", ""); !mode.empty())
+    {
+        runDisplay.presentMode = mode == "vsync"       ? SDL_GPU_PRESENTMODE_VSYNC
+                                 : mode == "immediate" ? SDL_GPU_PRESENTMODE_IMMEDIATE
+                                                       : SDL_GPU_PRESENTMODE_MAILBOX;
+    }
+    if (showFps)
+    {
+        settings.showFps = true;
+    }
+    presenter->setResolutionScale(runScale);
+    // The VIF1 thread's share of the wall on every stats line: an F9 mark
+    // then says which thread was saturated.
+    dq8::gfx::setStatsExtraLine([] { return rg::vif1::busyReport() + mainStallReport(); });
+    dq8::gfx::setPresentObserver(&debug::noteFrameTime);
+    // Aspect ratio Auto follows the Widescreen option.
+    presenter->setGameWidescreenQuery([] { return rg::widescreen::wide() ? 1 : 0; });
+    rg::texturePack::install();
+    presenter->setSideImageLoader(&loadBorderImage);
+    const auto [width, height] = initialWindowSize(settings);
+    std::string windowError;
+    if (!presenter->openWindow("Rogue Galaxy Recompiled", width, height, windowError,
+                               initialWindowPlacement(settings)))
+    {
+        throw std::runtime_error("could not open the window: " + windowError);
+    }
+    runtime.setExternalPresenter(&pump, presenter.get());
+    ps2SetHostPresentHook(&presentNative, presenter.get());
+    if (!presenter->supportsPresentMode(settings.display.presentMode))
+    {
+        settings.display.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
+    }
+    if (!presenter->supportsPresentMode(runDisplay.presentMode))
+    {
+        runDisplay.presentMode = SDL_GPU_PRESENTMODE_VSYNC;
+    }
+    m_menu = createMenu(runtime, *presenter, settings, settingsPath);
+    g_hasMenu = m_menu != nullptr;
+    g_menu = m_menu.get();
+    // The game's Settings screen shows the menu's options.
+    rg::settingspages::setEnabled(g_hasMenu);
+    // After the menu applied the saved options: this run's.
+    presenter->setDisplayOptions(runDisplay);
+    std::printf("[rg] renderer: native, SDL GPU (%s), internal scale %ux%s\n", presenter->driverName().c_str(),
+                presenter->resolutionScale(), m_menu ? ", menu on F1" : "");
+    m_presenter = std::move(presenter);
 }
 
 Setup::~Setup()
 {
-#if defined(RG_HAS_SDLGPU)
-    // The runtime still holds the backend (it is destroyed after this), but
-    // the presenter has stopped: take the menu off it before the menu goes.
-    if (m_window && m_menu)
+    // The presenting thread has stopped: the menu comes off the presenter
+    // before either goes.
+    if (m_presenter && m_menu)
     {
-        m_window->setOverlay(nullptr);
+        m_presenter->setOverlay(nullptr);
     }
     g_menu = nullptr;
     m_menu.reset();
-#endif
+    m_presenter.reset();
 }
 
 void Setup::install(PS2Runtime &runtime)
@@ -1318,8 +1296,9 @@ void Setup::install(PS2Runtime &runtime)
     // The game is drawn by the native pipeline from records
     // (docs/NATIVE-ONLY.md): the runtime's GS front end has no backend to
     // draw with, and any call that still gets there names itself (gs_null.h).
+    // Nothing mirrors GS local memory: no GS targets or textures exist.
     runtime.gs().setRasterBackend(nullGsBackend());
-    std::printf("[rg] GS backend: none (the native pipeline draws; %s presents)\n", m_name);
+    std::printf("[rg] GS backend: none; GS local memory is not mirrored\n");
 }
 
 } // namespace rg::graphics

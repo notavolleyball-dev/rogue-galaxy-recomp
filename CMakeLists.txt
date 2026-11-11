@@ -133,11 +133,9 @@ endif()
 # fails; the generated code, most of the executable, is not LTO'd anyway.
 set_property(TARGET ps2_runtime PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
 
-# The hardware GS backend (SDL3 GPU, from DQ8-Recompiled). Configuring
-# downloads and builds SDL3, and glslang when no GLSL compiler is installed.
-option(RG_GS_SDLGPU "Build the SDL3 GPU GS backend" ON)
-if(RG_GS_SDLGPU)
-    add_subdirectory(thirdparty/dq8-gfx "${CMAKE_BINARY_DIR}/dq8-gfx")
-endif()
+# The renderer, the presenter and the menu (SDL3 GPU, from DQ8-Recompiled).
+# Configuring downloads and builds SDL3, and glslang when no GLSL compiler is
+# installed.
+add_subdirectory(thirdparty/dq8-gfx "${CMAKE_BINARY_DIR}/dq8-gfx")
 
 add_subdirectory(src)

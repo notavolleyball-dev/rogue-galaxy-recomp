@@ -8,9 +8,7 @@
 #include <mutex>
 #include <vector>
 
-#if defined(RG_HAS_SDLGPU)
 #include "gfx/native/native_pipeline.h"
-#endif
 
 #include "native_producer.h"
 #include "ps2_runtime.h"
@@ -345,7 +343,6 @@ bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
     const bool depth = psm == 0x30u || psm == 0x31u || psm == 0x32u || psm == 0x3Au;
     if (depth)
         return rg::nativeproducer::readDepth(q.base, q.psm, q.x, q.y, q.width, q.height, bytes) && !bytes.empty();
-#if defined(RG_HAS_SDLGPU)
     const bool colour = psm == 0x00u || psm == 0x01u || psm == 0x02u || psm == 0x0Au;
     if (!colour)
         return false;
@@ -391,9 +388,6 @@ bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
                          0u);
     }
     return !bytes.empty();
-#else
-    return false;
-#endif
 }
 
 void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
