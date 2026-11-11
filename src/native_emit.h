@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "draw_state_mirror.h"
+
 class PS2Runtime;
 namespace rg::vu1native
 {
@@ -50,6 +52,10 @@ struct Group
     // depth base, then TEX1 and CLAMP, then TEX0).
     uint32_t chain = 0u;
     std::vector<std::pair<uint8_t, uint64_t>> writes;
+    // The draw registers its chunks are drawn under: the game thread's
+    // where the call's marker went (rg::drawstate::game()), its writes
+    // applied.
+    rg::drawstate::Registers regs{};
 };
 // An item's: the model matrix (60-63) and the mesh header (76-79, 81, 42),
 // from its packets p14 and p18; its groups, in the order they are drawn.

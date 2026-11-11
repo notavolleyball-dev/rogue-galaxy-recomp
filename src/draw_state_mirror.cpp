@@ -11,28 +11,10 @@ namespace rg::drawstate
 {
 namespace
 {
-// The draw registers (both contexts, PRIM and PRMODE apart, the rest) and
-// the effective PRIM (PRMODECONT applied), as the GS decodes them.
-struct DrawRegisters
-{
-    rg::DrawContext ctx[2]{};
-    rg::PrimReg primRegister{};
-    rg::PrimReg prmodeRegister{};
-    bool prmodecont = true;
-    rg::TexaReg texa{};
-    rg::TexClutReg texclut{};
-    bool pabe = false;
-    uint64_t scanmsk = 0;
-    uint64_t dimx = 0;
-    uint64_t dthe = 0;
-    uint64_t colclamp = 0;
-    uint8_t fogR = 0, fogG = 0, fogB = 0;
-};
 struct Mirror
 {
     std::mutex mutex;
-    DrawRegisters r;
-    rg::PrimReg prim{};
+    Registers regs;
 };
 Mirror g_mirror;
 
@@ -67,19 +49,18 @@ void decodeTex0(rg::Tex0Reg &t, uint64_t value)
     t.cld = static_cast<uint8_t>((value >> 61) & 0x7);
 }
 
-// One register write, as the front end takes it. Caller holds the mutex.
-void write(Mirror &m, uint8_t reg, uint64_t value)
+// One register write, as the front end takes it.
+void writeTo(DrawRegisters &r, rg::PrimReg &prim, uint8_t reg, uint64_t value)
 {
-    DrawRegisters &r = m.r;
     const int ci = (reg & 1u) ? 1 : 0;
     switch (reg)
     {
     case 0x00:
         r.primRegister = decodePrim(value);
         if (r.prmodecont)
-            m.prim = r.primRegister;
+            prim = r.primRegister;
         else
-            m.prim.type = r.primRegister.type;
+            prim.type = r.primRegister.type;
         break;
     case 0x06: case 0x07:
         decodeTex0(r.ctx[ci].tex0, value);
@@ -104,8 +85,8 @@ void write(Mirror &m, uint8_t reg, uint64_t value)
     case 0x1A: {
         r.prmodecont = (value & 1) != 0;
         const rg::PrimType type = r.primRegister.type;
-        m.prim = r.prmodecont ? r.primRegister : r.prmodeRegister;
-        m.prim.type = type;
+        prim = r.prmodecont ? r.primRegister : r.prmodeRegister;
+        prim.type = type;
         break;
     }
     case 0x1B:
@@ -113,8 +94,8 @@ void write(Mirror &m, uint8_t reg, uint64_t value)
         if (!r.prmodecont)
         {
             const rg::PrimType type = r.primRegister.type;
-            m.prim = r.prmodeRegister;
-            m.prim.type = type;
+            prim = r.prmodeRegister;
+            prim.type = type;
         }
         break;
     case 0x1C:
@@ -180,7 +161,7 @@ void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
     std::lock_guard lock(g_mirror.mutex);
     for (const rg::gif::GifEvent &e : events)
         if (e.kind == rg::gif::GifEvent::Kind::Register)
-            write(g_mirror, e.reg, e.value);
+            g_mirror.regs.write(e.reg, e.value);
 }
 
 void observe(const uint8_t *data, uint32_t size)
@@ -199,24 +180,29 @@ void observe(const uint8_t *data, uint32_t size)
     std::lock_guard lock(g_mirror.mutex);
     for (const rg::gif::GifEvent &e : events)
         if (e.kind == rg::gif::GifEvent::Kind::Register)
-            write(g_mirror, e.reg, e.value);
+            g_mirror.regs.write(e.reg, e.value);
 }
 
 
-namespace
-{
-rg::DrawState stateOf(const DrawRegisters &r, const rg::PrimReg &prim);
-}
 
 rg::DrawState current()
 {
     std::lock_guard lock(g_mirror.mutex);
-    return stateOf(g_mirror.r, g_mirror.prim);
+    return g_mirror.regs.state();
 }
 
-namespace
+void Registers::write(uint8_t reg, uint64_t value)
 {
-rg::DrawState stateOf(const DrawRegisters &r, const rg::PrimReg &prim)
+    writeTo(r, prim, reg, value);
+}
+
+void Registers::write(const std::pair<uint8_t, uint64_t> *writes, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+        writeTo(r, prim, writes[i].first, writes[i].second);
+}
+
+rg::DrawState Registers::state() const
 {
     rg::DrawState state{};
     state.context = r.ctx[prim.ctxt ? 1 : 0];
@@ -239,11 +225,10 @@ rg::DrawState stateOf(const DrawRegisters &r, const rg::PrimReg &prim)
     state.linearFilter = mmag != 0u || mmin == 1u || (mmin & 0x4u) != 0u;
     return state;
 }
-} // namespace
 
 struct Tracker::Impl
 {
-    Mirror mirror;
+    Registers regs;
     rg::gif::GifState carried;
     std::vector<rg::gif::GifEvent> events;
 };
@@ -265,7 +250,7 @@ void Tracker::observe(const uint8_t *data, uint32_t size)
     });
     for (const rg::gif::GifEvent &e : t.events)
         if (e.kind == rg::gif::GifEvent::Kind::Register)
-            write(t.mirror, e.reg, e.value);
+            t.regs.write(e.reg, e.value);
 }
 
 void Tracker::observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count)
@@ -276,12 +261,23 @@ void Tracker::observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t c
         rg::gif::applyRegister(writes[i].first, writes[i].second, t.carried, t.events);
     for (const rg::gif::GifEvent &e : t.events)
         if (e.kind == rg::gif::GifEvent::Kind::Register)
-            write(t.mirror, e.reg, e.value);
+            t.regs.write(e.reg, e.value);
 }
 
 rg::DrawState Tracker::current() const
 {
-    return stateOf(m_impl->mirror.r, m_impl->mirror.prim);
+    return m_impl->regs.state();
+}
+
+const Registers &Tracker::registers() const
+{
+    return m_impl->regs;
+}
+
+Tracker &game()
+{
+    static Tracker tracker;
+    return tracker;
 }
 
 } // namespace rg::drawstate

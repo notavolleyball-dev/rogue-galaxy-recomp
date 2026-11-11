@@ -26,6 +26,34 @@ void observe(const uint8_t *data, uint32_t size);
 void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
 
 
+// The draw registers (both contexts, PRIM and PRMODE apart, the rest) and
+// the effective PRIM (PRMODECONT applied), as the GS decodes them: a value
+// a record can keep (the draw state it is drawn under, made where the game
+// wrote it).
+struct DrawRegisters
+{
+    rg::DrawContext ctx[2]{};
+    rg::PrimReg primRegister{};
+    rg::PrimReg prmodeRegister{};
+    bool prmodecont = true;
+    rg::TexaReg texa{};
+    rg::TexClutReg texclut{};
+    bool pabe = false;
+    uint64_t scanmsk = 0;
+    uint64_t dimx = 0;
+    uint64_t dthe = 0;
+    uint64_t colclamp = 0;
+    uint8_t fogR = 0, fogG = 0, fogB = 0;
+};
+struct Registers
+{
+    DrawRegisters r{};
+    rg::PrimReg prim{};
+    void write(uint8_t reg, uint64_t value);
+    void write(const std::pair<uint8_t, uint64_t> *writes, size_t count);
+    rg::DrawState state() const;
+};
+
 // The draw state of now: what a primitive drawn next would be drawn under.
 rg::DrawState current();
 
@@ -41,10 +69,16 @@ public:
     void observe(const uint8_t *data, uint32_t size);
     void observeWrites(const std::pair<uint8_t, uint64_t> *writes, size_t count);
     rg::DrawState current() const;
+    const Registers &registers() const;
 
 private:
     struct Impl;
     Impl *m_impl;
 };
+
+// The game thread's (M6): the draw state as the game writes it, at the time
+// it writes it (the draw environments' packets, the blocks, the model calls
+// drawn from records), for the records made there.
+Tracker &game();
 
 } // namespace rg::drawstate

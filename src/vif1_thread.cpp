@@ -300,6 +300,9 @@ uint32_t modelIdOf(uint64_t hash, bool &define)
 // packets to classify and decode again.
 using RegisterWrite = std::pair<uint8_t, uint64_t>;
 thread_local const RegisterWrite *t_meshWrites = nullptr;
+// M6: a chunk drawn from a model call's record is drawn under the record's
+// draw registers (made where the game wrote the call), not the list's.
+thread_local const rg::drawstate::Registers *t_recordRegs = nullptr;
 thread_local uint32_t t_meshWriteCount = 0u;
 // The packets as writes; false when they hold anything else (a vertex, a
 // transfer, image data): they then go as packets.
@@ -877,11 +880,17 @@ public:
             std::memcpy(data + (q & 1023u) * 16u, v.data(), 16u);
         };
         std::vector<std::vector<uint8_t>> basePackets;
+        std::vector<RegisterWrite> baseWrites;
+        rg::drawstate::Registers regs;
         for (const rg::nativeemit::Item &item : call.items)
         {
             for (uint32_t r = 0; r < 4u; ++r)
                 put(60u + r, item.model[r]);
+            // The base piece's packet (the object's FOGCOL): on the
+            // record's registers, and the list's for what follows.
             rg::vu1native::runBaseOn(data, basePackets);
+            if (!packetsAsWrites(basePackets, baseWrites))
+                baseWrites.clear();
             for (const auto &packet : basePackets)
                 deliverPacket(packet.data(), static_cast<uint32_t>(packet.size()));
             put(76u, item.q76);
@@ -903,7 +912,11 @@ public:
                 put(88u, rg::nativeemit::Quad{});
                 rg::native2d::observeWrites(group.writes.data(), group.writes.size());
                 applyWrites(group.writes);
+                regs = group.regs;
+                regs.write(baseWrites.data(), baseWrites.size());
+                t_recordRegs = &regs;
                 unpackChain(memory, group.chain, item.base, *group.program);
+                t_recordRegs = nullptr;
             }
         }
     }
@@ -2030,7 +2043,15 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
     {
         if (!t_onVif1Thread)
             g_thread->drain();
-        const rg::DrawState state = rg::drawstate::current();
+        rg::DrawState state;
+        if (t_recordRegs)
+        {
+            rg::drawstate::Registers regs = *t_recordRegs;
+            regs.write(t_meshWrites, t_meshWriteCount);
+            state = regs.state();
+        }
+        else
+            state = rg::drawstate::current();
         rg::nativeproducer::ModelDraw model;
         if (t_model.active)
         {
@@ -2246,8 +2267,9 @@ bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
             {
                 rg::native2d::observeWrites(pending.data(), pending.size());
                 applyWrites(pending);
+                rg::drawstate::game().observeWrites(pending.data(), pending.size());
                 pending.clear();
-                const rg::DrawState state = rg::drawstate::current();
+                const rg::DrawState state = rg::drawstate::game().current();
                 if (rg::nativeproducer::clear(state, xy[0][0], xy[0][1], xy[1][0], xy[1][1], rgba, z == 0u))
                     ++g_envClears;
                 corners = 0;
@@ -2260,6 +2282,7 @@ bool takeEnvironment(const std::vector<std::pair<uint8_t, uint64_t>> &in)
     }
     rg::native2d::observeWrites(pending.data(), pending.size());
     applyWrites(pending);
+    rg::drawstate::game().observeWrites(pending.data(), pending.size());
     if (++g_envWritesTaken == 1u)
         std::fprintf(stderr, "[native-env] libgraph's environments taken as state and clears (no converter)\n");
     return true;

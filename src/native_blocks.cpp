@@ -448,7 +448,7 @@ void install(PS2Runtime &runtime)
     if (!enabled())
         return;
     g_rdram = runtime.memory().getRDRAM();
-    g_state = new rg::drawstate::Tracker();
+    g_state = &rg::drawstate::game();
     if (!rg::timing::hookFunction(runtime, kDrawEnvWritePacket, &drawEnvWritePacket, g_envOriginal) ||
         !rg::timing::hookFunction(runtime, kDrawListBeginPrim, &beginPrim, g_beginOriginal) ||
         !rg::timing::hookFunction(runtime, kGsPktBegin, &pktBegin, g_pktBeginOriginal) ||

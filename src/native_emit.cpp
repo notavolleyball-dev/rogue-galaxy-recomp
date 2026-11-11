@@ -307,6 +307,20 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
 // is resident) are written as the game writes them.
 std::atomic<uint64_t> g_unwrittenCalls{0u}, g_writtenCalls{0u};
 
+// Where a call's marker goes: each group's draw registers, the game
+// thread's with its writes applied, in order (the game thread's then as
+// the list's would be after them).
+void captureState(Call &call)
+{
+    rg::drawstate::Tracker &game = rg::drawstate::game();
+    for (Item &item : call.items)
+        for (Group &group : item.groups)
+        {
+            game.observeWrites(group.writes.data(), group.writes.size());
+            group.regs = game.registers();
+        }
+}
+
 bool drawable(const Call &call)
 {
     if (call.items.empty())
@@ -417,6 +431,7 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
         if (rebuilt && drawable(call) && rg::nativefx::writeMarker(call.unit))
         {
             ++g_unwrittenCalls;
+            captureState(call);
             {
                 std::lock_guard lock(g_mutex);
                 if (g_calls.size() >= 4096u)
@@ -563,6 +578,7 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             if (rg::nativefx::writeMarker(node.unit))
             {
                 ++g_unwrittenCalls;
+                captureState(node);
                 keepCall(std::move(node));
                 // Its record's state writes stand between: the next written
                 // node CALLs its texenv again.
