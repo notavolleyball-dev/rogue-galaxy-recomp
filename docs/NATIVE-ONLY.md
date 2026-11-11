@@ -8,6 +8,49 @@ and [VU1-NATIVE.md](VU1-NATIVE.md) stay as the record of what exists and
 why. Analyses of individual game functions go in
 [NATIVE-ONLY-NOTES.md](NATIVE-ONLY-NOTES.md), one section per function.
 
+## Read this first: this is a large structural change
+
+**This plan rebuilds how the game is drawn.** It deletes the emulated GS (about
+17,600 lines of the backend, plus the GS front end on the draw path). It
+deletes the packet plumbing in `src/` that turns GS data back into records
+(the draw-state mirror, the 2D converter, effects rebuilt from sprites,
+upload withholding, the absorber, most of the Draw stage). It replaces what
+feeds the renderer with hooks on the game's own functions: effects, 2D blocks,
+fonts and model draws. Tens of thousands of lines change hands. That is the
+point of the work, not a risk to be minimized.
+
+The owner of this project has seen earlier large efforts shrink, mid-way,
+into small fixes at the edges because the full change looked too hard. That
+is not acceptable here. Whoever works on this, human or model, works to these
+terms:
+
+- **Progress is measured by milestones closed**: their "Done when" met and
+  their listed code deleted. Optimizations, cleanups, new switches or fixes
+  outside the current milestone are not progress on this plan, however
+  useful they look. Note them at the end of this page and carry on.
+- **Hard is expected.** The model format (M5), the effect functions (M3)
+  and the 2D builders (M4) are large, poorly documented pieces of a
+  commercial game. When a step is hard, do the static work and write down
+  what was found and what is blocking in NATIVE-ONLY-NOTES.md, then ask.
+  Do not quietly narrow the step's scope, swap in an easier target, or stop
+  at analysis.
+- **No fallbacks left in place.** A milestone is not done while the old
+  path still handles part of its scope ("refused, sent on as packets", "the
+  rest keeps running the VU1"). A case that cannot be ported yet is listed by
+  name in the milestone with the reason, and the user agrees to it. A
+  fallback is never left in silently.
+- **Deleting is part of the deliverable.** Every milestone lists the code it
+  deletes. A milestone that adds the new path but leaves the old one is half
+  done.
+- **No permanent switches back to the old way.** The `gs-path-final` tag
+  and the reference captures are the comparison. An env switch that brings
+  back deleted behavior is not added.
+- **Scope changes are the user's decision.** If the plan is wrong (a hook
+  point does not exist, a function cannot be skipped), say so with the
+  evidence and propose the change. Do not re-scope on your own.
+- **At the start of every session**, read this section and the current
+  milestone. Then state which milestone item the session advances.
+
 ## Decisions (2026-11-11)
 
 - **The emulated GS path is removed**, not kept as a fallback. This
@@ -244,7 +287,7 @@ M1 to M6 run in order. Within M3 and M4, items are independent.
   review before any code depends on it.
 
 **User, once:**
-- Create the tag `gs-path-final` at the commit the plan starts from.
+- The tag `gs-path-final` exists (done 2026-11-11, `8431766`).
 - Run `reference.sh` on the tag twice:
   - **GS path**: the oracle for what the game should look like;
   - **native pipeline**: the baseline for what the native path draws today.
@@ -501,15 +544,21 @@ materials from M5).
 - **A permanent fork of dq8-gfx.** Accepted already (NATIVE-RENDERER.md,
   "Risks").
 
-## Open questions
+## Settled (2026-11-11)
 
-1. **Region texture packs** (font and UI regions) are answered by the GS
-   backend's texture cache. Porting them before M1 means matching UV-sprite
-   regions on converted packets, which M4 replaces anyway. **Proposal:**
-   whole-texture packs are ported in M1; region packs are off from M1 until
-   M4 brings them back on glyph and region records. Acceptable?
-2. **The Docker compile check** (M0) downloads a Linux toolchain and checks
-   out the two submodules on this machine. Acceptable?
-3. **Which OS do you test on?** The run scripts are Linux-only; on Windows,
-   `reference.sh` needs a `.bat` twin.
-4. **The tag:** `gs-path-final` at which commit, and pushed to which remote?
+1. **Region texture packs** (font and UI regions) are off from M1 until M4
+   brings them back on glyph and region records. Whole-texture packs are
+   ported in M1 and keep working throughout.
+2. **The compile check** is an x86_64 Linux build in Docker on the
+   development machine, with the PS2Recomp and imgui submodules checked out.
+3. **Testing is on Linux.** The run scripts stay Linux-only.
+4. **The tag** `gs-path-final` is at `8431766` (`origin/main` when the plan
+   was written; the plan's own commit only adds docs) and is pushed to
+   origin.
+
+## Outside this plan
+
+Ideas and fixes that came up during the work but belong to no milestone.
+They wait until the plan is done, or until the user moves one in.
+
+(None yet.)
