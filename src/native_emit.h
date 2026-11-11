@@ -58,7 +58,7 @@ struct Item
     std::array<Quad, 4> model{};
     Quad q76{}, q77{}, q78{}, q79{}, q81{}, q42{};
     std::vector<Group> groups;
-    uint32_t mesh = 0u;
+    uint32_t mesh = 0u, p14 = 0u;
     // Its VIF BASE (the chunks' TOP, mesh+0x00) and its palette (p1C's
     // quads: `bones` x 4 from p1C+0x20 to quad `paletteAt`).
     uint32_t base = 0u, p1C = 0u, paletteAt = 0u, bones = 0u;
@@ -67,6 +67,10 @@ struct Call
 {
     uint32_t unit = 0u;
     std::vector<Item> items;
+    // One node of the sorted path (one item, one group): its item's
+    // packets may or may not be CALLed before it (they are only when they
+    // changed), so its MSCALs do not count items.
+    bool single = false;
 };
 
 // A call the game did not write (its marker reached): its record.

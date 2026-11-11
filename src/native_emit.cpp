@@ -27,6 +27,11 @@ constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u;
 // ModelEmitShadowCasterPacketsMaybe: the same loop, one material for every
 // group (*(dctx+0x3B90), set by the shadow map's render).
 constexpr uint32_t kModelEmitShadowCaster = 0x0014E780u;
+// The sorted path: ModelQueueSortedPackets_14f0d0 queues a node per group
+// (DrawListAddNode), DrawListEmitBucket_1405a0 writes them at the buckets'
+// replay (NATIVE-ONLY-NOTES.md, "ModelQueueSortedPackets").
+constexpr uint32_t kQueueSorted = 0x0014F0D0u;
+constexpr uint32_t kEmitBucket = 0x001405A0u;
 // The markers' kinds (the unit's high byte; 1 passes, 2 blocks).
 constexpr uint32_t kBegin = 3u, kEnd = 4u, kUnwritten = 5u;
 // ModelMeshLinks: its chains are built once at load (static spans), so a
@@ -48,6 +53,10 @@ uint32_t read32(uint32_t address)
     uint32_t v;
     std::memcpy(&v, g_rdram + physical(address), sizeof(v));
     return v;
+}
+void write32(uint32_t address, uint32_t value)
+{
+    std::memcpy(g_rdram + physical(address), &value, sizeof(value));
 }
 Quad readQuad(uint32_t address)
 {
@@ -217,6 +226,7 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
             continue;
         Item &item = call.items.emplace_back();
         item.mesh = mesh;
+        item.p14 = p14;
         item.base = read32(mesh) & 0x3FFu;
         item.p1C = read32(it + 0x1Cu);
         item.paletteAt = read32(mesh + 0x124u) & 0x3FFu;
@@ -387,6 +397,181 @@ void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     emitWith(g_emitOriginal, false, rdram, ctx, runtime);
 }
 
+// The sorted path. At the queue: each item's groups as single-node
+// records, by (the item's p14, the group's chain), which the node carries
+// to its replay (its header's third entry, its chain).
+PS2Runtime::RecompiledFunction g_queueOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_bucketOriginal = nullptr;
+std::unordered_map<uint64_t, Call> g_sorted;
+
+void afterQueue(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+{
+    Call call;
+    predict(t_pendingDctx, t_pendingReq, call);
+    if (g_sorted.size() > 65536u)
+        g_sorted.clear();
+    for (Item &item : call.items)
+        for (Group &group : item.groups)
+        {
+            Call node;
+            node.single = true;
+            Item one = item;
+            one.groups = {group};
+            node.items.push_back(std::move(one));
+            g_sorted[(uint64_t(item.p14 & 0x0FFFFFFFu) << 32) | (group.chain & 0x0FFFFFFFu)] = std::move(node);
+        }
+}
+
+void queueSorted(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (rg::nativefx::inEffectCall())
+    {
+        g_queueOriginal(rdram, ctx, runtime);
+        return;
+    }
+    t_pendingReq = getRegU32(ctx, 6);
+    t_pendingDctx = getRegU32(ctx, 5);
+    rg::hooks::callThen(g_queueOriginal, rdram, ctx, runtime, &afterQueue, 0u);
+}
+
+uint32_t nextUnit(uint32_t kind)
+{
+    g_units = (g_units + 1u) & 0xFFFFFFu;
+    g_units = g_units == 0u ? 1u : g_units;
+    return g_units | (kind << 24);
+}
+
+void keepCall(Call &&call)
+{
+    std::lock_guard lock(g_mutex);
+    if (g_calls.size() >= 4096u)
+        g_calls.pop_front();
+    g_calls.push_back(std::move(call));
+}
+
+// DrawListEmitBucket(dctx, bucket), as the game writes it (RGDecomp's C
+// and the disassembly), with each node it knows a record of: compared (its
+// output between markers) or, its mesh trusted, drawn from the record (a
+// marker in place of its program, texenv, MSCAL and chain CALLs; the
+// header's changed entries, view, lights and the item's packets, still
+// CALLed as the game would).
+void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t o = getRegU32(ctx, 4);
+    const int32_t idx = static_cast<int32_t>(getRegU32(ctx, 5));
+    const uint32_t t = read32(o + 8u + 4u * read32(o));
+    if (rg::nativefx::inEffectCall() || t == 0u || g_sorted.empty())
+    {
+        g_bucketOriginal(rdram, ctx, runtime);
+        return;
+    }
+    const auto done = [&](int32_t value) {
+        setReturnS32(ctx, value);
+        ctx->pc = getRegU32(ctx, 31);
+    };
+    if (idx < 0 || idx >= static_cast<int32_t>(read32(o + 0x3BBCu)))
+        return done(0);
+    const uint32_t bucket = read32(read32(o + 0x3BC0u) + 4u * uint32_t(idx));
+    if (bucket == 0u)
+        return done(1);
+    const uint32_t pk = t + 8u;
+    const uint32_t hdr = read32(pk + 0x28u) + read32(pk + 0x2Cu) * 16u;
+    write32(hdr, 0x60000000u);
+    write32(hdr + 4u, 0u);
+    write32(hdr + 8u, 0x14000064u); // MSCAL 0x64
+    write32(hdr + 12u, 0u);
+    const uint32_t ha = hdr & 0x0FFFFFFFu;
+    const auto call = [&](uint32_t to) {
+        const uint32_t cur = read32(o + 4u);
+        write32(cur, 0x50000000u);
+        write32(cur + 4u, to & 0x0FFFFFFFu);
+        write32(cur + 8u, 0u);
+        write32(cur + 12u, 0u);
+        write32(o + 4u, cur + 16u);
+    };
+    uint32_t last = 0u, prev = 0u;
+    const int32_t count = static_cast<int32_t>(read32(read32(o + 0x3BC8u) + 4u * uint32_t(idx)));
+    uint32_t pp = bucket + 4u * uint32_t(count - 1);
+    for (int32_t i = 0; i < count; ++i, pp -= 4u)
+    {
+        const uint32_t e = read32(pp);
+        const uint32_t n = read32(e + 0x0Cu);
+        uint32_t src = read32(e + 0x10u);
+        if (prev == 0u || n != read32(prev + 0x0Cu))
+        {
+            for (uint32_t j = 0; j < n; ++j)
+                call(read32(src + 4u * j));
+        }
+        else
+        {
+            const uint32_t psrc = read32(prev + 0x10u);
+            if (psrc != src)
+                for (uint32_t j = 0; j < n; ++j)
+                    if (read32(src + 4u * j) != read32(psrc + 4u * j))
+                        call(read32(src + 4u * j));
+        }
+        prev = e;
+        // Its record, by its item's p14 and its chain.
+        const uint32_t chain = read32(e + 0x20u);
+        const auto found = n >= 3u ? g_sorted.find((uint64_t(read32(src + 8u) & 0x0FFFFFFFu) << 32) |
+                                                   (chain & 0x0FFFFFFFu))
+                                   : g_sorted.end();
+        if (found != g_sorted.end() && drawable(found->second))
+        {
+            Call node = found->second;
+            node.unit = nextUnit(kUnwritten);
+            if (rg::nativefx::writeMarker(node.unit))
+            {
+                ++g_unwrittenCalls;
+                keepCall(std::move(node));
+                // Its record's state writes stand between: the next written
+                // node CALLs its texenv again.
+                last = 0u;
+                continue;
+            }
+        }
+        uint32_t unit = 0u;
+        if (found != g_sorted.end())
+        {
+            Call node = found->second;
+            node.unit = unit = nextUnit(kBegin);
+            if (rg::nativefx::writeMarker(unit))
+                keepCall(std::move(node));
+            else
+                unit = 0u;
+        }
+        // DrawCtxAddChangedCallTags(dctx, e+0x18, e+0x14): six slots, a CALL
+        // for each that differs from the cache at dctx+0x3C48.
+        const uint32_t programs = read32(e + 0x18u), slots = read32(e + 0x14u);
+        if (slots == 6u)
+        {
+            for (uint32_t k = 0; k < 6u; ++k)
+            {
+                const uint32_t ptr = read32(programs + 4u * k);
+                if (read32(o + 0x3C48u + 4u * k) != ptr)
+                {
+                    call(ptr);
+                    write32(o + 0x3C48u + 4u * k, ptr);
+                }
+            }
+        }
+        const uint32_t texenv = read32(e + 0x1Cu);
+        if (last != texenv)
+        {
+            last = texenv;
+            call(last);
+        }
+        call(ha);
+        call(chain);
+        if (unit != 0u)
+            rg::nativefx::writeMarker(kEnd << 24);
+    }
+    // MemStackAllocQw(pk, 1): the RET+MSCAL quadword.
+    if (read32(pk + 0x20u) == 0u && read32(pk + 0x2Cu) + 1u <= read32(pk + 0x34u))
+        write32(pk + 0x2Cu, read32(pk + 0x2Cu) + 1u);
+    done(1);
+}
+
 void emitCaster(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     emitWith(g_casterOriginal, true, rdram, ctx, runtime);
@@ -415,7 +600,9 @@ void install(PS2Runtime &runtime)
 {
     g_rdram = runtime.memory().getRDRAM();
     if (!rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &emit, g_emitOriginal) ||
-        !rg::timing::hookFunction(runtime, kModelEmitShadowCaster, &emitCaster, g_casterOriginal))
+        !rg::timing::hookFunction(runtime, kModelEmitShadowCaster, &emitCaster, g_casterOriginal) ||
+        !rg::timing::hookFunction(runtime, kQueueSorted, &queueSorted, g_queueOriginal) ||
+        !rg::timing::hookFunction(runtime, kEmitBucket, &emitBucket, g_bucketOriginal))
         std::fprintf(stderr, "[model-emit] the model emitters not all hooked\n");
 }
 
@@ -456,6 +643,8 @@ bool marker(uint32_t unit, bool &unwritten)
             t_current = std::move(*it);
             g_calls.erase(it);
             t_in = true;
+            if (t_current.single)
+                t_item = 0;
             return true;
         }
     ++g_unknown;
@@ -468,7 +657,8 @@ void mscal(uint32_t startPC)
         return;
     if (startPC == 0u)
     {
-        ++t_item;
+        if (!t_current.single)
+            ++t_item;
         t_group = -1;
     }
     else if (startPC == 0x320u)

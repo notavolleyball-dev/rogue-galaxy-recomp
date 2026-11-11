@@ -1105,9 +1105,13 @@ item's VIF BASE and drawn as any model chunk. The camera, view and light
 packets still come from the list. `[model-emit] ... calls the game did
 not write N` counts them. The shadow casters
 (`ModelEmitShadowCasterPacketsMaybe`, one material for every group) go
-the same way. Next: the sorted path (`ModelQueueSortedPackets`, drawn at
-the buckets' replay); then the view, camera and light packets as records
-too. The sorted path (`ModelQueueSortedPackets`,
+the same way. **The sorted path too:** `ModelQueueSortedPackets` keeps a
+record of each queued node (by its item's p14 and its chain), and
+`DrawListEmitBucket` is reimplemented as the game writes it, each node it
+knows compared between markers or, its mesh trusted, drawn from its record
+(its header's changed CALLs still written; the next written node CALLs
+its texenv again). Next: the ModelMesh class (rebuilt every frame), then
+the view, camera and light packets as records. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
