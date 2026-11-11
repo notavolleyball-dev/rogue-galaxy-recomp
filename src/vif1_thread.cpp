@@ -1206,7 +1206,27 @@ bool takeMarkers(const uint8_t *data, uint32_t size, std::vector<uint8_t> &kept)
                     }
                     const uint32_t address = uint32_t(src) & (PS2_RAM_SIZE - 1u);
                     const uint64_t bytes = (uint64_t(w) * h * transferBits(dpsm) + 7u) / 8u;
-                    if (bytes != 0u && address + bytes <= PS2_RAM_SIZE)
+                    if ((src & producer::kHostSourceBlocks) != 0u && dpsm == 0u && bytes != 0u &&
+                        address + bytes <= PS2_RAM_SIZE && (w & 15u) == 0u && (h & 15u) == 0u)
+                    {
+                        // The movie's macroblocks, 16x16 CT32 column by
+                        // column: as rows of the frame.
+                        thread_local std::vector<uint8_t> frame;
+                        frame.resize(size_t(w) * h * 4u);
+                        const uint32_t nh = h / 16u;
+                        for (uint32_t i = 0; i < w / 16u; ++i)
+                            for (uint32_t j = 0; j < nh; ++j)
+                            {
+                                const uint8_t *block = ram + address + (size_t(i) * nh + j) * 0x400u;
+                                for (uint32_t r = 0; r < 16u; ++r)
+                                    std::memcpy(frame.data() + ((size_t(j) * 16u + r) * w + i * 16u) * 4u,
+                                                block + r * 64u, 64u);
+                            }
+                        producer::hostUpload(dbp, dbw, dpsm, 0u, 0u, w, h, frame.data(),
+                                             static_cast<uint32_t>(frame.size()));
+                        countUpload(UploadPath::HostMarker);
+                    }
+                    else if (bytes != 0u && address + bytes <= PS2_RAM_SIZE)
                     {
                         producer::hostUpload(dbp, dbw, dpsm, uint32_t((src >> 32) & 0x7FFu),
                                              uint32_t((src >> 43) & 0x7FFu), w, h, ram + address,

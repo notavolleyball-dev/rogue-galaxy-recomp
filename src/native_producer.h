@@ -107,6 +107,10 @@ inline uint64_t takeValue(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t wi
 // makes a host upload of the source as it is then (hostUpload): the DMA
 // would have read it there.
 constexpr uint8_t kHostRegister = 0x7Bu, kHostSourceRegister = 0x7Au;
+// In kHostSourceRegister's write: the source is CT32 16x16 blocks of 0x400
+// bytes, column by column (the movie's macroblocks, GsUploadImage16Blocks),
+// not rows of the transfer.
+constexpr uint64_t kHostSourceBlocks = 1ull << 54;
 // How many records texture() and palette() have queued for takeProduced
 // so far (game thread: a hook tells whether every one it asked for was
 // made).

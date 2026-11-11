@@ -27,6 +27,12 @@ constexpr uint32_t kTexBuildUploadPkt = 0x00158610u;
 // rrw, rrh): an upload of qwc quadwords from addr, by reference (REF tags
 // of at most 0x7FF0 each, the first cut to a 128-byte boundary).
 constexpr uint32_t kGsBuildImageUploadRefPkt = 0x00158390u;
+// GsUploadImage16Blocks_1d27a0(pkt, src, _, w, h): the movie's frame (the
+// MPEG decoder's CT32 macroblocks at src, 16x16 each, column by column) as
+// a GIF-channel packet of 16x16 uploads by reference to the texture
+// *(0x4817A8)'s TBP and TBW.
+constexpr uint32_t kGsUploadImage16Blocks = 0x001D27A0u;
+constexpr uint32_t kMovieTexture = 0x004817A8u;
 // DrawEnvSetFrameFromDesc_144fe0(env, desc, flags).
 constexpr uint32_t kSetFrameFromDesc = 0x00144FE0u;
 // The getters that fill the frame's and the display buffer's descriptors.
@@ -183,6 +189,44 @@ void uploadRef(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
     g_uploadRefs.push_back({getRegU32(ctx, 4), getRegU32(ctx, 8), getRegU32(ctx, 9)});
     rg::hooks::callThen(g_uploadRefOriginal, rdram, ctx, runtime, &afterUploadRef, 0u);
+}
+
+// The movie's frame upload (M6): its packet replaced, once built, by a
+// GIF-channel host marker (an END tag over an A+D packet) of the frame,
+// its source flagged as macroblocks.
+PS2Runtime::RecompiledFunction g_upload16Original = nullptr;
+struct Upload16
+{
+    uint32_t pkt = 0u, src = 0u, w = 0u, h = 0u;
+    uint64_t tex0 = 0u;
+};
+std::vector<Upload16> g_upload16s;
+
+void afterUpload16(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
+{
+    namespace producer = rg::nativeproducer;
+    if (g_upload16s.empty())
+        return;
+    const Upload16 u = g_upload16s.back();
+    g_upload16s.pop_back();
+    const uint32_t at = physical(u.pkt), src = physical(u.src);
+    if (u.w == 0u || u.h == 0u || (u.w & 15u) || (u.h & 15u) || at + 64u > PS2_RAM_SIZE ||
+        uint64_t(src) + uint64_t(u.w) * u.h * 4u > PS2_RAM_SIZE)
+        return;
+    const uint32_t tbp = uint32_t(u.tex0 & 0x3FFFu), tbw = uint32_t((u.tex0 >> 14) & 0x3Fu);
+    const uint64_t q[8] = {3ull | (7ull << 28), 0ull, // END, three quadwords
+                           2ull | (1ull << 15) | (1ull << 60), 0xEull, // GIF: NLOOP 2, EOP, A+D
+                           producer::takeValue(tbp, tbw, 0u, u.w, u.h), producer::kHostRegister,
+                           uint64_t(src) | producer::kHostSourceBlocks, producer::kHostSourceRegister};
+    std::memcpy(g_rdram + at, q, sizeof(q));
+}
+
+void upload16(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t texture = readAt<uint32_t>(kMovieTexture);
+    g_upload16s.push_back({getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 7), getRegU32(ctx, 8),
+                           texture != 0u ? readAt<uint64_t>(texture + 0x38u) : 0u});
+    rg::hooks::callThen(g_upload16Original, rdram, ctx, runtime, &afterUpload16, 0u);
 }
 
 // A take marker (rg::nativeproducer::kTakeRegister) of `takes` at `at`:
@@ -633,6 +677,8 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-capture] TexBuildUploadPkt could not be hooked\n");
     if (!rg::timing::hookFunction(runtime, kGsBuildImageUploadRefPkt, &uploadRef, g_uploadRefOriginal))
         std::fprintf(stderr, "[native-capture] GsBuildImageUploadRefPkt could not be hooked\n");
+    if (!rg::timing::hookFunction(runtime, kGsUploadImage16Blocks, &upload16, g_upload16Original))
+        std::fprintf(stderr, "[native-capture] GsUploadImage16Blocks could not be hooked\n");
     if (!rg::timing::hookFunction(runtime, kSceGsSetDefStoreImage, &setDefStoreImage, g_setDefStoreImageOriginal) ||
         !rg::timing::hookFunction(runtime, kSceGsExecStoreImage, &execStoreImage, g_execStoreImageOriginal))
         std::fprintf(stderr, "[native-capture] the GS memory reads could not be hooked: they stay GS transfers\n");
