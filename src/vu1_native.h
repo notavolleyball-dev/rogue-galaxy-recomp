@@ -197,8 +197,11 @@ void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
 void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
                  std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh);
+// `knownSlots`: the palette's size (modelSlots) when the chunk's sections
+// are not in memory (a chunk the list no longer carries); ~0u: read them.
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
-              std::vector<float> &palette);
+              std::vector<float> &palette, uint32_t knownSlots = ~0u);
+uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top);
 
 // RG_VU1_NATIVE, in the game (src/vif1_thread.cpp), for the chunks done
 // natively: unset, each is sent as a mesh the renderer transforms, without

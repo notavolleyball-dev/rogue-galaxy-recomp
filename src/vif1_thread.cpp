@@ -282,6 +282,49 @@ struct Hole
     bool filled = false; // read from guest memory after all (listHole)
     uint64_t hash = 0u;
 };
+
+// M5 step 2 (docs/NATIVE-ONLY.md): model geometry the list no longer
+// carries. A model's chunks are a packet built once at load and REF'd from
+// the list each frame (NATIVE-ONLY-NOTES.md, "Model resources"). The VIF1
+// thread learns, for each REF payload of chunks (a ModelSpan), the model
+// chunk each of its MSCNTs drew; once every one of them is a known chunk,
+// the game thread's gather leaves the payload in guest memory (the write
+// watch vouching for it) and puts an MSCNT a chunk in its place, each a
+// ModelMark: the VIF1 thread draws the chunk from what it learned, with no
+// UNPACK and no VU1. RG_MODEL_ELIDE=0: the list carries every chunk.
+struct ModelChunkMeta
+{
+    uint32_t id = 0u;
+    uint8_t header[32] = {}; // the chunk's two header quads at TOP
+    uint32_t slots = 0u;     // its palette's size (vu1native::modelSlots)
+};
+struct ModelSpan
+{
+    uint32_t offset = 0u, bytes = 0u, phys = 0u;
+    uint64_t stamp = 0u; // the write watch's, taken when it was copied
+};
+struct ModelMark
+{
+    uint32_t offset = 0u;
+    ModelChunkMeta chunk;
+};
+struct LearnedSpan
+{
+    uint64_t stamp = 0u, epoch = 0u;
+    std::vector<ModelChunkMeta> chunks;
+};
+std::mutex g_learnedMutex;
+std::unordered_map<uint64_t, LearnedSpan> g_learned; // by phys << 32 | bytes
+std::atomic<uint64_t> g_modelSpansElided{0u}, g_modelChunksElided{0u}, g_modelMarksLost{0u};
+bool modelGpuOn();
+bool elidingModels()
+{
+    static const bool on = [] {
+        const char *value = std::getenv("RG_MODEL_ELIDE");
+        return modelGpuOn() && !(value && std::strcmp(value, "0") == 0);
+    }();
+    return on;
+}
 // RG_MESH_REPEAT=1 (docs/NATIVE-BOUNDARY.md, issue 2's count): how much of
 // the geometry the native VU1 programs build is what they built a frame
 // before. A mesh is known by its vertices in object space (position, UV,
@@ -704,19 +747,31 @@ bool elidableUpload(PS2Memory &memory, uint32_t tagAddress, uint32_t data, uint3
 // read the pixels.
 void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &out,
                  std::vector<std::pair<uint32_t, uint32_t>> *origins = nullptr, std::vector<Hole> *holes = nullptr,
-                 bool binds = false)
+                 bool binds = false, std::vector<ModelSpan> *modelSpans = nullptr,
+                 std::vector<ModelMark> *modelMarks = nullptr)
 {
     out.clear();
     // Each piece, in order; `hash` set: left uncopied, at `phys`. send() runs
-    // on the game thread alone.
+    // on the game thread alone. `chunks` set: a REF payload of model chunks
+    // the VIF1 thread knows, an MSCNT each in its place (M5 step 2);
+    // `candidate`: one to learn.
     struct Span
     {
         uint32_t address, bytes, phys;
         uint64_t hash;
         bool bind;
+        const std::vector<ModelChunkMeta> *chunks = nullptr;
+        bool candidate = false;
+        uint64_t stamp = 0u;
     };
     thread_local std::vector<Span> spans;
     spans.clear();
+    // The learned spans, held for the walk (the VIF1 thread adds to them).
+    std::unique_lock<std::mutex> learned(g_learnedMutex, std::defer_lock);
+    const bool models = modelSpans && modelMarks && tte && elidingModels();
+    const uint64_t epoch = models ? rg::nativeproducer::retainedEpoch() : 0u;
+    if (models)
+        learned.lock();
     size_t total = 0u;
     walkChain(memory, tadr, tie, [&](uint32_t tagAddress, uint32_t data, uint32_t qwc, uint32_t tagLow) {
         if (tte)
@@ -737,7 +792,45 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
             // A marker: a cnt tag with the magic in its unused bits.
             const bool bind = binds && tte && qwc >= 2u && ((tagLow >> 28) & 0x7u) == 1u &&
                               ((tagLow >> 16) & 0x3FFu) == rg::nativeproducer::kBindTagMagic;
-            spans.push_back({data, qwc * 16u, phys, hash, bind});
+            Span span{data, qwc * 16u, phys, hash, bind};
+            // A REF payload of model chunks: the tag's VIFcodes NOPs, the
+            // payload a chunk's STCYCL 1,1 first.
+            if (models && hash == 0u && !bind && data != tagAddress + 16u)
+            {
+                try
+                {
+                    if (!memory.isScratchpad(data) && !memory.isScratchpad(tagAddress))
+                    {
+                        const uint32_t at = memory.translateAddress(data), bytes = qwc * 16u;
+                        const uint8_t *ram = memory.getRDRAM();
+                        uint32_t codes[2], first = 0u;
+                        std::memcpy(codes, ram + memory.translateAddress(tagAddress) + 8u, sizeof(codes));
+                        if (uint64_t(at) + bytes <= PS2_RAM_SIZE)
+                            std::memcpy(&first, ram + at, sizeof(first));
+                        if (codes[0] == 0u && codes[1] == 0u && first == 0x01000101u && uint64_t(at) + bytes <= PS2_RAM_SIZE)
+                        {
+                            const auto known = g_learned.find((uint64_t(at) << 32) | bytes);
+                            if (known != g_learned.end() && known->second.epoch == epoch &&
+                                !known->second.chunks.empty() &&
+                                rg::writewatch::unchanged(ram + at, bytes, known->second.stamp))
+                            {
+                                span.chunks = &known->second.chunks;
+                                span.bytes = (static_cast<uint32_t>(known->second.chunks.size()) * 4u + 15u) & ~15u;
+                            }
+                            else
+                            {
+                                span.candidate = true;
+                                span.phys = at;
+                                span.stamp = rg::writewatch::watch(ram + at, bytes);
+                            }
+                        }
+                    }
+                }
+                catch (const std::exception &)
+                {
+                }
+            }
+            spans.push_back(span);
             if (countingMeshRepeats())
             {
                 // Issue 2's count: what the list takes by reference (the
@@ -801,7 +894,7 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                     }
                 }
             }
-            total += static_cast<size_t>(qwc) * 16u;
+            total += spans.back().bytes;
         }
         return true;
     });
@@ -823,6 +916,24 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                 out.resize(out.size() + span.bytes);
                 continue;
             }
+            if (span.chunks)
+            {
+                // An MSCNT a chunk, NOPs to the quad.
+                const size_t at = out.size();
+                out.resize(at + span.bytes);
+                std::memset(out.data() + at, 0, span.bytes);
+                for (size_t i = 0; i < span.chunks->size(); ++i)
+                {
+                    const uint32_t mscnt = 0x17000000u;
+                    std::memcpy(out.data() + at + i * 4u, &mscnt, 4u);
+                    modelMarks->push_back({static_cast<uint32_t>(at + i * 4u), (*span.chunks)[i]});
+                }
+                ++g_modelSpansElided;
+                g_modelChunksElided += span.chunks->size();
+                continue;
+            }
+            if (span.candidate)
+                modelSpans->push_back({static_cast<uint32_t>(out.size()), span.bytes, span.phys, span.stamp});
             const size_t at = out.size();
             appendBytes(memory, out, span.address, span.bytes);
             if (!span.bind)
@@ -1517,6 +1628,10 @@ struct List
     // (offset in data, EE address), and the list's number.
     std::vector<std::pair<uint32_t, uint32_t>> origins;
     uint32_t number = 0u;
+    // M5 step 2: the REF payloads of chunks it carries (to learn), and the
+    // MSCNTs standing for chunks it does not (to draw).
+    std::vector<ModelSpan> modelSpans;
+    std::vector<ModelMark> modelMarks;
 };
 
 class Vif1Thread
@@ -1686,6 +1801,7 @@ public:
         // (once per code image and entry), its MSCNTs run the chunks; or the
         // MSCAL is the chunk (drawsAtCall).
         const rg::vu1native::Program *native = nullptr;
+        bool marked = false; // an MSCNT standing for a chunk (M5 step 2): the VU1 never runs it
         {
             if (!resume)
             {
@@ -1721,7 +1837,37 @@ public:
                 m_nativeProgram = nullptr;
             }
             t_vu1Source = programSource(m_nativeProgram);
-            if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
+            // M5 step 2: an MSCNT standing for a chunk the list does not
+            // carry: drawn from what was learned of it, its header put back
+            // at TOP for the header and row the program's constants make.
+            const ModelMark *mark = resume ? markAt(memory) : nullptr;
+            if (resume && !mark)
+                learnBegin(memory);
+            if (mark)
+            {
+                marked = true;
+                if (m_nativeProgram && rg::vu1native::modelOnGpu(*m_nativeProgram) &&
+                    nativeMode() == rg::vu1native::Mode::Gpu && toDrawStage())
+                {
+                    uint8_t *data = memory.getVU1Data();
+                    std::memcpy(data + (top & 1023u) * 16u, mark->chunk.header, sizeof(mark->chunk.header));
+                    rg::vu1native::modelHeader(*m_nativeProgram, data, top, m_nativePackets, m_nativeMesh);
+                    rg::vu1native::modelRow(*m_nativeProgram, data, top, t_model.row, t_model.palette,
+                                            mark->chunk.slots);
+                    m_nativeBounds.made = false;
+                    t_model.active = true;
+                    t_model.define = false;
+                    t_model.list = false;
+                    m_modelId = mark->chunk.id;
+                    native = m_nativeProgram;
+                    m_nativeMonitor.native(*native);
+                }
+                else
+                {
+                    ++g_modelMarksLost;
+                }
+            }
+            else if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
                 const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
                 // The chunks that clip (slot E) go to the GPU unless
@@ -1752,6 +1898,7 @@ public:
                         modelId = modelIdOf(rg::vu1native::modelChunkHash(*native, data, top), t_model.define);
                         if (modelId != 0u)
                         {
+                            learnChunk(*native, data, top, modelId);
                             if (t_model.define)
                                 rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
                             rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
@@ -1779,8 +1926,9 @@ public:
                 }
             }
             m_nativeMonitor.tick();
+            learnEnd();
         }
-        if (!native || nativeMode() == rg::vu1native::Mode::Check)
+        if (!marked && (!native || nativeMode() == rg::vu1native::Mode::Check))
         {
             if (native && nativeMode() == rg::vu1native::Mode::Check)
             {
@@ -1871,6 +2019,108 @@ public:
         t_vu1Camera = 0u;
         m_vpuStat.store((vu1.state().stoppedByD ? 0x0200u : 0u) | (vu1.state().stoppedByT ? 0x0400u : 0u),
                         std::memory_order_release);
+    }
+
+    // M5 step 2's learning (the list's model spans) and marks.
+    const ModelMark *markAt(PS2Memory &memory)
+    {
+        const auto &marks = m_current.modelMarks;
+        if (marks.empty())
+            return nullptr;
+        const uint8_t *cursor = memory.vif1Cursor();
+        const uint8_t *base = m_current.data.data();
+        if (!cursor || cursor < base || cursor >= base + m_current.data.size())
+            return nullptr;
+        const uint32_t offset = static_cast<uint32_t>(cursor - base);
+        while (m_markAt < marks.size() && marks[m_markAt].offset < offset)
+            ++m_markAt;
+        return m_markAt < marks.size() && marks[m_markAt].offset == offset ? &marks[m_markAt] : nullptr;
+    }
+    // An MSCNT that ran a chunk the list carried: inside a model span, it is
+    // counted, and the span spoiled unless learnChunk names it.
+    void learnBegin(PS2Memory &memory)
+    {
+        m_learnSpan = -1;
+        m_learnNamed = false;
+        const auto &spans = m_current.modelSpans;
+        if (spans.empty())
+            return;
+        const uint8_t *cursor = memory.vif1Cursor();
+        const uint8_t *base = m_current.data.data();
+        if (!cursor || cursor < base || cursor >= base + m_current.data.size())
+            return;
+        const uint32_t offset = static_cast<uint32_t>(cursor - base);
+        while (m_spanAt < spans.size() && spans[m_spanAt].offset + spans[m_spanAt].bytes <= offset)
+            ++m_spanAt;
+        if (m_spanAt < spans.size() && spans[m_spanAt].offset <= offset)
+        {
+            m_learnSpan = static_cast<int32_t>(m_spanAt);
+            ++m_spanLearning[m_spanAt].mscnts;
+        }
+    }
+    void learnChunk(const rg::vu1native::Program &program, const uint8_t *data, uint32_t top, uint32_t id)
+    {
+        if (m_learnSpan < 0)
+            return;
+        ModelChunkMeta meta;
+        meta.id = id;
+        std::memcpy(meta.header, data + (top & 1023u) * 16u, sizeof(meta.header));
+        meta.slots = rg::vu1native::modelSlots(program, data, top);
+        m_spanLearning[static_cast<size_t>(m_learnSpan)].chunks.push_back(meta);
+        m_learnNamed = true;
+    }
+    void learnEnd()
+    {
+        if (m_learnSpan >= 0 && !m_learnNamed)
+            m_spanLearning[static_cast<size_t>(m_learnSpan)].spoiled = true;
+        m_learnSpan = -1;
+    }
+    void learnList()
+    {
+        m_markAt = m_spanAt = 0u;
+        m_learnSpan = -1;
+        m_spanLearning.assign(m_current.modelSpans.size(), SpanLearning{});
+    }
+    // At the list's end: the spans every MSCNT of which drew a known chunk,
+    // learned under the stamp taken when they were copied; the others
+    // forgotten.
+    void publishLearned()
+    {
+        static uint64_t lists = 0u;
+        if (++lists % 600u == 0u && elidingModels())
+        {
+            size_t learned = 0u;
+            {
+                std::lock_guard lock(g_learnedMutex);
+                learned = g_learned.size();
+            }
+            std::fprintf(stderr,
+                         "[model-elide] spans learned %zu; left in guest memory so far: %llu spans, %llu chunks; "
+                         "marks not drawn %llu\n",
+                         learned, (unsigned long long)g_modelSpansElided.load(),
+                         (unsigned long long)g_modelChunksElided.load(), (unsigned long long)g_modelMarksLost.load());
+        }
+        if (m_current.modelSpans.empty())
+            return;
+        const uint64_t epoch = rg::nativeproducer::retainedEpoch();
+        std::lock_guard lock(g_learnedMutex);
+        if (g_learned.size() > 65536u)
+            g_learned.clear();
+        for (size_t i = 0; i < m_current.modelSpans.size(); ++i)
+        {
+            const ModelSpan &span = m_current.modelSpans[i];
+            SpanLearning &l = m_spanLearning[i];
+            const uint64_t key = (uint64_t(span.phys) << 32) | span.bytes;
+            if (l.spoiled || l.mscnts == 0u || l.chunks.size() != l.mscnts || span.stamp == 0u)
+            {
+                g_learned.erase(key);
+                continue;
+            }
+            LearnedSpan &learned = g_learned[key];
+            learned.stamp = span.stamp;
+            learned.epoch = epoch;
+            learned.chunks = std::move(l.chunks);
+        }
     }
 
     // The tag of the program starting at pair `startPC`: the entry and a hash
@@ -2003,10 +2253,12 @@ private:
                     meshRepeatList();
                 if (retainingMeshes())
                     retainList();
+                learnList();
                 if (!m_current.data.empty())
                 {
                     memory.processVIF1Data(m_current.data.data(), static_cast<uint32_t>(m_current.data.size()));
                 }
+                publishLearned();
             }
             catch (const std::exception &error)
             {
@@ -2134,6 +2386,16 @@ private:
     GSNativeMesh m_nativeMesh;
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
+    struct SpanLearning
+    {
+        std::vector<ModelChunkMeta> chunks;
+        uint32_t mscnts = 0u;
+        bool spoiled = false;
+    };
+    std::vector<SpanLearning> m_spanLearning; // the list's model spans'
+    size_t m_markAt = 0u, m_spanAt = 0u;
+    int32_t m_learnSpan = -1;
+    bool m_learnNamed = false;
     std::vector<std::vector<uint8_t>> m_vu1Packets;
     std::vector<uint8_t> m_checkData;
     VU1State m_checkState{};
@@ -3451,9 +3713,12 @@ void send(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::Re
     {
         static uint32_t listNumber = 0u;
         list.number = ++listNumber;
+        list.modelSpans.clear();
+        list.modelMarks.clear();
         gatherChain(memory, address, (chcr & kChcrTte) != 0u, (chcr & kChcrTie) != 0u, list.data,
                     (g_capture || nativeEffects()) ? &list.origins : nullptr,
-                    elidingUploads() ? &list.holes : nullptr, bindingTextures());
+                    elidingUploads() ? &list.holes : nullptr, bindingTextures(), &list.modelSpans,
+                    &list.modelMarks);
     }
     reportFinished(rdram, ctx, runtime);
     if (vifwait::g_on)

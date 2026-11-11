@@ -2382,8 +2382,19 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
     mesh.vertices.clear();
 }
 
+uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top)
+{
+    const VuData vu(data);
+    const Sections s = sectionsOf(program, vu, top);
+    uint32_t slots = 0u;
+    for (uint32_t k = 0; k < s.count; ++k)
+        for (uint32_t b = 0; b < s.bones; ++b)
+            slots = std::max(slots, uint32_t(slotOf(vu.half(s.skin + k * 2u, b))) + 1u);
+    return slots;
+}
+
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
-              std::vector<float> &palette)
+              std::vector<float> &palette, uint32_t knownSlots)
 {
     const VuData vu(data);
     const Sections s = sectionsOf(program, vu, top);
@@ -2449,10 +2460,7 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
     palette.clear();
     if (s.bones)
     {
-        uint32_t slots = 0u;
-        for (uint32_t k = 0; k < s.count; ++k)
-            for (uint32_t b = 0; b < s.bones; ++b)
-                slots = std::max(slots, uint32_t(slotOf(vu.half(s.skin + k * 2u, b))) + 1u);
+        const uint32_t slots = knownSlots != ~0u ? knownSlots : modelSlots(program, data, top);
         palette.resize(size_t(slots) * 16u);
         for (uint32_t x = 0; x < slots; ++x)
             for (uint32_t r = 0; r < 4u; ++r)

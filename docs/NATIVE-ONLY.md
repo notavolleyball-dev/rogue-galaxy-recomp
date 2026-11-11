@@ -739,6 +739,16 @@ recovers.
     - wrong UVs (F);
     - missing triangles (the backface rule).
   - `RG_MODEL_GPU=0` puts every chunk back on the CPU, to compare.
+- **Step 2 in code too:** a REF payload of chunks whose every MSCNT drew a
+  known chunk is learned (by its guest address, size and the write watch's
+  stamp). From then on the game thread's gather leaves it in guest memory
+  and puts an MSCNT a chunk in its place; the VIF1 thread draws each from
+  what it learned (its header and palette size) with the current VU1
+  constants, with no copy, no UNPACK and no VU1.
+  - `[model-elide]` lines count the spans learned, the spans and chunks
+    left in guest memory, and the marks not drawn (should stay 0).
+  - `RG_MODEL_ELIDE=0` carries every chunk again.
+  - Needs the write watch (Linux): elsewhere nothing is elided.
 
 **How (decided 2026-11-11, from the notes in NATIVE-ONLY-NOTES.md, "M5").**
 The notes change the order of the steps above:
