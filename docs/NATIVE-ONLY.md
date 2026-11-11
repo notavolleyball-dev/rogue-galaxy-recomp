@@ -853,7 +853,10 @@ Not done:
     `draws from one` and `not hashable here`.
   - To confirm with a pack collected under the tag.
 
-**Done when:**
+**Done when** (2026-11-11: the first in code, stronger than asked: there
+is no converter on the list, and a packet that still draws is counted by
+`[gs-packets]`; the other two wait on play; fonts as glyph records are not
+among them, and need the pack naming decided, as they change it):
 - the 2D converter receives no packet except those of the VU1 packet
   programs (counter, over a play session with menus, battles and events);
 - the HUD size and widescreen options behave as on the tag;
@@ -1203,13 +1206,19 @@ shadow does not follow, 2D outside the builder) and uploads.
   draw task.
 
 **Left of M6, by what it waits on:**
-- **Uploads (play data):** the texture hook binds most uploads by marker
-  already; the rest are records made at the hook and published where the
-  list's transfer is (withheld), host uploads nobody made a record of
-  (captured from the list's image data) and local copies (mirrored). The
-  stats line's upload counts (`withheld`, `host uploads nobody took`,
-  `local copies mirrored`) say which of these have users; each one with
-  users needs its uploader found and hooked before its list path goes.
+- **Uploads, in code since:** every texture node becomes records at the
+  hook and a marker in the list (bound; or, with records the hook made, a
+  take marker, kTakeRegister; the palette callback's palettes made records
+  from where the callback put them); every upload by reference the game
+  builds (GsBuildImageUploadRefPkt) is a host marker (kHostRegister: the
+  hook's record of the transfer if queued, else a host upload of its
+  source at the marker). Its inline twin (GsBuildImageUploadPkt) has no
+  caller that runs (TexBuildUploadPkt's mode is always 0). Local copies
+  (TexAnime's DrawListAddVramCopy) are A+D register writes the list's run
+  mirrors in order, as a marker would. Left: host capture and withholding
+  for an upload written some other way, which `[uploads]` would name
+  (`host (no record)`, `withheld`); play data decides whether those paths
+  can be deleted.
 - **The playthrough route** (the user's).
 
 
