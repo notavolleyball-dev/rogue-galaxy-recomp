@@ -73,8 +73,15 @@ stacked PRs at the end).
 - **M2 is done in code** on `native-only/m2-contract` (from M1's branch;
   see M2's status for what changed and the points kept differently from
   the draft contract, for the user's review).
-- **M3 is next**, on `native-only/m3-passes` from M2's branch: effects as
-  passes, in M3's order, each with a note in NATIVE-ONLY-NOTES.md first.
+- **M3 is under way** on `native-only/m3-passes` (from M2's branch). The
+  mechanism: the effect's hook reads its arguments into a
+  `rg::nativeproducer::PassRequest` kept by the unit of its packet range
+  (`native_effects.cpp`'s `keepPass`); the VIF1 thread, reaching the range,
+  sends the `Pass` (`emitPass`) and drops the packets; the renderer expands
+  the pass into its own draws (`native_passes.cpp`). Done: glare. Next, in
+  order: flip copy, plane shadow, bloom, DoF, object layers, CBlur,
+  refraction, color filter, fades and captures, TexAnime, focus, shadow
+  map, lens flare, depth probe. Each gets a note in NATIVE-ONLY-NOTES.md.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
