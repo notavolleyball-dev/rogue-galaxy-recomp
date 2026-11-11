@@ -3,8 +3,8 @@
 # card, build/run/mc0-bench),
 # 30 fps mode, 1x, hidden and muted; the frame at pad read FRAME logged to
 # build/run/NAME.txt(.vram); SECONDS of play.
-#   tools/vu1/oracle/native-run.sh NAME MODE [SECONDS=110] [FRAME=3000]
-# MODE is RG_VU1_NATIVE's (0, check, 1, skip, gpu; src/vu1_native.h). The
+#   tools/rgcpu/bench/walk.sh NAME MODE [SECONDS=110] [FRAME=3000]
+# MODE is RG_VU1_NATIVE's (gpu; src/vu1_native.h; the check mode went in M5). The
 # 30 fps walk is deterministic: two runs of one build log the same frame, so
 # tools/bench/cmpvram.py and tools/bench/vram2png.py compare modes.
 cd "${RG_DIR:-$(dirname "$0")/../../..}" || exit 1
@@ -24,7 +24,6 @@ mkdir -p build/run/shots/$NAME
 # presented frame back from the GPU (not only those it saves), a wait a
 # frame that play never has: off for performance runs.
 if [ "${RG_WALK_SHOTS:-1}" = 0 ]; then unset DQ8_GFX_SCREENSHOT_DIR DQ8_GFX_SCREENSHOT_EVERY; fi
-unset RG_VU1_REPLAY
 cat disc/*.DAT disc/*.HD6 > /dev/null 2>&1
 ${RG_BIN:-build/game/src/roguegalaxy} disc/SCUS_974.90 > "build/run/$NAME.log" 2>&1 &
 pid=$!

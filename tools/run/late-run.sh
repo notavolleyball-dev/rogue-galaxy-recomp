@@ -13,7 +13,6 @@ export RG_INPUT="$LOAD${EXTRA:+,$EXTRA}"
 export RG_INPUT_CLOCK=pad RG_MUTE=1 DQ8_GFX_HIDDEN_WINDOW=1 RG_FPS=30 RG_SCALE=1
 rm -rf build/run/mc0-run; cp -r build/run/mc0-late build/run/mc0-run
 export RG_MC0_DIR=build/run/mc0-run RG_SETTINGS_FILE=build/run/native-on.ini
-export RG_VU1_HARVEST=build/harvest RG_VU1_NATIVE=check RG_VU1_NATIVE_CHECK_EVERY=16
 export DQ8_GFX_SCREENSHOT_DIR=build/run/shots/$NAME DQ8_GFX_SCREENSHOT_EVERY=$SHOT
 for assignment in "$@"; do export "$assignment"; done
 rm -rf build/run/shots/$NAME; mkdir -p build/run/shots/$NAME

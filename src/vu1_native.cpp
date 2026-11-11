@@ -2183,51 +2183,6 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, con
     std::memcpy(data + 99u * 16u, &most, sizeof(most));
 }
 
-bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after)
-{
-    if (program.kind == Kind::Overlay)
-    {
-        const VuRounding rounding;
-        std::vector<uint8_t> copy(before, before + 1024u * 16u);
-        runOverlay(copy.data(), nullptr);
-        return std::memcmp(copy.data() + 144u * 16u, after + 144u * 16u, 26u * 16u) == 0;
-    }
-    if (program.kind == Kind::Base)
-    {
-        const VuRounding rounding;
-        std::vector<uint8_t> copy(before, before + 1024u * 16u);
-        runBase(copy.data(), nullptr);
-        const auto same = [&](uint32_t first, uint32_t quads) {
-            return std::memcmp(copy.data() + first * 16u, after + first * 16u, quads * 16u) == 0;
-        };
-        return same(64u, 3u) && same(68u, 8u) && same(100u, 3u) &&
-               std::memcmp(copy.data() + 111u * 16u + 8u, after + 111u * 16u + 8u, 4u) == 0;
-    }
-    if (program.kind == Kind::Outline)
-    {
-        const VuRounding rounding;
-        return outlineLoopWord(VuData(before), top) == static_cast<uint32_t>(VuData(after).word(1023, 0));
-    }
-    if (!program.depthBounds || !program.bounds)
-    {
-        return true;
-    }
-    const VuRounding rounding;
-    Vec4 least, most;
-    boundsAfter(program, before, top, least, most);
-    const VuData vu(after);
-    const Vec4 vuLeast = vu.quad(98), vuMost = vu.quad(99);
-    const float *a = &least.x, *b = &vuLeast.x, *c = &most.x, *d = &vuMost.x;
-    for (int i = 0; i < 4; ++i)
-    {
-        const float scale = rg::fmax(1.0f, rg::fmax(std::fabs(a[i]), std::fabs(c[i])));
-        if (std::fabs(a[i] - b[i]) > 1e-4f * scale || std::fabs(c[i] - d[i]) > 1e-4f * scale)
-        {
-            return false;
-        }
-    }
-    return true;
-}
 
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
@@ -2623,63 +2578,14 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
 Mode modeFromEnvironment()
 {
     const char *value = std::getenv("RG_VU1_NATIVE");
-    if (value && std::strcmp(value, "check") == 0)
-        return Mode::Check;
     if (value && *value && std::strcmp(value, "gpu") != 0)
-        std::fprintf(stderr, "[vu1native] RG_VU1_NATIVE=%s ignored: the modes are gpu (the default) and check\n",
-                     value);
+        std::fprintf(stderr, "[vu1native] RG_VU1_NATIVE=%s ignored: the check mode is gone (M5)\n", value);
     return Mode::Gpu;
 }
 
 void Monitor::declined(const Program &program, const char *reason)
 {
     ++m_declined[std::string(program.name) + ": " + reason];
-}
-
-const char *Monitor::check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
-                           const std::vector<std::vector<uint8_t>> &native)
-{
-    const auto events = [](const std::vector<std::vector<uint8_t>> &packets) {
-        std::vector<rg::gif::GifEvent> out;
-        rg::gif::GifState state;
-        for (const auto &packet : packets)
-        {
-            rg::gif::decodeGifPacket(packet.data(), static_cast<uint32_t>(packet.size()), state, out);
-        }
-        return out;
-    };
-    rg::gif::Tolerance tolerance;
-    tolerance.xy = 1u;
-    tolerance.z = 16u;
-    tolerance.rgba = 1u;
-    tolerance.stq = 1e-5f;
-    const auto reference = events(vu);
-    const auto candidate = events(native);
-    const rg::gif::Comparison result = rg::gif::compare(reference, candidate, tolerance);
-    ++m_checked;
-    if (result.mismatched == 0u && result.countDifference == 0)
-    {
-        return nullptr;
-    }
-    ++m_differ;
-    const char *kind = result.countDifference != 0     ? "vertex count"
-                       : result.kindMismatches != 0u   ? "ADC or register"
-                       : result.maxXy > tolerance.xy   ? "position"
-                       : result.maxZ > tolerance.z     ? "Z"
-                       : result.maxRgba > tolerance.rgba ? "color"
-                       : result.maxUv > tolerance.uv   ? "UV"
-                       : result.maxStq > tolerance.stq ? "STQ"
-                                                       : "fog";
-    ++m_kinds[std::string(program.name) + ": " + kind];
-    if (m_shown++ < 5u)
-    {
-        const size_t at = static_cast<size_t>(result.firstMismatch);
-        std::fprintf(stderr, "[vu1native] %s differs at event %zu of %zu (%+lld events):\n  vu1    %s\n  native %s\n",
-                     program.name, at, reference.size(), static_cast<long long>(result.countDifference),
-                     at < reference.size() ? rg::gif::describe(reference[at]).c_str() : "-",
-                     at < candidate.size() ? rg::gif::describe(candidate[at]).c_str() : "-");
-    }
-    return kind;
 }
 
 void Monitor::tick()
@@ -2706,18 +2612,9 @@ void Monitor::tick()
     {
         left += " [" + reason + "]=" + std::to_string(count);
     }
-    std::fprintf(stderr, "[vu1native] %s: native chunks%s; left to the VU1%s", 
-                 m_mode == Mode::Check ? "check" : "gpu",
+    (void)m_mode;
+    std::fprintf(stderr, "[vu1native] gpu: native chunks%s; left to the VU1%s",
                  line.empty() ? " none" : line.c_str(), left.empty() ? " none" : left.c_str());
-    if (m_mode == Mode::Check)
-    {
-        std::fprintf(stderr, "; checked %llu, differ %llu", static_cast<unsigned long long>(m_checked),
-                     static_cast<unsigned long long>(m_differ));
-        for (const auto &[kind, count] : m_kinds)
-        {
-            std::fprintf(stderr, " [%s]=%llu", kind.c_str(), static_cast<unsigned long long>(count));
-        }
-    }
     std::fprintf(stderr, "\n");
 }
 

@@ -21,7 +21,8 @@ struct ModelRow;
 // program is recognized by the FNV-1a hash of each piece's code, so no game
 // code is kept here. Every piece was read from the code with
 // tools/vu1/vudis.py over a recording's coverage and is checked against the
-// VU1 with tools/vu1/oracle; see its README.
+// VU1 with tools/vu1/oracle (removed in M5 of docs/NATIVE-ONLY.md; the GPU
+// runs the strip programs now).
 //
 // Done: every program the recordings hold (docs/VU1-NATIVE.md, "Status"):
 // the strip programs, composed from a piece per slot (A; B plain or skinned;
@@ -169,7 +170,6 @@ struct Bounds
 };
 void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built = nullptr,
                         const Bounds *bounds = nullptr);
-bool memoryEffectsMatch(const Program &program, const uint8_t *before, uint32_t top, const uint8_t *after);
 
 // The GS packets the program kicks for that chunk, in order.
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
@@ -207,15 +207,13 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
               std::vector<float> &palette, uint32_t knownSlots = ~0u);
 uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top);
 
-// RG_VU1_NATIVE, in the game (src/vif1_thread.cpp), for the chunks done
-// natively: unset, each is sent as a mesh the renderer transforms, without
-// running the VU1; `check` runs the VU1 as before and compares its packets
-// with the native ones (for the oracle's work; goes in M5 of
-// docs/NATIVE-ONLY.md).
+// The chunks done natively are sent as meshes the renderer draws, without
+// running the VU1. (The check mode that compared them with the VU1's
+// packets, the RG_VU1_REPLAY recordings and the oracle went in M5 of
+// docs/NATIVE-ONLY.md: the GPU runs the strip programs now.)
 enum class Mode : uint8_t
 {
     Gpu,
-    Check,
 };
 Mode modeFromEnvironment();
 
@@ -230,16 +228,6 @@ public:
 
     void native(const Program &program) { ++m_native[program.name]; }
     void declined(const Program &program, const char *reason);
-    // What differs (the first of: vertex count, ADC or a register, position,
-    // Z, color, UV, STQ, fog), or null when nothing does beyond the tolerance.
-    const char *check(const Program &program, const std::vector<std::vector<uint8_t>> &vu,
-                      const std::vector<std::vector<uint8_t>> &native);
-    // A difference found outside the packets (VU1 memory), counted as check's.
-    void noteKind(const Program &program, const char *kind)
-    {
-        ++m_differ;
-        ++m_kinds[std::string(program.name) + ": " + kind];
-    }
     // Prints the line when it is due.
     void tick();
 
@@ -247,10 +235,6 @@ private:
     Mode m_mode;
     std::map<std::string, uint64_t> m_native;
     std::map<std::string, uint64_t> m_declined;
-    std::map<std::string, uint64_t> m_kinds;
-    uint64_t m_checked = 0u;
-    uint64_t m_differ = 0u;
-    uint32_t m_shown = 0u;
     int64_t m_next = 0;
 };
 

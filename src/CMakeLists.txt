@@ -151,7 +151,6 @@ add_executable(roguegalaxy
     debug/jump_trace.cpp
     debug/sampler.cpp
     debug/stall_watch.cpp
-    debug/vu1_replay.cpp
 )
 target_include_directories(roguegalaxy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -179,16 +178,6 @@ if(NOT MSVC)
                                 PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
-# tools/vu1/oracle: replays an RG_VU1_REPLAY recording through VU1 without the
-# game, the check for native replacements of the VU1 programs. Not built by
-# default: cmake --build build/game --target rg_vu1_oracle
-add_executable(rg_vu1_oracle EXCLUDE_FROM_ALL
-    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/rg_vu1_oracle.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/gif_events.cpp"
-    "${CMAKE_SOURCE_DIR}/tools/vu1/oracle/native.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vu1_native.cpp")
-target_include_directories(rg_vu1_oracle PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/debug" "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(rg_vu1_oracle PRIVATE ps2_runtime)
 # tools/vu1/oracle/vu0_check.cpp: the native VU0 program against the VU0 on
 # synthetic inputs. cmake --build build/game --target rg_vu0_check
 add_executable(rg_vu0_check EXCLUDE_FROM_ALL
