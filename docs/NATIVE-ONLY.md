@@ -144,10 +144,10 @@ stacked PRs at the end).
   call and compared with the list's (`[model-emit]`), and calls whose
   meshes agreed are no longer written: they are drawn from their records
   (state from the material's GsEnv and the draw environment, geometry
-  from the static spans), on the direct and the sorted path and for the
-  shadow casters. Left: the ModelMesh class (named above), and the view,
-  camera and light packets (VU1 state the drawn records still read where
-  the list puts it).
+  from the spans, the ModelMesh class's rebuilt by its own method), on
+  the direct and the sorted path and for the shadow casters, with no
+  guard. Left: the view, camera and light packets (VU1 state the drawn
+  records still read where the list puts it).
   - **What the rest of M4 and M6 waits on is the play test's counts.**
     Both switches are guarded by the comparison itself (a block owner or
     mesh is drawn from its record only once its records agreed with the
@@ -1114,12 +1114,12 @@ record of each queued node (by its item's p14 and its chain), and
 `DrawListEmitBucket` is reimplemented as the game writes it, each node it
 knows compared between markers or, its mesh trusted, drawn from its record
 (its header's changed CALLs still written; the next written node CALLs
-its texenv again). The ModelMesh class (cloth and other meshes whose
-chunks the game rebuilds into the frame's buffer at every emit) is
-compared but not skipped: skipping would mean rebuilding its chunks and
-their buffer allocation here for a draw the game already pays for; it
-stays on the list path, its chunks drawn by the model stage as transient
-inputs. Named, for the user's review. The sorted path (`ModelQueueSortedPackets`,
+its texenv again). The ModelMesh class (cloth and other meshes whose chunks the game
+rebuilds into the frame's buffer at every emit) is drawn from records
+too: the hook runs the mesh's own `GetGroupPkts` (through
+`rg::hooks::runToEnd`, its arrays below the guest's stack), allocates the
+quadwords it wrote in the frame's buffer as the emitter would, and reads
+the record from the rebuilt chains. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its

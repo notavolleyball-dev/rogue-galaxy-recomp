@@ -37,6 +37,10 @@ constexpr uint32_t kUnwritten = 5u;
 // ModelMeshLinks: its chains are built once at load (static spans), so a
 // call of only these can be drawn from its record with nothing written.
 constexpr uint32_t kMeshLinks = 0x00470010u;
+// ModelMesh: its chunks are rebuilt into the frame's buffer at every emit
+// (its GetGroupPkts, vtable +0x18, runs BuildUnpackPkt); the hook runs that
+// itself before reading the record.
+constexpr uint32_t kMesh = 0x00470040u;
 
 uint32_t physical(uint32_t address)
 {
@@ -309,7 +313,8 @@ bool drawable(const Call &call)
         return false;
     for (const Item &item : call.items)
     {
-        if (read32(item.mesh + 0x50u) != kMeshLinks)
+        const uint32_t vtable = read32(item.mesh + 0x50u);
+        if (vtable != kMeshLinks && vtable != kMesh)
             return false;
         for (const Group &group : item.groups)
             if (!group.programKnown || !group.program || !rg::vu1native::modelOnGpu(*group.program) ||
@@ -325,6 +330,61 @@ PS2Runtime::RecompiledFunction g_casterOriginal = nullptr;
 // nest outside effects, which are not followed).
 uint32_t t_pendingReq = 0u, t_pendingDctx = 0u;
 bool t_pendingCaster = false;
+
+// The call's ModelMesh items' chunks rebuilt as the emitter would (their
+// GetGroupPkts into the frame's current buffer, the quadwords it wrote
+// allocated there), so their groups' chains hold this frame's chunks.
+// False: one could not be (no buffer, no room, the method did not finish).
+bool rebuildMeshes(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t dctx, uint32_t req)
+{
+    const uint32_t key = read32(req + 0x40u);
+    const uint32_t meshes = read32(read32(req + 0x0Cu) + 4u);
+    const uint32_t count = read32(read32(req + 0x08u));
+    if (count > 2048u)
+        return false;
+    uint32_t node = read32(req + 0x44u);
+    for (int guard = 0; node != 0u && guard < 4096; ++guard, node = read32(node))
+    {
+        const uint32_t it = node + 0x10u;
+        if (key != 0u && read32(it) != key)
+            continue;
+        if (read32(it + 0x14u) == 0u || read32(it + 0x18u) == 0u)
+            continue;
+        const uint32_t mesh = read32(meshes + 4u * read32(it + 0x08u));
+        if (mesh == 0u || read32(mesh + 0x50u) != kMesh)
+            continue;
+        // DrawListGetCurBuf: the current buffer's memstack, its top.
+        const uint32_t t = read32(dctx + 8u + 4u * read32(dctx));
+        if (t == 0u)
+            return false;
+        const uint32_t pk = t + 8u;
+        if (read32(pk + 0x20u) != 0u)
+            return false;
+        const uint32_t cur = read32(pk + 0x28u) + read32(pk + 0x2Cu) * 16u;
+        // The method's arrays (materials and chains, -1 ended) below the
+        // guest's stack, and its own frame below them.
+        const uint32_t sp = getRegU32(ctx, 29);
+        const uint32_t arrays = (sp - 0x4000u) & ~15u;
+        R5900Context local = *ctx;
+        const auto set = [&](int r, uint32_t v) { local.r[r] = _mm_set_epi64x(0, int64_t(int32_t(v))); };
+        set(4, mesh);
+        set(5, cur);
+        set(6, arrays);
+        set(7, arrays + 0x2000u);
+        set(8, count);
+        set(29, (sp - 0x8000u) & ~15u);
+        const uint32_t entry = read32(read32(mesh + 0x50u) + 0x18u);
+        PS2Runtime::RecompiledFunction method = runtime->lookupFunction(entry);
+        if (!method || !rg::hooks::runToEnd(method, entry, rdram, local, runtime))
+            return false;
+        const uint32_t qwc = getRegU32(&local, 2);
+        // MemStackAllocQw(buffer, qwc).
+        if (read32(pk + 0x2Cu) + qwc > read32(pk + 0x34u))
+            return false;
+        write32(pk + 0x2Cu, read32(pk + 0x2Cu) + qwc);
+    }
+    return true;
+}
 
 void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdram, R5900Context *ctx,
               PS2Runtime *runtime)
@@ -344,7 +404,17 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
         Call call;
         call.unit = g_units | (kUnwritten << 24);
         predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster);
-        if (drawable(call) && rg::nativefx::writeMarker(call.unit))
+        // ModelMesh items: their chunks rebuilt first, the record read again.
+        bool rebuilt = true;
+        for (const Item &item : call.items)
+            if (read32(item.mesh + 0x50u) == kMesh)
+            {
+                rebuilt = rebuildMeshes(rdram, ctx, runtime, getRegU32(ctx, 5), getRegU32(ctx, 6));
+                call.items.clear();
+                predict(getRegU32(ctx, 5), getRegU32(ctx, 6), call, caster);
+                break;
+            }
+        if (rebuilt && drawable(call) && rg::nativefx::writeMarker(call.unit))
         {
             ++g_unwrittenCalls;
             {
