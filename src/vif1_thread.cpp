@@ -1801,6 +1801,7 @@ public:
                     t_model.transient = false;
                     t_model.list = false;
                     m_modelId = mark->chunk.id;
+                    m_particleMesh = false;
                     native = m_nativeProgram;
                     m_nativeMonitor.native(*native);
                 }
@@ -1831,7 +1832,16 @@ public:
                 {
                     native = m_nativeProgram;
                     t_model.active = false;
-                    if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
+                    m_particleMesh = false;
+                    if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Particles)
+                    {
+                        // M5: the particles as a mesh in world space, which
+                        // the renderer projects (not window packets).
+                        rg::vu1native::particleMesh(memory.getVU1Data(), top, m_nativePackets, m_nativeMesh);
+                        m_nativeBounds.made = false;
+                        m_particleMesh = true;
+                    }
+                    else if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
                     {
                         // M5: the chunk goes to the model vertex stage. Seen
                         // in two lists, it is kept under an id (its inputs
@@ -1922,7 +1932,7 @@ public:
             }
             else
             {
-                const bool meshed = rg::vu1native::hasMesh(*native);
+                const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh;
                 // A mesh's own register packets ride with it as writes.
                 const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
                                       packetsAsWrites(m_nativePackets, m_nativeWrites);
@@ -1940,7 +1950,17 @@ public:
                         t_meshWrites = m_nativeWrites.data();
                         t_meshWriteCount = static_cast<uint32_t>(m_nativeWrites.size());
                     }
-                    deliverMesh(m_runtime.gs(), m_nativeMesh, memory.getVU1Data());
+                    if (m_particleMesh)
+                    {
+                        // The corners are in world space: the model matrix
+                        // the producer reads (quads 60-63) the identity.
+                        std::memcpy(m_particleQuads, memory.getVU1Data(), sizeof(m_particleQuads));
+                        const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                        std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
+                        deliverMesh(m_runtime.gs(), m_nativeMesh, m_particleQuads);
+                    }
+                    else
+                        deliverMesh(m_runtime.gs(), m_nativeMesh, memory.getVU1Data());
                     t_retain = {};
                     t_model.active = false;
                     t_meshWriteCount = 0u;
@@ -2324,6 +2344,8 @@ private:
     GSNativeMesh m_nativeMesh;
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
+    bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
+    alignas(16) uint8_t m_particleQuads[64u * 16u] = {}; // its VU1 quads, the model the identity
     struct SpanLearning
     {
         std::vector<ModelChunkMeta> chunks;

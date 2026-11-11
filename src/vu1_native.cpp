@@ -1509,6 +1509,110 @@ void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint
     }
 }
 
+// The particles as a mesh (M5): each particle's four corners in world space
+// (buildParticles' arithmetic), two triangles a particle, for the renderer
+// to project; the header's matrix world to window (quads 8-11, 24-27,
+// 12-15), no cull. The state packets are buildParticles' (FOGCOL, then the
+// GIF header, PRIM and PRMODE).
+void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+{
+    packets.clear();
+    std::vector<uint8_t> &fog = packets.emplace_back();
+    uint32_t fogTag[4];
+    std::memcpy(fogTag, vu.bytes(19), sizeof(fogTag));
+    putWords(fog, 0x8001u, fogTag[1], fogTag[2], fogTag[3]);
+    putQuad(fog, vu.bytes(41));
+    if (vu.half(87, 1) & 0x10u)
+        std::memset(fog.data() + 16u, 0, 4u);
+    std::vector<uint8_t> &state = packets.emplace_back();
+    uint32_t tag[4];
+    std::memcpy(tag, vu.bytes(0), sizeof(tag));
+    tag[0] |= 0x8000u;
+    putQuad(state, tag);
+    putWords(state, 3u, 0u, 0u, 0u); // a triangle list
+    putWords(state, vu.half(87, 0), 0u, 27u, 0u);
+
+    const uint32_t count = std::min<uint32_t>(vu.half(top, 1), 256u);
+    const uint32_t positions = top + 2u;
+    const uint32_t offsets = positions + vu.half(top, 3);
+    const uint32_t uvs = positions + vu.half(top + 1u, 0);
+    const uint32_t colors = positions + vu.half(top + 1u, 1);
+    Vec4 camera[4], window[4], model[4], rows[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        camera[i] = vu.quad(8u + i);
+        model[i] = vu.quad(60u + i);
+        window[i] = vu.quad(12u + i);
+    }
+    for (uint32_t i = 0; i < 4u; ++i)
+        rows[i] = transform(window, transform(camera, vu.quad(24u + i)));
+    GSNativeMesh::Header &h = mesh.header;
+    h = GSNativeMesh::Header{};
+    for (uint32_t r = 0; r < 4u; ++r)
+    {
+        h.matrix[r][0] = rows[r].x;
+        h.matrix[r][1] = rows[r].y;
+        h.matrix[r][2] = rows[r].z;
+        h.matrix[r][3] = rows[r].w;
+    }
+    const Vec4 fogQuad = vu.quad(40);
+    std::memcpy(h.fog, &fogQuad, sizeof(h.fog));
+    for (float &c : h.colorMax)
+        c = 255.0f;
+    h.triangleList = 1u;
+    const Vec4 eye = vu.quad(28);
+    const float halfPi = fromBits(0x3fc90fd8u);
+    mesh.vertices.clear();
+    mesh.vertices.reserve(size_t(count) * 6u);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const Vec4 p = vu.quad(positions + 2u * i), shape = vu.quad(positions + 2u * i + 1u);
+        const Vec4 world = transform(model, {p.x, p.y, p.z, 1.0f});
+        const float ex = eye.x - world.x, ey = eye.y - world.y, ez = eye.z - world.z;
+        const float rx = 0.0f + ez, ry = 0.0f, rz = 0.0f - ex;
+        const float rr = rx * rx + ry * ry + rz * rz;
+        const float ux = ey * rz - ry * ez, uy = ez * rx - rz * ex, uz = ex * ry - rx * ey;
+        const float uu = ux * ux + uy * uy + uz * uz;
+        const float rq = vuReciprocalRoot(rr), uq = vuReciprocalRoot(uu);
+        const float rs[3] = {rx * rq * shape.x, ry * rq * shape.x, rz * rq * shape.x};
+        const float us[3] = {ux * uq * shape.y, uy * uq * shape.y, uz * uq * shape.y};
+        const float c = 0.0f - particleCosine(shape.z - halfPi), s = particleCosine(shape.z);
+        float a[3], b[3];
+        for (int l = 0; l < 3; ++l)
+        {
+            a[l] = rs[l] * s - us[l] * c;
+            b[l] = rs[l] * c + us[l] * s;
+        }
+        const Vec4 o0 = vu.quad(offsets + 2u * i), o1 = vu.quad(offsets + 2u * i + 1u);
+        const Vec4 uv0 = vu.quad(uvs + 2u * i), uv1 = vu.quad(uvs + 2u * i + 1u);
+        const float corners[4][2] = {{o0.x, o0.y}, {o1.x, o0.y}, {o0.x, o1.y}, {o1.x, o1.y}};
+        const float texels[4][2] = {{uv0.x, uv0.y}, {uv1.x, uv0.y}, {uv0.x, uv1.y}, {uv1.x, uv1.y}};
+        const Vec4 color = vu.quad(colors + i);
+        const float lanes[4] = {color.x, color.y, color.z, color.w};
+        float rgba[4];
+        for (int l = 0; l < 4; ++l)
+            rgba[l] = float(gsNativeFtoi(rg::fmax(rg::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
+        GSNativeMesh::Vertex quad[4];
+        for (uint32_t v = 0; v < 4u; ++v)
+        {
+            GSNativeMesh::Vertex &out = quad[v];
+            out.x = b[0] * corners[v][1] + world.x + a[0] * corners[v][0];
+            out.y = b[1] * corners[v][1] + world.y + a[1] * corners[v][0];
+            out.z = b[2] * corners[v][1] + world.z + a[2] * corners[v][0];
+            out.u = texels[v][0];
+            out.v = texels[v][1];
+            out.r = rgba[0];
+            out.g = rgba[1];
+            out.b = rgba[2];
+            out.a = rgba[3];
+        }
+        // The strip's two triangles: 0 1 2 and 1 2 3.
+        for (const uint32_t k : {0u, 1u, 2u, 1u, 2u, 3u})
+            mesh.vertices.push_back(quad[k]);
+    }
+    h.vertexCount = static_cast<uint32_t>(mesh.vertices.size());
+}
+
 // The projected texture program. F: each vertex's UV is its position through
 // quads 30-33 times the model rows (60-63; x, y and w lanes), divided by w,
 // and its color (128, 128, 128, 82.w * 81.w * 128), unclamped. C, a strip
@@ -2270,6 +2374,11 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 }
 
 // --- M5: the strip programs on the GPU (native_model.vert) ---------------
+
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+{
+    particleMesh(VuData(data), top, packets, mesh);
+}
 
 bool modelOnGpu(const Program &program)
 {

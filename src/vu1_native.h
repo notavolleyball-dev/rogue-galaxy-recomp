@@ -192,6 +192,10 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 // modelRow: the constants the stage reads for this draw (its layout is
 // native_model.vert's), and the bones' matrices the chunk uses.
 bool modelOnGpu(const Program &program);
+// The particles program's chunk as a mesh in world space (M5): drawn with
+// the model matrix the identity (the caller's VU1 quads 60-63 made so).
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets,
+                  GSNativeMesh &mesh);
 uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top);
 void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
