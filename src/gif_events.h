@@ -6,10 +6,10 @@
 #include <vector>
 
 // What a GS packet does, as a list of events: each register it writes, and
-// each vertex it kicks with the vertex state at that moment. Two packets that
-// give the same events draw the same thing, however they were laid out (PACKED
-// or REGLIST, one tag or several), which is what a native replacement of a VU1
-// program has to match.
+// each vertex it kicks with the vertex state at that moment. M6: the 2D
+// builder's decoder for a block's shadow (src/native_2d.h) and nothing
+// else; the game's own packets are read as register state
+// (src/gs_writes.h).
 namespace rg::gif
 {
 
@@ -52,10 +52,6 @@ struct GifState
     uint16_t u = 0, v = 0;
     uint8_t f = 0;
 };
-
-// One register write as an A+D qword gives it: vertex state into `state`,
-// a kick or another register's write appended as its event.
-void applyRegister(uint8_t reg, uint64_t value, GifState &state, std::vector<GifEvent> &out);
 
 // Appends the events of one packet: a chain of GIF tags up to EOP or the end
 // of the bytes. IMAGE data is counted, not decoded.
@@ -108,37 +104,5 @@ template <typename Visit> bool eachPacket(const uint8_t *data, uint32_t size, Vi
     }
     return true;
 }
-
-// Field tolerances for compare(): differences up to these count as equal.
-struct Tolerance
-{
-    uint32_t xy = 0;    // in 1/16 pixel
-    uint32_t z = 0;     // in Z units
-    uint32_t rgba = 0;  // per channel
-    uint32_t uv = 0;    // in 1/16 texel
-    uint32_t f = 0;
-    float stq = 0.0f;   // relative
-};
-
-// Largest differences found, and how many events differ beyond the tolerance.
-struct Comparison
-{
-    uint64_t events = 0;
-    uint64_t vertices = 0;
-    uint64_t mismatched = 0;     // events differing beyond the tolerance
-    uint64_t kindMismatches = 0; // different kind, register, or drawing/no-kick
-    int64_t countDifference = 0; // candidate events minus reference events
-    uint32_t maxXy = 0;
-    uint32_t maxZ = 0;
-    uint32_t maxRgba = 0;
-    uint32_t maxUv = 0;
-    float maxStq = 0.0f;
-    int64_t firstMismatch = -1;
-    void add(const Comparison &other);
-};
-Comparison compare(const std::vector<GifEvent> &reference, const std::vector<GifEvent> &candidate,
-                   const Tolerance &tolerance);
-
-std::string describe(const GifEvent &event);
 
 } // namespace rg::gif
