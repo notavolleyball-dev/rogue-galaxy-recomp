@@ -90,6 +90,13 @@ struct Range
 };
 std::mutex g_mutex;
 std::vector<Range> g_ranges;
+// M4: the layer each draw task's packets belong to (below).
+struct LayerRange
+{
+    uint32_t start = 0u, end = 0u;
+    uint8_t layer = 0u;
+};
+std::vector<LayerRange> g_layerRanges; // under g_mutex, by start
 
 // The ranges `start`-`end` overlaps go: the memory is something else's now.
 void dropRangesLocked(uint32_t start, uint32_t end)
@@ -124,6 +131,9 @@ void dropRanges(uint32_t start, uint32_t end)
     end = physical(end);
     std::lock_guard lock(g_mutex);
     dropRangesLocked(start, end);
+    g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
+                                       [&](const LayerRange &r) { return r.start < end && start < r.end; }),
+                        g_layerRanges.end());
 }
 
 PS2Runtime::RecompiledFunction g_frameBeginOriginal = nullptr;
@@ -142,6 +152,138 @@ void afterFrameBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 void drawListFrameBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     rg::hooks::callThen(g_frameBeginOriginal, rdram, ctx, runtime, &afterFrameBegin, 0u);
+}
+
+// M4: the layer each draw task's packets belong to (native::Layer, as a
+// byte), by the packet memory the task wrote, as the effects' ranges are.
+// Kept apart from them: an effect's call runs inside a task.
+
+void addLayerRange(uint32_t start, uint32_t end, uint8_t layer)
+{
+    start = physical(start);
+    end = physical(end);
+    if (end <= start || end - start > (4u << 20))
+        return;
+    std::lock_guard lock(g_mutex);
+    g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
+                                       [&](const LayerRange &r) { return r.start < end && start < r.end; }),
+                        g_layerRanges.end());
+    const LayerRange range{start, end, layer};
+    g_layerRanges.insert(std::upper_bound(g_layerRanges.begin(), g_layerRanges.end(), range,
+                                          [](const LayerRange &x, const LayerRange &y) { return x.start < y.start; }),
+                         range);
+}
+
+// The draw tasks (TaskDraw*), each with the layer its 2D is: by what the
+// task draws (its name; docs/NATIVE-ONLY-NOTES.md, "Draw tasks and layers").
+enum class Layer : uint8_t // native::Layer's values
+{
+    Scene,
+    Hud,
+    Menu,
+    Text,
+    Fade,
+    Overlay,
+};
+struct DrawTask
+{
+    uint32_t address;
+    Layer layer;
+};
+constexpr DrawTask kDrawTasks[] = {
+    {0x001F70F0u, Layer::Scene}, // TaskDrawShadowMap_1f70f0
+    {0x001F7360u, Layer::Scene}, // TaskDrawShadow_1f7360
+    {0x001F7AB0u, Layer::Scene}, // TaskDrawChara3_1f7ab0
+    {0x001F8BA0u, Layer::Scene}, // TaskDrawCharaPre_1f8ba0
+    {0x001F9350u, Layer::Scene}, // TaskDrawCharaBlur_1f9350
+    {0x001F93A0u, Layer::Hud}, // TaskDrawAttackChain2_1f93a0
+    {0x001FB150u, Layer::Menu}, // TaskDrawInsectCage_1fb150
+    {0x001FFB00u, Layer::Text}, // TaskDrawCaption_1ffb00
+    {0x001FFB60u, Layer::Menu}, // TaskDrawMenuWarp_1ffb60
+    {0x001FFCF0u, Layer::Scene}, // TaskDrawLensFlare_1ffcf0
+    {0x001FFD20u, Layer::Scene}, // TaskDrawSandStorm_1ffd20
+    {0x001FFD50u, Layer::Scene}, // TaskDrawSunLight_1ffd50
+    {0x00200BD0u, Layer::Menu}, // TaskDrawTransPorter_200bd0
+    {0x00200D10u, Layer::Scene}, // TaskDrawSky_200d10
+    {0x00202630u, Layer::Hud}, // TaskDrawIconStealth_202630
+    {0x00202DD0u, Layer::Menu}, // TaskDrawMenuInsectResultThunk_202dd0
+    {0x00202E90u, Layer::Menu}, // TaskDrawMenuInsectVs_202e90
+    {0x002030A0u, Layer::Menu}, // TaskDrawMenuEasyChange_2030a0
+    {0x00203180u, Layer::Menu}, // TaskDrawMenuInsectCage_203180
+    {0x00203280u, Layer::Menu}, // TaskDrawMenuHelp_203280
+    {0x00203360u, Layer::Menu}, // TaskDrawMenuInsectEntry_203360
+    {0x00203450u, Layer::Menu}, // TaskDrawMenuCompleteCheck_203450
+    {0x00203530u, Layer::Menu}, // TaskDrawMenu7thMystery_203530
+    {0x00203620u, Layer::Menu}, // TaskDrawMenuThink_203620
+    {0x00203720u, Layer::Menu}, // TaskDrawMenuShop_203720
+    {0x00203830u, Layer::Menu}, // TaskDrawMenuTrans_203830
+    {0x00204320u, Layer::Menu}, // TaskDrawMenuWin_204320
+    {0x002046F0u, Layer::Menu}, // TaskDrawMenuSpace_2046f0
+    {0x00204850u, Layer::Menu}, // TaskDrawMenuFactory2_204850
+    {0x00204860u, Layer::Menu}, // TaskDrawMenuFactory_204860
+    {0x002049D0u, Layer::Menu}, // TaskDrawMenuMain_2049d0
+    {0x00204AB0u, Layer::Menu}, // TaskDrawMenuBtlChg_204ab0
+    {0x002058B0u, Layer::Hud}, // TaskDrawStatus_2058b0
+    {0x0027A8B0u, Layer::Text}, // TaskDrawMessage_27a8b0
+    {0x0027AB20u, Layer::Scene}, // TaskDrawEvent4_27ab20
+    {0x0027AB30u, Layer::Scene}, // TaskDrawEvent3_27ab30
+    {0x0027AB40u, Layer::Scene}, // TaskDrawEvent2_27ab40
+    {0x0027AB50u, Layer::Scene}, // TaskDrawEvent1_27ab50
+    {0x002CEE40u, Layer::Hud}, // TaskDrawObjectCursor_2cee40
+    {0x002CEEA0u, Layer::Menu}, // TaskDrawMonography_2ceea0
+    {0x002D85B0u, Layer::Hud}, // TaskDrawStatusEffect_2d85b0
+    {0x002D85D0u, Layer::Scene}, // TaskDrawProgEffect_2d85d0
+    {0x002D8860u, Layer::Scene}, // TaskDrawEffect_2d8860
+    {0x002EE9D0u, Layer::Overlay}, // TaskDrawGrayScaleFilter_2ee9d0
+    {0x002F5AD0u, Layer::Menu}, // TaskDrawDiscChange_2f5ad0
+    {0x002F5AE0u, Layer::Overlay}, // TaskDrawPauseFilter_2f5ae0
+    {0x002F6840u, Layer::Scene}, // TaskDrawFocus_2f6840
+    {0x002F6A00u, Layer::Scene}, // TaskDrawDof_2f6a00
+    {0x002F6B20u, Layer::Scene}, // TaskDrawGlare_2f6b20
+    {0x002F6DA0u, Layer::Scene}, // TaskDrawMapEffect_2f6da0
+    {0x002F6E60u, Layer::Fade}, // TaskDrawFade_2f6e60
+    {0x003127E0u, Layer::Scene}, // TaskDrawNpc_3127e0
+    {0x00313580u, Layer::Hud}, // TaskDrawTargetMng2_313580
+    {0x00313590u, Layer::Hud}, // TaskDrawTargetMng1_313590
+    {0x003135B0u, Layer::Hud}, // TaskDrawJudgeObject_3135b0
+    {0x00319550u, Layer::Menu}, // TaskDrawMenuInsectResult_319550
+    {0x00319DC0u, Layer::Menu}, // TaskDrawMenuInsect_319dc0
+    {0x00319E40u, Layer::Scene}, // TaskDrawInsect_319e40
+    {0x003387A0u, Layer::Text}, // TaskDrawTBox_3387a0
+    {0x00343070u, Layer::Overlay}, // TaskDrawDebugAction_343070
+    {0x00345D50u, Layer::Hud}, // TaskDrawThinkCircle_345d50
+    {0x00367930u, Layer::Menu}, // TaskDrawFactory_367930
+};
+constexpr size_t kDrawTaskCount = sizeof(kDrawTasks) / sizeof(kDrawTasks[0]);
+PS2Runtime::RecompiledFunction g_drawTaskOriginals[kDrawTaskCount] = {};
+
+void afterDrawTask(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
+{
+    // data: the task's index, and where its packets began.
+    const uint32_t index = data >> 24, top = data & 0xFFFFFFu;
+    if (index < kDrawTaskCount && kDrawTasks[index].layer != Layer::Scene)
+        addLayerRange(top, stackTop(), static_cast<uint8_t>(kDrawTasks[index].layer));
+}
+
+template <size_t I> void drawTask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    const uint32_t top = physical(stackTop());
+    if (top > 0xFFFFFFu)
+    {
+        g_drawTaskOriginals[I](rdram, ctx, runtime);
+        return;
+    }
+    rg::hooks::callThen(g_drawTaskOriginals[I], rdram, ctx, runtime, &afterDrawTask,
+                        (static_cast<uint32_t>(I) << 24) | top);
+}
+
+template <size_t... I> void hookDrawTasks(PS2Runtime &runtime, std::index_sequence<I...>)
+{
+    size_t hooked = 0u;
+    ((hooked += rg::timing::hookFunction(runtime, kDrawTasks[I].address, &drawTask<I>, g_drawTaskOriginals[I]) ? 1u : 0u),
+     ...);
+    if (g_log)
+        std::fprintf(stderr, "[nativefx] draw tasks hooked for layers: %zu of %zu\n", hooked, kDrawTaskCount);
 }
 
 // M3: the effects sent as passes (native_records.h's Pass), their
@@ -1177,6 +1319,7 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[nativefx] the effects stay GS packets\n");
         return;
     }
+    hookDrawTasks(runtime, std::make_index_sequence<kDrawTaskCount>{});
     if (!rg::timing::hookFunction(runtime, kGlareFilterDraw, &glareFilterDraw, g_glareOriginal))
     {
         std::fprintf(stderr, "[nativefx] the glare stays GS packets\n");
@@ -1377,6 +1520,18 @@ Place placeAt(uint32_t address)
         return Place{};
     --it;
     return address < it->end ? it->place : Place{};
+}
+
+uint8_t layerAt(uint32_t address)
+{
+    address = physical(address);
+    std::lock_guard lock(g_mutex);
+    auto it = std::upper_bound(g_layerRanges.begin(), g_layerRanges.end(), address,
+                               [](uint32_t value, const LayerRange &range) { return value < range.start; });
+    if (it == g_layerRanges.begin())
+        return 0u;
+    --it;
+    return address < it->end ? it->layer : 0u;
 }
 
 Effect effectAt(uint32_t address)

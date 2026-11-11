@@ -363,3 +363,23 @@ from the code.
   (`Texture::fromTarget`), addressed at the game's size: the faded frame
   is as sharp as it was drawn. The read still writes the EE buffer, for
   any reader on the CPU.
+
+### Draw tasks and layers (`TaskDraw*`, 62; M4)
+
+- **What:** the task manager's draw callbacks, each drawing one part of
+  the frame into the draw list being built. The packets a task writes (from
+  the list's memory-stack top at its entry to the top at its return) are
+  its, and their 2D gets the task's layer (`Draw2D::layer`), the VU1
+  programs' kicks by the list that holds their MSCAL.
+- **Layers, by the task's name (to confirm in play):**
+  - Menu: every `TaskDrawMenu*`, `TransPorter`, `DiscChange`, `Factory`,
+    `InsectCage`, `Monography`;
+  - Text: `Message`, `Caption`, `TBox`;
+  - Fade: `Fade`;
+  - Overlay: `PauseFilter`, `GrayScaleFilter`, `DebugAction`;
+  - Hud: `IconStealth`, `Status`, `StatusEffect`, `ObjectCursor`,
+    `TargetMng1/2`, `ThinkCircle`, `AttackChain2`, `JudgeObject`;
+  - Scene: the rest (the characters, the sky, the effects, the events,
+    the NPCs, the insects in the field).
+- **Open:** whether the `Event1-4` tasks draw text or letterboxes (Scene
+  for now); whether `TBox` is the treasure box's message (Text) or a 3D box.

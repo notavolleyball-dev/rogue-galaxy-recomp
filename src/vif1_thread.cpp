@@ -2576,6 +2576,9 @@ std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_piecesMade
 // draw state the packets before it left (the PRIM write just before it
 // among them); one it refuses goes to the GS, or, with no GS behind the
 // pipeline, where the absorbed packets go (the producer's line says why).
+// The layer of the packet being delivered (deliverPacketAt).
+thread_local uint8_t t_layer = 0u;
+
 void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
 {
     if (!t_onVif1Thread)
@@ -2583,7 +2586,7 @@ void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
         g_thread->drain(); // the lists in flight first, as for the GS
     }
     const GSDrawState state = rg::drawstate::current();
-    if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs, piece.indices))
+    if (rg::nativeproducer::piece(piece.mesh, &state, piece.texelUvs, t_layer, piece.indices))
     {
         ++g_piecesMade;
         return;
@@ -3066,6 +3069,9 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 
 void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
 {
+    // M4: the layer of the draw task that wrote it (what a VU1 program
+    // kicked: the task whose list holds the MSCAL), for its 2D.
+    t_layer = rg::nativefx::layerAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
     // Step 5: an effect's packets, held until the effect's run ends. A
     // packet outside the held run ends it first, before a composite can
     // take the packet: the effect goes on ahead of what follows it.

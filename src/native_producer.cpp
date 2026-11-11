@@ -3062,7 +3062,8 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
     image.seq = s.uploadedSeq[dbp] = ++s.sequence;
 }
 
-bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, const std::vector<uint32_t> &indices)
+bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, uint8_t layer,
+           const std::vector<uint32_t> &indices)
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
@@ -3082,6 +3083,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
     native::Draw2D draw;
     native::reuseMeshBuffers(draw);
     draw.source = kSource2d;
+    draw.layer = static_cast<native::Layer>(std::min<uint8_t>(layer, uint8_t(native::Layer::Overlay)));
     const uint32_t frameBase = c.frame.fbp * 32u;
     uint32_t seqKey = frameBase; // the buffer's, or its narrow view's
     const bool view = narrow(s, frameBase, c.frame.fbw);

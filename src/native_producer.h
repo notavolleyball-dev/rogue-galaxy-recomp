@@ -132,7 +132,7 @@ uint64_t retainedEpoch();
 // why).
 // `indices`: the mesh's triangles into mesh.vertices (empty: the vertices
 // are a triangle list themselves).
-bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels,
+bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels, uint8_t layer,
            const std::vector<uint32_t> &indices = {});
 
 // Step 5c: an object's head draws into the buffer at `base` (`fbw`) go to

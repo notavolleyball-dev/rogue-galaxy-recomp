@@ -103,6 +103,10 @@ void endFlip();
 // buffer), as GS bases.
 bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &target);
 
+// M4: the layer (native::Layer's value) of the draw task whose packets the
+// EE address holds; 0 (Scene) for none.
+uint8_t layerAt(uint32_t address);
+
 // The effect whose packets the EE address holds (any of RDRAM's windows).
 Effect effectAt(uint32_t address);
 Place placeAt(uint32_t address);
