@@ -144,6 +144,14 @@ inline bool drawsAtCall(const Program &program)
 // code image.
 const Program *identify(const uint8_t *code, uint32_t startPC);
 
+// The shadow volumes program's chunk as two meshes in world space (M5): the
+// volumes' triangles after quad 38's packet with the facing ones kept, and
+// after quad 35's with the others, each colored by its packet's RGBAQ (the
+// model matrix the identity, as particleMesh's). False when a packet sets
+// no RGBAQ: the caller keeps buildChunk's packets.
+bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
+                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2]);
+
 // The base piece's run (MSCAL 0x000) on `data`, as the VU1 would leave it
 // (quads 64-75, 100-102, 111), its packets not made: for a copy of VU1 data
 // memory kept elsewhere (src/native_models.cpp).

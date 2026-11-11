@@ -1461,6 +1461,7 @@ public:
                     t_model.list = false;
                     m_modelId = mark->chunk.id;
                     m_particleMesh = false;
+                    m_shadowMesh = false;
                     native = m_nativeProgram;
                     m_nativeMonitor.native(*native);
                 }
@@ -1488,7 +1489,18 @@ public:
                     native = m_nativeProgram;
                     t_model.active = false;
                     m_particleMesh = false;
-                    if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Particles)
+                    m_shadowMesh = false;
+                    if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Shadow &&
+                        rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top, m_shadowPackets,
+                                                    m_shadowMeshes))
+                    {
+                        // M5: the shadow volumes as two meshes in world space
+                        // (the facing ones' blend and the others').
+                        m_nativeBounds.made = false;
+                        m_shadowMesh = true;
+                        m_nativePackets.clear();
+                    }
+                    else if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Particles)
                     {
                         // M5: the particles as a mesh in world space, which
                         // the renderer projects (not window packets).
@@ -1550,6 +1562,23 @@ public:
         if (native)
         {
             {
+                if (m_shadowMesh)
+                {
+                    // Each mesh after its packets, the model matrix the
+                    // identity (its corners are in world space).
+                    std::memcpy(m_particleQuads, memory.getVU1Data(), sizeof(m_particleQuads));
+                    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                    std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        if (m_shadowMeshes[i].vertices.empty())
+                            continue;
+                        for (const auto &packet : m_shadowPackets[i])
+                            deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                        deliverMesh(m_runtime.gs(), m_shadowMeshes[i], m_particleQuads);
+                    }
+                    m_shadowMesh = false;
+                }
                 const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh;
                 // A mesh's own register packets ride with it as writes.
                 const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
@@ -1973,6 +2002,9 @@ private:
     rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)
+    bool m_shadowMesh = false;            // the chunk is shadow volumes as two meshes (shadowMeshes)
+    std::vector<std::vector<uint8_t>> m_shadowPackets[2];
+    GSNativeMesh m_shadowMeshes[2];
     std::shared_ptr<rg::nativemodels::GameDraw> m_gameDraw; // the mark's, made on the game thread
     alignas(16) uint8_t m_particleQuads[64u * 16u] = {}; // its VU1 quads, the model the identity
     struct SpanLearning

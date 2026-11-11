@@ -94,7 +94,8 @@ stacked PRs at the end).
     and sent in the stream's order.
   - M6, early: the GS front end gets nothing any more (see M6).
   - Left:
-    - M5: outlines and shadow volumes as records.
+    - M5: the outlines as records (their silhouette test needs both
+      triangles' facing; still window packets).
     - M6: the records made at game time are still sent from the VIF1
       stream (passes, blocks, model draws). Next: send them from the
       gather in its order, and the VIF1 thread no longer decodes for the
@@ -812,6 +813,11 @@ recovers.
     no id yet, or whose inputs change every frame, with its inputs);
   - the float-input and projector programs, too;
   - the particles as a world-space mesh;
+  - the shadow volumes as two world-space meshes. Each follows its blend's
+    packet (quad 38's or 35's) and is colored by that packet's RGBAQ; the
+    renderer's backface rule keeps the facing triangles in one and the
+    others in the other, from the same projected corners. A packet that
+    sets no RGBAQ keeps the old window packets;
   - the retained static meshes (`native_mesh_static.vert`, `StaticVertex`,
     `RG_MESH_RETAIN`) deleted.
   - The CPU raw path stays for `RG_MODEL_GPU=0` and for the programs the

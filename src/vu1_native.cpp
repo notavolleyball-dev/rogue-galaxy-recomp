@@ -1290,6 +1290,133 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
     }
 }
 
+// The shadow volumes as two meshes (M5): every lit triangle's volume (its
+// corners and the same pushed from the light, world space, buildShadow's
+// arithmetic and its skip of a volume with a corner outside its own w) as
+// triangles, once with the facing ones kept (the A+D packet at quad 38
+// before it) and once with the others (quad 35's), the renderer's backface
+// rule choosing between them from the same projected corners. Each mesh's
+// color is the RGBAQ its packet sets; false when one sets none (the caller
+// keeps the packets).
+bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
+                    std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2])
+{
+    // The colors the two packets set (decoded twice from two different
+    // colors: a packet that sets RGBAQ ends on the same one).
+    const std::vector<uint8_t> state[2] = {gifPacket(vu, 38), gifPacket(vu, 35)};
+    float rgba[2][4];
+    for (int i = 0; i < 2; ++i)
+    {
+        rg::gif::GifState a, b;
+        std::memset(a.rgba, 0x00, sizeof(a.rgba));
+        std::memset(b.rgba, 0xFF, sizeof(b.rgba));
+        std::vector<rg::gif::GifEvent> events;
+        rg::gif::decodeGifPacket(state[i].data(), static_cast<uint32_t>(state[i].size()), a, events);
+        rg::gif::decodeGifPacket(state[i].data(), static_cast<uint32_t>(state[i].size()), b, events);
+        if (std::memcmp(a.rgba, b.rgba, sizeof(a.rgba)) != 0)
+            return false;
+        for (int l = 0; l < 4; ++l)
+            rgba[i][l] = float(a.rgba[l]);
+    }
+    const uint32_t count = vu.half(top, 1);
+    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    Vec4 model[4], light[4], view[4], projection[4], away[4], camera[4], window[4], rows[4];
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        model[i] = vu.quad(60u + i);
+        away[i] = vu.quad(30u + i);
+        camera[i] = vu.quad(8u + i);
+        window[i] = vu.quad(12u + i);
+    }
+    const Vec4 viewport = vu.quad(16);
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        light[i] = transform(away, model[i]);
+        view[i] = transform(camera, vu.quad(24u + i));
+        view[i].x *= viewport.x;
+        view[i].y *= viewport.y;
+        projection[i] = vu.quad(12u + i);
+        rows[i] = transform(window, transform(camera, vu.quad(24u + i)));
+    }
+    const Vec4 toLight = vu.quad(34);
+    const float lit = fromBits(0x38d1b717u);
+    for (int i = 0; i < 2; ++i)
+    {
+        packets[i].clear();
+        packets[i].push_back(state[i]);
+        std::vector<uint8_t> &prim = packets[i].emplace_back();
+        uint32_t tag[4];
+        std::memcpy(tag, vu.bytes(0), sizeof(tag));
+        tag[0] |= 0x8000u;
+        putQuad(prim, tag);
+        putWords(prim, 3u, 0u, 0u, 0u); // a triangle list
+        putWords(prim, vu.half(87, 0), 0u, 27u, 0u);
+        GSNativeMesh::Header &h = meshes[i].header;
+        h = GSNativeMesh::Header{};
+        for (uint32_t r = 0; r < 4u; ++r)
+        {
+            h.matrix[r][0] = rows[r].x;
+            h.matrix[r][1] = rows[r].y;
+            h.matrix[r][2] = rows[r].z;
+            h.matrix[r][3] = rows[r].w;
+        }
+        const Vec4 fogQuad = vu.quad(40);
+        std::memcpy(h.fog, &fogQuad, sizeof(h.fog));
+        for (float &c : h.colorMax)
+            c = 255.0f;
+        h.triangleList = 1u;
+        h.backface = 1u;
+        // A list's triangles are judged with -winding: +1 keeps those whose
+        // projected cross product (buildShadow's) is positive, the facing.
+        h.winding = i == 0 ? 1.0f : -1.0f;
+        meshes[i].vertices.clear();
+    }
+    constexpr uint8_t kFans[5][4] = {{0, 3, 4, 1}, {1, 4, 5, 2}, {2, 5, 3, 0}, {0, 1, 2, 2}, {5, 4, 3, 3}};
+    for (uint32_t first = 0; first + 2u < count; first += 3u)
+    {
+        Vec4 world[3], pushed[3];
+        for (uint32_t j = 0; j < 3u; ++j)
+        {
+            float p[3];
+            decodePosition(vu, top, first + j, bones, p);
+            const Vec4 point{p[0], p[1], p[2], 1.0f};
+            world[j] = transform(model, point);
+            pushed[j] = transform(light, point);
+        }
+        const Vec4 a = sub(world[1], world[0]), b = sub(world[2], world[0]);
+        const float nx = a.y * b.z - b.y * a.z, ny = a.z * b.x - b.z * a.x, nz = a.x * b.y - b.x * a.y;
+        if (!(toLight.x * nx + toLight.y * ny + toLight.z * nz > lit))
+            continue;
+        bool outside = false;
+        for (uint32_t j = 0; j < 3u; ++j)
+        {
+            outside = outside || clipsOwnW(transform(view, world[j]));
+            outside = outside || clipsOwnW(transform(view, pushed[j]));
+        }
+        if (outside)
+            continue;
+        const Vec4 corners[6] = {world[0], world[1], world[2], pushed[0], pushed[1], pushed[2]};
+        for (const auto &fan : kFans)
+            for (const uint8_t t : {0, 1, 2, 0, 2, 3})
+                for (int i = 0; i < 2; ++i)
+                {
+                    GSNativeMesh::Vertex v;
+                    const Vec4 &c = corners[fan[t]];
+                    v.x = c.x;
+                    v.y = c.y;
+                    v.z = c.z;
+                    v.r = rgba[i][0];
+                    v.g = rgba[i][1];
+                    v.b = rgba[i][2];
+                    v.a = rgba[i][3];
+                    meshes[i].vertices.push_back(v);
+                }
+    }
+    for (int i = 0; i < 2; ++i)
+        meshes[i].header.vertexCount = static_cast<uint32_t>(meshes[i].vertices.size());
+    return true;
+}
+
 // The base piece (12ad73d2), run by an MSCAL at 0x000 before each object's
 // chunks: it kicks the object's state packet at quad 19, then leaves in VU1
 // memory what the strip programs read. With M the model rows (quads 60-63)
@@ -1839,6 +1966,12 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 }
 
 } // namespace
+
+bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
+                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2])
+{
+    return shadowMeshFrom(program, VuData(data), top, packets, meshes);
+}
 
 void baseProgram(uint8_t *data)
 {
