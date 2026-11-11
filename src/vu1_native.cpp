@@ -1394,8 +1394,10 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
     const bool clips = hasMesh(program);
     if (program.kind == Kind::Overlay || program.kind == Kind::Base)
         return nullptr;
-    if (program.decode == Decode::Plain && vu.half(76, 2) != 0u)
-        return "quad 76.z set (an entry into B other than its first)";
+    // A enters B at pair 300 + (76.z ? TOP+1.w : 0) (0x450-0x480): with a
+    // plain B only the first entry is known.
+    if (program.decode == Decode::Plain && vu.half(76, 2) != 0u && vu.half(top + 1u, 3) != 0u)
+        return "quad 76.z and TOP+1.w set (an entry into a plain B other than its first)";
     if (program.decode == Decode::Skinned && bonesOf(program, vu, top) == 0u)
         return "an entry into the skinning B not read";
     // A chunk of no whole edge, triangle or particle, or of fewer vertices
