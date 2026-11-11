@@ -37,6 +37,7 @@ FetchContent_MakeAvailable(SDL3)
 add_library(dq8_gfx_native STATIC
     src/gfx/native/native_pipeline.cpp
     src/gfx/native/native_meshes.cpp
+    src/gfx/native/native_passes.cpp
 )
 target_include_directories(dq8_gfx_native PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(dq8_gfx_native PUBLIC SDL3::SDL3-static)

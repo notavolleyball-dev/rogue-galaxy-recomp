@@ -104,6 +104,8 @@ struct Counts
     uint64_t wholesAsked = 0, wholesMade = 0, wholesNone = 0, wholesDrawn = 0;
     // Tiles of sheets (region clamp and repeat) cut into textures of their own.
     uint64_t tilesCut = 0;
+    // M3: post effects sent as passes, and those whose buffers were unknown.
+    uint64_t passesMade = 0, passesRefused = 0;
 };
 
 struct State
@@ -476,7 +478,8 @@ std::string statsLine()
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
                        ", no depth target there " + std::to_string(s.depthNoTarget) +
-                       " | tiles cut " + d(n.tilesCut, r.tilesCut) +
+                       " | tiles cut " + d(n.tilesCut, r.tilesCut) + " | passes " + d(n.passesMade, r.passesMade) +
+                       ", refused (buffer unknown) " + d(n.passesRefused, r.passesRefused) +
                        " | texture packs: pairs looked up " + d(n.wholesAsked, r.wholesAsked) + ", pictures made " +
                        d(n.wholesMade, r.wholesMade) + ", none " + d(n.wholesNone, r.wholesNone) +
                        ", draws from a picture " + d(n.wholesDrawn, r.wholesDrawn);
@@ -3601,6 +3604,38 @@ bool readDepth(uint32_t base, uint32_t psm, uint32_t x, uint32_t y, uint32_t wid
     }
     return true;
 }
+bool pass(const PassRequest &request)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    native::Pass record;
+    record.kind = static_cast<native::PassKind>(request.kind);
+    record.frame = kSceneTarget;
+    if (request.frameBase != 0u)
+    {
+        const auto at = s.targetAt.find(request.frameBase);
+        record.frame = at != s.targetAt.end() ? at->second : 0u;
+    }
+    for (int i = 0; i < 4; ++i)
+    {
+        if (request.workBases[i] == 0u)
+            continue;
+        const auto at = s.targetAt.find(request.workBases[i]);
+        record.work[i] = at != s.targetAt.end() ? at->second : 0u;
+        if (record.work[i] == 0u)
+            record.frame = 0u;
+    }
+    if (record.frame == 0u)
+    {
+        ++s.counts.passesRefused;
+        return false;
+    }
+    std::copy(std::begin(request.params), std::end(request.params), record.params);
+    ++s.counts.passesMade;
+    native::push(std::move(record));
+    return true;
+}
+
 void frameBoundary()
 {
     State &s = state();

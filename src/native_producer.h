@@ -201,6 +201,20 @@ uint32_t captureTarget(uint32_t base);
 // The scene target's id (the frame's).
 constexpr uint32_t kSceneTarget = 1u;
 
+// M3 of docs/NATIVE-ONLY.md: a post effect as a Pass record (native_records.h),
+// in the stream's order (the VIF1 thread, where the effect's packets were).
+// Its frame and work buffers by the GS bases the game draws them at (frame
+// 0: the scene); `kind` is native::PassKind's. False when a buffer is not a
+// target the producer declared (counted).
+struct PassRequest
+{
+    uint8_t kind = 0;
+    uint32_t frameBase = 0;
+    uint32_t workBases[4] = {};
+    float params[16] = {};
+};
+bool pass(const PassRequest &request);
+
 // After the flip's Present record: the next frame begins. Its Clear records
 // (the scene's, and each depth target's at its first use) follow from here.
 void frameBoundary();

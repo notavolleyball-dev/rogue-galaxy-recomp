@@ -197,6 +197,19 @@ private:
 
     void apply(SDL_GPUDevice *device, Record &record, std::string &error);
     void count(const MeshDraw &draw);
+    // A Pass as the renderer's own draws and clears, in order into the frame
+    // being gathered (native_passes.cpp). False: a kind not drawn yet, or
+    // targets not declared (counted).
+    bool expandPass(const Pass &pass);
+    // One rectangle of a pass: `source` (0: none, untextured) from its texels
+    // u0..u1, v0..v1 into `target`'s pixels x0..x1, y0..y1, times `color`
+    // (each channel), with `material`'s blend, tests and filter.
+    void passRect(Id target, Id source, const float rect[4], const float uv[4], float color,
+                  const Material &material);
+    // A target of the renderer's own for a pass (a ping-pong partner),
+    // declared like `like` the first time.
+    Id passScratch(uint32_t slot, Id like);
+    uint64_t m_passesDrawn = 0, m_passesRefused = 0;
     SDL_GPUTexture *createTexture(SDL_GPUDevice *device, SDL_GPUTextureFormat format, uint32_t width,
                                   uint32_t height, std::string &error);
     bool upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error);
@@ -336,7 +349,7 @@ private:
     SDL_GPUGraphicsPipeline *m_resolvePipeline = nullptr;
     SDL_GPUSampler *m_resolveSampler = nullptr;
     bool m_resolveFailed = false;
-    uint64_t m_clearsRefused = 0, m_passesIgnored = 0;
+    uint64_t m_clearsRefused = 0;
     bool m_frameReady = false;
     bool m_dumpTargets = false; // the triggered dump: write the targets out
     SDL_GPUShader *m_meshVertex = nullptr;

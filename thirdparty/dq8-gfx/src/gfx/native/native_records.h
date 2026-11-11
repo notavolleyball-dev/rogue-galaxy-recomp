@@ -349,11 +349,17 @@ struct Draw2D
 };
 
 // A post effect the renderer draws itself (M3 of the game's
-// docs/NATIVE-ONLY.md): its inputs and outputs by id, and its parameters
-// from the hooked function's arguments. Each kind gets a parameter struct
-// of its own as it is ported; until then nothing sends one.
+// docs/NATIVE-ONLY.md), from the hooked function's arguments: `frame` is
+// the target it reads and draws onto (the scene), `work` the game's own
+// buffers it uses (by the kind's convention), `params` its parameters.
+// native_passes.cpp has what each kind draws.
 enum class PassKind : uint8_t
 {
+    // GlareFilterDrawMaybe: work[0] the frame's bright parts, work[1] their
+    // streaks. params: 0 the alpha a pixel must be over to glow, 1 the
+    // streaks' strength, 2 their spread in sixteenths of a pixel, 3 the
+    // strength laid over the frame, 4 the color clamp (what the game's
+    // blends clamp to).
     Glare,
     Bloom,
     DepthOfField,
@@ -371,9 +377,8 @@ enum class PassKind : uint8_t
 struct Pass
 {
     PassKind kind = PassKind::Glare;
-    Id source = 0;      // the target it reads
-    Id destination = 0; // the target it writes
-    Id depth = 0;       // the depth it reads, when it does
+    Id frame = 0;
+    Id work[4] = {};
     float params[16] = {};
 };
 

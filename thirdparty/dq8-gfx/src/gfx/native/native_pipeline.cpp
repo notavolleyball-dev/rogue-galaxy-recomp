@@ -509,9 +509,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             }
             else if constexpr (std::is_same_v<T, Pass>)
             {
-                // Built in M3 of the game's docs/NATIVE-ONLY.md; nothing
-                // sends one yet.
-                ++m_passesIgnored;
+                ++(expandPass(r) ? m_passesDrawn : m_passesRefused);
             }
             else if constexpr (std::is_same_v<T, Present>)
             {
@@ -1114,7 +1112,8 @@ std::string Renderer::statsLine()
             std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
             ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
             std::to_string(m_retainedResets) + ") | clears of part of a target (not drawn, so far) " +
-            std::to_string(m_clearsRefused) + ", passes (none yet, so far) " + std::to_string(m_passesIgnored);
+            std::to_string(m_clearsRefused) + " | passes drawn (so far) " + std::to_string(m_passesDrawn) +
+            ", refused " + std::to_string(m_passesRefused);
     m_evictedReported = m_evicted;
     m_refusedReported = m_refused;
     const Readiness &now = m_readiness, &was = m_readinessReported;

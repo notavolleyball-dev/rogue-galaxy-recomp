@@ -2788,6 +2788,18 @@ void flushEffect()
     }
     GS &gs = *t_held.gs;
     std::string why;
+    // A pass: the renderer draws it from the function's parameters, and its
+    // packets go nowhere (M3 of docs/NATIVE-ONLY.md).
+    if (rg::nativefx::isPass(t_held.effect))
+    {
+        const bool sent = rg::nativefx::emitPass(t_held.effect, t_held.unit);
+        countEffect(sent, t_held.effect, "its pass was not sent (its parameters or buffers unknown)",
+                    t_held.packets);
+        t_held.effect = rg::nativefx::Effect::None;
+        t_held.unit = 0u;
+        t_held.packets.clear();
+        return;
+    }
     const bool drawn = drawEffect(t_held.effect, t_held.packets, t_held.unit, gs, why);
     if (!drawn)
     {
@@ -3164,7 +3176,7 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     {
         const rg::nativefx::Place place = address == ~0u ? rg::nativefx::Place{} : rg::nativefx::placeAt(address);
         effect = place.effect;
-        unit = effect == rg::nativefx::Effect::ColorFilter ? place.unit : 0u;
+        unit = effect == rg::nativefx::Effect::ColorFilter || rg::nativefx::isPass(effect) ? place.unit : 0u;
         if (effect != t_held.effect || unit != t_held.unit)
         {
             flushEffect();

@@ -142,15 +142,75 @@ void drawListFrameBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     rg::hooks::callThen(g_frameBeginOriginal, rdram, ctx, runtime, &afterFrameBegin, 0u);
 }
 
+// M3: the effects sent as passes (native_records.h's Pass), their
+// parameters read from the function's arguments when it is called, kept by
+// the unit their packet range carries until the VIF1 thread reaches it.
+std::mutex g_passMutex;
+std::vector<std::pair<uint32_t, rg::nativeproducer::PassRequest>> g_passes; // by unit
+uint32_t g_nextPassUnit = 0u;
+// The unit of the call in progress (game thread), and where it began.
+uint32_t g_passUnit = 0u;
+
+uint32_t keepPass(const rg::nativeproducer::PassRequest &request)
+{
+    std::lock_guard lock(g_passMutex);
+    const uint32_t unit = (++g_nextPassUnit & 0xFFFFFFu) | (1u << 24);
+    if (g_passes.size() >= 64u) // a few frames' worth; an older one was never reached
+        g_passes.erase(g_passes.begin());
+    g_passes.emplace_back(unit, request);
+    return unit;
+}
+
+// A descriptor's GS base (TEX0's TBP0 at +0x38, as the target declarations
+// read it).
+uint32_t descriptorBase(uint32_t desc)
+{
+    if (desc == 0u || !g_rdram)
+        return 0u;
+    uint64_t tex0 = 0u;
+    std::memcpy(&tex0, g_rdram + (physical(desc) & ~7u) + 0x38u, sizeof(tex0));
+    return static_cast<uint32_t>(tex0 & 0x3FFFu) & ~31u;
+}
+
+float readFloatAt(uint32_t address)
+{
+    const uint32_t bits = read32(address);
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 PS2Runtime::RecompiledFunction g_glareOriginal = nullptr;
 
 void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Glare);
+    addRange(top, stackTop(), Effect::Glare, g_passUnit);
+    g_passUnit = 0u;
 }
 
+// GlareFilterDrawMaybe_17a0d0(arg): arg holds the two buffers' descriptors
+// (+0, +4), the alpha a pixel must be over (+8, s32), the streaks' strength
+// (+0xC), their spread (+0x10) and the strength laid over the frame
+// (+0x14), floats (RGDecomp's C; docs/NATIVE-ONLY-NOTES.md).
 void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    const uint32_t arg = getRegU32(ctx, 4);
+    g_passUnit = 0u;
+    if (arg != 0u && read32(arg) != 0u && read32(arg + 4u) != 0u)
+    {
+        rg::nativeproducer::PassRequest request;
+        request.kind = 0u; // native::PassKind::Glare
+        request.workBases[0] = descriptorBase(read32(arg));
+        request.workBases[1] = descriptorBase(read32(arg + 4u));
+        const int32_t over = static_cast<int32_t>(read32(arg + 8u));
+        request.params[0] = float(over) / 128.0f;
+        request.params[1] = readFloatAt(arg + 0x0Cu); // 128 xC bytes over 0x80
+        request.params[2] = 24.0f * readFloatAt(arg + 0x10u);
+        const int32_t final = static_cast<int32_t>(128.0f * readFloatAt(arg + 0x14u));
+        request.params[3] = float(std::clamp(final, 0, 255)) / 128.0f;
+        request.params[4] = 255.0f / 128.0f;
+        g_passUnit = keepPass(request);
+    }
     rg::hooks::callThen(g_glareOriginal, rdram, ctx, runtime, &afterGlare, stackTop());
 }
 
@@ -1531,6 +1591,28 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
     return true;
 }
 } // namespace
+
+bool isPass(Effect effect)
+{
+    return effect == Effect::Glare;
+}
+
+bool emitPass(Effect effect, uint32_t unit)
+{
+    if (!isPass(effect) || unit == 0u)
+        return false;
+    rg::nativeproducer::PassRequest request;
+    {
+        std::lock_guard lock(g_passMutex);
+        const auto it = std::find_if(g_passes.begin(), g_passes.end(),
+                                     [&](const auto &kept) { return kept.first == unit; });
+        if (it == g_passes.end())
+            return false;
+        request = it->second;
+        g_passes.erase(it);
+    }
+    return rg::nativeproducer::pass(request);
+}
 
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit)

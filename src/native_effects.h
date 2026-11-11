@@ -142,6 +142,11 @@ void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &pack
 // From the packets an effect's function wrote, in order: the effect, and
 // the packets with their kicks withheld. False, with `why`, when they are
 // not the sprites expected. `unit`: the colour filter's colour.
+// M3: an effect sent as a Pass record (native_records.h) in place of its
+// packets: whether it is one, and the pass of the call whose packet range
+// carries `unit`, sent (false: not found, or its buffers unknown).
+bool isPass(Effect effect);
+bool emitPass(Effect effect, uint32_t unit);
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
            std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit = 0u);
 
