@@ -114,11 +114,9 @@ namespace
 std::atomic<uint64_t> g_busyNanos{0u};
 // And the GIF stage in the GS, for the same line.
 std::atomic<uint64_t> g_gifBusyNanos{0u};
-// Set on the VIF1 thread and on the draw stage's: what reaches the GS from
-// them comes from a list (and goes on to the GIF stage).
+// Set while a list runs (Vif1Thread::runList, on the game thread): what is
+// delivered then comes from a list, with its place in it.
 thread_local bool t_onVif1Thread = false;
-// Set on the VIF1 thread only: with the draw stage on, what its lists make
-// for the GS goes there (toDrawStage).
 thread_local bool t_listDecoder = false;
 // The native program whose chunk is being made a mesh on this thread, as its
 // meshes' MeshDraw::source (0: none): what the renderer's draw labels name
@@ -343,22 +341,12 @@ uint32_t modelIdOf(uint64_t hash, bool &define)
 
 
 // A VU1 mesh's own register writes (docs/NATIVE-BOUNDARY.md, issue 4): the
-// native program's fog colour, PRIM and PRMODE went ahead of each mesh as two
-// GIF packets this code had just encoded, for the draw stage to copy, place,
-// classify and decode again: some 1,500 packets a frame. They ride with the
-// mesh as (register, value) pairs instead and go straight to the draw-state
-// mirror. RG_MESH_WRITES=0: packets, as before.
+// native program's fog colour, PRIM and PRMODE ride with the mesh as
+// (register, value) pairs and go straight to the draw-state mirror, not as
+// packets to classify and decode again.
 using RegisterWrite = std::pair<uint8_t, uint64_t>;
 thread_local const RegisterWrite *t_meshWrites = nullptr;
 thread_local uint32_t t_meshWriteCount = 0u;
-bool meshWritesOn()
-{
-    static const bool on = [] {
-        const char *value = std::getenv("RG_MESH_WRITES");
-        return !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
-}
 // The packets as writes; false when they hold anything else (a vertex, a
 // transfer, image data): they then go as packets.
 bool packetsAsWrites(const std::vector<std::vector<uint8_t>> &packets, std::vector<RegisterWrite> &writes)
@@ -708,374 +696,11 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 void deliverImage(const uint8_t *data, uint32_t size);
 // A hole's image data (gatherChain), which never left guest memory.
 void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash);
-// A list's last record has run (Vif1Thread::listFinished).
-void finishList();
 bool absorbing();
 
-// The draw stage: under the native pipeline, everything a list makes for the
-// GS -- packets, VU1 meshes, texture continuations -- is consumed on a thread
-// of its own, in order, while the VIF1 thread decodes on: the 2D converter,
-// the effects and composites, the upload withholding, the draw-state mirror,
-// the producer's meshes and the SIGNAL/FINISH/LABEL bits. Half of the VIF1
-// thread's time was there (2026-11-08). A list counts as done, and its DMA
-// interrupt goes to the game, only once the stage has run its end, so every
-// drain and busy() covers the stage too.
-//
-// What the consumer reads of the VIF1 thread's state travels with each
-// record: the packet's list address and VIF cursor, the profile tag and
-// camera, the MXCSR, and for a mesh the VU1 matrices (quads 0-63) the
-// producer reads. RG_DRAW_STAGE=0 consumes on the VIF1 thread, as before.
-bool drawStageOn()
-{
-    static const bool on = [] {
-        const char *value = std::getenv("RG_DRAW_STAGE");
-        return absorbing() && !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
-}
-bool toDrawStage() { return t_listDecoder && drawStageOn(); }
-std::atomic<uint64_t> g_drawBusyNanos{0u};
-
-class DrawStage
-{
-public:
-    DrawStage()
-    {
-        m_thread = std::thread([this] { run(); });
-        m_id = m_thread.get_id();
-    }
-
-    std::thread::id id() const { return m_id; }
-
-    // From the VIF1 thread, copied.
-    void packet(const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
-    {
-        if (!data || size == 0u)
-            return;
-        uint8_t *at = append(Kind::Packet, size, address, cursor, 0u);
-        std::memcpy(at, data, size);
-    }
-    void image(const uint8_t *data, uint32_t size)
-    {
-        if (!data || size == 0u)
-            return;
-        uint8_t *at = append(Kind::Image, size, ~0u, ~0u, 0u);
-        std::memcpy(at, data, size);
-    }
-    // Image data left in guest memory (a list's hole): where, and the hash
-    // of the record made from it.
-    void imageElided(const Hole &hole)
-    {
-        const Elided elided{hole.bytes, hole.phys, hole.hash};
-        std::memcpy(append(Kind::ImageElided, sizeof(elided), ~0u, ~0u, 0u), &elided, sizeof(elided));
-    }
-    // A model chunk's payload (t_model), for the mesh that follows: its
-    // flags, its row, its palette, and its inputs when it defines them.
-    void model(const ModelPayload &m)
-    {
-        const uint32_t inputs = m.define || m.transient ? static_cast<uint32_t>(m.inputs.size()) : 0u;
-        const uint32_t floats = static_cast<uint32_t>(m.palette.size());
-        const uint32_t size = 16u + static_cast<uint32_t>(sizeof(m.row)) + floats * 4u +
-                              inputs * static_cast<uint32_t>(sizeof(dq8::gfx::native::ModelInput));
-        uint8_t *at = append(Kind::Model, size, ~0u, ~0u, 0u);
-        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u) | (m.transient ? 4u : 0u) |
-                                      (m.volume ? 8u : 0u),
-                                  inputs, floats, m.edge};
-        std::memcpy(at, head, sizeof(head));
-        at += 16u;
-        std::memcpy(at, &m.row, sizeof(m.row));
-        at += sizeof(m.row);
-        if (floats)
-            std::memcpy(at, m.palette.data(), floats * 4u);
-        at += floats * 4u;
-        if (inputs)
-            std::memcpy(at, m.inputs.data(), inputs * sizeof(dq8::gfx::native::ModelInput));
-    }
-    // A VU1 program's mesh, with the quads of VU1 memory the producer reads
-    // when `vu1Data` is given.
-    void mesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
-    {
-        if (t_model.active)
-            model(t_model);
-        // A retained mesh already defined goes without its vertices; its id
-        // rides in the record's cursor.
-        const MeshRetain retain = t_retain;
-        const uint32_t vertices = retain.id != 0u && !retain.define
-                                      ? 0u
-                                      : static_cast<uint32_t>(mesh.vertices.size() * sizeof(rg::NativeMesh::Vertex));
-        // Its own register writes behind everything else, their count in
-        // the record's address.
-        const uint32_t writes = t_meshWriteCount;
-        static_assert(sizeof(RegisterWrite) == 16u);
-        const uint32_t size = static_cast<uint32_t>(sizeof(rg::NativeMesh::Header)) + vertices +
-                              (vu1Data ? kVu1Bytes : 0u) + writes * 16u;
-        static_assert(kVu1Bytes == 16u * 16u, "the quads below");
-        uint8_t *at = append(Kind::Mesh, size, writes, retain.id != 0u ? retain.id : ~0u, vu1Data ? 1u : 0u);
-        if (writes)
-            std::memcpy(at + size - writes * 16u, t_meshWrites, writes * 16u);
-        std::memcpy(at, &mesh.header, sizeof(mesh.header));
-        at += sizeof(mesh.header);
-        if (vertices)
-            std::memcpy(at, mesh.vertices.data(), vertices);
-        if (vu1Data)
-            for (const auto &[first, count] : kVu1Runs)
-            {
-                std::memcpy(at + vertices, vu1Data + first * 16u, count * 16u);
-                at += count * 16u;
-            }
-    }
-    // The list's end: hands over what is staged; the stage then flushes the
-    // held effect and composites and finishes the list.
-    void endList()
-    {
-        append(Kind::ListEnd, 0u, ~0u, ~0u, 0u);
-        publish();
-    }
-
-    void stop()
-    {
-        publish();
-        {
-            std::lock_guard lock(m_mutex);
-            m_stop = true;
-        }
-        m_work.notify_all();
-        if (m_thread.joinable())
-            m_thread.join();
-    }
-
-private:
-    // (The records are written into Bytes whole: each was written twice
-    // while growing zeroed them.)
-    enum class Kind : uint32_t
-    {
-        Packet,
-        Image,
-        Mesh,
-        ListEnd,
-        ImageElided,
-        Model, // a model chunk's payload, for the Mesh after it (M5)
-    };
-    struct Elided
-    {
-        uint32_t bytes, phys;
-        uint64_t hash;
-    };
-    struct Header
-    {
-        Kind kind;
-        uint32_t size;
-        uint32_t address;
-        uint32_t cursor;
-        uint32_t mxcsr; // as GifStage's, without the sticky flags
-        uint32_t source; // t_vu1Source
-        uint32_t unused;
-        uint32_t vu1;   // a mesh: the VU1 quads follow its vertices
-    };
-    static_assert(sizeof(Header) == 32u);
-    // The VU1 quads the producer reads of a mesh (nativeproducer::mesh: the
-    // viewport 4-7, projection 8-11, view 24-27, model 60-63), in runs.
-    static constexpr std::pair<uint32_t, uint32_t> kVu1Runs[3] = {{4u, 8u}, {24u, 4u}, {60u, 4u}};
-    static constexpr uint32_t kVu1Bytes = 16u * 16u;
-
-    // Room for a record of `size` bytes at the end of the staged buffer.
-    uint8_t *append(Kind kind, uint32_t size, uint32_t address, uint32_t cursor, uint32_t vu1)
-    {
-        if (m_staged.size() >= kPublishBytes)
-            publish();
-        const Header header{kind,        size, address, cursor, _mm_getcsr() & ~kMxcsrFlags,
-                            t_vu1Source, 0u, vu1};
-        const size_t at = m_staged.size();
-        m_staged.resize(at + sizeof(Header) + ((static_cast<size_t>(size) + 15u) & ~size_t{15u}));
-        std::memcpy(m_staged.data() + at, &header, sizeof(header));
-        return m_staged.data() + at + sizeof(Header);
-    }
-
-    void publish()
-    {
-        if (m_staged.empty())
-            return;
-        const size_t bytes = m_staged.size();
-        {
-            std::unique_lock lock(m_mutex);
-            m_space.wait(lock, [&] { return m_outstanding == 0u || m_outstanding + bytes <= kCapacity; });
-            m_buffers.push_back(std::move(m_staged));
-            m_outstanding += bytes;
-            m_staged.clear();
-            if (!m_pool.empty())
-            {
-                m_staged = std::move(m_pool.back());
-                m_pool.pop_back();
-            }
-        }
-        m_work.notify_one();
-    }
-
-    void run()
-    {
-        ThreadNaming::SetCurrentThreadName("Draw");
-        t_onVif1Thread = true;
-        uint32_t mxcsr = _mm_getcsr() & ~kMxcsrFlags;
-        for (;;)
-        {
-            Bytes buffer;
-            {
-                std::unique_lock lock(m_mutex);
-                m_work.wait(lock, [&] { return !m_buffers.empty() || m_stop; });
-                if (m_buffers.empty())
-                    return;
-                buffer = std::move(m_buffers.front());
-                m_buffers.pop_front();
-            }
-            const auto started = std::chrono::steady_clock::now();
-            size_t at = 0u;
-            while (at + sizeof(Header) <= buffer.size())
-            {
-                Header header;
-                std::memcpy(&header, buffer.data() + at, sizeof(header));
-                const uint8_t *data = buffer.data() + at + sizeof(Header);
-                if (header.mxcsr != mxcsr)
-                {
-                    _mm_setcsr(header.mxcsr);
-                    mxcsr = header.mxcsr;
-                }
-                t_vu1Source = header.source;
-                try
-                {
-                    switch (header.kind)
-                    {
-                    case Kind::Packet:
-                        deliverPacketAt(data, header.size, header.address, header.cursor);
-                        break;
-                    case Kind::Image:
-                        deliverImage(data, header.size);
-                        break;
-                    case Kind::ImageElided:
-                    {
-                        Elided elided;
-                        std::memcpy(&elided, data, sizeof(elided));
-                        deliverElidedImage(elided.bytes, elided.phys, elided.hash);
-                        break;
-                    }
-                    case Kind::Mesh:
-                    {
-                        const uint32_t writes = header.address;
-                        const uint32_t vertices = header.size - static_cast<uint32_t>(sizeof(rg::NativeMesh::Header)) -
-                                                  (header.vu1 ? kVu1Bytes : 0u) - writes * 16u;
-                        std::memcpy(&m_mesh.header, data, sizeof(m_mesh.header));
-                        m_mesh.vertices.resize(vertices / sizeof(rg::NativeMesh::Vertex));
-                        if (vertices)
-                            std::memcpy(m_mesh.vertices.data(), data + sizeof(m_mesh.header), vertices);
-                        m_meshWrites.resize(writes);
-                        if (writes)
-                            std::memcpy(static_cast<void *>(m_meshWrites.data()), data + header.size - writes * 16u,
-                                        writes * 16u);
-                        t_meshWrites = m_meshWrites.data();
-                        t_meshWriteCount = writes;
-                        // The quads back where VU1 memory has them (the rest
-                        // of this copy is never read).
-                        const uint8_t *quads = nullptr;
-                        if (header.vu1)
-                        {
-                            const uint8_t *from = data + sizeof(m_mesh.header) + vertices;
-                            for (const auto &[first, count] : kVu1Runs)
-                            {
-                                std::memcpy(m_vu1 + first * 16u, from, count * 16u);
-                                from += count * 16u;
-                            }
-                            quads = m_vu1;
-                        }
-                        t_retain = {header.cursor != ~0u ? header.cursor : 0u, vertices != 0u};
-                        deliverMesh(m_mesh, quads);
-                        t_retain = {};
-                        t_model.active = false;
-                        t_meshWriteCount = 0u;
-                        break;
-                    }
-                    case Kind::Model:
-                    {
-                        uint32_t head[4];
-                        std::memcpy(head, data, sizeof(head));
-                        const uint8_t *from = data + 16u;
-                        ModelPayload &m = t_model;
-                        m.active = true;
-                        m.define = (head[0] & 1u) != 0u;
-                        m.list = (head[0] & 2u) != 0u;
-                        m.transient = (head[0] & 4u) != 0u;
-                        m.edge = head[3];
-                        m.volume = (head[0] & 8u) != 0u;
-                        std::memcpy(&m.row, from, sizeof(m.row));
-                        from += sizeof(m.row);
-                        m.palette.resize(head[2]);
-                        if (head[2])
-                            std::memcpy(m.palette.data(), from, head[2] * 4u);
-                        from += head[2] * 4u;
-                        m.inputs.resize(head[1]);
-                        if (head[1])
-                            std::memcpy(static_cast<void *>(m.inputs.data()), from,
-                                        head[1] * sizeof(dq8::gfx::native::ModelInput));
-                        break;
-                    }
-                    case Kind::ListEnd:
-                        t_vu1Source = 0u;
-                        flushEffect();
-                        flushComposites();
-                        if (vifwait::g_on)
-                            vifwait::add(vifwait::g_listDraw, vifwait::g_listSent.load());
-                        finishList();
-                        break;
-                    }
-                }
-                catch (const std::exception &error)
-                {
-                    std::fprintf(stderr, "[draw] record failed: %s\n", error.what());
-                    if (header.kind == Kind::ListEnd)
-                    {
-                        discardHeld();
-                        finishList();
-                    }
-                }
-                at += sizeof(Header) + ((static_cast<size_t>(header.size) + 15u) & ~size_t{15u});
-            }
-            g_drawBusyNanos.fetch_add(
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          std::chrono::steady_clock::now() - started)
-                                          .count()),
-                std::memory_order_relaxed);
-            const size_t bytes = buffer.size();
-            {
-                std::lock_guard lock(m_mutex);
-                m_outstanding -= bytes;
-                if (m_pool.size() < kPoolSize && buffer.capacity() <= 4u * kPublishBytes)
-                {
-                    buffer.clear();
-                    m_pool.push_back(std::move(buffer));
-                }
-            }
-            m_space.notify_one();
-        }
-    }
-
-    static constexpr size_t kPublishBytes = 128u * 1024u;
-    static constexpr size_t kCapacity = 64u * 1024u * 1024u;
-    static constexpr size_t kPoolSize = 16u;
-    static constexpr uint32_t kMxcsrFlags = 0x3Fu;
-
-    std::thread m_thread;
-    std::thread::id m_id;
-    std::mutex m_mutex;
-    std::condition_variable m_work, m_space;
-    std::deque<Bytes> m_buffers; // guarded by m_mutex
-    std::vector<Bytes> m_pool;   // guarded by m_mutex
-    Bytes m_staged;              // the VIF1 thread's
-    rg::NativeMesh m_mesh;                        // the stage's
-    std::vector<RegisterWrite> m_meshWrites;    // the stage's: the mesh's own register writes
-    alignas(16) uint8_t m_vu1[64u * 16u] = {};  // the stage's: a mesh's VU1 quads, in place
-    size_t m_outstanding = 0u;                  // guarded by m_mutex
-    bool m_stop = false;                        // guarded by m_mutex
-};
-
-DrawStage *g_drawStage = nullptr;
+// (M6: there is no draw stage any more. A list runs on the game thread as it
+// is sent and what it makes goes straight to the producer, in the game's
+// order; the producer's records go to the renderer's queue.)
 // For busyReport's VU1 pair counts.
 PS2Runtime *g_runtime = nullptr;
 
@@ -1367,8 +992,7 @@ public:
                 }
                 const bool meshed = rg::vu1native::hasMesh(*native) || m_particleMesh || m_outlineMesh;
                 // A mesh's own register packets ride with it as writes.
-                const bool asWrites = meshed && meshWritesOn() && toDrawStage() &&
-                                      packetsAsWrites(m_nativePackets, m_nativeWrites);
+                const bool asWrites = meshed && packetsAsWrites(m_nativePackets, m_nativeWrites);
                 if (!asWrites)
                     for (const auto &packet : m_nativePackets)
                     {
@@ -1522,7 +1146,7 @@ public:
     // DMA but could reach a hook, and on the GIF stage's.
     void drain(int line = __builtin_LINE())
     {
-        if (m_running || (g_drawStage && std::this_thread::get_id() == g_drawStage->id()))
+        if (m_running)
         {
             return;
         }
@@ -1550,17 +1174,6 @@ public:
         return false;
     }
 
-    // The draw stage ran a list's end: the list is done.
-    void listFinished()
-    {
-        {
-            std::lock_guard lock(m_mutex);
-            ++m_completed;
-        }
-        m_idle.notify_all();
-        m_runtime.eeScheduler().postEvent(EeEvent{EeEventType::Dmac, 1u, 0u});
-    }
-
     // Lists that finished since the last call, for their DMAC completion.
     uint64_t takeFinished()
     {
@@ -1575,7 +1188,6 @@ private:
     {
         PS2Memory &memory = m_runtime.memory();
         const auto started = std::chrono::steady_clock::now();
-        const bool staged = toDrawStage();
         try
         {
             t_listData = m_current.data.data();
@@ -1597,15 +1209,11 @@ private:
             std::fprintf(stderr, "[vif1] list failed: %s\n", error.what());
         }
         // What the list held goes on before the next list's packets, also
-        // when it threw (with the draw stage, the stage does it at the
-        // list's end). If that throws too, it is dropped.
+        // when it threw. If that throws too, it is dropped.
         try
         {
-            if (!staged)
-            {
-                flushEffect();
-                flushComposites();
-            }
+            flushEffect();
+            flushComposites();
         }
         catch (const std::exception &error)
         {
@@ -1614,10 +1222,6 @@ private:
         }
         if (vifwait::g_on)
             vifwait::add(vifwait::g_listVif1, vifwait::g_listSent.load());
-        if (staged)
-        {
-            g_drawStage->endList();
-        }
         g_busyNanos.fetch_add(
             static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started)
@@ -1625,16 +1229,12 @@ private:
             std::memory_order_relaxed);
         {
             std::lock_guard lock(m_mutex);
-            m_completed += staged ? 0u : 1u;
+            ++m_completed;
             if (m_pool.size() < kPoolSize)
             {
                 m_current.data.clear();
                 m_pool.push_back(std::move(m_current.data));
             }
-        }
-        if (staged)
-        {
-            return;
         }
         m_idle.notify_all();
         m_runtime.eeScheduler().postEvent(EeEvent{EeEventType::Dmac, 1u, 0u});
@@ -1726,11 +1326,6 @@ private:
 };
 
 Vif1Thread *g_thread = nullptr;
-
-void finishList()
-{
-    g_thread->listFinished();
-}
 
 // Steps 3b and 6 of docs/NATIVE-PIPELINE.md: uploads the producer made
 // records of are withheld from the GS, a record whose memory the game
@@ -2752,11 +2347,6 @@ void deliverPacket(const uint8_t *data, uint32_t size)
 {
     const uint32_t address = t_onVif1Thread ? listAddress(data) : ~0u;
     const uint32_t cursor = t_onVif1Thread ? packetCursor(address) : ~0u;
-    if (toDrawStage())
-    {
-        g_drawStage->packet(data, size, address, cursor);
-        return;
-    }
     deliverPacketAt(data, size, address, cursor);
 }
 
@@ -2853,11 +2443,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 
 void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
 {
-    if (toDrawStage())
-    {
-        g_drawStage->mesh(mesh, vu1Data);
-        return;
-    }
     // A held effect goes on first: a composite's head decided here sends
     // its packets.
     if (nativeEffects() && t_onVif1Thread)
@@ -2987,7 +2572,7 @@ bool elidingUploads()
 {
     static const bool on = [] {
         const char *value = std::getenv("RG_UPLOAD_ELIDE");
-        return drawStageOn() && uploadsTaken() && !(value && std::strcmp(value, "0") == 0);
+        return uploadsTaken() && !(value && std::strcmp(value, "0") == 0);
     }();
     return on;
 }
@@ -3341,7 +2926,6 @@ void install(PS2Runtime &runtime)
     // and the VIF1 paths already drained it after each one.
     PS2Memory &memory = runtime.memory();
     memory.setGifArbiter(nullptr);
-    g_drawStage = new DrawStage();
     // From the VIF1 thread through the GIF stage. From any other thread (the
     // game's own GIF transfers, after the drain every DMA start does) straight
     // to the GS, behind whatever the stage still holds.
@@ -3355,12 +2939,11 @@ void install(PS2Runtime &runtime)
     // A texture split over DIRECT packets continues in place, without the
     // copy behind a synthesized IMAGE tag.
     memory.setGifImageCallback([](const uint8_t *data, uint32_t size) {
-        if (toDrawStage())
+        // An upload's data the list left in guest memory (a hole) comes as
+        // what the producer made of it, the rest as it is.
+        if (const Hole *hole = t_listDecoder ? listHole(data, size, true) : nullptr)
         {
-            if (const Hole *hole = listHole(data, size, true))
-                g_drawStage->imageElided(*hole);
-            else
-                g_drawStage->image(data, size);
+            deliverElidedImage(hole->bytes, hole->phys, hole->hash);
             return;
         }
         deliverImage(data, size);
@@ -3401,10 +2984,6 @@ void shutdown()
     {
         g_thread->stop();
     }
-    if (g_drawStage)
-    {
-        g_drawStage->stop();
-    }
 }
 
 std::string busyReport()
@@ -3416,22 +2995,11 @@ std::string busyReport()
     const uint64_t gif = g_gifBusyNanos.load(std::memory_order_relaxed);
     const double wall = std::chrono::duration<double>(now - lastTime).count();
     auto share = [&](uint64_t nanos) { return wall > 0.0 ? (static_cast<double>(nanos) * 1e-9) / wall * 100.0 : 0.0; };
-    static uint64_t lastDraw = 0u;
-    const uint64_t draw = g_drawBusyNanos.load(std::memory_order_relaxed);
     char text[128];
-    if (g_drawStage && drawStageOn())
-    {
-        std::snprintf(text, sizeof(text), "vif1 busy=%.0f%% draw busy=%.0f%% of wall", share(busy - lastBusy),
-                      share(draw - lastDraw));
-    }
-    else
-    {
-        std::snprintf(text, sizeof(text), "vif1 busy=%.0f%% of wall", share(busy - lastBusy));
-    }
+    std::snprintf(text, sizeof(text), "lists busy=%.0f%% of wall", share(busy - lastBusy));
     lastTime = now;
     lastBusy = busy;
     lastGif = gif;
-    lastDraw = draw;
     // VU1 pairs run on the interpreter since the last report: a program the
     // build has not compiled (several times slower), e.g. an effect's, shows
     // up here. Read unsynchronised from the VIF1 thread's counters; a stats

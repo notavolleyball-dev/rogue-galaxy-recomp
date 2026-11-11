@@ -1044,6 +1044,17 @@ the submodule is checked out again: `git -C thirdparty/PS2Recomp checkout
 0015 (the threaded GS worker, which the null backend still sits behind)
 and 0034 (the libgraph stubs' register sink, still used).
 
+**Step 4 in code: the draw stage is deleted.** A list runs on the game
+thread and what it makes goes straight to the producer (packets to the
+converter and the mirror, meshes, uploads, an elided upload as what the
+producer made of it), in the game's order; the producer's records go to the
+renderer's queue. Gone: the `DrawStage` class and its thread, its record
+encoding (packet, image, mesh, model records and the VU1 quads copied with
+each mesh), `RG_DRAW_STAGE`, and `RG_MESH_WRITES` (a mesh's state packets
+always ride as register writes). To watch: the game thread's frame time
+(the converter and the producer's meshes are on it now: `lists busy` in
+the stats).
+
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
 sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
 with the tail's packets withheld, and the bounds it read (quads 98/99) are
