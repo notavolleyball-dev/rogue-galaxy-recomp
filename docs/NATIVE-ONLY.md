@@ -805,7 +805,7 @@ They wait until the plan is done, or until the user moves one in.
   further the same way: CT16's TEXA (`texaLow`, `texaHigh`) is applied by
   the shader too.
 - **More decoding to the GPU (candidates).**
-  - T4 textures are still widened to a byte a texel on the CPU.
+  - T4 textures: done (M5's branch). They are `Index4` records of the
+    game's bytes, and the shader takes the nibble. The tile cutter and the
+    packs' hash widen a copy where they need one.
   - Pre-swizzled T8 uploads are still unswizzled on the CPU.
-  - Moving either touches the producer's tile cutter, its local-copy
-    mirror and the texture packs' hash, which read kept texels.

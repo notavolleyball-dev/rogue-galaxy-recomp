@@ -629,7 +629,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             ownW = float(img.logicalWidth ? img.logicalWidth : img.width);
             ownH = float(img.logicalHeight ? img.logicalHeight : img.height);
             mu.mode[0] = img.format == PixelFormat::Ct16 ? 4u : 1u;
-            if (img.format == PixelFormat::Index8)
+            if (img.format == PixelFormat::Index8 || img.format == PixelFormat::Index4)
             {
                 const auto p = m_palettes.find(m.palette ? m.palette : img.palette);
                 if (p == m_palettes.end())
@@ -639,7 +639,8 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
                 }
                 palette = p->second.texture;
                 mu.units[0] = p->second.scale;
-                mu.mode[0] = p->second.format == PixelFormat::Ct16 ? 5u : 2u;
+                mu.mode[0] = (p->second.format == PixelFormat::Ct16 ? 5u : 2u) |
+                             (img.format == PixelFormat::Index4 ? 8u : 0u);
                 mu.mode[3] = p->second.width;
             }
             mu.mode[1] = static_cast<uint32_t>(m.function);
@@ -649,7 +650,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         {
             // The target's alpha, from the copy, at the pixel (the palette
             // slot, which an Index8 texture would need too).
-            if (!copy || n != first || mu.mode[0] == 2u || mu.mode[0] == 5u)
+            if (!copy || n != first || (mu.mode[0] & 7u) == 2u || (mu.mode[0] & 7u) == 5u)
             {
                 ++m_meshCounts.feedback;
                 continue;

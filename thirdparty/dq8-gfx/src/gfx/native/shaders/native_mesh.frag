@@ -20,7 +20,8 @@ struct DrawRow {
     vec4 depthLimit; // x: MeshDraw::depthCap; y: 1 when it applies
     // The fragment stage's.
     // mode x: 0 untextured, 1 RGBA, 2 Index8 through the palette, 3 a target,
-    // 4 CT16, 5 Index8 through a CT16 palette
+    // 4 CT16, 5 Index8 through a CT16 palette; | 8: the indices packed two
+    // a byte (Index4, the low nibble first)
     // y: the texture function (0 modulate, 1 decal, 2 highlight, 3 highlight2)
     // z: the texel's alpha is used (TCC)
     // w: the palette's entries
@@ -100,15 +101,22 @@ void main() {
     if (material.mode.x != 0u) {
         vec4 t;
         vec2 texel = inUv * material.size.xy - material.offset.xy; // in texels
-        bool indexed = material.mode.x == 2u || material.mode.x == 5u;
-        bool ct16 = material.mode.x >= 4u;
+        uint kind = material.mode.x & 7u;
+        bool indexed = kind == 2u || kind == 5u;
+        bool ct16 = kind == 4u || kind == 5u;
         if (indexed) {
             // Fetched, not filtered: an index is not a color.
             ivec2 size = ivec2(material.size.zw);
             ivec2 at = ivec2(floor(texel));
             at.x = wrapAxis(at.x, size.x, material.blend.z != 0.0);
             at.y = wrapAxis(at.y, size.y, material.blend.w != 0.0);
-            int index = int(texelFetch(image, at, 0).r * 255.0 + 0.5);
+            int index;
+            if ((material.mode.x & 8u) != 0u) {
+                int packed = int(texelFetch(image, ivec2(at.x >> 1, at.y), 0).r * 255.0 + 0.5);
+                index = (at.x & 1) != 0 ? (packed >> 4) : (packed & 15);
+            } else {
+                index = int(texelFetch(image, at, 0).r * 255.0 + 0.5);
+            }
             t = texelFetch(palette, ivec2(min(index, int(material.mode.w) - 1), 0), 0);
         } else {
             t = texture(image, texel / material.size.zw);

@@ -37,6 +37,10 @@ enum class PixelFormat : uint8_t
     // takes the alpha from the draw's TEXA (Material::texaLow, texaHigh,
     // alphaZeroOnBlack). Also a palette's entries.
     Ct16,
+    // The GS's T4 as the game has it: two indices a byte, the low nibble
+    // first, rows of width / 2 bytes (an even width). The shader takes the
+    // nibble.
+    Index4,
     Depth32, // a depth target
     // A replacement picture's blocks as its file has them (a texture pack's
     // DDS), 4x4 texels a block, a row of blocks after another.

@@ -8,13 +8,20 @@
 layout(set = 2, binding = 0) uniform sampler2D image;
 layout(set = 2, binding = 1) uniform sampler2D palette;
 layout(set = 3, binding = 0) uniform ViewMode {
-    uvec4 mode; // x: mode, y: palette entries
+    uvec4 mode; // x: mode, y: palette entries, z: the indices packed (Index4)
 } params;
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
 
 void main() {
     vec4 texel = texture(image, inUv);
+    if (params.mode.z != 0u) {
+        // Index4: the nibble of the texel's byte.
+        ivec2 size = textureSize(image, 0);
+        int x = int(inUv.x * float(size.x * 2));
+        int packed = int(texelFetch(image, ivec2(x >> 1, int(inUv.y * float(size.y))), 0).r * 255.0 + 0.5);
+        texel.r = float((x & 1) != 0 ? (packed >> 4) : (packed & 15)) / 255.0;
+    }
     if (params.mode.x == 1u) {
         int index = int(texel.r * 255.0 + 0.5);
         texel = texelFetch(palette, ivec2(min(index, int(params.mode.y) - 1), 0), 0);

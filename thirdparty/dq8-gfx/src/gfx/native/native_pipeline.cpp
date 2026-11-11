@@ -581,6 +581,10 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     format = ct16Format(device);
                     bytes = uint64_t(r.width) * r.height * 2u;
                     break;
+                case PixelFormat::Index4: // two texels a byte: a texture half as wide
+                    format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+                    bytes = (r.width & 1u) ? 0u : uint64_t(r.width / 2u) * r.height;
+                    break;
                 case PixelFormat::Bc1:
                     format = SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
                     bytes = blocks * 8u;
@@ -606,7 +610,8 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     ++m_refused;
                     return;
                 }
-                SDL_GPUTexture *texture = createTexture(device, format, r.width, r.height, error);
+                const uint32_t storedWidth = r.format == PixelFormat::Index4 ? r.width / 2u : r.width;
+                SDL_GPUTexture *texture = createTexture(device, format, storedWidth, r.height, error);
                 if (!texture)
                     return;
                 if (const auto old = m_images.find(r.id); old != m_images.end())
@@ -619,7 +624,7 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                                        r.logicalHeight, r.scale};
                 m_imageOrder.push_back(r.id);
                 m_imageBytes += bytes;
-                m_uploads.push_back({texture, r.width, r.height,
+                m_uploads.push_back({texture, storedWidth, r.height,
                                      r.format == PixelFormat::Ct16 ? ct16Texels(device, r.texels, bytes / 2u) : r.texels});
                 m_recent.erase(std::remove(m_recent.begin(), m_recent.end(), r.id), m_recent.end());
                 m_recent.push_front(r.id);
@@ -868,7 +873,8 @@ void Renderer::drawView(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass)
         SDL_GPUTexture *palette = image.texture;
         if (image.format == PixelFormat::Ct16)
             mode[0] = 3u;
-        if (image.format == PixelFormat::Index8)
+        mode[2] = image.format == PixelFormat::Index4 ? 1u : 0u;
+        if (image.format == PixelFormat::Index8 || image.format == PixelFormat::Index4)
         {
             const auto p = m_palettes.find(image.palette);
             if (p != m_palettes.end())

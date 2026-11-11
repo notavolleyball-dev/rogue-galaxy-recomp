@@ -58,9 +58,26 @@ constexpr float kTexelScale = 255.0f / 128.0f;
 // CT16's 5-bit channels, sampled as UNORM (v / 31), are worth v * 8 / 128
 // (the GS widens them by a shift).
 constexpr float kCt16Scale = 31.0f * 8.0f / 128.0f;
+// Bytes a texel; 0 for Index4's half byte (copied by the texel, not the byte).
 uint32_t texelBytes(native::PixelFormat f)
 {
-    return f == native::PixelFormat::Index8 ? 1u : f == native::PixelFormat::Ct16 ? 2u : 4u;
+    return f == native::PixelFormat::Index8 ? 1u
+           : f == native::PixelFormat::Ct16 ? 2u
+           : f == native::PixelFormat::Index4 ? 0u
+                                              : 4u;
+}
+
+bool indexedFormat(native::PixelFormat f)
+{
+    return f == native::PixelFormat::Index8 || f == native::PixelFormat::Index4;
+}
+
+// An Index4 texture's indices a byte each (for the texture packs' hash and
+// the tile cutter, which take them so).
+void widenIndex4(const uint8_t *packed, size_t texels, uint8_t *out)
+{
+    for (size_t i = 0; i < texels; ++i)
+        out[i] = (packed[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
 }
 float texelScale(native::PixelFormat f)
 {
@@ -722,12 +739,16 @@ native::Id textureRecord(State &s, const TextureLevel &l, size_t bytes, uint64_t
         record.format = native::PixelFormat::Index8;
         out->assign(l.ram, l.ram + bytes);
     }
-    else // T4: the low nibble first, widened to a byte each
+    else if ((l.width & 1u) == 0u) // T4 as the game has it: the shader takes the nibble
+    {
+        record.format = native::PixelFormat::Index4;
+        out->assign(l.ram, l.ram + texels / 2u);
+    }
+    else // an odd width: widened to a byte each
     {
         record.format = native::PixelFormat::Index8;
         out->resize(texels);
-        for (size_t i = 0; i < texels; ++i)
-            (*out)[i] = (l.ram[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
+        widenIndex4(l.ram, texels, out->data());
     }
     record.scale = texelScale(record.format);
     lock.lock();
@@ -1381,12 +1402,16 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
         record.format = native::PixelFormat::Index8;
         out->assign(data, data + texels);
     }
+    else if (dpsm == kT4 && bytes >= (texels + 1u) / 2u && (width & 1u) == 0u)
+    {
+        record.format = native::PixelFormat::Index4;
+        out->assign(data, data + texels / 2u);
+    }
     else if (dpsm == kT4 && bytes >= (texels + 1u) / 2u)
     {
         record.format = native::PixelFormat::Index8;
         out->resize(texels);
-        for (size_t i = 0; i < texels; ++i)
-            (*out)[i] = (data[i / 2u] >> ((i & 1u) * 4u)) & 0x0Fu;
+        widenIndex4(data, texels, out->data());
     }
     else
         return;
@@ -2634,7 +2659,7 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
         return;
     const uint32_t psm = t.psm & 0x3Fu;
     const auto tex = s.texels.find(m.texture);
-    if (tex == s.texels.end() || tex->second.format != native::PixelFormat::Index8 || !tex->second.data)
+    if (tex == s.texels.end() || !indexedFormat(tex->second.format) || !tex->second.data)
         return;
     const uint32_t width = tex->second.width, height = tex->second.height;
     if (!rg::pcsx2::hashable(psm, width, height) || width != (1u << std::min<uint32_t>(t.tw, 10u)) ||
@@ -2666,14 +2691,22 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
                 ct16(uint16_t((*rgba)[i * 2u] | ((*rgba)[i * 2u + 1u] << 8)), expanded.data() + i * 4u);
             rgba = &expanded;
         }
-        w.texels = rg::pcsx2::texelHash(tex->second.data->data(), width, height, psm);
+        std::vector<uint8_t> widened;
+        const uint8_t *indices = tex->second.data->data();
+        if (tex->second.format == native::PixelFormat::Index4)
+        {
+            widened.resize(size_t(width) * height);
+            widenIndex4(indices, widened.size(), widened.data());
+            indices = widened.data();
+        }
+        w.texels = rg::pcsx2::texelHash(indices, width, height, psm);
         const auto known = s.clutHashes.find(m.palette);
         w.clut = known != s.clutHashes.end() ? known->second
                                               : (s.clutHashes[m.palette] =
                                                      rg::pcsx2::clutHash(rgba->data(), entries));
         ++s.counts.wholesAsked;
         if (dumping && s.dumped.insert(w.texels * 1099511628211ull ^ w.clut).second)
-            dumpWhole(tex->second.data->data(), *rgba, entries, width, height, psm, w.texels, w.clut);
+            dumpWhole(indices, *rgba, entries, width, height, psm, w.texels, w.clut);
     }
     if (w.id == 0u && !w.none)
     {
@@ -2743,8 +2776,21 @@ void cutRegion(State &s, uint64_t clamp, native::Material &m)
         ++s.counts.unknownClamp;
         return;
     }
-    // Copied: the table may grow below.
-    const State::Kept from = source->second;
+    // Copied: the table may grow below. A packed T4 is cut from its
+    // indices widened (the tile is Index8).
+    State::Kept from = source->second;
+    if (from.format == native::PixelFormat::Index4)
+    {
+        auto widened = std::make_shared<std::vector<uint8_t>>(size_t(from.width) * from.height);
+        if (from.data->size() * 2u < widened->size())
+        {
+            ++s.counts.unknownClamp;
+            return;
+        }
+        widenIndex4(from.data->data(), widened->size(), widened->data());
+        from.data = std::move(widened);
+        from.format = native::PixelFormat::Index8;
+    }
     const uint32_t width = from.width, height = from.height;
     const size_t texel = texelBytes(from.format);
     if (width == 0u || height == 0u || from.data->size() < size_t(width) * height * texel)
@@ -2902,6 +2948,11 @@ void mirrorCopy(State &s, uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx
     if (!from.pixels && !from.kept)
     {
         ++s.counts.copiesNoSource;
+        return;
+    }
+    if (from.bytesPer == 0u) // a packed T4's half bytes: not mirrored
+    {
+        ++s.counts.copiesOtherFormat;
         return;
     }
     Plane to = planeAt(s, dbp, dpsm, dbw);
