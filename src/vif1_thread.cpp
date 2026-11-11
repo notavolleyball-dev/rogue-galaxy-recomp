@@ -160,11 +160,6 @@ thread_local size_t t_listSize = 0u;
 thread_local const std::vector<std::pair<uint32_t, uint32_t>> *t_listOrigins = nullptr;
 // The piece of t_listOrigins the last listAddress found (listAddress).
 thread_local size_t t_listOriginAt = 0u;
-rg::vu1native::Mode nativeMode()
-{
-    static const rg::vu1native::Mode mode = rg::vu1native::modeFromEnvironment();
-    return mode;
-}
 // Whether the GPU path takes the chunks slot E clips: unless
 // RG_VU1_CLIP_ON_GPU=0, which keeps them on the VU1. It was off without the
 // native pipeline: the field walk of October 29 lost the near wall's texture
@@ -291,99 +286,14 @@ struct LearnedSpan
 std::mutex g_learnedMutex;
 std::unordered_map<uint64_t, LearnedSpan> g_learned; // by phys << 32 | bytes
 std::atomic<uint64_t> g_modelSpansElided{0u}, g_modelChunksElided{0u}, g_modelMarksLost{0u};
-bool modelGpuOn();
 bool elidingModels()
 {
     static const bool on = [] {
         const char *value = std::getenv("RG_MODEL_ELIDE");
-        return modelGpuOn() && !(value && std::strcmp(value, "0") == 0);
+        return !(value && std::strcmp(value, "0") == 0);
     }();
     return on;
 }
-// RG_MESH_REPEAT=1 (docs/NATIVE-BOUNDARY.md, issue 2's count): how much of
-// the geometry the native VU1 programs build is what they built a frame
-// before. A mesh is known by its vertices in object space (position, UV,
-// color; not the depth, which is the camera's); "repeated" when the same
-// was built in one of the 8 lists before this one, "with its matrix" when
-// its header (matrix, fog, clip planes) is the same too. Printed every 600
-// lists, on the VIF1 thread.
-struct MeshRepeat
-{
-    struct Seen
-    {
-        uint64_t list, header;
-    };
-    std::unordered_map<uint64_t, Seen> seen;
-    uint64_t list = 0u, reported = 0u;
-    uint64_t meshes[2] = {}, vertices[2] = {};             // [skinned]
-    uint64_t repeatMeshes[2] = {}, repeatVertices[2] = {}; // from an earlier list
-    uint64_t sameMatrix[2] = {}, sameList[2] = {};         // vertices
-};
-bool countingMeshRepeats()
-{
-    static const bool on = std::getenv("RG_MESH_REPEAT") != nullptr;
-    return on;
-}
-thread_local MeshRepeat t_meshRepeat;
-uint64_t repeatHash(const uint8_t *at, size_t size, uint64_t h)
-{
-    for (; size >= 8u; at += 8, size -= 8u)
-    {
-        uint64_t word;
-        std::memcpy(&word, at, 8);
-        h = (h ^ word) * 0x9E3779B97F4A7C15ull;
-        h ^= h >> 29;
-    }
-    return h;
-}
-void noteMeshRepeat(const GSNativeMesh &mesh, bool skinned)
-{
-    MeshRepeat &r = t_meshRepeat;
-    const size_t count = mesh.vertices.size();
-    if (count == 0u)
-        return;
-    uint64_t h = count;
-    for (const GSNativeMesh::Vertex &v : mesh.vertices)
-        h = repeatHash(reinterpret_cast<const uint8_t *>(&v), offsetof(GSNativeMesh::Vertex, depth) & ~size_t(7), h) ^
-            static_cast<uint32_t>(v.a * 16.0f);
-    const uint64_t header = repeatHash(reinterpret_cast<const uint8_t *>(&mesh.header), sizeof(mesh.header) & ~size_t(7), 1u);
-    const int k = skinned ? 1 : 0;
-    ++r.meshes[k];
-    r.vertices[k] += count;
-    const auto it = r.seen.find(h);
-    if (it != r.seen.end() && it->second.list == r.list)
-        r.sameList[k] += count;
-    else if (it != r.seen.end() && r.list - it->second.list <= 8u)
-    {
-        ++r.repeatMeshes[k];
-        r.repeatVertices[k] += count;
-        if (it->second.header == header)
-            r.sameMatrix[k] += count;
-    }
-    r.seen[h] = {r.list, header};
-}
-void meshRepeatList()
-{
-    MeshRepeat &r = t_meshRepeat;
-    if (++r.list - r.reported < 600u)
-        return;
-    r.reported = r.list;
-    for (int k = 0; k < 2; ++k)
-        std::fprintf(stderr,
-                     "[mesh-repeat] %s: %llu meshes, %llu vertices; built the same in an earlier list: %llu meshes, "
-                     "%llu vertices (%.1f%%), %llu of those with the same header; same as one earlier in its own "
-                     "list: %llu vertices\n",
-                     k ? "skinned" : "not skinned", (unsigned long long)r.meshes[k],
-                     (unsigned long long)r.vertices[k], (unsigned long long)r.repeatMeshes[k],
-                     (unsigned long long)r.repeatVertices[k],
-                     r.vertices[k] ? 100.0 * double(r.repeatVertices[k]) / double(r.vertices[k]) : 0.0,
-                     (unsigned long long)r.sameMatrix[k], (unsigned long long)r.sameList[k]);
-    for (int k = 0; k < 2; ++k)
-        r.meshes[k] = r.vertices[k] = r.repeatMeshes[k] = r.repeatVertices[k] = r.sameMatrix[k] = r.sameList[k] = 0u;
-    if (r.seen.size() > (1u << 20))
-        r.seen.clear();
-}
-
 // Model chunks kept by the renderer (M5 of docs/NATIVE-ONLY.md): a chunk
 // whose inputs the VIF1 thread saw in two lists gets an id; its inputs go
 // to the renderer once, and every later draw names it.
@@ -411,15 +321,6 @@ struct ModelPayload
     std::vector<float> palette;
 };
 thread_local ModelPayload t_model;
-// RG_MODEL_GPU=0: every strip chunk through vu1_native's buildMesh, as before.
-bool modelGpuOn()
-{
-    static const bool on = [] {
-        const char *value = std::getenv("RG_MODEL_GPU");
-        return !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
-}
 struct RetainTable
 {
     struct Entry
@@ -749,69 +650,6 @@ void gatherChain(PS2Memory &memory, uint32_t tadr, bool tte, bool tie, Bytes &ou
                 }
             }
             spans.push_back(span);
-            if (countingMeshRepeats())
-            {
-                // Issue 2's count: what the list takes by reference (the
-                // game's own data, sent from where it is) and what the game
-                // wrote into the list this frame.
-                static uint64_t lists = 0u, inlineBytes = 0u, refBytes = 0u, refSpans = 0u, lastTadr = ~0ull;
-                if (lastTadr != tadr)
-                {
-                    lastTadr = tadr;
-                    if (++lists % 600u == 0u)
-                    {
-                        std::fprintf(stderr, "[mesh-repeat] lists: %llu KiB a list written by the game, %llu KiB by "
-                                             "reference in %llu spans\n",
-                                     (unsigned long long)(inlineBytes / 600u >> 10),
-                                     (unsigned long long)(refBytes / 600u >> 10), (unsigned long long)(refSpans / 600u));
-                        inlineBytes = refBytes = refSpans = 0u;
-                    }
-                }
-                if (data == tagAddress + 16u)
-                    inlineBytes += qwc * 16u;
-                else
-                {
-                    refBytes += qwc * 16u;
-                    ++refSpans;
-                    // Of the referenced: from memory no write reached since
-                    // the send before (the write watch), and the VIFcodes
-                    // its tag carries, by kind.
-                    static std::unordered_map<uint64_t, uint64_t> stamps;
-                    static uint64_t stable = 0u, spans = 0u, unpack = 0u, direct = 0u, other = 0u, reports = 0u;
-                    try
-                    {
-                        if (!memory.isScratchpad(data) && !memory.isScratchpad(tagAddress))
-                        {
-                            const uint32_t at = memory.translateAddress(data), bytes = qwc * 16u;
-                            const uint8_t *ram = memory.getRDRAM();
-                            if (uint64_t(at) + bytes <= PS2_RAM_SIZE)
-                            {
-                                uint64_t &stamp = stamps[(uint64_t(at) << 32) | bytes];
-                                if (stamp != 0u && rg::writewatch::unchanged(ram + at, bytes, stamp))
-                                    stable += bytes;
-                                else
-                                    stamp = rg::writewatch::watch(ram + at, bytes);
-                                uint32_t codes[2];
-                                std::memcpy(codes, ram + memory.translateAddress(tagAddress) + 8u, 8u);
-                                const uint32_t op = (codes[1] >> 24) & 0x7Fu;
-                                ++((op & 0x60u) == 0x60u ? unpack : (op == 0x50u || op == 0x51u) ? direct : other);
-                            }
-                        }
-                    }
-                    catch (const std::exception &)
-                    {
-                    }
-                    if (++spans % 300000u == 0u && reports++ < 40u)
-                    {
-                        std::fprintf(stderr, "[mesh-repeat] referenced: %llu KiB of the last 300000 spans from memory "
-                                             "unwritten since the send before; tags' second VIFcode: UNPACK %llu, "
-                                             "DIRECT %llu, other %llu\n",
-                                     (unsigned long long)(stable >> 10), (unsigned long long)unpack,
-                                     (unsigned long long)direct, (unsigned long long)other);
-                        stable = unpack = direct = other = 0u;
-                    }
-                }
-            }
             total += spans.back().bytes;
         }
         return true;
@@ -1436,8 +1274,7 @@ public:
             if (mark)
             {
                 marked = true;
-                if (m_nativeProgram && rg::vu1native::modelOnGpu(*m_nativeProgram) &&
-                    nativeMode() == rg::vu1native::Mode::Gpu && toDrawStage())
+                if (m_nativeProgram && rg::vu1native::modelOnGpu(*m_nativeProgram))
                 {
                     uint8_t *data = memory.getVU1Data();
                     std::memcpy(data + (top & 1023u) * 16u, mark->chunk.header, sizeof(mark->chunk.header));
@@ -1461,7 +1298,6 @@ public:
                         m_nativeMesh = game.mesh;
                         m_gameDraw = mark->game;
                     }
-                    m_nativeBounds.made = false;
                     t_model.active = true;
                     t_model.define = false;
                     t_model.transient = false;
@@ -1482,14 +1318,13 @@ public:
             }
             else if (m_nativeProgram && resume != rg::vu1native::drawsAtCall(*m_nativeProgram))
             {
-                const bool gpu = nativeMode() == rg::vu1native::Mode::Gpu;
                 // The chunks that clip (slot E) go to the GPU unless
                 // RG_VU1_CLIP_ON_GPU=0: the mesh carries E's near and far
                 // planes and the shader clips there (gl_ClipDistance), so no
                 // driver is left to cut at the eye on its own. In check mode
                 // they go to the VU1.
                 const char *reason =
-                    rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, gpu && g_gpuClips);
+                    rg::vu1native::declineChunk(*m_nativeProgram, memory.getVU1Data(), top, g_gpuClips);
                 if (reason)
                 {
                     m_nativeMonitor.declined(*m_nativeProgram, reason);
@@ -1501,24 +1336,22 @@ public:
                     m_particleMesh = false;
                     m_shadowMesh = false;
                     m_outlineMesh = false;
-                    if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Shadow &&
+                    if (native->kind == rg::vu1native::Kind::Shadow &&
                         rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top, m_shadowPackets,
                                                     m_shadowMeshes, m_shadowInputs, m_shadowRows, m_shadowPalette))
                     {
                         // M5: the shadow volumes to the model vertex stage,
                         // twice (the facing ones' blend and the others').
-                        m_nativeBounds.made = false;
                         m_shadowMesh = true;
                         m_nativePackets.clear();
                     }
-                    else if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Outline &&
+                    else if (native->kind == rg::vu1native::Kind::Outline &&
                              rg::vu1native::outlineDraw(*native, memory.getVU1Data(), top, m_nativePackets,
                                                         m_nativeMesh, t_model.inputs, t_model.edge, t_model.row,
                                                         t_model.palette))
                     {
                         // M5: the outlines to the model vertex stage, which
                         // tests each edge and draws its four lines.
-                        m_nativeBounds.made = false;
                         t_model.active = true;
                         t_model.define = false;
                         t_model.list = false;
@@ -1527,14 +1360,13 @@ public:
                         m_modelId = 0u;
                         m_outlineMesh = true;
                     }
-                    else if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Particles)
+                    else if (native->kind == rg::vu1native::Kind::Particles)
                     {
                         // M5: the particles to the model vertex stage, which
                         // makes each billboard in world space.
                         rg::vu1native::particleMesh(memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
                                                     t_model.inputs, t_model.row);
                         t_model.palette.clear();
-                        m_nativeBounds.made = false;
                         t_model.active = true;
                         t_model.define = false;
                         t_model.list = true;
@@ -1544,7 +1376,7 @@ public:
                         m_modelId = 0u;
                         m_particleMesh = true;
                     }
-                    else if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
+                    else if (rg::vu1native::modelOnGpu(*native))
                     {
                         // M5: the chunk goes to the model vertex stage. Seen
                         // in two lists, it is kept under an id (its inputs
@@ -1561,18 +1393,10 @@ public:
                             rg::vu1native::modelChunk(*native, data, top, t_model.inputs, t_model.list);
                         rg::vu1native::modelHeader(*native, data, top, m_nativePackets, m_nativeMesh);
                         rg::vu1native::modelRow(*native, data, top, t_model.row, t_model.palette);
-                        m_nativeBounds.made = false;
                         t_model.active = true;
                         t_model.edge = 0u;
                         t_model.volume = false;
                         m_modelId = modelId;
-                    }
-                    else if (gpu)
-                    {
-                        rg::vu1native::buildMesh(*native, memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
-                                                 &m_nativeBounds);
-                        if (countingMeshRepeats())
-                            noteMeshRepeat(m_nativeMesh, native->decode == rg::vu1native::Decode::Skinned);
                     }
                     else
                     {
@@ -1668,11 +1492,8 @@ public:
                     t_meshWriteCount = 0u;
                 }
                 // What the VU1 would have left in its memory, where it did
-                // not run: its memory is what buildMesh read the mesh from,
-                // so the bounds come from it.
-                rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top,
-                                                  meshed ? &m_nativeMesh : nullptr,
-                                                  meshed ? &m_nativeBounds : nullptr);
+                // not run.
+                rg::vu1native::applyMemoryEffects(*native, memory.getVU1Data(), top);
             }
         }
         t_vu1Tag = 0u;
@@ -1918,8 +1739,6 @@ private:
                 t_listOriginAt = 0u;
                 t_listHoles = &m_current.holes;
                 t_listHoleAt = 0u;
-                if (countingMeshRepeats())
-                    meshRepeatList();
                 retainList();
                 learnList();
                 if (!m_current.data.empty())
@@ -2043,11 +1862,10 @@ private:
     std::vector<uint8_t> m_codeSeen = std::vector<uint8_t>(PS2_VU1_CODE_SIZE);
     std::array<uint64_t, kCodeBlocks> m_blockHash{};
     bool m_codeSeenValid = false;
-    rg::vu1native::Monitor m_nativeMonitor{nativeMode()};
+    rg::vu1native::Monitor m_nativeMonitor;
     std::vector<std::vector<uint8_t>> m_nativePackets;
     std::vector<RegisterWrite> m_nativeWrites; // a mesh's, in their place
     GSNativeMesh m_nativeMesh;
-    rg::vu1native::Bounds m_nativeBounds; // buildMesh's, for applyMemoryEffects
     uint32_t m_modelId = 0u;              // the model chunk being drawn (t_model)
     bool m_outlineMesh = false;           // the chunk is outlines for the model stage (outlineDraw)
     bool m_particleMesh = false;          // the chunk is particles as a mesh (particleMesh)

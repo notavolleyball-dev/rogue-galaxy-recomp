@@ -105,7 +105,6 @@ struct Counts
     uint64_t meshes = 0, meshesNoState = 0, meshesSplit = 0, meshesWhole = 0, camerasNew = 0;
     uint64_t materialKnown = 0, textureMiss = 0, textureMissPsm = 0, textureMissTarget = 0, paletteMiss = 0, targetMiss = 0;
     uint64_t unknownBlend = 0, unknownClamp = 0, unknownWriteMask = 0, unknownOther = 0;
-    uint64_t triangles = 0, trianglesSkipped = 0;
     // Step 5b: 2D pieces made window-space mesh draws, and why not.
     uint64_t pieces = 0, piecesMade = 0, piecesNoState = 0, piecesNoTarget = 0, piecesNoSource = 0;
     uint64_t piecesFogged = 0, piecesFromTarget = 0, piecesSubTarget = 0, piecesCt24 = 0;
@@ -427,15 +426,10 @@ uint64_t keyOf(uint64_t hash, uint32_t a, uint32_t b, uint32_t c)
     return k ? k : 1u;
 }
 
-// The renderer's cull's counts (cullMesh, on its thread).
-std::atomic<uint64_t> g_triangles{0u}, g_trianglesSkipped{0u};
-
 std::string statsLine()
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
-    s.counts.triangles = g_triangles.load(std::memory_order_relaxed);
-    s.counts.trianglesSkipped = g_trianglesSkipped.load(std::memory_order_relaxed);
     const Counts &n = s.counts, &r = s.reported;
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
     std::string line = "[native-producer] texture levels " + d(n.levels, r.levels) + ": new " +
@@ -459,8 +453,7 @@ std::string statsLine()
                        d(n.paletteMiss, r.paletteMiss) + ", target " + d(n.targetMiss, r.targetMiss) +
                        "; unknown: blend " + d(n.unknownBlend, r.unknownBlend) + ", clamp " +
                        d(n.unknownClamp, r.unknownClamp) + ", write mask " + d(n.unknownWriteMask, r.unknownWriteMask) +
-                       ", other " + d(n.unknownOther, r.unknownOther) + "), triangles " +
-                       d(n.triangles, r.triangles) + " (skipped " + d(n.trianglesSkipped, r.trianglesSkipped) + ")" +
+                       ", other " + d(n.unknownOther, r.unknownOther) + ")" +
                        " | sampled a texture uploaded over a target " +
                        d(n.texturesOverTargets, r.texturesOverTargets) + " | 2D pieces " + d(n.pieces, r.pieces) + ": made " + d(n.piecesMade, r.piecesMade) +
                        " (from a target " + d(n.piecesFromTarget, r.piecesFromTarget) + ", as CT24 " +
@@ -2000,110 +1993,6 @@ bool hiddenDraw(uint32_t target, bool depthTested, bool reads, uint32_t source)
 
 } // namespace
 
-namespace
-{
-// The renderer's cull of a raw mesh draw (native::setMeshCull), on its
-// thread: the triangles the program draws into draw.indices, by the rule
-// and arithmetic mesh() applied on the producer's thread before.
-void cullMesh(native::MeshDraw &draw)
-{
-    GSNativeMesh::Header h;
-    std::memcpy(&h, draw.rawHeader, sizeof(h));
-    const uint32_t count = static_cast<uint32_t>(draw.raw.size());
-    draw.indices.clear();
-    // The triangles the program draws: a strip's every vertex from the
-    // third on, a list's every third, less those the program culls (the
-    // GS front end's rule for this mesh, gsNativeMeshSkips).
-    const bool culls = h.guardBand || h.backface;
-    thread_local std::vector<GSNativeMeshPoint> points;
-    if (culls)
-    {
-        // Only what the skip rule reads (px, py, outside), by the same
-        // operations as gsNativeMeshPoint, so the same bits.
-        points.resize(count);
-        const auto &m = h.matrix;
-        for (uint32_t k = 0; k < count; ++k)
-        {
-#if defined(__clang__)
-#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
-#endif
-            const native::RawVertex &v = draw.raw[k];
-            float clip[4];
-            for (int i = 0; i < 4; ++i)
-                clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
-            GSNativeMeshPoint &p = points[k];
-            p.q = gsNativeReciprocal(clip[3]);
-            p.px = clip[0] * p.q;
-            p.py = clip[1] * p.q;
-            p.outside = false;
-            if (h.guardBand)
-            {
-                const float projected[3] = {p.px, p.py, clip[2] * p.q};
-                for (int i = 0; i < 3; ++i)
-                {
-                    const float g = projected[i] * h.bandScale[i] + h.bandOffset[i] * h.bandScale[i];
-                    p.outside = p.outside || g > 1.0f || g < -1.0f;
-                }
-            }
-        }
-    }
-    const bool lists = h.triangleList != 0u;
-    const bool listCull = lists && h.backface;
-    float winding = listCull ? -h.winding : h.winding;
-    uint64_t skipped = 0u;
-    draw.indices.reserve(count >= 2u ? (count - 2u) * 3u : 0u);
-    for (uint32_t k = 1; k < count; ++k)
-    {
-        const bool judged = !listCull || k % 3u == 2u;
-        bool skip = culls && judged && gsNativeMeshSkips(h, points.data(), k, winding);
-        // A clipping chunk's triangle with a corner behind the eye (w < 0):
-        // its projected corner lands mirrored, so the projected facing has
-        // the wrong sign and a floor in front of the camera was culled at
-        // some angles. The VU1 judges such a triangle after its slot E has
-        // clipped it; here the GPU clips after, so the facing is judged in
-        // homogeneous terms: the projected one times the sign of the three
-        // w's product (the same as before while every w is positive).
-        if (h.clips && h.backface && judged && k >= 2u)
-        {
-            const float wSign = points[k - 2u].q * points[k - 1u].q * points[k].q;
-            if (wSign < 0.0f)
-            {
-                GSNativeMesh::Header facingOnly = h;
-                facingOnly.guardBand = 0u;
-                skip = gsNativeMeshSkips(facingOnly, points.data(), k, -winding);
-            }
-        }
-        // RG_NATIVE_NO_CULL=1 (debug): nothing culled or guard-band
-        // skipped here, to tell triangles this rule drops from ones the
-        // depth test loses.
-        static const bool noCull = [] {
-            const char *v = std::getenv("RG_NATIVE_NO_CULL");
-            const bool on = v && *v && *v != '0';
-            if (on)
-                std::fprintf(stderr, "[native] RG_NATIVE_NO_CULL: no triangle culled\n");
-            return on;
-        }();
-        if (noCull)
-            skip = false;
-        if (culls && !listCull)
-            winding = -winding;
-        const bool drawn = k >= 2u && (lists ? k % 3u == 2u : true);
-        if (!drawn)
-            continue;
-        if (skip)
-        {
-            ++skipped;
-            continue;
-        }
-        draw.indices.push_back(k - 2u);
-        draw.indices.push_back(k - 1u);
-        draw.indices.push_back(k);
-    }
-
-    g_triangles.fetch_add(draw.indices.size() / 3u, std::memory_order_relaxed);
-    g_trianglesSkipped.fetch_add(skipped, std::memory_order_relaxed);
-}
-} // namespace
 
 void nameSource(uint32_t source, const char *name)
 {
@@ -2114,7 +2003,9 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
           uint32_t retained, const ModelDraw *modelChunk)
 {
     const ModelDraw *const chunkModel = modelChunk;
-    if (!vu1Data)
+    // Every VU1 mesh is the model vertex stage's (M5): its row, and its
+    // inputs or its retained id.
+    if (!vu1Data || !chunkModel || !chunkModel->row)
         return false;
     // A model chunk's inputs, once, whatever becomes of this draw (M5).
     if (chunkModel && retained != 0u && chunkModel->define && chunkModel->inputs && !chunkModel->inputs->empty())
@@ -2145,37 +2036,19 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
     GSNativeMesh::Header h = mesh.header;
     if (h.clips && !guardClipped)
         h.guardBand = 0u;
-    const uint32_t count = retained != 0u ? 0u : static_cast<uint32_t>(mesh.vertices.size());
 
     native::MeshDraw draw;
     native::reuseMeshBuffers(draw);
     draw.source = source;
 
-    // The chunk as the program left it: the renderer culls it (cullMesh,
-    // on its thread) and makes its GPU vertices from these.
-    static const bool cullSet = (native::setMeshCull(&cullMesh), true);
-    (void)cullSet;
-    static_assert(sizeof(native::RawVertex) == sizeof(GSNativeMesh::Vertex) &&
-                      offsetof(native::RawVertex, u) == offsetof(GSNativeMesh::Vertex, u) &&
-                      offsetof(native::RawVertex, r) == offsetof(GSNativeMesh::Vertex, r) &&
-                      offsetof(native::RawVertex, depth) == offsetof(GSNativeMesh::Vertex, depth),
-                  "RawVertex is GSNativeMesh::Vertex, field for field");
-    static_assert(sizeof(GSNativeMesh::Header) <= sizeof(native::MeshDraw::rawHeader) &&
-                      std::is_trivially_copyable_v<GSNativeMesh::Header>,
-                  "the header fits MeshDraw::rawHeader");
-    native::reuseRawBuffer(draw);
-    const auto *rawFirst = reinterpret_cast<const native::RawVertex *>(mesh.vertices.data());
-    draw.raw.assign(rawFirst, rawFirst + count);
-    std::memcpy(draw.rawHeader, &h, sizeof(h));
-    std::memcpy(draw.rawColorMax, h.colorMax, sizeof(draw.rawColorMax));
-    draw.rawColorScale = kUnit;
-    if (retained != 0u || chunkModel)
+    std::memcpy(draw.modelColorMax, h.colorMax, sizeof(draw.modelColorMax));
+    draw.modelColorScale = kUnit;
     {
-        // The renderer draws it from its own buffer and judges the
-        // program's cull on the GPU (cullMesh's rule, from these). A model
-        // chunk drawn this once (no id) brings its inputs.
+        // The renderer draws it from its own buffer or the inputs it
+        // brings (a chunk drawn this once, with no id) and judges the
+        // program's cull on the GPU from these.
         draw.retained = retained;
-        if (chunkModel && retained == 0u && chunkModel->inputs)
+        if (retained == 0u && chunkModel->inputs)
         {
             draw.modelInputs = *chunkModel->inputs;
             draw.modelList = chunkModel->list;
@@ -2189,13 +2062,10 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
         draw.guardBand = h.guardBand != 0u;
         draw.backface = h.backface != 0u;
         draw.clips = h.clips != 0u;
-        if (chunkModel && chunkModel->row)
-        {
-            draw.hasModelRow = true;
-            draw.modelRow = *chunkModel->row;
-            if (chunkModel->palette)
-                draw.palette = *chunkModel->palette;
-        }
+        draw.hasModelRow = true;
+        draw.modelRow = *chunkModel->row;
+        if (chunkModel->palette)
+            draw.palette = *chunkModel->palette;
     }
     for (int i = 0; i < 4; ++i)
         draw.fog[i] = h.fog[i] * kFogUnit;

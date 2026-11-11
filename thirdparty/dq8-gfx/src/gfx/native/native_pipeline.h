@@ -53,16 +53,6 @@ void nameSource(uint32_t source, const char *name);
 void reuseMeshBuffers(MeshDraw &draw);
 void reuseMeshBuffers(Draw2D &draw);
 
-// MeshDraw::raw's buffer from the same pool (reuseMeshBuffers gives the
-// others). Any thread.
-void reuseRawBuffer(MeshDraw &draw);
-
-// The producer's cull for MeshDraw::raw draws: fills draw.indices with the
-// triangles the program draws. Called on the renderer's thread for each
-// such draw of a frame it draws, before anything else reads the draw.
-void setMeshCull(void (*cull)(MeshDraw &draw));
-void (*meshCull())(MeshDraw &draw);
-
 // A retained mesh's vertex (native_mesh_static.vert): its triangle's three
 // corners, its own UV and colour, which corner it is and the triangle's
 // place in the strip (the sign its winding has there).

@@ -45,9 +45,13 @@
 //            clamped to quad 39; ADC as its Cull says; then FOGCOL (quad 41
 //            behind tag quad 19, its low word zeroed with quad 87.y & 0x10)
 //            is kicked, then the chunk.
-// The other programs (Kind) are written out below, each by itself:
-// buildOutline, buildShadow, runOverlay, runBase, buildParticles,
-// buildProjector.
+// Every chunk of these is drawn by the renderer's model vertex stage
+// (native_model.vert) from the inputs and constants made here; this file no
+// longer makes a vertex. The other programs (Kind) are written out below,
+// each by itself: the outlines, shadow volumes and particles for the same
+// stage (outlineDraw, shadowMeshes, particleMesh), buildOutline and
+// buildShadow as their packet fallbacks, runOverlay and runBase for what
+// they leave in VU1 memory.
 // The arithmetic runs in the VU's rounding (toward zero), set around each
 // entry point (VuRounding): the compiler must not move float work across it.
 #pragma STDC FENV_ACCESS ON
@@ -410,12 +414,6 @@ void putWords(std::vector<uint8_t> &packet, uint32_t x, uint32_t y, uint32_t z, 
     putQuad(packet, words);
 }
 
-void putFloats(std::vector<uint8_t> &packet, float x, float y, float z, float w)
-{
-    const float words[4] = {x, y, z, w};
-    putQuad(packet, words);
-}
-
 // Vertex k's position as B leaves it: the int16 / 32768 times quad 77, then
 // skinned over `bones` bones (0: not skinned).
 void decodePosition(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, float position[3], bool raw = false)
@@ -436,56 +434,6 @@ void decodePosition(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, 
     if (bones != 0u)
     {
         skin(vu, positions + vu.half(top + 1u, 2) + k * 2u, bones, position);
-    }
-}
-
-// The skinning B's normals: as skin(), rows 0-2 only, of the normal scaled
-// by each weight.
-void skinNormal(const VuData &vu, uint32_t weights, uint32_t bones, float normal[3])
-{
-    const float scale = fromBits(0x3b808081u);
-    float acc[3] = {};
-    bool first = true;
-    for (uint32_t b = 0; b < bones; ++b)
-    {
-        const float w = static_cast<float>(vu.word(weights + 1u, b)) * scale;
-        const float scaled[3] = {normal[0] * w, normal[1] * w, normal[2] * w};
-        const uint32_t matrix = 900u + ((vu.half(weights, b) * 2u) & 0xFFFFu);
-        for (uint32_t row = 0; row < 3u; ++row)
-        {
-            const Vec4 m = vu.quad(matrix + row);
-            const float lanes[3] = {m.x, m.y, m.z};
-            for (int i = 0; i < 3; ++i)
-            {
-                const float product = lanes[i] * scaled[row];
-                acc[i] = first ? product : acc[i] + product;
-            }
-            first = false;
-        }
-    }
-    std::memcpy(normal, acc, sizeof(acc));
-}
-
-// Vertex k's normal as B leaves it: the int16 (at TOP+2 plus TOP.w) / 32768
-// times quad 78, then skinned.
-void decodeNormal(const VuData &vu, uint32_t top, uint32_t k, uint32_t bones, float normal[3], bool raw = false)
-{
-    const uint32_t normals = top + 2u + vu.half(top, 3);
-    const Vec4 scale = vu.quad(78);
-    if (raw)
-    {
-        for (uint32_t i = 0; i < 3u; ++i)
-            normal[i] = fromBits(static_cast<uint32_t>(vu.word(normals + k, i)));
-    }
-    else
-    {
-        normal[0] = itof15(vu.word(normals + k, 0)) * scale.x;
-        normal[1] = itof15(vu.word(normals + k, 1)) * scale.y;
-        normal[2] = itof15(vu.word(normals + k, 2)) * scale.z;
-    }
-    if (bones != 0u)
-    {
-        skinNormal(vu, top + 2u + vu.half(top + 1u, 2) + k * 2u, bones, normal);
     }
 }
 
@@ -570,26 +518,6 @@ float vuSin(float x)
         polynomial = c[i] + squared * polynomial;
     return x * polynomial;
 }
-
-// The ramp F (0594a063, UNVERIFIED: no recording holds it): u = (n . c + 1) /
-// 2 with c = (quad 100.x, 101.x, 102.x), v = 0; the sum in the VU's order.
-struct Ramp
-{
-    float c[3];
-
-    explicit Ramp(const VuData &vu)
-    {
-        c[0] = vu.quad(100).x;
-        c[1] = vu.quad(101).x;
-        c[2] = vu.quad(102).x;
-    }
-
-    void uv(const float n[3], float &u, float &v) const
-    {
-        u = ((c[0] * n[0] + c[1] * n[1]) + c[2] * n[2] + 1.0f) * 0.5f;
-        v = 0.0f;
-    }
-};
 
 // The beam's F (b1d29245; recorded): each position through quads 72-75 (the x,
 // y and w lanes, a column each), divided by w, y negated, taken from the
@@ -693,43 +621,6 @@ struct Wave
         const float ny = ((0.0f + c) * d + s * x) + a;
         x = nx;
         y = ny;
-    }
-};
-
-// The reflection F (ad209cd3): per vertex, W = the position through the
-// object matrix (quads 60-63, a column each), V = (W - quad 28) times ERLENG
-// (1 / its length), N = the normal through quads 64-66 (rotation only), r =
-// V - N * 2 (V.N); the UV is ((r.x + 1) / 2, (r.z + 1) / 2). Sums run in the
-// VU's order (the accumulator adds one product at a time).
-struct Reflection
-{
-    Vec4 col[4], rot[3], eye;
-
-    explicit Reflection(const VuData &vu)
-    {
-        for (uint32_t i = 0; i < 4u; ++i)
-            col[i] = vu.quad(60u + i);
-        for (uint32_t i = 0; i < 3u; ++i)
-            rot[i] = vu.quad(64u + i);
-        eye = vu.quad(28);
-    }
-
-    void uv(const float p[3], const float n[3], float &u, float &v) const
-    {
-        const float w[3] = {((col[0].x * p[0] + col[1].x * p[1]) + col[2].x * p[2]) + col[3].x * 1.0f,
-                            ((col[0].y * p[0] + col[1].y * p[1]) + col[2].y * p[2]) + col[3].y * 1.0f,
-                            ((col[0].z * p[0] + col[1].z * p[1]) + col[2].z * p[2]) + col[3].z * 1.0f};
-        const float d[3] = {w[0] - eye.x, w[1] - eye.y, w[2] - eye.z};
-        const float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-        const float inverse = length != 0.0f ? 1.0f / length : length;
-        const float vx = d[0] * inverse, vy = d[1] * inverse, vz = d[2] * inverse;
-        const float nx = (rot[0].x * n[0] + rot[1].x * n[1]) + rot[2].x * n[2];
-        const float ny = (rot[0].y * n[0] + rot[1].y * n[1]) + rot[2].y * n[2];
-        const float nz = (rot[0].z * n[0] + rot[1].z * n[1]) + rot[2].z * n[2];
-        const float dot = (vx * nx + vy * ny) + vz * nz;
-        const float twice = dot + dot;
-        u = ((vx - nx * twice) + 1.0f) * 0.5f;
-        v = ((vz - nz * twice) + 1.0f) * 0.5f;
     }
 };
 
@@ -873,134 +764,6 @@ void chunkHeader(const Program &program, const VuData &vu, uint32_t top, Chunk &
         }
     }
 
-}
-
-void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &chunk)
-{
-    chunkHeader(program, vu, top, chunk);
-    const uint32_t count = vu.half(top, 1);
-    const uint32_t positions = top + 2u;
-    const uint32_t uvs = positions + vu.half(top + 1u, 0);
-    const uint32_t colors = positions + vu.half(top + 1u, 1);
-    const Vec4 uvScale = vu.quad(79);
-    Vec4 material = vu.quad(82);
-    material.w *= vu.quad(81).w;
-    const Vec4 light = vu.quad(42);
-    const Vec4 ambient = vu.quad(83);
-    Vec4 colorBase{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
-                   material.z * light.z + ambient.z * 128.0f, material.w * light.w};
-    // Either C with 87.y & 0x200: quad 82 times 43, no ambient.
-    if ((program.color == Color::PerVertex || program.color == Color::Material) && (vu.half(87, 1) & 0x200u))
-    {
-        const Vec4 other = vu.quad(43);
-        colorBase = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
-    }
-    const bool perVertex = program.color == Color::PerVertex;
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    const bool lit = program.color == Color::Lit || program.color == Color::LitVertex || program.color == Color::LitPoint ||
-                      program.color == Color::LitPointVertex;
-    const bool normals = lit || program.uv == Uv::SphereMap || program.uv == Uv::Reflect || program.uv == Uv::Ramp ||
-                         program.uv == Uv::Swell;
-    const Lights lights(vu);
-    const PointLights points(vu);
-    const SphereMap sphere(vu);
-    const Wave wave(vu);
-    const Reflection reflection(vu);
-    const Ramp ramp(vu);
-    const Beam beam(vu);
-    const Swell swell(vu);
-    chunk.mesh.vertices.resize(count);
-    for (uint32_t k = 0; k < count; ++k)
-    {
-        GSNativeMesh::Vertex &v = chunk.mesh.vertices[k];
-        float position[3];
-        decodePosition(vu, top, k, bones, position, program.rawFloats);
-        if (program.uv == Uv::Wave)
-        {
-            wave.xy(position[0], position[1]);
-        }
-        if (program.uv == Uv::Swell)
-        {
-            float normal[3];
-            decodeNormal(vu, top, k, program.skinNormals ? bones : 0u, normal, program.rawFloats);
-            swell.push(position, normal);
-        }
-        v.x = position[0];
-        v.y = position[1];
-        v.z = position[2];
-        v.u = program.rawFloats ? fromBits(static_cast<uint32_t>(vu.word(uvs + k, 0))) : itof15(vu.word(uvs + k, 0)) * uvScale.x;
-        v.v = program.rawFloats ? fromBits(static_cast<uint32_t>(vu.word(uvs + k, 1))) : itof15(vu.word(uvs + k, 1)) * uvScale.y;
-        v.r = perVertex ? colorBase.x * itof15(vu.word(colors + k, 0)) * 256.0f : colorBase.x;
-        v.g = perVertex ? colorBase.y * itof15(vu.word(colors + k, 1)) * 256.0f : colorBase.y;
-        v.b = perVertex ? colorBase.z * itof15(vu.word(colors + k, 2)) * 256.0f : colorBase.z;
-        v.a = perVertex ? colorBase.w * itof15(vu.word(colors + k, 3)) * 256.0f : colorBase.w;
-        if (program.rawColor)
-        {
-            v.r = fromBits(static_cast<uint32_t>(vu.word(colors + k, 0)));
-            v.g = fromBits(static_cast<uint32_t>(vu.word(colors + k, 1)));
-            v.b = fromBits(static_cast<uint32_t>(vu.word(colors + k, 2)));
-            v.a = fromBits(static_cast<uint32_t>(vu.word(colors + k, 3)));
-        }
-        if (program.uv == Uv::Beam)
-            beam.uv(position, v.u, v.v);
-        if (program.white)
-            v.r = v.g = v.b = 128.0f;
-        if (normals)
-        {
-            float normal[3];
-            decodeNormal(vu, top, k, program.skinNormals ? bones : 0u, normal, program.rawFloats);
-            if (lit)
-            {
-                const Vec4 c = lights.shade(normal);
-                v.r = c.x;
-                v.g = c.y;
-                v.b = c.z;
-                v.a = c.w;
-                if (program.color == Color::LitPoint || program.color == Color::LitPointVertex)
-                {
-                    float rgb[3] = {c.x, c.y, c.z};
-                    points.add(position, normal, rgb);
-                    v.r = rgb[0];
-                    v.g = rgb[1];
-                    v.b = rgb[2];
-                }
-                if (program.color == Color::LitPointVertex)
-                {
-                    const float sign = (vu.half(87, 1) & 0x100u) ? -1.0f : 1.0f;
-                    const float lit[3] = {v.r, v.g, v.b};
-                    float out[3];
-                    for (uint32_t i = 0; i < 3u; ++i)
-                    {
-                        const float cv = itof15(vu.word(colors + k, i)) * 256.0f;
-                        out[i] = rg::fmax((lit[i] * cv) * sign, (lit[i] + cv * 128.0f) * -sign);
-                    }
-                    v.r = out[0];
-                    v.g = out[1];
-                    v.b = out[2];
-                    v.a = c.w * (itof15(vu.word(colors + k, 3)) * 256.0f);
-                }
-                if (program.color == Color::LitVertex)
-                {
-                    v.r = c.x * (itof15(vu.word(colors + k, 0)) * 256.0f);
-                    v.g = c.y * (itof15(vu.word(colors + k, 1)) * 256.0f);
-                    v.b = c.z * (itof15(vu.word(colors + k, 2)) * 256.0f);
-                    v.a = c.w * (itof15(vu.word(colors + k, 3)) * 256.0f);
-                }
-            }
-            if (program.uv == Uv::SphereMap)
-            {
-                sphere.uv(normal, v.u, v.v);
-            }
-            if (program.uv == Uv::Reflect)
-            {
-                reflection.uv(position, normal, v.u, v.v);
-            }
-            if (program.uv == Uv::Ramp)
-            {
-                ramp.uv(normal, v.u, v.v);
-            }
-        }
-    }
 }
 
 // The outline C. With TOP.x 19 the chunk's points come in fours: an edge
@@ -1460,166 +1223,6 @@ void runBase(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
     std::memcpy(data + 111u * 16u + 8u, &sign, 4u);
 }
 
-// The particle D (8ecadb3a). Per particle: a position (two quads: xyz, then
-// x and y scales and an angle), a color (floats, times 128, within 0-128),
-// two corner offsets and two UVs (xy of two quads each). The quad faces the
-// eye (quad 28): its axes are e x (0, 1, 0) and e x that, normalized (e
-// from the particle to the eye), scaled, and turned by the angle, whose
-// cosine and sine come from a polynomial in a triangle wave of the angle /
-// 2 pi. Its corners (offset x, offset y) go through the window matrix
-// (quads 12-15 times 8-11 times 24-27) and the divide, and through clip
-// space (8-11 times 24-27, x and y times 16.xy): one corner outside its w
-// sets ADC on all four, else the XYZF2 word w is 0x7fff (fog 0xff). Out:
-// the FOGCOL packet, then the header and per particle PRIM 4 (its low word
-// only: the rest of the quad is the buffer's) and four vertices of ST,
-// RGBA, XYZF2.
-float particleCosine(float angle)
-{
-    const float p = std::fabs(angle) * fromBits(0xbe22f987u); // -1 / 2 pi
-    const float magic = fromBits(0x4b400000u);               // 1.5 * 2^23
-    const float fraction = ((p - magic) + magic) - p;
-    const float t = std::fabs(fraction - 0.5f) - 0.25f;
-    const float t2 = t * t, t4 = t2 * t2, t8 = t4 * t4;
-    const float a3 = t * fromBits(0xc2255de0u) * t2;
-    const float a7 = t * fromBits(0xc2992661u) * t2 * t4;
-    const float a5 = t * fromBits(0x42a33457u) * t4;
-    const float a1 = t * fromBits(0x40c90fdau);
-    const float a9 = t * fromBits(0x421ed7b7u) * t8;
-    return a3 + a7 + a5 + a1 + a9;
-}
-
-// 1 / sqrt(|x|), as the runtime's RSQRT gives it (the most float at 0).
-float vuReciprocalRoot(float x)
-{
-    const float root = std::sqrt(std::fabs(x));
-    return root != 0.0f ? 1.0f / root : std::numeric_limits<float>::max();
-}
-
-// 1 / x, as the runtime's DIV gives it.
-float vuReciprocal(float x)
-{
-    return gsNativeReciprocal(x);
-}
-
-void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets)
-{
-    packets.clear();
-    std::vector<uint8_t> &fog = packets.emplace_back();
-    uint32_t fogTag[4];
-    std::memcpy(fogTag, vu.bytes(19), sizeof(fogTag));
-    putWords(fog, 0x8001u, fogTag[1], fogTag[2], fogTag[3]);
-    putQuad(fog, vu.bytes(41));
-    if (vu.half(87, 1) & 0x10u)
-    {
-        std::memset(fog.data() + 16u, 0, 4u);
-    }
-
-    const uint32_t count = vu.half(top, 1);
-    const uint32_t positions = top + 2u;
-    const uint32_t offsets = positions + vu.half(top, 3);
-    const uint32_t uvs = positions + vu.half(top + 1u, 0);
-    const uint32_t colors = positions + vu.half(top + 1u, 1);
-    // Where A puts the output (TOP + 76.x), the vertices 4 quads on.
-    const uint32_t output = top + vu.half(76, 0) + 4u;
-    std::vector<uint8_t> &packet = packets.emplace_back();
-    packet.reserve(64u + count * 208u);
-    putQuad(packet, vu.bytes(0));
-    putWords(packet, 4u, 0u, 0u, 0u);
-    putWords(packet, vu.half(87, 0), 0u, 27u, 0u);
-    uint32_t tag[4];
-    std::memcpy(tag, vu.bytes(86), sizeof(tag));
-    tag[0] = vu.half(top, 2);
-    putQuad(packet, tag);
-
-    Vec4 camera[4], window[4], clip[4], model[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        camera[i] = vu.quad(8u + i);
-        model[i] = vu.quad(60u + i);
-    }
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        window[i] = vu.quad(12u + i);
-    }
-    const Vec4 viewport = vu.quad(16);
-    Vec4 rows[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        clip[i] = transform(camera, vu.quad(24u + i));
-        rows[i] = transform(window, clip[i]);
-        clip[i].x *= viewport.x;
-        clip[i].y *= viewport.y;
-    }
-    const Vec4 eye = vu.quad(28);
-    const float halfPi = fromBits(0x3fc90fd8u);
-
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        const Vec4 p = vu.quad(positions + 2u * i), shape = vu.quad(positions + 2u * i + 1u);
-        const Vec4 world = transform(model, {p.x, p.y, p.z, 1.0f});
-        const float ex = eye.x - world.x, ey = eye.y - world.y, ez = eye.z - world.z;
-        const float rx = 0.0f + ez, ry = 0.0f, rz = 0.0f - ex;
-        const float rr = rx * rx + ry * ry + rz * rz;
-        const float ux = ey * rz - ry * ez, uy = ez * rx - rz * ex, uz = ex * ry - rx * ey;
-        const float uu = ux * ux + uy * uy + uz * uz;
-        const float rq = vuReciprocalRoot(rr), uq = vuReciprocalRoot(uu);
-        const float rs[3] = {rx * rq * shape.x, ry * rq * shape.x, rz * rq * shape.x};
-        const float us[3] = {ux * uq * shape.y, uy * uq * shape.y, uz * uq * shape.y};
-        const float c = 0.0f - particleCosine(shape.z - halfPi), s = particleCosine(shape.z);
-        float a[3], b[3];
-        for (int l = 0; l < 3; ++l)
-        {
-            a[l] = rs[l] * s - us[l] * c;
-            b[l] = rs[l] * c + us[l] * s;
-        }
-        const Vec4 o0 = vu.quad(offsets + 2u * i), o1 = vu.quad(offsets + 2u * i + 1u);
-        const Vec4 uv0 = vu.quad(uvs + 2u * i), uv1 = vu.quad(uvs + 2u * i + 1u);
-        const float corners[4][2] = {{o0.x, o0.y}, {o1.x, o0.y}, {o0.x, o1.y}, {o1.x, o1.y}};
-        const float texels[4][2] = {{uv0.x, uv0.y}, {uv1.x, uv0.y}, {uv0.x, uv1.y}, {uv1.x, uv1.y}};
-
-        const Vec4 color = vu.quad(colors + i);
-        const float lanes[4] = {color.x, color.y, color.z, color.w};
-        uint32_t rgba[4];
-        for (int l = 0; l < 4; ++l)
-        {
-            rgba[l] = static_cast<uint32_t>(
-                gsNativeFtoi(rg::fmax(rg::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
-        }
-        uint32_t st[4][4], xyz[4][4];
-        bool outside = false;
-        for (uint32_t v = 0; v < 4u; ++v)
-        {
-            float k[3];
-            for (int l = 0; l < 3; ++l)
-            {
-                k[l] = b[l] * corners[v][1] + (&world.x)[l] + a[l] * corners[v][0];
-            }
-            const Vec4 corner{k[0], k[1], k[2], 1.0f};
-            const Vec4 screen = transform(rows, corner);
-            outside = outside || clipsOwnW(transform(clip, corner));
-            const float q = vuReciprocal(screen.w);
-            const float stq[4] = {texels[v][0] * q, texels[v][1] * q, 1.0f * q, 1.0f * q};
-            std::memcpy(st[v], stq, sizeof(stq));
-            xyz[v][0] = static_cast<uint32_t>(gsNativeFtoi(screen.x * q, 16.0f));
-            xyz[v][1] = static_cast<uint32_t>(gsNativeFtoi(screen.y * q, 16.0f));
-            xyz[v][2] = static_cast<uint32_t>(gsNativeFtoi(screen.z * q, 16.0f));
-        }
-        const uint32_t adc = outside ? 0x8000u : 0x7fffu;
-        // PRIM: ISW writes the low word only; the rest is what the buffer held.
-        uint32_t prim[4];
-        std::memcpy(prim, vu.bytes(output + 13u * i), sizeof(prim));
-        prim[0] = 4u;
-        putQuad(packet, prim);
-        for (uint32_t v = 0; v < 4u; ++v)
-        {
-            xyz[v][3] = adc;
-            putQuad(packet, st[v]);
-            putQuad(packet, rgba);
-            putQuad(packet, xyz[v]);
-        }
-    }
-}
-
 // The particles for the model vertex stage (M5, flag 32 of the row): each
 // particle six inputs (its strip's triangles 0 1 2 and 1 2 3 as a list),
 // each with the particle's position, its shape (bones: x, y and the angle),
@@ -1717,168 +1320,6 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
             v.color[2] = color.z;
             v.color[3] = color.w;
         }
-    }
-}
-
-// The projected texture program. F: each vertex's UV is its position through
-// quads 30-33 times the model rows (60-63; x, y and w lanes), divided by w,
-// and its color (128, 128, 128, 82.w * 81.w * 128), unclamped. C, a strip
-// D of its own: the transform (68-71), the divide, z times 87.z at most 1.y,
-// fog; vertex j's ADC from the guard band of j and of the two before it
-// (the origin before the first; the earlier two tested with their scaled
-// z), and the triangle's facing, skipped when cross * winding > 0. The
-// XYZF2 word w is then its low half with ADC: the fog's for every vertex
-// but the first, whose low half is what the buffer held.
-void buildProjector(const Program &program, const VuData &vu, uint32_t top,
-                    std::vector<std::vector<uint8_t>> &packets)
-{
-    Chunk chunk;
-    readChunk(program, vu, top, chunk);
-    packets.clear();
-    packets.push_back(std::move(chunk.fog));
-    std::vector<uint8_t> &packet = packets.emplace_back();
-    const uint32_t count = vu.half(top, 1);
-    packet.reserve(64u + count * 48u);
-    for (const auto &quad : chunk.header)
-    {
-        putQuad(packet, quad);
-    }
-    Vec4 model[4], projector[4], window[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        model[i] = vu.quad(60u + i);
-        projector[i] = vu.quad(30u + i);
-        window[i] = vu.quad(68u + i);
-    }
-    Vec4 texture[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        texture[i] = transform(projector, model[i]);
-    }
-    const uint32_t rgba[4] = {128u, 128u, 128u,
-                              static_cast<uint32_t>(gsNativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f))};
-    const Vec4 fog = vu.quad(40), viewport = vu.quad(16), band = vu.quad(17), offset = vu.quad(18);
-    const float bandScale[3] = {band.x * viewport.x, band.y * viewport.y, band.z};
-    const float bandOffset[3] = {offset.x * bandScale[0], offset.y * bandScale[1], offset.z * bandScale[2]};
-    const auto outside = [&](const float p[3]) {
-        bool out = false;
-        for (int i = 0; i < 3; ++i)
-        {
-            const float g = p[i] * bandScale[i] + bandOffset[i];
-            out = out || g > 1.0f || g < -1.0f;
-        }
-        return out;
-    };
-    float winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? -1.0f : 1.0f);
-    const float depthScale = vu.quad(87).z, depthMax = vu.quad(1).y;
-    const uint32_t output = top + vu.half(76, 0) + 4u;
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    // The two vertices before (scaled z), and whether each is outside.
-    float before[2][3] = {};
-    bool outBefore[2] = {outside(before[0]), outside(before[1])};
-    // A triangle list goes through C's own path: each triangle judged once,
-    // at its last vertex, from its three vertices' guard band (each with its
-    // z unscaled) and its facing with the first triangle's sign throughout;
-    // only that vertex's XYZF2 word w is cut to its low half and ADC.
-    const bool list = (vu.half(top, 0) & 7u) == 3u;
-    bool rawBefore[2] = {false, false};
-    for (uint32_t j = 0; j < count; ++j)
-    {
-        float position[3];
-        decodePosition(vu, top, j, bones, position);
-        const Vec4 point{position[0], position[1], position[2], 1.0f};
-        const Vec4 t = transform(texture, point);
-        const float tq = vuReciprocal(t.w);
-        const float u = t.x * tq, v = t.y * tq;
-        const Vec4 c = transform(window, point);
-        const float q = vuReciprocal(c.w);
-        const float raw[3] = {c.x * q, c.y * q, c.z * q};
-        const float scaled[3] = {raw[0], raw[1], rg::fmin(raw[2] * depthScale, depthMax)};
-        const float f = rg::fmax(rg::fmin(fog.x * 1.0f + fog.w * c.w, fog.y), fog.z);
-        const float ax = before[1][0] - before[0][0], ay = before[1][1] - before[0][1];
-        const float bx = scaled[0] - before[1][0], by = scaled[1] - before[1][1];
-        if (j != 0u && !list)
-        {
-            winding = 0.0f - winding;
-        }
-        const float facing = (ax * by - bx * ay) * winding;
-        const bool rawOut = outside(raw);
-        const uint32_t fogWord = static_cast<uint32_t>(gsNativeFtoi(f, 16.0f));
-        uint32_t w;
-        if (list)
-        {
-            const bool hidden = j % 3u == 2u && (rawOut || rawBefore[0] || rawBefore[1] || facing > 0.0f);
-            w = j % 3u != 2u ? fogWord : (fogWord & 0xFFFFu) | (hidden ? 0x8000u : 0u);
-        }
-        else
-        {
-            const bool hidden = rawOut || outBefore[0] || outBefore[1] || facing > 0.0f;
-            const uint32_t low = j == 0u ? static_cast<uint32_t>(vu.word(output + 2u, 3)) : fogWord;
-            w = (low & 0xFFFFu) | (hidden ? 0x8000u : 0u);
-        }
-        const float stq[4] = {u * q, v * q, 1.0f * q, 0.0f};
-        putQuad(packet, stq);
-        putQuad(packet, rgba);
-        putWords(packet, static_cast<uint32_t>(gsNativeFtoi(scaled[0], 16.0f)),
-                 static_cast<uint32_t>(gsNativeFtoi(scaled[1], 16.0f)),
-                 static_cast<uint32_t>(gsNativeFtoi(scaled[2], 16.0f)), w);
-        rawBefore[0] = rawBefore[1];
-        rawBefore[1] = rawOut;
-        std::memcpy(before[0], before[1], sizeof(before[0]));
-        std::memcpy(before[1], scaled, sizeof(scaled));
-        outBefore[0] = outBefore[1];
-        outBefore[1] = outside(scaled);
-    }
-}
-
-// The projected texture's chunk as a mesh (buildProjector's arithmetic, for
-// the GPU): the UV the position through the projector, divided by its w,
-// per vertex (the shader then interpolates it as ST / Q, as the GS does the
-// program's ST), the color (128, 128, 128, 82.w * 81.w * 128), the guard
-// band and the facing as C tests them. C flips its sign before judging each
-// vertex and gsNativeMeshSkips after, so at every triangle the mesh's sign is
-// the opposite of C's: the header holds C's starting sign negated, as
-// readChunk's does for D (a triangle list, which C judges with the starting
-// sign throughout, takes -winding there, so it agrees too).
-void projectorMesh(const Program &program, const VuData &vu, uint32_t top, GSNativeMesh &mesh)
-{
-    Vec4 projector[4], texture[4];
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        projector[i] = vu.quad(30u + i);
-    }
-    for (uint32_t i = 0; i < 4u; ++i)
-    {
-        texture[i] = transform(projector, vu.quad(60u + i));
-    }
-    GSNativeMesh::Header &h = mesh.header;
-    h.guardBand = 1u;
-    h.backface = 1u;
-    h.winding = vu.quad(111).z * ((vu.half(87, 1) & 0x1000u) ? 1.0f : -1.0f);
-    h.depthScale = vu.quad(87).z;
-    h.depthMax = vu.quad(1).y;
-    for (float &c : h.colorMax)
-    {
-        c = 255.0f;
-    }
-    const float alpha = static_cast<float>(gsNativeFtoi(vu.quad(82).w * vu.quad(81).w * 128.0f, 1.0f));
-    const uint32_t count = vu.half(top, 1);
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    mesh.vertices.resize(count);
-    for (uint32_t j = 0; j < count; ++j)
-    {
-        float position[3];
-        decodePosition(vu, top, j, bones, position);
-        const Vec4 t = transform(texture, Vec4{position[0], position[1], position[2], 1.0f});
-        const float tq = vuReciprocal(t.w);
-        GSNativeMesh::Vertex &v = mesh.vertices[j];
-        v.x = position[0];
-        v.y = position[1];
-        v.z = position[2];
-        v.u = t.x * tq;
-        v.v = t.y * tq;
-        v.r = v.g = v.b = 128.0f;
-        v.a = alpha;
     }
 }
 
@@ -2179,89 +1620,9 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
 namespace
 {
 
-// The bounds a depth-and-bounds chunk leaves: quads 98 and 99 as they were,
-// widened lane by lane by each vertex's projected x, y, z and fog. Only
-// those four of gsNativeMeshPoint, by the same operations in the same
-// order, so the same bits.
-void widenBounds(const GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
-{
-#if defined(__clang__)
-#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
-#endif
-    const GSNativeMesh::Header &h = mesh.header;
-    const auto &m = h.matrix;
-    float *lo = &least.x, *hi = &most.x;
-    for (const GSNativeMesh::Vertex &v : mesh.vertices)
-    {
-        float clip[4];
-        for (int i = 0; i < 4; ++i)
-            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
-        const float q = gsNativeReciprocal(clip[3]);
-        const float z = clip[2] * q;
-        const float lanes[4] = {clip[0] * q, clip[1] * q, rg::fmin(z * h.depthScale, h.depthMax),
-                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
-        for (int i = 0; i < 4; ++i)
-        {
-            lo[i] = rg::fmin(lo[i], lanes[i]);
-            hi[i] = rg::fmax(hi[i], lanes[i]);
-        }
-    }
-}
-
-// A mesh's depths (buildMesh's, gsNativeMeshDepth) and its bounds
-// (widenBounds) in one pass: both project the vertex with the same matrix,
-// and the depth is the bounds' z lane in whole units. The same operations in
-// the same order as the two apart, so the same bits; apart they were a
-// tenth of the VIF1 thread (2026-11-09).
-void depthsAndBounds(GSNativeMesh &mesh, Vec4 &least, Vec4 &most)
-{
-#if defined(__clang__)
-#pragma clang fp contract(off) // rounded as the VU1's separate multiply and add
-#endif
-    const GSNativeMesh::Header &h = mesh.header;
-    const auto &m = h.matrix;
-    float *lo = &least.x, *hi = &most.x;
-    for (GSNativeMesh::Vertex &v : mesh.vertices)
-    {
-        float clip[4];
-        for (int i = 0; i < 4; ++i)
-            clip[i] = v.x * m[0][i] + v.y * m[1][i] + v.z * m[2][i] + m[3][i];
-        const float q = gsNativeReciprocal(clip[3]);
-        const float z = clip[2] * q;
-        const float pz = rg::fmin(z * h.depthScale, h.depthMax);
-        const float lanes[4] = {clip[0] * q, clip[1] * q, pz,
-                                rg::fmax(rg::fmin(h.fog[0] + h.fog[3] * clip[3], h.fog[1]), h.fog[2])};
-        for (int i = 0; i < 4; ++i)
-        {
-            lo[i] = rg::fmin(lo[i], lanes[i]);
-            hi[i] = rg::fmax(hi[i], lanes[i]);
-        }
-        v.depth = static_cast<float>((static_cast<uint32_t>(gsNativeFtoi(pz, 16.0f)) >> 4) & 0xFFFFFFu);
-    }
-}
-
-// `built`: the chunk as buildMesh made it from this same data memory, so as
-// not to read it again; null to read it here.
-void boundsAfter(const Program &program, const uint8_t *data, uint32_t top, Vec4 &least, Vec4 &most,
-                 const GSNativeMesh *built = nullptr)
-{
-    const VuData vu(data);
-    least = vu.quad(98);
-    most = vu.quad(99);
-    if (built)
-    {
-        widenBounds(*built, least, most);
-        return;
-    }
-    Chunk chunk;
-    readChunk(program, vu, top, chunk);
-    widenBounds(chunk.mesh, least, most);
-}
-
 } // namespace
 
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built,
-                        const Bounds *bounds)
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top)
 {
     if (program.kind == Kind::Overlay)
     {
@@ -2282,28 +1643,10 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, con
         std::memcpy(data + 1023u * 16u, &word, sizeof(word));
         return;
     }
-    if (!program.depthBounds || !program.bounds)
-    {
-        return;
-    }
-    if (bounds && bounds->made)
-    {
-        // buildMesh's, from this data memory as it still is.
-        std::memcpy(data + 98u * 16u, bounds->least, sizeof(bounds->least));
-        std::memcpy(data + 99u * 16u, bounds->most, sizeof(bounds->most));
-        return;
-    }
-    const VuRounding rounding;
-    Vec4 least, most;
-    // A projector's mesh is rewritten after the read (projectorMesh), and a
-    // program without a mesh has none: those read the chunk here.
-    if (built && (program.kind == Kind::Projector || !hasMesh(program)))
-        built = nullptr;
-    boundsAfter(program, data, top, least, most, built);
-    std::memcpy(data + 98u * 16u, &least, sizeof(least));
-    std::memcpy(data + 99u * 16u, &most, sizeof(most));
+    // The bounds the depth-and-bounds D pieces keep in quads 98 and 99 are
+    // read only by the overlay B, inside a composite tail whose overlay is
+    // M3's ObjectLayer pass (docs/NATIVE-ONLY-NOTES.md, "M5"): not kept.
 }
-
 
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
@@ -2332,121 +1675,7 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
         packets.push_back(gifPacket(VuData(data), 19));
         return;
     }
-    if (program.kind == Kind::Particles)
-    {
-        buildParticles(VuData(data), top, packets);
-        return;
-    }
-    if (program.kind == Kind::Projector)
-    {
-        buildProjector(program, VuData(data), top, packets);
-        return;
-    }
-    Chunk chunk;
-    readChunk(program, VuData(data), top, chunk);
-    packets.clear();
-    packets.push_back(std::move(chunk.fog));
-
-    // The output as D writes it: the header, then ST, RGBAQ and XYZF2 per
-    // vertex, ADC as the program's culling says (ISW keeps only the low half
-    // of the word it sets).
-    const GSNativeMesh &mesh = chunk.mesh;
-    const uint32_t count = static_cast<uint32_t>(mesh.vertices.size());
-    std::vector<uint8_t> &packet = packets.emplace_back();
-    packet.reserve(64u + count * 48u);
-    for (const auto &quad : chunk.header)
-    {
-        putQuad(packet, quad);
-    }
-    std::vector<GSNativeMeshPoint> points(count);
-    for (uint32_t k = 0; k < count; ++k)
-    {
-        const GSNativeMeshPoint &p = points[k] = gsNativeMeshPoint(mesh.header, mesh.vertices[k]);
-        if (program.rawColor)
-            putFloats(packet, 0.0f, 0.0f, 1.0f, 0.0f);
-        else if (program.affine)
-            putFloats(packet, mesh.vertices[k].u, mesh.vertices[k].v, 1.0f, 0.0f);
-        else
-            putFloats(packet, p.s, p.t, p.q, 0.0f);
-        putWords(packet, static_cast<uint32_t>(p.rgba[0]), static_cast<uint32_t>(p.rgba[1]),
-                 static_cast<uint32_t>(p.rgba[2]), static_cast<uint32_t>(p.rgba[3]));
-        putWords(packet, static_cast<uint32_t>(p.x16), static_cast<uint32_t>(p.y16), static_cast<uint32_t>(p.z16),
-                 static_cast<uint32_t>(p.f16));
-    }
-    if (program.cull != Cull::None)
-    {
-        // The culling pieces clear the clip flags, then set each vertex's
-        // ADC from the last three judgments: the first vertex's from its
-        // own. (It never draws; it is in the packet.)
-        // The backface pieces' list path judges each triangle once, at its
-        // last vertex, with the sign the strips' first triangle has.
-        const bool lists = mesh.header.triangleList && mesh.header.backface;
-        if (count != 0u && points[0].outside && !lists)
-        {
-            const uint32_t w = (static_cast<uint32_t>(points[0].f16) & 0xFFFFu) | 0x8000u;
-            std::memcpy(packet.data() + 64u + 2u * 16u + 12u, &w, 4u);
-        }
-        float winding = lists ? -mesh.header.winding : mesh.header.winding;
-        for (uint32_t k = 1; k < count; ++k)
-        {
-            const bool skip = (!lists || k % 3u == 2u) && gsNativeMeshSkips(mesh.header, points.data(), k, winding);
-            if (!lists)
-                winding = -winding;
-            const uint32_t w = (static_cast<uint32_t>(points[k].f16) & 0xFFFFu) | (skip ? 0x8000u : 0u);
-            std::memcpy(packet.data() + 64u + (k * 3u + 2u) * 16u + 12u, &w, 4u);
-        }
-    }
-}
-
-void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
-               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds)
-{
-    if (bounds)
-        bounds->made = false;
-    if (!hasMesh(program))
-    {
-        buildChunk(program, data, top, packets);
-        mesh.vertices.clear();
-        mesh.header.vertexCount = 0u;
-        return;
-    }
-    const VuRounding rounding;
-    Chunk chunk;
-    readChunk(program, VuData(data), top, chunk);
-    if (program.kind == Kind::Projector)
-    {
-        projectorMesh(program, VuData(data), top, chunk.mesh);
-    }
-    packets.clear();
-    packets.push_back(std::move(chunk.fog));
-    // PRIM and PRMODE behind the program's GIF tag, made the packet's end.
-    std::vector<uint8_t> &state = packets.emplace_back();
-    uint32_t tag[4];
-    std::memcpy(tag, chunk.header[0], sizeof(tag));
-    tag[0] |= 0x8000u;
-    putQuad(state, tag);
-    putQuad(state, chunk.header[1]);
-    putQuad(state, chunk.header[2]);
-    // The Z exactly as the program has it: the GPU rounds to nearest. With
-    // the bounds the program keeps, where they come from this same mesh
-    // (not a projector's, rewritten above): quads 98 and 99 widened by it.
-    if (bounds && program.depthBounds && program.bounds && program.kind != Kind::Projector)
-    {
-        const VuData vu(data);
-        Vec4 least = vu.quad(98), most = vu.quad(99);
-        depthsAndBounds(chunk.mesh, least, most);
-        std::memcpy(bounds->least, &least, sizeof(bounds->least));
-        std::memcpy(bounds->most, &most, sizeof(bounds->most));
-        bounds->made = true;
-    }
-    else
-    {
-        for (GSNativeMesh::Vertex &v : chunk.mesh.vertices)
-        {
-            v.depth = gsNativeMeshDepth(chunk.mesh.header, v);
-        }
-    }
-    mesh = std::move(chunk.mesh);
+    packets.clear(); // (every other program is the model vertex stage's)
 }
 
 // --- M5: the strip programs on the GPU (native_model.vert) ---------------
@@ -2764,14 +1993,6 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
     }
 }
 
-Mode modeFromEnvironment()
-{
-    const char *value = std::getenv("RG_VU1_NATIVE");
-    if (value && *value && std::strcmp(value, "gpu") != 0)
-        std::fprintf(stderr, "[vu1native] RG_VU1_NATIVE=%s ignored: the check mode is gone (M5)\n", value);
-    return Mode::Gpu;
-}
-
 void Monitor::declined(const Program &program, const char *reason)
 {
     ++m_declined[std::string(program.name) + ": " + reason];
@@ -2801,7 +2022,6 @@ void Monitor::tick()
     {
         left += " [" + reason + "]=" + std::to_string(count);
     }
-    (void)m_mode;
     std::fprintf(stderr, "[vu1native] gpu: native chunks%s; left to the VU1%s",
                  line.empty() ? " none" : line.c_str(), left.empty() ? " none" : left.c_str());
     std::fprintf(stderr, "\n");

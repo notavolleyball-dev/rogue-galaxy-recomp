@@ -59,7 +59,7 @@ struct DrawRow {
     // test's reference, w: the shuffle's scale.
     vec4 units;
     // x: what a raw vertex color is worth once capped (MeshDraw's
-    // rawColorScale).
+    // modelColorScale).
     vec4 vertexUnits;
 };
 layout(std430, set = 2, binding = 2) readonly buffer Draws {

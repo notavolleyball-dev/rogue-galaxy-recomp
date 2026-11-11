@@ -125,7 +125,7 @@ struct Program
 };
 
 // Whether the program's chunks are meshes (the model vertex stage's); if
-// not, the GPU path sends buildChunk's packets.
+// not, the VIF1 thread sends buildChunk's packets.
 inline bool hasMesh(const Program &program)
 {
     return program.kind == Kind::Strip || program.kind == Kind::Projector;
@@ -173,32 +173,17 @@ const char *declineChunk(const Program &program, const uint8_t *data, uint32_t t
 // other pieces.
 std::string describePieces(const uint8_t *code, uint32_t startPC);
 
-// What the program leaves in VU1 data memory that a later run, or the EE,
-// may read: the bounds in quads 98 and 99 for the programs with
-// `depthBounds`. `apply` writes it where the VU1 did not run (skip, gpu);
-// `matches` says whether the VU1 left the same (check), from the data
-// memory before the run and after it. `built`, when given: the chunk as
-// buildMesh made it from this same data memory, not read again.
-// `bounds`, when buildMesh made them: written as they are.
-struct Bounds
-{
-    bool made = false;
-    float least[4] = {}, most[4] = {};
-};
-void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top, const GSNativeMesh *built = nullptr,
-                        const Bounds *bounds = nullptr);
+// What the program leaves in VU1 data memory that a later run reads, where
+// the VU1 did not run: the overlay's and base piece's runs, the outline's
+// count at quad 1023.
+void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 
-// The GS packets the program kicks for that chunk, in order.
+// The GS packets the program kicks for that chunk, in order: the programs
+// the model vertex stage does not draw (the overlay, the base piece) and
+// the fallbacks (a shadow chunk whose packets set no RGBAQ, an outline
+// chunk of no whole edge).
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets);
-
-// The chunk as a mesh: the packets that set the GS state it draws under
-// (FOGCOL, PRIM and PRMODE), to go first, and the strip itself, for
-// GS::submitNativeMesh. With `bounds`, and a program that keeps them
-// (applyMemoryEffects), they are made in the pass that gives each vertex its
-// depth: the same projection of the same vertex, done once instead of twice.
-void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
-               std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds = nullptr);
 
 // M5 of docs/NATIVE-ONLY.md: a strip program's chunks drawn by the
 // renderer's model vertex stage (native_model.vert), which runs B, F and C
@@ -237,24 +222,14 @@ void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gf
               std::vector<float> &palette, uint32_t knownSlots = ~0u);
 uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top);
 
-// The chunks done natively are sent as meshes the renderer draws, without
-// running the VU1. (The check mode that compared them with the VU1's
-// packets, the RG_VU1_REPLAY recordings and the oracle went in M5 of
-// docs/NATIVE-ONLY.md: the GPU runs the strip programs now.)
-enum class Mode : uint8_t
-{
-    Gpu,
-};
-Mode modeFromEnvironment();
-
-// What the VIF1 thread did with each strip chunk, and in check mode how the
-// VU1's packets compare with the native ones (within 1/16 pixel, 16 Z units,
-// one color level and 1e-5 of STQ); a line every two seconds, and the first
-// few differences in full.
+// What the VIF1 thread did with each chunk: drawn natively (the model
+// vertex stage, or buildChunk's packets), or left to the VU1 and why; a
+// line every two seconds. (The check mode that compared them with the
+// VU1's packets, the RG_VU1_REPLAY recordings, the oracle and the CPU mesh
+// path went in M5 of docs/NATIVE-ONLY.md: the GPU runs the programs now.)
 class Monitor
 {
 public:
-    explicit Monitor(Mode mode) : m_mode(mode) {}
 
     void native(const Program &program) { ++m_native[program.name]; }
     void declined(const Program &program, const char *reason);
@@ -262,7 +237,6 @@ public:
     void tick();
 
 private:
-    Mode m_mode;
     std::map<std::string, uint64_t> m_native;
     std::map<std::string, uint64_t> m_declined;
     int64_t m_next = 0;

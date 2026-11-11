@@ -265,17 +265,6 @@ struct Vertex
     float fog = 1.0f;
 };
 
-// A VU1 chunk's vertex as the program left it (the producer's
-// GSNativeMesh::Vertex, field for field): object space, UVs before the
-// divide, colour before its cap, the program's own Z (depth, unused here).
-struct RawVertex
-{
-    float x, y, z;
-    float u, v;
-    float r, g, b, a;
-    float depth;
-};
-
 // A model chunk's vertex as the game's VU1 program reads it, before the
 // program (M5 of the game's docs/NATIVE-ONLY.md): the int values of its
 // position, normal, UV and color, its bones' palette slots (0-35) and their
@@ -335,15 +324,11 @@ struct MeshDraw
     float depthScale = 1.0f;
     float depthBias = 0.0f;
     float depthCap = 3.402823466e38f;
-    // Instead of vertices and indices: a VU1 chunk as the program left it.
-    // The renderer makes its triangles on its own thread through the cull
-    // the producer set (setMeshCull, which reads rawHeader, the producer's
-    // own description of the chunk), and its GPU vertices straight from
-    // these, each colour capped at rawColorMax (fmin).
-    std::vector<RawVertex> raw;
-    float rawColorMax[4] = {};
-    // The raw colours, once capped, times this are in the draw's units.
-    float rawColorScale = 1.0f;
+    // A model chunk's (hasModelRow): the model stage caps each vertex's
+    // color at modelColorMax, then times modelColorScale it is in the
+    // draw's units.
+    float modelColorMax[4] = {};
+    float modelColorScale = 1.0f;
     // A retained mesh (the game's docs/NATIVE-BOUNDARY.md, issue 2): a
     // chunk the producer saw unchanged from one frame to the next, kept by
     // the renderer in a vertex buffer of its own under this id (a
@@ -357,7 +342,6 @@ struct MeshDraw
     float bandScale[4] = {}, bandOffset[4] = {};
     float winding = 1.0f;
     bool guardBand = false, backface = false, clips = false;
-    alignas(16) unsigned char rawHeader[256];
     // A model chunk's draw (its RetainedMesh has `model`): the program's
     // constants, and its bones' matrices (4 rows of 4 floats a slot, row
     // vectors, slot x at palette[16 x]).

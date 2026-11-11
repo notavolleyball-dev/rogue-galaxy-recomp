@@ -806,7 +806,7 @@ recovers.
     - wrong lighting (the C variants);
     - wrong UVs (F);
     - missing triangles (the backface rule).
-  - `RG_MODEL_GPU=0` puts every chunk back on the CPU, to compare.
+  - (`RG_MODEL_GPU=0`, the CPU path, is deleted: see below.)
 - **Since step 1, also in code:**
   - every strip chunk the model stage can draw goes to it (a chunk with
     no id yet, or whose inputs change every frame, with its inputs);
@@ -834,7 +834,14 @@ recovers.
     side (so they scale with the output, as the 2D path's lines);
   - the retained static meshes (`native_mesh_static.vert`, `StaticVertex`,
     `RG_MESH_RETAIN`) deleted.
-  - The CPU raw path stays only for `RG_MODEL_GPU=0`.
+  - **The CPU mesh path is deleted:** `buildMesh`, `readChunk`, the
+    projector's, particles' and strip programs' packet builders,
+    `RawVertex`, `MeshDraw::raw`/`rawHeader`, `setMeshCull`/`cullMesh`,
+    the bounds kept in quads 98/99 (only the overlay B read them, and M3's
+    ObjectLayer pass replaced it), `RG_MODEL_GPU`, `RG_MESH_REPEAT` and the
+    VU1 mode switch. Every VU1 mesh the producer takes is the model
+    stage's; `buildChunk` is left for the overlay, the base piece, and the
+    outline and shadow fallbacks.
 - **Step 3 in code too** (`src/native_models.*`):
   - The game thread's gather reads every VIF1 list as the VIF would: its
     own VU1 data and code memory and draw state; UNPACK, MPG, the base
@@ -882,7 +889,7 @@ So M5 goes in this order:
      runs `readChunk` or `buildMesh` for these chunks.
    - The guard-band skip goes, as planned; backfaces stay, judged on the
      GPU from the corners.
-   - `RG_MODEL_GPU=0` is the CPU path, for triage, until it is deleted.
+   - `RG_MODEL_GPU=0` was the CPU path, for triage, until it was deleted.
 2. **The list stops carrying geometry.** The game thread's gather leaves a
    known chunk's bytes in guest memory (as uploads are elided), and the VIF1
    thread neither copies nor UNPACKs them. It needs the chunk's identity

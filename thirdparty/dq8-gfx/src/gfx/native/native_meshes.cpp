@@ -343,52 +343,10 @@ SDL_GPUGraphicsPipeline *Renderer::meshPipeline(SDL_GPUDevice *device, uint32_t 
 
 namespace
 {
-// std::fmin(colour, cap) as glibc gives it, inline (the producer's
-// rg::fmin): a NaN gives the other operand, of +0 and -0 the minimum is -0,
-// a signalling NaN gives a + b.
-inline float capColor(float a, float b)
-{
-    if (a != a || b != b)
-    {
-        uint32_t x, y;
-        std::memcpy(&x, &a, 4);
-        std::memcpy(&y, &b, 4);
-        const bool sa = a != a && (x & 0x00400000u) == 0u, sb = b != b && (y & 0x00400000u) == 0u;
-        if (sa || sb)
-            return a + b;
-        return b != b ? a : b;
-    }
-    if (a < b)
-        return a;
-    if (b < a)
-        return b;
-    uint32_t x, y;
-    std::memcpy(&x, &a, 4);
-    std::memcpy(&y, &b, 4);
-    x |= y;
-    std::memcpy(&a, &x, 4);
-    return a;
-}
-
-// A raw draw's vertex as the renderer's Vertex (MeshDraw::raw).
-inline void rawToVertex(const RawVertex &in, const float cap[4], Vertex &out)
-{
-    out.position[0] = in.x;
-    out.position[1] = in.y;
-    out.position[2] = in.z;
-    out.uv[0] = in.u;
-    out.uv[1] = in.v;
-    out.color[0] = capColor(in.r, cap[0]);
-    out.color[1] = capColor(in.g, cap[1]);
-    out.color[2] = capColor(in.b, cap[2]);
-    out.color[3] = capColor(in.a, cap[3]);
-}
-
-// The draw's vertex count: its Vertex form when it has one (a raw draw's
-// is made only for the debug logs), else its raw one.
+// The draw's vertex count.
 inline size_t vertexCount(const MeshDraw &d)
 {
-    return d.vertices.empty() ? d.raw.size() : d.vertices.size();
+    return d.vertices.size();
 }
 } // namespace
 
@@ -553,22 +511,6 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
     {
         const MeshDraw &d = m_frameMeshes[n];
         const uint32_t row = static_cast<uint32_t>(n);
-        if (d.vertices.empty())
-            for (const RawVertex &in : d.raw)
-            {
-                v->position[0] = in.x;
-                v->position[1] = in.y;
-                v->position[2] = in.z;
-                v->uv[0] = in.u;
-                v->uv[1] = in.v;
-                v->color[0] = capColor(in.r, d.rawColorMax[0]) * d.rawColorScale;
-                v->color[1] = capColor(in.g, d.rawColorMax[1]) * d.rawColorScale;
-                v->color[2] = capColor(in.b, d.rawColorMax[2]) * d.rawColorScale;
-                v->color[3] = capColor(in.a, d.rawColorMax[3]) * d.rawColorScale;
-                v->fog = 1.0f; // Vertex's default: a model's F is the draw's
-                v->draw = row;
-                ++v;
-            }
         for (const Vertex &in : d.vertices)
         {
             std::memcpy(v->position, in.position, sizeof(v->position));
@@ -640,7 +582,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         mu.units[1] = m.colorClamp;
         mu.units[2] = m.alphaReference;
         mu.units[3] = m.shuffleScale;
-        du.vertexUnits[0] = d.rawColorScale;
+        du.vertexUnits[0] = d.modelColorScale;
         SDL_GPUTexture *image = m_white, *palette = m_white;
         float ownW = 1.0f, ownH = 1.0f;
         if (m.sourceTarget != 0u)
@@ -742,7 +684,7 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             du.cull[1] = d.guardBand ? 1.0f : 0.0f;
             du.cull[2] = d.backface ? 1.0f : 0.0f;
             du.cull[3] = d.clips ? 1.0f : 0.0f;
-            std::memcpy(du.colorMax, d.rawColorMax, sizeof(du.colorMax));
+            std::memcpy(du.colorMax, d.modelColorMax, sizeof(du.colorMax));
             ++m_retainedDrawn;
             if (retained->model)
             {
@@ -1001,26 +943,6 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         std::fprintf(stderr, "[frame-dump] frame %llu (%zu draws)\n", (unsigned long long)m_meshCounts.frames,
                      m_frameMeshes.size());
         m_dumpTargets = true;
-    }
-    // VU1 chunks as the program left them: their triangles through the
-    // producer's cull, on this thread rather than the producer's; with a
-    // dump reading vertices, their Vertex form too.
-    {
-        void (*cull)(MeshDraw &) = meshCull();
-        const bool asVertices = (dumpFrame != 0u && m_meshCounts.frames == dumpFrame) || triggered;
-        for (MeshDraw &d : m_frameMeshes)
-        {
-            if (d.raw.empty())
-                continue;
-            if (cull)
-                cull(d);
-            if (asVertices)
-            {
-                d.vertices.resize(d.raw.size());
-                for (size_t k = 0; k < d.raw.size(); ++k)
-                    rawToVertex(d.raw[k], d.rawColorMax, d.vertices[k]);
-            }
-        }
     }
     if ((dumpFrame != 0u && m_meshCounts.frames == dumpFrame) || triggered)
     {
