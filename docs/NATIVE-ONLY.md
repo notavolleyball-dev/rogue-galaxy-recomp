@@ -1118,6 +1118,39 @@ quadwords it wrote in the frame's buffer as the emitter would, and reads
 the record from the rebuilt chains. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
+**Nothing runs the VU1 for a draw (in code):** an MSCAL or MSCNT is drawn
+by the native programs or not at all. The chunks `declineChunk` refuses
+(M5's status names them), those of programs `identify()` does not know and
+shadow chunks whose packets set no RGBAQ are counted under `[vu1native]`'s
+"not drawn" and dropped; `buildShadow`, the last GS packet builder but the
+base piece's FOGCOL, is deleted. VPU_STAT's D/T bits stay clear.
+
+**Composites by markers (in code):** a composite's blocks are skipped like
+every other: its head's are drawn from their shadows, the first clear of
+untextured CT32 sprites giving the object layer's box and a marker (kind 6)
+before it; its tail's are discarded (its ObjectLayer passes draw them). A
+marker at the call's end (kind 7) ends the layer and sends the tail's
+passes. The VIF1 side's batch of head and tail packets, `clearBox` from
+packets and the tail chain's ranges are deleted.
+
+**Effects by markers only; no block is written (in code):** every pass is
+sent at its marker (Glare, Bloom, the colour filter and DoF write it at the
+call's end when they could not before it); the packet ranges, the holding
+of an effect's packets and their withheld kicks are deleted. `native_gspkt`
+opens every segment over scratch, an effect's too: a block inside a pass's
+call is discarded, and `DrawListBeginPlaneShadowPass` is no longer an
+effect (its mask's clear is an ordinary block).
+
+**Records under their own draw state (in code):** the mirror's register
+file is a value (`rg::drawstate::Registers`); the game thread's tracker
+(`rg::drawstate::game()`: the draw environments' packets, the blocks,
+libgraph's environments, the model calls drawn from records) gives each
+group of a record its registers where its marker goes, and its chunks are
+drawn under them, not under the list's mirror. The list's mirror is left
+only for what the list still draws: model calls the game writes,
+outlines, particles, shadow volumes, the converter's pieces (blocks the
+shadow does not follow, 2D outside the builder) and uploads.
+
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
 sprites are only drawn inside a composite's tail, by M3's ObjectLayer pass,
 with the tail's packets withheld, and the bounds it read (quads 98/99) are
