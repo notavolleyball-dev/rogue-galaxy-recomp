@@ -12,12 +12,14 @@
 #include <vector>
 
 #include "draw_state_mirror.h"
+#include "hud_size.h"
 #include "native_2d.h"
 #include "native_effects.h"
 #include "native_producer.h"
 #include "ps2_runtime.h"
 #include "return_hook.h"
 #include "scene_timing.h"
+#include "widescreen.h"
 
 namespace rg::nativeblocks
 {
@@ -42,6 +44,7 @@ uint32_t physical(uint32_t address)
 rg::drawstate::Tracker *g_state = nullptr;
 bool g_inBlock = false;
 uint32_t g_blockStart = 0u;
+uint32_t g_blockOwner = 0u; // DrawListBeginPrim's return address
 
 // A block's pieces, kept by unit until the VIF1 thread reaches the block.
 struct KeptPiece
@@ -127,6 +130,7 @@ void beginPrim(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_inBlock = true;
     g_blockStart = rg::nativefx::listTop();
+    g_blockOwner = getRegU32(ctx, 31);
     g_beginOriginal(rdram, ctx, runtime);
 }
 
@@ -177,6 +181,16 @@ void afterEnd(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
     }
     if (block.pieces.empty())
         return; // nothing drawn: the packets go on as they are
+    // What reshapes the block's 2D (the HUD's sizes, the movie's box on a
+    // wide screen), on its records.
+    {
+        thread_local std::vector<BlockMesh> meshes;
+        meshes.clear();
+        for (KeptPiece &piece : block.pieces)
+            meshes.push_back({&piece.mesh, piece.texels || piece.state.prim.tme != 0u});
+        rg::hudsize::reshape(g_blockOwner, meshes);
+        rg::widescreen::reshape(g_blockOwner, meshes);
+    }
     block.end = g_state->current();
     g_units = (g_units + 1u) & 0xFFFFFFu;
     g_units = g_units == 0u ? 1u : g_units;
@@ -210,6 +224,33 @@ bool take(uint32_t unit, Block &out)
 
 thread_local Block t_last; // the block emit() sent, for compare()
 } // namespace
+
+// A fogged piece's clip is (x w, y w, 0, w), w its z (native_2d's closeMesh).
+bool fogged(const GSNativeMesh &mesh)
+{
+    return mesh.header.matrix[3][3] == 0.0f && mesh.header.matrix[2][3] == 1.0f;
+}
+
+void transform(GSNativeMesh &mesh, float sx, float sy, float tx, float ty)
+{
+    const bool fog = fogged(mesh);
+    for (GSNativeMesh::Vertex &v : mesh.vertices)
+    {
+        const float w = fog ? v.z : 1.0f;
+        v.x = sx * v.x + tx * w;
+        v.y = sy * v.y + ty * w;
+    }
+}
+
+float vertexX(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v)
+{
+    return fogged(mesh) && v.z != 0.0f ? v.x / v.z : v.x;
+}
+
+float vertexY(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v)
+{
+    return fogged(mesh) && v.z != 0.0f ? v.y / v.z : v.y;
+}
 
 bool enabled()
 {

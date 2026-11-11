@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "loading_screen.h"
+#include "native_blocks.h"
 #include "overlay/overlay_manager.h"
 #include "ps2_runtime.h"
 #include "scene_timing.h"
@@ -37,9 +38,10 @@ constexpr float kStandardAspect = 0.75f;
 // MovieDrawFrame's picture, centred in the 512x448 frame:
 // GsPktSetXYZPixel(packet, x, y, z) for its top left (x = offset + s5,
 // y = offset + s6, the bars beside and above it) and its bottom right
-// (x + s1 - 1, y + s0 - 1, s1 x s0 its size).
+// (x + s1 - 1, y + s0 - 1, s1 x s0 its size), in the block MovieDrawFrame
+// opens at 0x1D58C4.
+constexpr uint32_t kMovieBlockOwner = 0x001D58CCu;
 constexpr uint32_t kMovieTopLeftReturn = 0x001D5A80u;
-constexpr uint32_t kMovieBottomRightReturn = 0x001D5ADCu;
 constexpr int kLeftRegister = 21;
 constexpr int kTopRegister = 22;
 constexpr int kWidthRegister = 17;
@@ -73,11 +75,6 @@ float projection()
 int32_t argument(const R5900Context *ctx, int reg)
 {
     return static_cast<int32_t>(getRegU32(ctx, reg));
-}
-
-void setArgument(R5900Context *ctx, int reg, int32_t value)
-{
-    ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
 }
 
 struct Box
@@ -144,21 +141,21 @@ void viewSetPerspective(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_viewSetPerspective(rdram, ctx, runtime);
 }
 
+// The movie's picture as MovieDrawFrame places it in the frame: its bars
+// and size, read at its top left's vertex (game thread).
+struct MoviePicture
+{
+    int32_t left = 0, top = 0, width = 0, height = 0;
+    bool set = false;
+} g_movie;
+
 void gsPktSetXyzPixel(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t ra = getRegU32(ctx, 31);
-    const int32_t width = argument(ctx, kWidthRegister);
-    const int32_t height = argument(ctx, kHeightRegister);
-    if ((ra == kMovieTopLeftReturn || ra == kMovieBottomRightReturn) && wide() && width > 0 && height > 0)
+    if (ra == kMovieTopLeftReturn)
     {
-        // The frame's offset stays: x and y less the bar, and less the size
-        // for the bottom right.
-        const bool bottomRight = ra == kMovieBottomRightReturn;
-        const Box box = widePicture(width, height);
-        const int32_t x = argument(ctx, 5) - argument(ctx, kLeftRegister) - (bottomRight ? width - 1 : 0);
-        const int32_t y = argument(ctx, 6) - argument(ctx, kTopRegister) - (bottomRight ? height - 1 : 0);
-        setArgument(ctx, 5, x + box.left + (bottomRight ? box.width - 1 : 0));
-        setArgument(ctx, 6, y + box.top + (bottomRight ? box.height - 1 : 0));
+        g_movie = {argument(ctx, kLeftRegister), argument(ctx, kTopRegister), argument(ctx, kWidthRegister),
+                   argument(ctx, kHeightRegister), true};
     }
     g_gsPktSetXyzPixel(rdram, ctx, runtime);
 }
@@ -181,6 +178,38 @@ void install(PS2Runtime &runtime)
     if (!complete)
     {
         std::fprintf(stderr, "[rg] widescreen: some hooks are missing, see above\n");
+    }
+}
+
+void reshape(uint32_t owner, std::vector<rg::nativeblocks::BlockMesh> &meshes)
+{
+    if (owner != kMovieBlockOwner)
+        return;
+    const MoviePicture movie = g_movie;
+    g_movie.set = false;
+    if (!movie.set || !wide() || movie.width <= 1 || movie.height <= 1)
+        return;
+    // The picture (the block's textured pieces) from where the game put it
+    // to the wide frame's box: its corners move by the box's offsets, the
+    // frame's own offset kept.
+    const Box box = widePicture(movie.width, movie.height);
+    const float sx = float(box.width - 1) / float(movie.width - 1);
+    const float sy = float(box.height - 1) / float(movie.height - 1);
+    for (rg::nativeblocks::BlockMesh &m : meshes)
+    {
+        if (!m.textured || m.mesh->vertices.empty())
+            continue;
+        float x0 = 1e30f, y0 = 1e30f;
+        for (const GSNativeMesh::Vertex &v : m.mesh->vertices)
+        {
+            x0 = std::min(x0, rg::nativeblocks::vertexX(*m.mesh, v));
+            y0 = std::min(y0, rg::nativeblocks::vertexY(*m.mesh, v));
+        }
+        // x0 is the frame's offset plus the bar; it goes to the offset plus
+        // the box's left, the rest scaled from there.
+        const float nx0 = x0 - float(movie.left) + float(box.left);
+        const float ny0 = y0 - float(movie.top) + float(box.top);
+        rg::nativeblocks::transform(*m.mesh, sx, sy, nx0 - sx * x0, ny0 - sy * y0);
     }
 }
 

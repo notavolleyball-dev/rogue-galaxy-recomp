@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
+
+#include "runtime/gs/gs_types.h"
 
 class PS2Runtime;
 
@@ -26,6 +29,23 @@ bool enabled();
 // producer. False: no pieces kept for `unit` (the converter takes the
 // packets).
 bool emit(uint32_t unit);
+
+// A block's drawn pieces as made (window pixels, the GS's XYOFFSET in), for
+// what reshapes a block's 2D at its end instead of the game's vertices
+// (hud_size, widescreen: M4's "transforms of the 2D layer"): the block's
+// owner (DrawListBeginPrim's return address) and its meshes, each with
+// whether it is textured.
+struct BlockMesh
+{
+    GSNativeMesh *mesh;
+    bool textured;
+};
+// x' = sx x + tx, y' = sy y + ty on a piece's vertices (a fogged piece's
+// x and y carry its w).
+void transform(GSNativeMesh &mesh, float sx, float sy, float tx, float ty);
+// A vertex's x and y as drawn (a fogged piece's w divided out).
+float vertexX(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v);
+float vertexY(const GSNativeMesh &mesh, const GSNativeMesh::Vertex &v);
 
 // After the block's packets went on: the VIF1 thread's mirror compared
 // with what the game thread's said at the block's end (counted).

@@ -734,8 +734,15 @@ Not done:
 - fonts as glyph records;
 - libgraph's `sceGsPutDrawEnv`/`sceGsSwapDBuff` clears and the `sceGifPk`
   paths (still the converter's);
-- HUD size and widescreen as layer transforms (`hud_size` still patches the
-  blocks' vertices, which the game thread then reads);
+- ~~HUD size and widescreen as layer transforms~~ **in code:** neither
+  writes the game's vertices or arguments any more. A block's 2D records
+  are reshaped at its end by its owner (`native_blocks`'s `BlockMesh`,
+  `transform`): `hud_size::reshape` scales the minimap's view and arrow
+  toward the view's corner and each compass letter about its centre;
+  `widescreen::reshape` moves the movie's picture to the wide frame's box
+  (its bars and size read, not changed, at its top left's vertex). The
+  compass dial's screen matrix and the cameras' aspects stay parameter
+  changes. To check: the options as on the tag;
 - **region packs, in part.**
   - Drawn again (`replaceRegion` in the producer): a UV sprite's texel
     rectangle of an indexed texture is named as gs-path-final's

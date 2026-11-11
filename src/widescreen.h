@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
+#include "native_blocks.h"
+
 class PS2Runtime;
 
 // The game drawn for a wide screen, of the window's shape.
@@ -15,7 +20,7 @@ class PS2Runtime;
 // The rest is nemesis2000's PCSX2 patch for SCUS-97490: the compass and the
 // insect menus' model previews, which set 3/4 themselves, take 9/16 too; a movie
 // made for 16:9, drawn between bars on 4:3, fills the frame from top to
-// bottom. Its letterbox fix is not taken: events keep their bars, by which
+// bottom (its records reshaped, reshape()). Its letterbox fix is not taken: events keep their bars, by which
 // the game places their text. Beyond the patch, a 4:3 movie (512x448)
 // narrows to keep its shape, with bars at its sides.
 //
@@ -36,6 +41,11 @@ namespace rg::widescreen
 void install(PS2Runtime &runtime);
 
 void setEnabled(bool enable);
+
+// A block's 2D, as made at its end (game thread; src/native_blocks.h): the
+// movie's picture moved to the wide frame's box (M4: on its records, not
+// the game's vertices).
+void reshape(uint32_t owner, std::vector<rg::nativeblocks::BlockMesh> &meshes);
 
 // The option is on and the game is past the screens before it: the frame
 // is drawn wide.
