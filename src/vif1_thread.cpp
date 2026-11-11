@@ -558,7 +558,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 void deliverImage(const uint8_t *data, uint32_t size);
 // A hole's image data (gatherChain), which never left guest memory.
 void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash);
-bool absorbing();
 
 // (M6: there is no draw stage any more. A list runs on the game thread as it
 // is sent and what it makes goes straight to the producer, in the game's
@@ -1544,18 +1543,9 @@ void watchTransfers(const uint8_t *data, uint32_t size, bool absorbToo = false)
     }
 }
 
-// Step 6 of docs/NATIVE-PIPELINE.md, finished: under the pipeline (with its
-// 2D on), what is left of a packet after the converter and the upload
-// withholding no longer goes to the GS. The renderer draws from records, the
-// draw-state mirror and the converter follow the packets, and the GS draws
-// nothing. What the game still sees of the GS is SIGNAL, FINISH and LABEL in
-// the privileged registers (CSR, SIGLBLID), set here as the GS would.
-// RG_NATIVE_ABSORB=0 sends it to the GS as before.
-bool absorbing()
-{
-    return true; // (RG_NATIVE_ABSORB went in M6: there is no GS to send to)
-}
-
+// What the game still sees of the GS: SIGNAL, FINISH and LABEL in the
+// privileged registers (CSR, SIGLBLID), set here as the GS would. Nothing
+// else of a packet goes to the GS (there is none behind the pipeline).
 void absorbRegister(uint8_t reg, uint64_t value)
 {
     GSRegisters *regs = g_runtime ? &g_runtime->memory().gs() : nullptr;
@@ -1617,8 +1607,7 @@ void applyWrites(const std::vector<std::pair<uint8_t, uint64_t>> &writes)
 }
 
 
-// The layer and the draw task of the packet being delivered (deliverPacketAt).
-thread_local uint8_t t_layer = 0u;
+// The draw task of the packet being delivered (deliverPacketAt), for the census.
 thread_local uint32_t t_task = 0u;
 
 // M6: a packet the list still carries is register state and uploads; the
@@ -1836,7 +1825,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
     }
     // M4: the layer of the draw task that wrote it (what a VU1 program
     // kicked: the task whose list holds the MSCAL), for its 2D.
-    t_layer = rg::nativefx::layerAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
     t_task = rg::nativefx::taskAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
     // The flip's copy, from the game thread: after the lists in flight, as
     // the GS would get it.
@@ -1876,7 +1864,7 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
     // stream's state, below); as a packet only when image data is due first.
     if (t_meshWriteCount != 0u)
     {
-        if (absorbing() && t_upload.imageBytes == 0u)
+        if (t_upload.imageBytes == 0u)
             g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
         else
         {
@@ -2428,19 +2416,6 @@ std::string busyReport()
     lastBusy = busy;
     lastGif = gif;
     return text;
-}
-
-void drainForSnapshot()
-{
-    // Only from the game's thread. The presenter reaches a frame boundary
-    // too, through flip pacing's fallback while the game shows no flips (a
-    // loading screen), and it does so holding the GS state lock, which the
-    // VIF1 thread needs to finish its list: waiting for it there is a
-    // deadlock (it was one, at the Story loading screen).
-    if (g_thread && std::this_thread::get_id() == g_gameThread)
-    {
-        g_thread->drain();
-    }
 }
 
 bool busy()

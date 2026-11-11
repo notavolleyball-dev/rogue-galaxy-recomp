@@ -80,13 +80,6 @@ uint32_t stackTop()
 }
 
 std::mutex g_mutex;
-// M4: the layer each draw task's packets belong to (below).
-struct LayerRange
-{
-    uint32_t start = 0u, end = 0u;
-    uint8_t layer = 0u;
-};
-std::vector<LayerRange> g_layerRanges; // under g_mutex, by start
 // M4's census: every draw task's packet range with the task (its index in
 // kDrawTasks), apart from the layers (an outer task would replace an inner
 // one's layer there).
@@ -105,9 +98,6 @@ void dropRanges(uint32_t start, uint32_t end)
     start = physical(start);
     end = physical(end);
     std::lock_guard lock(g_mutex);
-    g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
-                                       [&](const LayerRange &r) { return r.start < end && start < r.end; }),
-                        g_layerRanges.end());
     g_taskRanges.erase(std::remove_if(g_taskRanges.begin(), g_taskRanges.end(),
                                       [&](const TaskRange &r) { return r.start < end && start < r.end; }),
                        g_taskRanges.end());
@@ -129,25 +119,6 @@ void afterFrameBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 void drawListFrameBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     rg::hooks::callThen(g_frameBeginOriginal, rdram, ctx, runtime, &afterFrameBegin, 0u);
-}
-
-// M4: the layer each draw task's packets belong to (native::Layer, as a
-// byte), by the packet memory the task wrote.
-
-void addLayerRange(uint32_t start, uint32_t end, uint8_t layer)
-{
-    start = physical(start);
-    end = physical(end);
-    if (end <= start || end - start > (4u << 20))
-        return;
-    std::lock_guard lock(g_mutex);
-    g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
-                                       [&](const LayerRange &r) { return r.start < end && start < r.end; }),
-                        g_layerRanges.end());
-    const LayerRange range{start, end, layer};
-    g_layerRanges.insert(std::upper_bound(g_layerRanges.begin(), g_layerRanges.end(), range,
-                                          [](const LayerRange &x, const LayerRange &y) { return x.start < y.start; }),
-                         range);
 }
 
 // M4's census: a draw task's range (an inner task's, written first, stays:
@@ -257,8 +228,6 @@ void afterDrawTask(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
     // data: the task's index, and where its packets began.
     const uint32_t index = data >> 24, top = data & 0xFFFFFFu;
     g_currentLayer = 0u;
-    if (index < kDrawTaskCount && kDrawTasks[index].layer != Layer::Scene)
-        addLayerRange(top, stackTop(), static_cast<uint8_t>(kDrawTasks[index].layer));
     if (index < kDrawTaskCount)
         addTaskRange(top, stackTop(), static_cast<uint16_t>(index));
 }
@@ -1660,18 +1629,6 @@ bool takeCompositeBox(uint32_t unit, Box &box)
 uint8_t currentLayer()
 {
     return g_currentLayer;
-}
-
-uint8_t layerAt(uint32_t address)
-{
-    address = physical(address);
-    std::lock_guard lock(g_mutex);
-    auto it = std::upper_bound(g_layerRanges.begin(), g_layerRanges.end(), address,
-                               [](uint32_t value, const LayerRange &range) { return value < range.start; });
-    if (it == g_layerRanges.begin())
-        return 0u;
-    --it;
-    return address < it->end ? it->layer : 0u;
 }
 
 uint32_t taskAt(uint32_t address)
