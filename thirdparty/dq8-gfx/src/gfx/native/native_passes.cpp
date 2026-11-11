@@ -291,6 +291,38 @@ bool Renderer::expandPass(const Pass &pass)
         }
         return true;
     }
+    case PassKind::ColorFilter:
+    {
+        // ScreenColorFilterMaybe_179c60: the frame's alpha rebuilt from its
+        // green (the GS's CT16 view of the frame drawn onto itself: alpha's
+        // bits 2-7 from green's), then its color set to params 0-2 times
+        // that alpha (Cs Ad), its alpha 1. params 3: the shuffle's scale.
+        const Id frame = pass.frame;
+        float fw = 0.0f, fh = 0.0f;
+        if (!size(frame, fw, fh))
+            return false;
+        const Id scratch = passScratch(1u, frame);
+        if (scratch == 0u)
+            return false;
+        const float whole[4] = {0.0f, 0.0f, fw, fh};
+        Material copy = spriteMaterial();
+        copy.linear = false;
+        passRect(scratch, frame, whole, whole, 1.0f, copy);
+        Material shuffle = copy;
+        shuffle.function = TextureFunction::Decal;
+        shuffle.shuffle = ChannelShuffle::GreenToAlpha;
+        shuffle.shuffleScale = pass.params[3];
+        shuffle.colorWrite = 0x8u;
+        passRect(frame, scratch, whole, whole, 1.0f, shuffle);
+        Material tint = spriteMaterial();
+        tint.blending = true;
+        tint.srcFactor = BlendFactor::DstAlpha;
+        tint.dstFactor = BlendFactor::Zero;
+        const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const float rgba[4] = {pass.params[0], pass.params[1], pass.params[2], 1.0f};
+        passRect(frame, 0u, whole, none, rgba, tint);
+        return true;
+    }
     default:
         return false;
     }

@@ -369,6 +369,9 @@ enum class PassKind : uint8_t
     DepthOfField,
     PlaneShadow,
     CBlur,
+    // ScreenColorFilterMaybe: the frame's alpha rebuilt from its green, its
+    // color then params 0-2 times that alpha. params 3: the green-to-alpha
+    // shuffle's scale (ChannelShuffle::GreenToAlpha).
     ColorFilter,
     Fade,
     Capture,

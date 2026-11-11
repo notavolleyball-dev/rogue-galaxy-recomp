@@ -124,3 +124,17 @@ from the code.
   the scene's depth is behind the level's distance (the renderer's depth
   from the producer's `standardDepth` of the two Z values), at the
   strength's alpha.
+
+### `ScreenColorFilterMaybe_179c60` (M3)
+
+- **Arguments:** `a0`, `a1`, `a2` = r, g, b (bytes, 0x80 = 1). Callers:
+  `GameSceneTintApply_1ce8f0` (the scene's tint).
+- **What it draws:** the frame viewed as CT16 (a node over the frame's TBP,
+  twice its height, `0x3A` written into its TEXA-like field) drawn onto the
+  same view 8 pixels over with `TEXA = 0x80 << 32`, which copies each
+  pixel's RG half onto its BA half: the frame's alpha gets green's bits
+  2-7, keeping its own bits 0-1 (the renderer's `ChannelShuffle::
+  GreenToAlpha`); then an untextured sprite over the frame, `Cs Ad` (A=Cs
+  B=0 C=Ad D=0), color `(r, g, b, 0x80)`.
+- **The hook emits:** a `Pass` (`PassKind::ColorFilter`); the call runs and
+  its packets are replaced (as the glare's).

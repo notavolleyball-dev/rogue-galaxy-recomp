@@ -297,10 +297,21 @@ void afterColorFilter(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
     addRange(top, stackTop(), Effect::ColorFilter, g_colorFilterUnit);
 }
 
+// The colour filter's pass, for (r, g, b) bytes (0x80 = 1).
+uint32_t colorFilterPass(uint32_t r, uint32_t g, uint32_t b)
+{
+    rg::nativeproducer::PassRequest request;
+    request.kind = 5u; // native::PassKind::ColorFilter
+    request.params[0] = float(r & 0xFFu) / 128.0f;
+    request.params[1] = float(g & 0xFFu) / 128.0f;
+    request.params[2] = float(b & 0xFFu) / 128.0f;
+    request.params[3] = 128.0f; // a byte a unit over 0x80
+    return keepPass(request);
+}
+
 void colorFilter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    g_colorFilterUnit = (getRegU32(ctx, 4) & 0xFFu) | ((getRegU32(ctx, 5) & 0xFFu) << 8) |
-                        ((getRegU32(ctx, 6) & 0xFFu) << 16) | (1u << 24);
+    g_colorFilterUnit = colorFilterPass(getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6));
     rg::hooks::callThen(g_colorFilterOriginal, rdram, ctx, runtime, &afterColorFilter, stackTop());
 }
 
@@ -343,9 +354,7 @@ void gameSceneTintApply(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t top = stackTop();
             g_colorFilterOriginal(rdram, ctx, runtime);
-            // The unit as colorFilter makes it: r in the low byte.
-            const uint32_t unit =
-                ((color >> 16) & 0xFFu) | (color & 0xFF00u) | ((color & 0xFFu) << 16) | (1u << 24);
+            const uint32_t unit = colorFilterPass(color >> 16, color >> 8, color);
             addRange(top, stackTop(), Effect::ColorFilter, unit);
         }
         else if (PS2Runtime::RecompiledFunction filter = runtime->lookupFunction(kColorFilter))
@@ -1615,7 +1624,7 @@ bool buildColorFilter(const std::vector<std::vector<uint8_t>> &packets, uint32_t
 
 bool isPass(Effect effect)
 {
-    return effect == Effect::Glare || effect == Effect::Bloom;
+    return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter;
 }
 
 bool emitPass(Effect effect, uint32_t unit)
