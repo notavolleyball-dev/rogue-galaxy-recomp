@@ -42,11 +42,8 @@ struct DrawRow {
     // destination alpha test, 0 none, 1 drawn where the target's alpha is
     // below 1, 2 where at least (read from `palette`, the target's copy)
     vec4 texa;
-    // The GS's CLAMP: x, y the u region (min, max), z, w the v region;
-    // wrap.x, .y the modes (0 repeat, 1 clamp, 2 region clamp, 3 region
-    // repeat).
-    uvec4 region;
-    uvec4 wrap;
+    // xy: subtracted from the texel coordinate (Material::texelOffset).
+    vec4 offset;
     // A retained mesh's cull (native_mesh_static.vert): the program's matrix
     // to GS window coordinates, its guard band, x: the winding sign, y: the
     // guard band test on, z: the backface test on, w: the chunk is clipped;

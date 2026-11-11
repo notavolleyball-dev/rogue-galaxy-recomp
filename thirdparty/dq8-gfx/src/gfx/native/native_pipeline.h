@@ -268,8 +268,7 @@ private:
         float blend[4];
         float fogColor[4];
         float texa[4];
-        uint32_t region[4]; // min u, max u, min v, max v (the GS's CLAMP)
-        uint32_t wrap[4];   // u, v: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
+        float offset[4]; // xy: Material::texelOffset
         // A retained mesh's cull and colour cap (native_mesh_static.vert).
         float cullMatrix[16];
         float bandScale[4];

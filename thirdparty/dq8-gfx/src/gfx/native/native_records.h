@@ -184,22 +184,20 @@ struct Material
     float sourceAlpha = -1.0f;
     bool alphaZeroOnBlack = false;
     // The color after the texture function is clamped to [0, this] when
-    // above 0 (the game's: its 0xFF).
+    // above 0.
     float colorClamp = 0.0f;
     // See ChannelShuffle::GreenToAlpha.
     float shuffleScale = 0.0f;
     // The size the uvs are normalized to; 0: the texture's own.
     uint16_t textureWidth = 0;
     uint16_t textureHeight = 0;
+    // Subtracted from the texel coordinate (uv times the size above) before
+    // the texture is sampled: a texture cut from another (a tile of a sheet)
+    // addressed as the sheet was.
+    float texelOffset[2] = {0.0f, 0.0f};
     bool linear = false;
-    bool clampU = true;
+    bool clampU = true; // false: repeat
     bool clampV = true;
-    // The GS's CLAMP per axis: 0 repeat, 1 clamp, 2 region clamp (to
-    // [region[0], region[1]]), 3 region repeat ((t & region[0]) |
-    // region[1]); in the texture's texels. Regions are fetched, not
-    // filtered (a texture's, not a target's).
-    uint8_t wrapU = 0, wrapV = 0;
-    uint16_t regionU[2] = {0, 0}, regionV[2] = {0, 0};
     TextureFunction function = TextureFunction::Modulate;
     ChannelShuffle shuffle = ChannelShuffle::None;
     bool textureAlpha = true; // the texel's alpha is used; false: the vertex's

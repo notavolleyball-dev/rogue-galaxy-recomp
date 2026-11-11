@@ -102,6 +102,8 @@ struct Counts
     // Texture packs: pairs of a texture and a palette looked up, pictures
     // made records, pairs with none, and draws given a picture.
     uint64_t wholesAsked = 0, wholesMade = 0, wholesNone = 0, wholesDrawn = 0;
+    // Tiles of sheets (region clamp and repeat) cut into textures of their own.
+    uint64_t tilesCut = 0;
 };
 
 struct State
@@ -216,6 +218,10 @@ struct State
     std::unordered_map<uint64_t, Whole> wholes;          // texture << 32 | palette
     std::unordered_map<native::Id, uint64_t> wholeOf;    // a picture's record -> its key
     std::unordered_map<native::Id, uint64_t> clutHashes; // palette id -> PCSX2's hash
+    // Tiles cut from textures (cutRegion): by the texture's id and the GS's
+    // CLAMP, the tile's own texture record; forgotten when either is evicted.
+    std::map<std::pair<native::Id, uint64_t>, native::Id> cuts;
+    std::unordered_map<native::Id, std::pair<native::Id, uint64_t>> cutOf;
     uint64_t packGeneration = 0u;
     // The depth targets drawn with since the frame began (frameBoundary):
     // each is cleared at its first use in a frame, as the game's clear
@@ -470,6 +476,7 @@ std::string statsLine()
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
                        ", no depth target there " + std::to_string(s.depthNoTarget) +
+                       " | tiles cut " + d(n.tilesCut, r.tilesCut) +
                        " | texture packs: pairs looked up " + d(n.wholesAsked, r.wholesAsked) + ", pictures made " +
                        d(n.wholesMade, r.wholesMade) + ", none " + d(n.wholesNone, r.wholesNone) +
                        ", draws from a picture " + d(n.wholesDrawn, r.wholesDrawn);
@@ -522,6 +529,14 @@ void forgetEvicted(State &s)
         {
             s.wholes.erase(whole->second);
             s.wholeOf.erase(whole);
+            continue;
+        }
+        // A tile: cut again at its next draw.
+        if (const auto cut = s.cutOf.find(id); cut != s.cutOf.end())
+        {
+            s.cuts.erase(cut->second);
+            s.cutOf.erase(cut);
+            s.texels.erase(id);
             continue;
         }
         const auto key = s.textureKeys.find(id);
@@ -1540,6 +1555,7 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
 } // namespace
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
 void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m);
+void cutRegion(State &s, uint64_t clamp, native::Material &m);
 namespace
 {
 bool materialOf(State &s, const GSDrawState &state, native::Material &m)
@@ -1584,15 +1600,15 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
         m.textureHeight = static_cast<uint16_t>(1u << std::min<uint32_t>(t.th, 10u));
         m.linear = state.linearFilter;
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
-        m.clampU = wms != 0u;
-        m.clampV = wmt != 0u;
-        // Region clamp and repeat (a tile of a sheet): the renderer's.
-        m.wrapU = static_cast<uint8_t>(wms);
-        m.wrapV = static_cast<uint8_t>(wmt);
-        m.regionU[0] = static_cast<uint16_t>((c.clamp >> 4) & 0x3FFu);
-        m.regionU[1] = static_cast<uint16_t>((c.clamp >> 14) & 0x3FFu);
-        m.regionV[0] = static_cast<uint16_t>((c.clamp >> 24) & 0x3FFu);
-        m.regionV[1] = static_cast<uint16_t>((c.clamp >> 34) & 0x3FFu);
+        // Region clamp and repeat (a tile of a sheet): a texture of its own.
+        const bool region = wms > 1u || wmt > 1u;
+        if (region && !m.sourceTarget)
+            cutRegion(s, c.clamp, m);
+        else
+        {
+            m.clampU = wms != 0u;
+            m.clampV = wmt != 0u;
+        }
         if ((wms > 1u || wmt > 1u) && m.sourceTarget)
         {
             ++s.counts.unknownClamp; // a target's region: not fetched so
@@ -1603,7 +1619,8 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
             native::TextureFunction::Highlight2};
         m.function = functions[t.tfx & 3u];
         m.textureAlpha = t.tcc != 0u;
-        replaceWhole(s, t, m);
+        if (!region)
+            replaceWhole(s, t, m);
     }
 
     if (state.prim.abe && !blendOf(c.alpha, m))
@@ -2517,8 +2534,7 @@ native::PixelFormat blockFormat(int blocks)
 void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
 {
     const bool dumping = wholeDumpDirectory() != nullptr;
-    if ((!rg::texturePack::active() && !dumping) || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u ||
-        m.wrapU >= 2u || m.wrapV >= 2u)
+    if ((!rg::texturePack::active() && !dumping) || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u)
         return;
     const uint32_t psm = t.psm & 0x3Fu;
     const auto tex = s.texels.find(m.texture);
@@ -2600,6 +2616,84 @@ void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
     m.palette = 0u;
     m.linear = !w.nearest;
     ++s.counts.wholesDrawn;
+}
+
+// Locked. The GS's region clamp and region repeat (CLAMP's WMS and WMT 2
+// and 3: a tile of a sheet, a texture the game addresses through a mask) as
+// a texture record of its own: per axis, clamp keeps the texels from MIN to
+// MAX, drawn clamped and offset by MIN; repeat keeps, at each texel u of the
+// texture, its texel (u & MSK) | FIX, drawn repeated. The renderer then
+// knows nothing of the GS's CLAMP. A texture whose texels the producer does
+// not hold keeps its own (counted).
+void cutRegion(State &s, uint64_t clamp, native::Material &m)
+{
+    const uint32_t wms = uint32_t(clamp & 3u), wmt = uint32_t((clamp >> 2) & 3u);
+    m.clampU = wms == 1u || wms == 2u;
+    m.clampV = wmt == 1u || wmt == 2u;
+    const auto source = s.texels.find(m.texture);
+    if (m.texture == 0u || source == s.texels.end() || !source->second.data)
+    {
+        ++s.counts.unknownClamp;
+        return;
+    }
+    // Copied: the table may grow below.
+    const State::Kept from = source->second;
+    const uint32_t width = from.width, height = from.height;
+    const size_t texel = from.indexed ? 1u : 4u;
+    if (width == 0u || height == 0u || from.data->size() < size_t(width) * height * texel)
+    {
+        ++s.counts.unknownClamp;
+        return;
+    }
+    // The texels kept per axis, and the offset they are addressed at.
+    const auto axis = [](uint32_t mode, uint32_t a, uint32_t b, uint32_t size, std::vector<uint32_t> &keep,
+                         float &offset) {
+        keep.clear();
+        offset = 0.0f;
+        if (mode == 2u)
+        {
+            const uint32_t lo = std::min(a, size - 1u), hi = std::clamp(b, lo, size - 1u);
+            for (uint32_t u = lo; u <= hi; ++u)
+                keep.push_back(u);
+            offset = float(lo);
+        }
+        else if (mode == 3u)
+            for (uint32_t u = 0; u < size; ++u)
+                keep.push_back(((u & a) | b) % size);
+        else
+            for (uint32_t u = 0; u < size; ++u)
+                keep.push_back(u);
+    };
+    const uint32_t minU = uint32_t((clamp >> 4) & 0x3FFu), maxU = uint32_t((clamp >> 14) & 0x3FFu);
+    const uint32_t minV = uint32_t((clamp >> 24) & 0x3FFu), maxV = uint32_t((clamp >> 34) & 0x3FFu);
+    thread_local std::vector<uint32_t> columns, rows;
+    axis(wms, minU, maxU, width, columns, m.texelOffset[0]);
+    axis(wmt, minV, maxV, height, rows, m.texelOffset[1]);
+    const std::pair<native::Id, uint64_t> key{m.texture, clamp & 0xFFFFFFFFFFull};
+    if (const auto cut = s.cuts.find(key); cut != s.cuts.end())
+    {
+        m.texture = cut->second;
+        return;
+    }
+    auto out = std::make_shared<std::vector<uint8_t>>(columns.size() * rows.size() * texel);
+    for (size_t y = 0; y < rows.size(); ++y)
+        for (size_t x = 0; x < columns.size(); ++x)
+            std::memcpy(out->data() + (y * columns.size() + x) * texel,
+                        from.data->data() + (size_t(rows[y]) * width + columns[x]) * texel, texel);
+    native::Texture record;
+    record.scale = kTexelScale;
+    record.id = s.nextTexture++;
+    record.format = from.indexed ? native::PixelFormat::Index8 : native::PixelFormat::Rgba8;
+    record.width = static_cast<uint16_t>(columns.size());
+    record.height = static_cast<uint16_t>(rows.size());
+    record.palette = from.palette;
+    s.texels[record.id] = {out, record.width, record.height, from.indexed, from.palette};
+    record.texels = std::move(out);
+    s.cuts[key] = record.id;
+    s.cutOf[record.id] = key;
+    ++s.counts.tilesCut;
+    m.texture = record.id;
+    native::push(std::move(record));
 }
 
 namespace
@@ -2987,15 +3081,15 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
         m.textureHeight = texels ? 1u : static_cast<uint16_t>(1u << std::min<uint32_t>(c.tex0.th, 10u));
         m.linear = drawState->linearFilter;
         const uint32_t wms = static_cast<uint32_t>(c.clamp & 3u), wmt = static_cast<uint32_t>((c.clamp >> 2) & 3u);
-        m.clampU = wms != 0u;
-        m.clampV = wmt != 0u;
-        // Region clamp and repeat (a tile of a sheet): the renderer's.
-        m.wrapU = static_cast<uint8_t>(wms);
-        m.wrapV = static_cast<uint8_t>(wmt);
-        m.regionU[0] = static_cast<uint16_t>((c.clamp >> 4) & 0x3FFu);
-        m.regionU[1] = static_cast<uint16_t>((c.clamp >> 14) & 0x3FFu);
-        m.regionV[0] = static_cast<uint16_t>((c.clamp >> 24) & 0x3FFu);
-        m.regionV[1] = static_cast<uint16_t>((c.clamp >> 34) & 0x3FFu);
+        // Region clamp and repeat (a tile of a sheet): a texture of its own.
+        const bool region = wms > 1u || wmt > 1u;
+        if (region && !m.sourceTarget)
+            cutRegion(s, c.clamp, m);
+        else
+        {
+            m.clampU = wms != 0u;
+            m.clampV = wmt != 0u;
+        }
         if ((wms > 1u || wmt > 1u) && m.sourceTarget)
         {
             known = false; // a target's region: not fetched so

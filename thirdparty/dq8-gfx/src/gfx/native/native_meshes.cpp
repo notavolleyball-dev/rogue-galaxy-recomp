@@ -385,7 +385,7 @@ inline size_t vertexCount(const MeshDraw &d)
 
 bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
 {
-    static_assert(sizeof(GpuDraw) == 480u, "std430, as the shaders read it");
+    static_assert(sizeof(GpuDraw) == 464u, "std430, as the shaders read it");
     // The retained meshes taken in since the last frame drawn, behind those
     // already in their buffer.
     if (!m_staticBuffer)
@@ -698,12 +698,8 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
         mu.blend[0] = m.shuffle == ChannelShuffle::GreenToAlpha ? 1.0f : 0.0f;
         mu.blend[2] = m.clampU ? 1.0f : 0.0f;
         mu.blend[3] = m.clampV ? 1.0f : 0.0f;
-        mu.wrap[0] = m.wrapU;
-        mu.wrap[1] = m.wrapV;
-        mu.region[0] = m.regionU[0];
-        mu.region[1] = m.regionU[1];
-        mu.region[2] = m.regionV[0];
-        mu.region[3] = m.regionV[1];
+        mu.offset[0] = m.texelOffset[0];
+        mu.offset[1] = m.texelOffset[1];
         for (int i = 0; i < 3; ++i)
             mu.fogColor[i] = d.fogColor[i];
 
