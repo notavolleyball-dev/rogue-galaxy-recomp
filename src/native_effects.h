@@ -49,10 +49,10 @@ enum class Effect : uint8_t
     ShadowSetup,
     // ModelDrawOffscreenComposite (stage E), an object at a time: the head
     // draws it into the offscreen buffer (its clear, its model), the tail
-    // lays that over the frame. The VIF1 thread draws each object into an
-    // object layer of the renderer's own and its tail from there
-    // (src/vif1_thread.cpp batches them). Place::unit: the object.
-    CompositeHead,
+    // lays that over the frame. Drawn into an object layer of the
+    // renderer's own, between the head's marker and the tail's
+    // (compositeBegin, the composite's after-callback), the tail's passes
+    // from there.
     CompositeTail,
     // GfxFlipBuffersMaybe's copy of the frame into the display buffer: sent
     // from the game thread, not the VIF1 lists, so taken by flipPacket
@@ -83,8 +83,6 @@ struct Place
 // variable is 0).
 bool enabled();
 const char *name(Effect effect);
-// Stage E's objects as object layers (false only when its hooks failed).
-bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.
 void install(PS2Runtime &runtime);
@@ -116,9 +114,10 @@ bool writeMarker(uint32_t unit);
 // An effect's hooked call is in progress (game thread), and how many have
 // begun so far: what a 2D block drawn inside one is.
 bool inEffectCall();
-// ModelDrawOffscreenComposite's call is in progress (its blocks are its
-// head's and tail's, which its ranges route).
+// ModelDrawOffscreenComposite's call is in progress; and past its head (a
+// part emitted: its blocks are then the tail's, which its passes draw).
 bool inCompositeCall();
+bool compositeTail();
 uint64_t effectCallsBegun();
 uint8_t currentLayer();
 
@@ -130,7 +129,6 @@ uint8_t layerAt(uint32_t address);
 uint32_t taskAt(uint32_t address);
 
 // The effect whose packets the EE address holds (any of RDRAM's windows).
-Effect effectAt(uint32_t address);
 Place placeAt(uint32_t address);
 
 
@@ -142,9 +140,12 @@ struct Box
     uint32_t fbw = 0u;
     int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 };
-bool clearBox(const std::vector<std::vector<uint8_t>> &packets, Box &box);
-// When a packet starts a transfer into GS memory: the pages it may write.
-bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &last);
+// Game thread, at the head's clear (src/native_blocks.cpp): its layer
+// begun there, a marker written with the box (once per composite; false:
+// none in progress, or already begun). The list's side takes the box at
+// the marker (by its unit).
+bool compositeBegin(const Box &box);
+bool takeCompositeBox(uint32_t unit, Box &box);
 
 // Debugging: the registers and primitives of `packets`, one line each.
 void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets);

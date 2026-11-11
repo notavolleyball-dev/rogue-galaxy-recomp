@@ -187,14 +187,13 @@ void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_nested = true;
     ++g_depth;
     // Every block is drawn from its shadow and the game writes none of it.
-    // A block inside a pass effect's call is not written and not drawn: the
-    // effect's pass draws it. A composite's blocks are written as the game
-    // writes them (its head's and tail's ranges route them).
-    const bool effect = rg::nativefx::inEffectCall();
-    const bool composite = rg::nativefx::inCompositeCall();
-    const bool skip = !composite;
-    g_open.push_back({owner, skip, false, effect && !composite, rg::nativefx::effectCallsBegun()});
-    rg::gspkt::beginBlock(skip);
+    // A block inside a pass effect's call is not drawn: the effect's pass
+    // draws it. A composite's head's blocks are drawn (into its layer), its
+    // tail's are its passes'.
+    const bool discard =
+        rg::nativefx::inCompositeCall() ? rg::nativefx::compositeTail() : rg::nativefx::inEffectCall();
+    g_open.push_back({owner, true, false, discard, rg::nativefx::effectCallsBegun()});
+    rg::gspkt::beginBlock(true);
     g_envs.clear();
     g_blockOwner = owner;
     g_pktBeginOriginal(rdram, ctx, runtime);
@@ -275,6 +274,37 @@ uint32_t keepBlock(Block &block)
     return unit;
 }
 
+// A composite head's clear: the box its untextured sprites cover in the
+// buffer they draw into (all one, CT32), in pixels.
+bool clearBox(const Block &block, rg::nativefx::Box &box)
+{
+    bool found = false;
+    for (const KeptPiece &piece : block.pieces)
+    {
+        const rg::DrawState &st = piece.state;
+        if (piece.texels || st.prim.tme || st.prim.type != rg::kPrimSprite || piece.mesh.vertices.empty())
+            continue;
+        const uint32_t base = st.context.frame.fbp << 5, fbw = st.context.frame.fbw;
+        if (st.context.frame.psm != 0u || fbw == 0u || (found && (base != box.base || fbw != box.fbw)))
+            return false;
+        const int32_t ox = st.context.xyoffset.ofx, oy = st.context.xyoffset.ofy;
+        for (const rg::NativeMesh::Vertex &v : piece.mesh.vertices)
+        {
+            const int32_t x = int32_t(vertexX(piece.mesh, v) * 16.0f) - ox;
+            const int32_t y = int32_t(vertexY(piece.mesh, v) * 16.0f) - oy;
+            const int32_t x0 = x >> 4, y0 = y >> 4, x1 = (x + 15) >> 4, y1 = (y + 15) >> 4;
+            if (!found)
+                box = rg::nativefx::Box{base, fbw, x0, y0, x1, y1};
+            box.x0 = std::min(box.x0, x0);
+            box.y0 = std::min(box.y0, y0);
+            box.x1 = std::max(box.x1, x1);
+            box.y1 = std::max(box.y1, y1);
+            found = true;
+        }
+    }
+    return found;
+}
+
 // A block the game did not write (skipped): made from the shadow before
 // DrawListEndPrim runs, and a marker put in the list where its CALL would
 // have been (before the restore packet's).
@@ -306,6 +336,10 @@ void makeSkipped()
     }
     if (block.pieces.empty() && block.writes.empty())
         return;
+    // A composite's head: its layer begins at its clear.
+    rg::nativefx::Box box;
+    if (rg::nativefx::inCompositeCall() && !rg::nativefx::compositeTail() && clearBox(block, box))
+        rg::nativefx::compositeBegin(box);
     const uint32_t unit = keepBlock(block);
     if (rg::nativefx::writeMarker(unit))
         ++g_unwritten;

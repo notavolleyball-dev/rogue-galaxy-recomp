@@ -1058,9 +1058,14 @@ void dofFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // the rest the tail. (Game thread only.)
 struct Composite
 {
+    // Its tail's unit ((7 << 24) | n: its passes, kept under it, and the
+    // marker that sends them); its head's marker is (6 << 24) | n.
     uint32_t unit = 0u;
-    uint32_t start = 0u;
-    uint32_t headEnd = 0u;
+    // Whether its head's layer was begun (a marker written with the box its
+    // clear covers), and whether a part was emitted (its blocks are then the
+    // tail's).
+    bool begun = false;
+    bool emitted = false;
     // The call's arguments (a0 its settings, a1 the object, f13 the alpha)
     // and what its overlay calls left (the tail's passes, docs/NATIVE-ONLY-NOTES.md).
     uint32_t settings = 0u, object = 0u;
@@ -1080,56 +1085,6 @@ float readFloat(uint32_t address)
     float value;
     std::memcpy(&value, &bits, sizeof(value));
     return value;
-}
-
-// The fixed DMA chain each composite's tail calls (GsPktAddDmaCallTag in
-// ModelDrawOffscreenCompositeMaybe at 0x16b180): the memory it sends from,
-// any tail's (unit 0). Walked once, when the first composite is marked.
-constexpr uint32_t kCompositeTailCall = 0x00445C60u;
-
-void markTailCall()
-{
-    static bool marked = false;
-    if (marked)
-        return;
-    marked = true;
-    uint32_t address = kCompositeTailCall;
-    std::vector<uint32_t> returns;
-    for (int step = 0; step < 256; ++step)
-    {
-        const uint32_t tag = read32(address);
-        const uint32_t qwc = tag & 0xFFFFu;
-        const uint32_t id = (tag >> 28) & 7u;
-        const uint32_t target = read32(address + 4u) & 0x7FFFFFF0u;
-        // The data after the tag (cnt, next, call, ret, end) or at its
-        // address (ref, refe, refs).
-        if (g_log)
-            std::fprintf(stderr, "[nativefx] tail call: tag at %08x id %u qwc %u address %08x\n", address, id, qwc, target);
-        if (id == 0u || id == 3u || id == 4u)
-            addRange(target, target + qwc * 16u, Effect::CompositeTail, 0u);
-        else
-            addRange(address, address + 16u + qwc * 16u, Effect::CompositeTail, 0u);
-        if (id == 0u || id == 7u)
-            break;
-        if (id == 1u)
-            address += 16u + qwc * 16u;
-        else if (id == 2u)
-            address = target;
-        else if (id == 3u || id == 4u)
-            address += 16u;
-        else if (id == 5u)
-        {
-            returns.push_back(address + 16u + qwc * 16u);
-            address = target;
-        }
-        else
-        {
-            if (returns.empty())
-                break;
-            address = returns.back();
-            returns.pop_back();
-        }
-    }
 }
 
 // The object layer's passes (native::PassKind::ObjectLayer). work[0]: the
@@ -1303,14 +1258,9 @@ void afterComposite(uint8_t *, R5900Context *, PS2Runtime *, uint32_t unit)
 {
     if (g_composite.unit != unit)
         return;
-    markTailCall();
     compositeBlurMask();
-    const uint32_t end = stackTop();
-    if (g_composite.headEnd > g_composite.start && g_composite.headEnd < end)
-    {
-        addRange(g_composite.start, g_composite.headEnd, Effect::CompositeHead, unit);
-        addRange(g_composite.headEnd, end, Effect::CompositeTail, unit);
-    }
+    // The tail: the layer ended, its passes drawn.
+    writePassMarker(unit);
     g_composite = Composite{};
 }
 
@@ -1327,18 +1277,11 @@ void compositeAt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     g_units = (g_units + 1u) & 0xFFFFFFu;
     g_units = g_units == 0u ? 1u : g_units;
     g_composite = Composite{};
-    g_composite.unit = g_units;
-    g_composite.start = stackTop();
+    g_composite.unit = g_units | (7u << 24);
     g_composite.settings = settings;
     g_composite.object = getRegU32(ctx, 5);
     g_composite.alpha = ctx->f[13];
-    callEffect(g_compositeOriginal, rdram, ctx, runtime, &afterComposite, g_units);
-}
-
-void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
-{
-    if (g_composite.unit != 0u)
-        g_composite.headEnd = stackTop();
+    callEffect(g_compositeOriginal, rdram, ctx, runtime, &afterComposite, g_composite.unit);
 }
 
 // M5's census: the model draws' items by mesh class (the vtable at
@@ -1412,15 +1355,11 @@ void shadowEmit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 void modelEmitDrawPackets(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     censusItems(0, getRegU32(ctx, 6));
-    if (g_composite.unit == 0u)
-    {
-        g_emitOriginal(rdram, ctx, runtime);
-        return;
-    }
-    rg::hooks::callThen(g_emitOriginal, rdram, ctx, runtime, &afterEmit, 0u);
+    if (g_composite.unit != 0u)
+        g_composite.emitted = true;
+    g_emitOriginal(rdram, ctx, runtime);
 }
 
-bool g_composites = true; // false when its hooks could not be placed
 bool g_flip = true; // false when its hook could not be placed
 // The flip's draw environment (below, with flipPacket).
 constexpr uint32_t kSceGsPutDrawEnv = 0x00108BB8u;
@@ -1506,7 +1445,6 @@ const char *name(Effect effect)
     case Effect::CBlurDraw: return "cblur draw";
     case Effect::Refraction: return "refraction";
     case Effect::ShadowSetup: return "shadow setup";
-    case Effect::CompositeHead: return "composite head";
     case Effect::CompositeTail: return "composite tail";
     case Effect::Flip: return "flip";
     case Effect::ColorFilter: return "color filter";
@@ -1514,11 +1452,6 @@ const char *name(Effect effect)
     case Effect::ShadowMapBlur: return "shadow map blur";
     default: return "none";
     }
-}
-
-bool compositesBatched()
-{
-    return enabled() && g_composites;
 }
 
 bool enabled()
@@ -1587,8 +1520,7 @@ void install(PS2Runtime &runtime)
          !rg::timing::hookFunction(runtime, kOverlayMulti, &overlayMulti, g_overlayMultiOriginal) ||
          !rg::timing::hookFunction(runtime, kOverlaySingle, &overlaySingle, g_overlaySingleOriginal)))
     {
-        g_composites = false;
-        std::fprintf(stderr, "[nativefx] the composites stay GS packets\n");
+        std::fprintf(stderr, "[nativefx] the composites are not hooked: drawn into their buffer, no tail\n");
     }
     if (
         !rg::timing::hookFunction(runtime, kColorFilter, &colorFilter, g_colorFilterOriginal))
@@ -1768,6 +1700,46 @@ bool inCompositeCall()
     return g_composite.unit != 0u;
 }
 
+bool compositeTail()
+{
+    return g_composite.unit != 0u && g_composite.emitted;
+}
+
+namespace
+{
+std::mutex g_boxMutex;
+std::vector<std::pair<uint32_t, Box>> g_boxes; // by the head marker's unit
+} // namespace
+
+bool compositeBegin(const Box &box)
+{
+    Composite &c = g_composite;
+    if (c.unit == 0u || c.begun || c.emitted)
+        return false;
+    const uint32_t unit = (c.unit & 0xFFFFFFu) | (6u << 24);
+    {
+        std::lock_guard lock(g_boxMutex);
+        if (g_boxes.size() >= 256u) // a few frames' worth; an older one was never reached
+            g_boxes.erase(g_boxes.begin());
+        g_boxes.emplace_back(unit, box);
+    }
+    c.begun = writePassMarker(unit);
+    return c.begun;
+}
+
+bool takeCompositeBox(uint32_t unit, Box &box)
+{
+    std::lock_guard lock(g_boxMutex);
+    for (auto it = g_boxes.begin(); it != g_boxes.end(); ++it)
+        if (it->first == unit)
+        {
+            box = it->second;
+            g_boxes.erase(it);
+            return true;
+        }
+    return false;
+}
+
 uint64_t effectCallsBegun()
 {
     return g_effectCalls;
@@ -1807,115 +1779,6 @@ uint32_t taskAt(uint32_t address)
             return kDrawTasks[it->task].address;
     }
     return 0u;
-}
-
-Effect effectAt(uint32_t address)
-{
-    return placeAt(address).effect;
-}
-
-bool clearBox(const std::vector<std::vector<uint8_t>> &packets, Box &box)
-{
-    std::array<uint64_t, 0x64> registers{};
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
-    bool found = false;
-    uint32_t queued = 0u;
-    rg::gif::GifEvent first;
-    for (const std::vector<uint8_t> &packet : packets)
-    {
-        events.clear();
-        rg::gif::eachPacket(packet.data(), static_cast<uint32_t>(packet.size()),
-                   [&](uint32_t at, uint32_t size) { rg::gif::decodeGifPacket(packet.data() + at, size, state, events); });
-        for (const rg::gif::GifEvent &event : events)
-        {
-            if (event.kind == rg::gif::GifEvent::Kind::Register)
-            {
-                if (event.reg == 0x00u)
-                    queued = 0u;
-                if (event.reg < registers.size())
-                    registers[event.reg] = event.value;
-                continue;
-            }
-            if ((event.prim & 7u) != 6u || ((event.prim >> 4) & 1u))
-                continue;
-            if (++queued < 2u)
-            {
-                first = event;
-                continue;
-            }
-            queued = 0u;
-            const uint32_t ctxt = (event.prim >> 9) & 1u;
-            const uint64_t frame = registers[kFrame + ctxt];
-            const uint64_t offset = registers[kXyoffset + ctxt];
-            const uint32_t base = static_cast<uint32_t>(frame & 0x1FFu) << 5u;
-            const uint32_t fbw = static_cast<uint32_t>((frame >> 16) & 0x3Fu);
-            if (((frame >> 24) & 0x3Fu) != 0u || (found && (base != box.base || fbw != box.fbw)))
-                return false;
-            const int32_t ox = static_cast<int32_t>(offset & 0xFFFFu), oy = static_cast<int32_t>((offset >> 32) & 0xFFFFu);
-            const int32_t x0 = (std::min<int32_t>(first.x, event.x) - ox) >> 4;
-            const int32_t y0 = (std::min<int32_t>(first.y, event.y) - oy) >> 4;
-            const int32_t x1 = (std::max<int32_t>(first.x, event.x) - ox + 15) >> 4;
-            const int32_t y1 = (std::max<int32_t>(first.y, event.y) - oy + 15) >> 4;
-            if (!found)
-                box = Box{base, fbw, x0, y0, x1, y1};
-            box.x0 = std::min(box.x0, x0);
-            box.y0 = std::min(box.y0, y0);
-            box.x1 = std::max(box.x1, x1);
-            box.y1 = std::max(box.y1, y1);
-            found = true;
-        }
-    }
-    return found && box.fbw != 0u;
-}
-
-bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &last)
-{
-    // An upload's registers come as one A+D packet: BITBLTBUF, TRXPOS,
-    // TRXREG, TRXDIR.
-    if (size < 32u)
-        return false;
-    uint64_t tag, regs;
-    std::memcpy(&tag, data, sizeof(tag));
-    std::memcpy(&regs, data + 8, sizeof(regs));
-    if ((tag >> 58) & 3u || (tag >> 60) != 1u || (regs & 0xFu) != kAd)
-        return false;
-    const uint32_t nloop = static_cast<uint32_t>(tag & 0x7FFFu);
-    uint64_t bitblt = 0u, pos = 0u, reg = 0u;
-    bool host = false;
-    for (uint32_t i = 0; i < nloop && 32u + i * 16u <= size; ++i)
-    {
-        uint64_t value, address;
-        std::memcpy(&value, data + 16u + i * 16u, sizeof(value));
-        std::memcpy(&address, data + 24u + i * 16u, sizeof(address));
-        switch (address & 0xFFu)
-        {
-        case 0x50u: bitblt = value; break;
-        case 0x51u: pos = value; break;
-        case 0x52u: reg = value; break;
-        case 0x53u: host = (value & 3u) == 0u; break;
-        default: break;
-        }
-    }
-    if (!host)
-        return false;
-    const uint32_t dbp = static_cast<uint32_t>((bitblt >> 32) & 0x3FFFu);
-    const uint32_t dbw = std::max<uint32_t>(static_cast<uint32_t>((bitblt >> 48) & 0x3Fu), 1u);
-    const uint32_t dpsm = static_cast<uint32_t>((bitblt >> 56) & 0x3Fu);
-    const uint32_t dsay = static_cast<uint32_t>((pos >> 48) & 0x7FFu);
-    const uint32_t rrh = std::max<uint32_t>(static_cast<uint32_t>((reg >> 32) & 0xFFFu), 1u);
-    // A page's size in pixels by format: 64 x 32 (32 and 24 bits), 64 x 64
-    // (16), 128 x 64 (8), 128 x 128 (4); a row of pages spans the width.
-    const bool four = dpsm == 0x14u || dpsm == 0x24u || dpsm == 0x2Cu;
-    const bool eight = dpsm == 0x13u || dpsm == 0x1Bu;
-    const bool sixteen = dpsm == 0x02u || dpsm == 0x0Au || dpsm == 0x30u || dpsm == 0x31u || dpsm == 0x32u ||
-                         dpsm == 0x3Au;
-    const uint32_t pageW = (four || eight) ? 128u : 64u;
-    const uint32_t pageH = four ? 128u : (eight || sixteen) ? 64u : 32u;
-    const uint32_t perRow = std::max<uint32_t>(dbw * 64u / pageW, 1u);
-    first = dbp / 32u + (dsay / pageH) * perRow;
-    last = dbp / 32u + ((dsay + rrh - 1u) / pageH) * perRow + perRow - 1u;
-    return true;
 }
 
 void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets)
