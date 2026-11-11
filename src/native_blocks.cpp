@@ -191,7 +191,7 @@ void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const bool discard =
         rg::nativefx::inCompositeCall() ? rg::nativefx::compositeTail() : rg::nativefx::inEffectCall();
     g_open.push_back({owner, true, false, discard});
-    rg::gspkt::beginBlock();
+    rg::gspkt::beginBlock(discard);
     g_envs.clear();
     g_blockOwner = owner;
     g_pktBeginOriginal(rdram, ctx, runtime);

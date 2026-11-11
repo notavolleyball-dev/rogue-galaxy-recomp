@@ -82,6 +82,7 @@ struct Shadow
     bool packed = false;
     uint32_t nreg = 1u;
     bool opened = false; // a GsPktOpen ran in it (followed or not)
+    bool discard = false; // a pass's block: never written, followed or not
 };
 std::vector<Shadow> g_shadows;
 
@@ -178,7 +179,22 @@ void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     if (!g_shadows.empty() && getRegU32(ctx, 4) == builder())
         g_shadows.back().opened = true;
-    if (Shadow *s = shadowFor(ctx))
+    // A discarded block's segments go over scratch even once its shadow is
+    // spoiled (the composite tail's VU1 calls): the game writes none of it.
+    Shadow *s = shadowFor(ctx);
+    if (!s && !g_shadows.empty() && g_shadows.back().discard && getRegU32(ctx, 4) == builder() &&
+        read32(getRegU32(ctx, 4)) != 0u)
+    {
+        const uint32_t b = getRegU32(ctx, 4);
+        const uint32_t stack = read32(b);
+        const uint32_t top = read32(stack + 0x28u) + read32(stack + 0x2Cu) * 16u;
+        write32(b + 0xE8u, 1u);
+        write32(b + 0xECu, top);
+        write32(b + 0xF4u, top);
+        ctx->pc = getRegU32(ctx, 31);
+        return;
+    }
+    if (s)
     {
         const uint32_t b = getRegU32(ctx, 4);
         if (read32(b) == 0u)
@@ -506,13 +522,14 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-gspkt] %zu of %zu builder functions hooked\n", hooked, total);
 }
 
-void beginBlock()
+void beginBlock(bool discard)
 {
     // An outer block's builder is reset by the inner one's: it is spoiled.
     if (!g_shadows.empty())
         g_shadows.back().broken = true;
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
+    g_shadows.back().discard = discard;
 }
 
 bool opened()

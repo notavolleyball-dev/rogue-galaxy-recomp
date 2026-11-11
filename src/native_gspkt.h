@@ -29,8 +29,10 @@ void install(PS2Runtime &runtime);
 // the block was written through something it does not follow. Each
 // GsPktOpen is replaced by a segment opened over scratch above the
 // memstack's top (the setters write there, nothing is allocated, GsPktEnd
-// answers 0 so no CALL is written).
-void beginBlock();
+// answers 0 so no CALL is written). `discard`: a pass's block (its pass
+// draws it), whose segments go over scratch even once its shadow is
+// spoiled.
+void beginBlock(bool discard);
 bool endBlock(std::vector<uint8_t> &out);
 // The open block has had a GsPktOpen (what is written from now on comes
 // after its first segment).
