@@ -81,7 +81,6 @@ struct Shadow
     size_t headerAt = SIZE_MAX; // the last GsPktOpen's header tag
     bool packed = false;
     uint32_t nreg = 1u;
-    bool skip = false;
     bool opened = false; // a GsPktOpen ran in it (followed or not)
 };
 std::vector<Shadow> g_shadows;
@@ -186,8 +185,6 @@ void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const uint32_t b = getRegU32(ctx, 4);
         if (read32(b) == 0u)
             s->broken = true; // no memstack: the setters write into an old packet
-        else if (s->skip && rg::nativefx::inEffectCall())
-            s->broken = true; // an effect's segments inside a skipped block: written (its range, its pass)
         else
         {
             s->headerAt = s->bytes.size();
@@ -198,19 +195,16 @@ void hookOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             const size_t at = s->bytes.size();
             s->bytes.resize(at + 6u * 16u);
             std::memcpy(s->bytes.data() + at, g_rdram + physical(b + 0x10u), 6u * 16u);
-            if (s->skip)
-            {
-                // A segment over scratch: the setters write above the
-                // memstack's top, Close and Commit allocate nothing (+0xE8
-                // 1), the block's start (+0xF0) stays 0.
-                const uint32_t stack = read32(b);
-                const uint32_t top = read32(stack + 0x28u) + read32(stack + 0x2Cu) * 16u;
-                write32(b + 0xE8u, 1u);
-                write32(b + 0xECu, top);
-                write32(b + 0xF4u, top);
-                ctx->pc = getRegU32(ctx, 31);
-                return;
-            }
+            // A segment over scratch: the setters write above the
+            // memstack's top, Close and Commit allocate nothing (+0xE8 1),
+            // the block's start (+0xF0) stays 0.
+            const uint32_t stack = read32(b);
+            const uint32_t top = read32(stack + 0x28u) + read32(stack + 0x2Cu) * 16u;
+            write32(b + 0xE8u, 1u);
+            write32(b + 0xECu, top);
+            write32(b + 0xF4u, top);
+            ctx->pc = getRegU32(ctx, 31);
+            return;
         }
     }
     g_Open(rdram, ctx, runtime);
@@ -270,20 +264,16 @@ void hookFinalizeTags(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 // GsPktClose: TEXFLUSH, then the A+D NLOOP (whatever the tag is).
 void hookClose(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    // (The segment over scratch has +0xE8 1, but closes as written.)
     if (Shadow *s = shadowFor(ctx))
     {
-        const uint32_t b = getRegU32(ctx, 4);
-        // (A skipped block's segment has +0xE8 1, but closes as written.)
-        if (s->skip || read32(b + 0xE8u) == 0u)
+        if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed)
+            s->broken = true;
+        else
         {
-            if (s->tagAt == SIZE_MAX || s->tagAt >= s->bytes.size() || s->packed)
-                s->broken = true;
-            else
-            {
-                putAD(*s, 0u, 0x3Fu);
-                const uint32_t gif = static_cast<uint32_t>((s->bytes.size() - s->tagAt) / 16u) - 1u;
-                setTagLoop(*s, s->tagAt, gif);
-            }
+            putAD(*s, 0u, 0x3Fu);
+            const uint32_t gif = static_cast<uint32_t>((s->bytes.size() - s->tagAt) / 16u) - 1u;
+            setTagLoop(*s, s->tagAt, gif);
         }
     }
     g_Close(rdram, ctx, runtime);
@@ -508,17 +498,13 @@ void install(PS2Runtime &runtime)
         std::fprintf(stderr, "[native-gspkt] %zu of %zu builder functions hooked\n", hooked, total);
 }
 
-void beginBlock(bool skip)
+void beginBlock()
 {
     // An outer block's builder is reset by the inner one's: it is spoiled.
     if (!g_shadows.empty())
         g_shadows.back().broken = true;
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
-    g_shadows.back().skip = skip;
-    // A block the game writes (a composite's) is not followed.
-    if (!skip)
-        g_shadows.back().broken = true;
 }
 
 bool opened()

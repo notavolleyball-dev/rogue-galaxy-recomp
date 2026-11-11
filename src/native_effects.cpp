@@ -23,7 +23,6 @@ namespace
 
 constexpr uint32_t kGlareFilterDraw = 0x0017A0D0u; // GlareFilterDrawMaybe
 constexpr uint32_t kPlaneShadowEnd = 0x00146CC0u;   // DrawListEndPlaneShadowPass
-constexpr uint32_t kPlaneShadowBegin = 0x00147B80u; // DrawListBeginPlaneShadowPass
 // ModelDrawOffscreenCompositeAtMaybe: the composite's only way in (it jumps
 // into ModelDrawOffscreenCompositeMaybe_16aac0 past the function table).
 constexpr uint32_t kCompositeAt = 0x0016B8A0u;
@@ -80,16 +79,7 @@ uint32_t stackTop()
     return stack == 0u ? 0u : read32(stack + 0x28u) + read32(stack + 0x2Cu) * 16u;
 }
 
-// The packet memory each effect's calls wrote, by start: a few frames'
-// worth, the VIF1 thread reading a frame or two behind the game.
-struct Range
-{
-    uint32_t start = 0u;
-    uint32_t end = 0u;
-    Place place;
-};
 std::mutex g_mutex;
-std::vector<Range> g_ranges;
 // M4: the layer each draw task's packets belong to (below).
 struct LayerRange
 {
@@ -107,30 +97,6 @@ struct TaskRange
 };
 std::vector<TaskRange> g_taskRanges; // under g_mutex, by start
 
-// The ranges `start`-`end` overlaps go: the memory is something else's now.
-void dropRangesLocked(uint32_t start, uint32_t end)
-{
-    g_ranges.erase(std::remove_if(g_ranges.begin(), g_ranges.end(),
-                                  [&](const Range &range) { return range.start < end && start < range.end; }),
-                   g_ranges.end());
-}
-
-void addRange(uint32_t start, uint32_t end, Effect effect, uint32_t unit = 0u)
-{
-    start = physical(start);
-    end = physical(end);
-    if (end <= start || end - start > (256u << 10))
-    {
-        return;
-    }
-    std::lock_guard lock(g_mutex);
-    dropRangesLocked(start, end);
-    const Range range{start, end, Place{effect, unit}};
-    g_ranges.insert(std::upper_bound(g_ranges.begin(), g_ranges.end(), range,
-                                     [](const Range &a, const Range &b) { return a.start < b.start; }),
-                    range);
-}
-
 // A frame begins in a buffer: what the effects wrote there before is some
 // other packet's now. (The game waits for the lists of a buffer to finish
 // before it builds in it again.)
@@ -139,7 +105,6 @@ void dropRanges(uint32_t start, uint32_t end)
     start = physical(start);
     end = physical(end);
     std::lock_guard lock(g_mutex);
-    dropRangesLocked(start, end);
     g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
                                        [&](const LayerRange &r) { return r.start < end && start < r.end; }),
                         g_layerRanges.end());
@@ -167,8 +132,7 @@ void drawListFrameBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 }
 
 // M4: the layer each draw task's packets belong to (native::Layer, as a
-// byte), by the packet memory the task wrote, as the effects' ranges are.
-// Kept apart from them: an effect's call runs inside a task.
+// byte), by the packet memory the task wrote.
 
 void addLayerRange(uint32_t start, uint32_t end, uint8_t layer)
 {
@@ -444,9 +408,13 @@ void callEffect(PS2Runtime::RecompiledFunction original, uint8_t *rdram, R5900Co
 
 PS2Runtime::RecompiledFunction g_glareOriginal = nullptr;
 
-void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+bool writePassMarker(uint32_t unit);
+
+// (Its marker could not be written before the call: at its end.)
+void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    addRange(top, stackTop(), Effect::Glare, g_passUnit);
+    if (g_passUnit != 0u)
+        writePassMarker(g_passUnit);
     g_passUnit = 0u;
 }
 
@@ -523,7 +491,6 @@ uint32_t g_shadowUnit = 0u; // game thread
 
 void afterShadow(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::Shadow, g_shadowUnit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (g_shadowUnit != 0u)
@@ -569,24 +536,11 @@ void planeShadowEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     callEffect(g_shadowOriginal, rdram, ctx, runtime, &afterShadow, stackTop());
 }
 
-PS2Runtime::RecompiledFunction g_shadowBeginOriginal = nullptr;
-
-void afterShadowBegin(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
-{
-    addRange(top, stackTop(), Effect::ShadowSetup);
-}
-
-void planeShadowBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-{
-    callEffect(g_shadowBeginOriginal, rdram, ctx, runtime, &afterShadowBegin, stackTop());
-}
-
 PS2Runtime::RecompiledFunction g_cblurOriginal = nullptr;
 uint32_t g_cblurUnit = 0u; // game thread
 
 void afterCBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::CBlur, g_cblurUnit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (g_cblurUnit != 0u)
@@ -635,9 +589,10 @@ void cblurTexBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 PS2Runtime::RecompiledFunction g_bloomOriginal = nullptr;
 uint32_t g_bloomUnit = 0u; // game thread
 
-void afterBloom(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+void afterBloom(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    addRange(top, stackTop(), Effect::Bloom, g_bloomUnit);
+    if (g_bloomUnit != 0u)
+        writePassMarker(g_bloomUnit);
     g_bloomUnit = 0u;
 }
 
@@ -686,9 +641,11 @@ constexpr uint32_t kColorFilter = 0x00179C60u;
 PS2Runtime::RecompiledFunction g_colorFilterOriginal = nullptr;
 uint32_t g_colorFilterUnit = 0u; // game thread only
 
-void afterColorFilter(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+void afterColorFilter(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    addRange(top, stackTop(), Effect::ColorFilter, g_colorFilterUnit);
+    if (g_colorFilterUnit != 0u)
+        writePassMarker(g_colorFilterUnit);
+    g_colorFilterUnit = 0u;
 }
 
 // The colour filter's pass, for (r, g, b) bytes (0x80 = 1).
@@ -754,10 +711,8 @@ void gameSceneTintApply(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         set(6, color & 0xFFu);
         if (g_colorFilterOriginal)
         {
-            const uint32_t top = stackTop();
             g_colorFilterOriginal(rdram, ctx, runtime);
-            const uint32_t unit = colorFilterPass(color >> 16, color >> 8, color);
-            addRange(top, stackTop(), Effect::ColorFilter, unit);
+            writePassMarker(colorFilterPass(color >> 16, color >> 8, color));
         }
         else if (PS2Runtime::RecompiledFunction filter = runtime->lookupFunction(kColorFilter))
         {
@@ -778,7 +733,6 @@ uint32_t g_cblurDrawUnit = 0u; // game thread
 
 void afterCBlurDraw(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::CBlurDraw, g_cblurDrawUnit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (g_cblurDrawUnit != 0u)
@@ -870,7 +824,6 @@ void afterFocus(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
         unit = keepPass(request);
     }
     g_framesSet.clear();
-    addRange(top, stackTop(), Effect::Focus, unit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (unit != 0u)
@@ -909,7 +862,6 @@ uint32_t g_shadowMapUnit = 0u; // game thread
 
 void afterShadowMapBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
-    addRange(top, stackTop(), Effect::ShadowMapBlur, g_shadowMapUnit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (g_shadowMapUnit != 0u)
@@ -977,7 +929,6 @@ void afterRefraction(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
         request.workSizes[0][0] = request.workSizes[0][1] = g_refractionSide;
         unit = keepPass(request);
     }
-    addRange(top, stackTop(), Effect::Refraction, unit);
     // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
     // comes at a marker where the call's output ends.
     if (unit != 0u)
@@ -996,9 +947,10 @@ PS2Runtime::RecompiledFunction g_dofOriginal = nullptr;
 
 uint32_t g_dofUnit = 0u; // game thread
 
-void afterDof(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
+void afterDof(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
 {
-    addRange(top, stackTop(), Effect::Dof, g_dofUnit);
+    if (g_dofUnit != 0u)
+        writePassMarker(g_dofUnit);
     g_dofUnit = 0u;
 }
 
@@ -1444,7 +1396,6 @@ const char *name(Effect effect)
     case Effect::Dof: return "dof";
     case Effect::CBlurDraw: return "cblur draw";
     case Effect::Refraction: return "refraction";
-    case Effect::ShadowSetup: return "shadow setup";
     case Effect::CompositeTail: return "composite tail";
     case Effect::Flip: return "flip";
     case Effect::ColorFilter: return "color filter";
@@ -1483,8 +1434,7 @@ void install(PS2Runtime &runtime)
     {
         std::fprintf(stderr, "[nativefx] the glare stays GS packets\n");
     }
-    if ((!rg::timing::hookFunction(runtime, kPlaneShadowBegin, &planeShadowBegin, g_shadowBeginOriginal) ||
-                     !rg::timing::hookFunction(runtime, kPlaneShadowEnd, &planeShadowEnd, g_shadowOriginal)))
+    if (!rg::timing::hookFunction(runtime, kPlaneShadowEnd, &planeShadowEnd, g_shadowOriginal))
     {
         std::fprintf(stderr, "[nativefx] the plane shadow stays GS packets\n");
     }
@@ -1668,22 +1618,6 @@ bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &
     return true;
 }
 
-Place placeAt(uint32_t address)
-{
-    address = physical(address);
-    std::lock_guard lock(g_mutex);
-    auto it = std::upper_bound(g_ranges.begin(), g_ranges.end(), address,
-                               [](uint32_t value, const Range &range) { return value < range.start; });
-    if (it == g_ranges.begin())
-        return Place{};
-    --it;
-    return address < it->end ? it->place : Place{};
-}
-
-uint32_t listTop()
-{
-    return stackTop();
-}
 
 bool writeMarker(uint32_t unit)
 {
@@ -1740,11 +1674,6 @@ bool takeCompositeBox(uint32_t unit, Box &box)
     return false;
 }
 
-uint64_t effectCallsBegun()
-{
-    return g_effectCalls;
-}
-
 
 
 uint8_t currentLayer()
@@ -1779,29 +1708,6 @@ uint32_t taskAt(uint32_t address)
             return kDrawTasks[it->task].address;
     }
     return 0u;
-}
-
-void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets)
-{
-    rg::gif::GifState state;
-    std::vector<rg::gif::GifEvent> events;
-    for (const std::vector<uint8_t> &packet : packets)
-    {
-        events.clear();
-        rg::gif::eachPacket(packet.data(), static_cast<uint32_t>(packet.size()),
-                   [&](uint32_t at, uint32_t size) { rg::gif::decodeGifPacket(packet.data() + at, size, state, events); });
-        std::fprintf(stderr, "[%s] packet %zu bytes:", what, packet.size());
-        for (const rg::gif::GifEvent &event : events)
-        {
-            if (event.kind == rg::gif::GifEvent::Kind::Register)
-                std::fprintf(stderr, " %02x=%llx", event.reg, static_cast<unsigned long long>(event.value));
-            else
-                std::fprintf(stderr, " V(prim %x %d,%d z %u uv %d,%d rgba %02x%02x%02x%02x%s)", event.prim, event.x, event.y, event.z,
-                             event.u, event.v, event.rgba[0], event.rgba[1], event.rgba[2], event.rgba[3],
-                             event.drawing ? " kick" : "");
-        }
-        std::fprintf(stderr, "\n");
-    }
 }
 
 

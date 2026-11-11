@@ -10,18 +10,17 @@ class PS2Runtime;
 // The game's post effects as the native pipeline's own draws (M3 of
 // docs/NATIVE-ONLY.md), instead of the GS sprites the game builds for them.
 //
-// The game's function still runs, so all it does besides drawing stays as
-// it was. Its hook reads the function's arguments into a pass request
-// (rg::nativeproducer::PassRequest) kept under the unit of the packet range
-// the call wrote. The VIF1 thread, reaching that range, sends the Pass
-// (emitPass) in the stream's order and the packets on with their kicks
-// withheld (XYZ2 as XYZ3: uploads and registers go on, no draws). The
-// renderer expands the pass into its own draws (native_passes.cpp). Each
-// function hooked has a note in docs/NATIVE-ONLY-NOTES.md.
+// Each hooked function's arguments become a pass request
+// (rg::nativeproducer::PassRequest) kept under a unit, and a marker for the
+// unit is written into the draw list where the call's output is (M6: the
+// only thing of the call's the list carries for drawing; its 2D blocks are
+// not written, src/native_blocks.cpp). A function with no side effect but
+// its packets is not run. The list's run, reaching the marker, sends the
+// Pass in the stream's order; the renderer expands it into its own draws
+// (native_passes.cpp). Each function hooked has a note in
+// docs/NATIVE-ONLY-NOTES.md.
 //
-// RG_NATIVE_EFFECTS_LOG=1 logs the effects' first passes;
-// RG_NATIVE_EFFECTS_TRACE=1 dumps the packets of an effect whose pass was
-// not sent.
+// RG_NATIVE_EFFECTS_LOG=1 logs the effects' first passes.
 namespace rg::nativefx
 {
 
@@ -44,9 +43,6 @@ enum class Effect : uint8_t
     // RefractionCaptureFrame (CharaDrawTranslucentPass's): the frame halved
     // into 03b80, which the refraction material samples.
     Refraction,
-    // DrawListBeginPlaneShadowPass: its packets go on as they are; the
-    // registers they set are where the shadow's sprites start from.
-    ShadowSetup,
     // ModelDrawOffscreenComposite (stage E), an object at a time: the head
     // draws it into the offscreen buffer (its clear, its model), the tail
     // lays that over the frame. Drawn into an object layer of the
@@ -58,26 +54,14 @@ enum class Effect : uint8_t
     // from the game thread, not the VIF1 lists, so taken by flipPacket
     // rather than by packet memory.
     Flip,
-    // ScreenColorFilterMaybe: the scene's tint, built from its arguments
-    // (Place::unit: the colour), its packets sent on with their kicks
-    // withheld.
+    // ScreenColorFilterMaybe: the scene's tint, built from its arguments.
     ColorFilter,
-    // FocusFilterDrawMaybe and ShadowMapBlur: built from their sprites, as
-    // the bloom.
+    // FocusFilterDrawMaybe and ShadowMapBlur: built from their arguments
+    // and the frames they set, as the bloom.
     Focus,
     ShadowMapBlur,
-    // M4: a GsPkt block (DrawListBeginPrim to DrawListEndPrim), its 2D
-    // made on the game thread (src/native_blocks.h); Place::unit its pieces'.
 };
 
-// What an EE address of the frame's packet memory holds: an effect's
-// packets, and for the colour filter its colour, for a composite its
-// object's number.
-struct Place
-{
-    Effect effect = Effect::None;
-    uint32_t unit = 0u;
-};
 
 // Whether any effect is on (the native pipeline is, and not every effect's
 // variable is 0).
@@ -103,22 +87,19 @@ void endFlip();
 // buffer), as GS bases.
 bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &target);
 
-// M4 (src/native_blocks.cpp): the top of the draw list being built (game
-// thread), a block's packet range marked with its unit, and the layer of
-// the draw task running now.
-uint32_t listTop();
+// M4 (src/native_blocks.cpp): a block's marker, and the layer of the draw
+// task running now.
 // A marker for `unit` at the draw list's write cursor (a cnt tag, NOP and
 // DIRECT 2, an A+D write of the unit to kPassRegister): the draw stage
 // sends what is kept under it there. False: no list being built.
 bool writeMarker(uint32_t unit);
-// An effect's hooked call is in progress (game thread), and how many have
-// begun so far: what a 2D block drawn inside one is.
+// A pass effect's hooked call is in progress (game thread): a 2D block
+// drawn inside one is its pass's.
 bool inEffectCall();
 // ModelDrawOffscreenComposite's call is in progress; and past its head (a
 // part emitted: its blocks are then the tail's, which its passes draw).
 bool inCompositeCall();
 bool compositeTail();
-uint64_t effectCallsBegun();
 uint8_t currentLayer();
 
 // M4: the layer (native::Layer's value) of the draw task whose packets the
@@ -128,8 +109,6 @@ uint8_t layerAt(uint32_t address);
 // EE address holds; 0 for none.
 uint32_t taskAt(uint32_t address);
 
-// The effect whose packets the EE address holds (any of RDRAM's windows).
-Place placeAt(uint32_t address);
 
 
 // A composite's head: the box its clear sprites cover in the offscreen
@@ -147,8 +126,6 @@ struct Box
 bool compositeBegin(const Box &box);
 bool takeCompositeBox(uint32_t unit, Box &box);
 
-// Debugging: the registers and primitives of `packets`, one line each.
-void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets);
 
 // M3: an effect sent as a Pass record (native_records.h) in place of its
 // packets: whether it is one, and the pass of the call whose packet range

@@ -92,8 +92,7 @@ struct OpenBlock
     uint32_t owner = 0u;
     bool skip = false;
     bool made = false;
-    bool effect = false;       // begun inside an effect's call
-    uint64_t effectsAt = 0u;   // the effect calls begun before it
+    bool effect = false; // inside a pass's call (its pass draws it)
 };
 std::vector<OpenBlock> g_open;
 
@@ -192,8 +191,8 @@ void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     // tail's are its passes'.
     const bool discard =
         rg::nativefx::inCompositeCall() ? rg::nativefx::compositeTail() : rg::nativefx::inEffectCall();
-    g_open.push_back({owner, true, false, discard, rg::nativefx::effectCallsBegun()});
-    rg::gspkt::beginBlock(true);
+    g_open.push_back({owner, true, false, discard});
+    rg::gspkt::beginBlock();
     g_envs.clear();
     g_blockOwner = owner;
     g_pktBeginOriginal(rdram, ctx, runtime);

@@ -571,11 +571,6 @@ void drawUnwritten(uint32_t unit);
 // data memory a program's mesh was built from, for the native pipeline's
 // mesh draw (rg::nativeproducer::mesh); null for others.
 void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data = nullptr);
-// An effect's packets held on the VIF1 thread go on, as the renderer's
-// effect or as they are (below).
-void flushEffect();
-// Dropped, after a flush that threw.
-void discardHeld();
 // deliverPacket with the packet's place known: its EE address in the list
 // (~0u for none) and, for one a VU1 program kicked, that of the VIF code
 // that started the program (~0u when not looked up).
@@ -1090,17 +1085,6 @@ private:
         catch (const std::exception &error)
         {
             std::fprintf(stderr, "[vif1] list failed: %s\n", error.what());
-        }
-        // What the list held goes on before the next list's packets, also
-        // when it threw. If that throws too, it is dropped.
-        try
-        {
-            flushEffect();
-        }
-        catch (const std::exception &error)
-        {
-            std::fprintf(stderr, "[vif1] the list's held packets failed: %s\n", error.what());
-            discardHeld();
         }
         if (vifwait::g_on)
             vifwait::add(vifwait::g_listVif1, vifwait::g_listSent.load());
@@ -1829,16 +1813,6 @@ void sendPacket(const uint8_t *data, uint32_t size)
     sendRaw(data, size);
 }
 
-// The packets of an effect the producer may draw (src/native_effects.h),
-// held on the VIF1 thread until something else goes to the GS (an effect's
-// packets come in one run) or the list ends.
-struct HeldEffect
-{
-    rg::nativefx::Effect effect = rg::nativefx::Effect::None;
-    uint32_t unit = 0u; // the colour filter's colour
-    std::vector<std::vector<uint8_t>> packets;
-};
-thread_local HeldEffect t_held;
 std::atomic<uint64_t> g_effectsNative{0u};
 std::atomic<uint64_t> g_effectsAsPackets{0u};
 
@@ -1877,19 +1851,15 @@ uint32_t listAddress(const uint8_t *data)
     return pieces[at].second + (offset - pieces[at].first);
 }
 
-// An effect built from its packets, as the producer's draws: then its
-// packets go on with their kicks withheld (the registers they set still
-// reach the GS and the draw-state mirror). False, with `why`, leaves the
-// packets to go on as they are.
-void countEffect(bool drawn, rg::nativefx::Effect kind, const std::string &why,
-                 const std::vector<std::vector<uint8_t>> &packets)
+// A pass sent at its marker (src/native_effects.h), or not (`why`): counted.
+void countEffect(bool drawn, rg::nativefx::Effect kind, const std::string &why)
 {
     if (drawn)
     {
         const uint64_t count = ++g_effectsNative;
         if (count == 1u || count % 3600u == 0u)
         {
-            std::fprintf(stderr, "[nativefx] %llu drawn by the renderer, %llu as packets\n",
+            std::fprintf(stderr, "[nativefx] %llu passes drawn by the renderer, %llu not\n",
                          static_cast<unsigned long long>(count),
                          static_cast<unsigned long long>(g_effectsAsPackets.load()));
         }
@@ -1903,43 +1873,8 @@ void countEffect(bool drawn, rg::nativefx::Effect kind, const std::string &why,
     if (told.size() < 16u && std::find(told.begin(), told.end(), line) == told.end())
     {
         told.push_back(line);
-        std::fprintf(stderr, "[nativefx] an effect stays packets: %s\n", line.c_str());
-        static const bool dump = std::getenv("RG_NATIVE_EFFECTS_TRACE") != nullptr;
-        if (dump)
-            rg::nativefx::dumpPackets("nativefx refused", packets);
+        std::fprintf(stderr, "[nativefx] a pass not drawn: %s\n", line.c_str());
     }
-}
-
-void flushEffect()
-{
-    if (t_held.effect == rg::nativefx::Effect::None)
-    {
-        return;
-    }
-    // A pass: the renderer draws it from the function's parameters (M3 of
-    // docs/NATIVE-ONLY.md); the packets' uploads and register writes still
-    // go on, their draws not. (Anything else held, a composite's packets
-    // outside its object, goes on as it is.)
-    const bool pass = rg::nativefx::isPass(t_held.effect);
-    const bool sent = pass && rg::nativefx::emitPass(t_held.effect, t_held.unit);
-    countEffect(sent, t_held.effect,
-                pass ? "its pass was not sent (its parameters or buffers unknown)" : "not a pass", t_held.packets);
-    for (std::vector<uint8_t> &packet : t_held.packets)
-    {
-        if (pass)
-            rg::nativefx::withholdKicks(packet);
-        sendPacket(packet.data(), static_cast<uint32_t>(packet.size()));
-    }
-    t_held.effect = rg::nativefx::Effect::None;
-    t_held.unit = 0u;
-    t_held.packets.clear();
-}
-
-void discardHeld()
-{
-    t_held.effect = rg::nativefx::Effect::None;
-    t_held.unit = 0u;
-    t_held.packets.clear();
 }
 
 // M6: stage E's objects (ModelDrawOffscreenComposite), each drawn into an
@@ -1998,8 +1933,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
     // have put its packets: the pass, in the stream's order.
     if (data && size >= 32u && (data[8] & 0xFu) == 0xEu && data[24] == rg::nativefx::kPassRegister)
     {
-        if (nativeEffects() && t_onVif1Thread)
-            flushEffect();
         uint64_t unit = 0u;
         std::memcpy(&unit, data + 16u, sizeof(unit));
         if ((unit >> 24) == 5u)
@@ -2028,40 +1961,13 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
             return;
         }
         countEffect(rg::nativefx::emitPassUnit(static_cast<uint32_t>(unit)), rg::nativefx::Effect::Glare,
-                    "its pass was not kept", {});
+                    "its pass was not kept");
         return;
     }
     // M4: the layer of the draw task that wrote it (what a VU1 program
     // kicked: the task whose list holds the MSCAL), for its 2D.
     t_layer = rg::nativefx::layerAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
     t_task = rg::nativefx::taskAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
-    // Step 5: an effect's packets, held until the effect's run ends. A
-    // packet outside the held run ends it first, before a composite can
-    // take the packet: the effect goes on ahead of what follows it.
-    rg::nativefx::Effect effect = rg::nativefx::Effect::None;
-    uint32_t unit = 0u;
-    const bool effects = nativeEffects() && t_onVif1Thread;
-    if (effects)
-    {
-        const rg::nativefx::Place place = address == ~0u ? rg::nativefx::Place{} : rg::nativefx::placeAt(address);
-        effect = place.effect;
-        unit = effect == rg::nativefx::Effect::ColorFilter || rg::nativefx::isPass(effect) ? place.unit : 0u;
-        if (effect != t_held.effect || unit != t_held.unit)
-        {
-            flushEffect();
-        }
-    }
-    if (effects)
-    {
-        // (The plane shadow's setup goes on as it is.)
-        if (effect != rg::nativefx::Effect::None && effect != rg::nativefx::Effect::ShadowSetup)
-        {
-            t_held.effect = effect;
-            t_held.unit = unit;
-            t_held.packets.emplace_back(data, data + size);
-            return;
-        }
-    }
     // The flip's copy, from the game thread: after the lists in flight, as
     // the GS would get it.
     if (!t_onVif1Thread && rg::nativefx::flipNative())
@@ -2087,7 +1993,7 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
             {
                 sendPacket(data, size);
             }
-            countEffect(drawn, rg::nativefx::Effect::Flip, "the producer cannot draw it", {});
+            countEffect(drawn, rg::nativefx::Effect::Flip, "the producer cannot draw it");
             return;
         }
     }
@@ -2096,11 +2002,6 @@ void deliverPacketAt(const uint8_t *data, uint32_t size, uint32_t address, uint3
 
 void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
 {
-    // A held effect goes on first.
-    if (nativeEffects() && t_onVif1Thread)
-    {
-        flushEffect();
-    }
     // The mesh's own register writes, where its packets went: the mirror
     // and the converter's carried state, or as a packet when the packet's
     // way has more to do (not absorbing, or image data due first).
@@ -2456,18 +2357,8 @@ namespace
 {
 // A texture split over DIRECT packets continues in place, without the copy
 // behind a synthesized IMAGE tag.
-// What image data ends before it is looked at: a held effect.
-void beforeImage()
-{
-    if (t_onVif1Thread)
-    {
-        flushEffect();
-    }
-}
-
 void deliverImage(const uint8_t *data, uint32_t size)
 {
-    beforeImage();
     if (uploadsTaken())
     {
         // A withheld upload's rest goes no further; another's is
@@ -2493,8 +2384,7 @@ void deliverElidedImage(uint32_t size, uint32_t phys, uint64_t hash)
     UploadWithhold &u = t_upload;
     if (uploadsTaken() && u.imageBytes >= size && u.expectHash == hash && u.seen.empty())
     {
-        beforeImage();
-        u.imageBytes -= size;
+            u.imageBytes -= size;
         u.expectBytes = 0u;
         rg::nativeproducer::noteElided(size, false);
         return;
