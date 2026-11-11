@@ -67,7 +67,7 @@ struct DrawRow {
 layout(std430, set = 0, binding = 0) readonly buffer Draws {
     DrawRow draws[];
 };
-// The constants of a draw (vu1_native's modelRow), 40 vec4s:
+// The constants of a draw (vu1_native's modelRow), 48 vec4s:
 //  0: quad 77 (position scale), w: the C piece (Color: 0 vertex colors,
 //     1 material, 2 lit, 3 lit vertex colors, 4 lit point vertex colors,
 //     5 lit point, 6 the projector's: the base)
@@ -88,8 +88,12 @@ layout(std430, set = 0, binding = 0) readonly buffer Draws {
 //  36: the swell's lanes (quads 68-71 w); 37.x: the palette's base
 //  38-41: the projector's texture matrix (C 6 and F 7: the projected
 //     texture, its color the base)
+//  flag 32 (particle()): 20-23 the model, 27 the eye, nothing else.
+//  flag 64 (volume()): 38-41 the light's push (the model times quads
+//     30-33), 42 the direction to the light and w the lit threshold, 43
+//     the color, 44-47 the camera (8-11 times 24-27, x and y times 16).
 struct ModelRow {
-    vec4 q[44];
+    vec4 q[48];
 };
 layout(std430, set = 0, binding = 1) readonly buffer Models {
     ModelRow models[];
@@ -224,6 +228,143 @@ void project(vec3 v, out float px, out float py, out float q, out bool outside) 
     outside = draw.cull.y != 0.0 && (any(greaterThan(g, vec3(1.0))) || any(lessThan(g, vec3(-1.0))));
 }
 
+// A vertex at p (the space draw.clip takes) with its UV and color: the
+// transform, the fog and the depth; off the target when skipped.
+void emit(vec3 p, vec2 uv, vec4 color, bool skip) {
+    vec4 clip = draw.clip * vec4(p, 1.0);
+    vec4 window = draw.viewport * clip;
+    outDraw = inDraw;
+    outUv = uv;
+    outColor = min(color, draw.colorMax) * draw.vertexUnits.x;
+    outFog = clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
+    float depth = dot(draw.depthRow, vec4(p, 1.0));
+    if (draw.depthLimit.y != 0.0 && clip.w > 0.0)
+        depth = min(depth, draw.depthLimit.x * clip.w);
+    gl_Position = vec4(window.x, window.y, depth + draw.target.w * clip.w, clip.w);
+    if (skip)
+        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+}
+
+// Rows r..r+3 times (p, 1), lane by lane as vu1_native's transform().
+vec4 rows4(int r, vec3 p) {
+    precise vec4 v = ((M.q[r] * p.x + M.q[r + 1] * p.y) + M.q[r + 2] * p.z) + M.q[r + 3] * 1.0;
+    return v;
+}
+
+// 1 / sqrt(|x|), the most float at 0 (the runtime's RSQRT).
+float rsqrtVu(float x) {
+    precise float root = sqrt(abs(x));
+    return root != 0.0 ? 1.0 / root : 3.402823466e38;
+}
+
+// The particle program's sine (vu1_native's particleCosine): the angle's
+// turns folded by the 1.5 x 2^23 trick, then an odd polynomial.
+float particleCosine(float angle) {
+    precise float p = abs(angle) * uintBitsToFloat(0xbe22f987u);
+    float magic = uintBitsToFloat(0x4b400000u);
+    precise float fraction = ((p - magic) + magic) - p;
+    precise float t = abs(fraction - 0.5) - 0.25;
+    precise float t2 = t * t;
+    precise float t4 = t2 * t2;
+    precise float t8 = t4 * t4;
+    precise float a3 = t * uintBitsToFloat(0xc2255de0u) * t2;
+    precise float a7 = t * uintBitsToFloat(0xc2992661u) * t2 * t4;
+    precise float a5 = t * uintBitsToFloat(0x42a33457u) * t4;
+    precise float a1 = t * uintBitsToFloat(0x40c90fdau);
+    precise float a9 = t * uintBitsToFloat(0x421ed7b7u) * t8;
+    precise float r = a3 + a7 + a5 + a1 + a9;
+    return r;
+}
+
+// The particles (flag 32; vu1_native's particleMesh, buildParticles'
+// arithmetic): the particle's position through the model, turned to face
+// the eye, its corner at the offsets along the turned axes, in world space.
+// A: the position; bones A: its shape (x, y, the angle); normal: this
+// corner's offsets; uv: its texel; color: the particle's (times 128,
+// clamped to 0-128, truncated).
+void particle() {
+    vec4 world = rows4(20, inA);
+    vec3 eye = M.q[27].xyz;
+    precise float ex = eye.x - world.x;
+    precise float ey = eye.y - world.y;
+    precise float ez = eye.z - world.z;
+    precise float rx = 0.0 + ez;
+    float ry = 0.0;
+    precise float rz = 0.0 - ex;
+    precise float rr = (rx * rx + ry * ry) + rz * rz;
+    precise float ux = ey * rz - ry * ez;
+    precise float uy = ez * rx - rz * ex;
+    precise float uz = ex * ry - rx * ey;
+    precise float uu = (ux * ux + uy * uy) + uz * uz;
+    float rq = rsqrtVu(rr), uq = rsqrtVu(uu);
+    vec3 shape = inBonesA.xyz;
+    precise vec3 rs = (vec3(rx, ry, rz) * rq) * shape.x;
+    precise vec3 us = (vec3(ux, uy, uz) * uq) * shape.y;
+    float c = 0.0 - particleCosine(shape.z - uintBitsToFloat(0x3fc90fd8u));
+    float s = particleCosine(shape.z);
+    precise vec3 a = rs * s - us * c;
+    precise vec3 b = rs * c + us * s;
+    precise vec3 corner = (b * inNormal.y + world.xyz) + a * inNormal.x;
+    vec4 color = floor(clamp(inColor * 128.0, 0.0, 128.0));
+    emit(corner, inUv, color, false);
+}
+
+// Whether a point is outside its own w (vu1_native's clipsOwnW).
+bool clipsOwnW(vec4 v) {
+    float w = abs(v.w);
+    return v.x > w || v.x < -w || v.y > w || v.y < -w || v.z > w || v.z < -w;
+}
+
+// The shadow volumes (flag 64; vu1_native's buildShadow): the triangle's
+// corners in world space and pushed from the light; none when it is not lit
+// (its world normal's dot with row 42 at most 42.w) or a corner is outside
+// its own w through rows 44-47. Five fans of two triangles over the six
+// (corner.x: fan x 6 + which of 0 1 2 0 2 3), each judged by the backface
+// rule from its own projected corners; the color row 43.
+const int kFans[20] = int[](0, 3, 4, 1, 1, 4, 5, 2, 2, 5, 3, 0, 0, 1, 2, 2, 5, 4, 3, 3);
+const int kFanCorner[6] = int[](0, 1, 2, 0, 2, 3);
+void volume() {
+    vec3 o[3];
+    o[0] = position(inA, inBonesA, inWeightsA, vec3(0.0));
+    o[1] = position(inB, inBonesB, inWeightsB, vec3(0.0));
+    o[2] = position(inC, inBonesC, inWeightsC, vec3(0.0));
+    vec3 corners[6];
+    bool skip = false;
+    for (int j = 0; j < 3; ++j) {
+        corners[j] = rows4(20, o[j]).xyz;
+        corners[3 + j] = rows4(38, o[j]).xyz;
+    }
+    for (int j = 0; j < 6; ++j)
+        skip = skip || clipsOwnW(rows4(44, corners[j]));
+    precise vec3 ea = corners[1] - corners[0];
+    precise vec3 eb = corners[2] - corners[0];
+    precise float nx = ea.y * eb.z - eb.y * ea.z;
+    precise float ny = ea.z * eb.x - eb.z * ea.x;
+    precise float nz = ea.x * eb.y - eb.x * ea.y;
+    vec4 toLight = M.q[42];
+    precise float lit = (toLight.x * nx + toLight.y * ny) + toLight.z * nz;
+    skip = skip || !(lit > toLight.w);
+
+    int k = int(inCorner.x + 0.5);
+    int fan = k / 6;
+    int which = k - fan * 6;
+    int t0 = kFans[fan * 4 + 0];
+    int t1 = kFans[fan * 4 + (which < 3 ? 1 : 2)];
+    int t2 = kFans[fan * 4 + (which < 3 ? 2 : 3)];
+    if (draw.cull.z != 0.0) {
+        float ax, ay, aq, bx, by, bq, cx, cy, cq;
+        bool ao, bo, co;
+        project(corners[t0], ax, ay, aq, ao);
+        project(corners[t1], bx, by, bq, bo);
+        project(corners[t2], cx, cy, cq, co);
+        precise float cross = (cx - bx) * (by - ay) - (bx - ax) * (cy - by);
+        precise float facing = cross * (draw.cull.x * inCorner.y);
+        skip = skip || facing < 0.0;
+    }
+    vec3 p = corners[kFans[fan * 4 + kFanCorner[which]]];
+    emit(p, vec2(0.0), M.q[43], skip);
+}
+
 // The outline C (src/vu1_native.cpp's buildOutline), flag 16: an edge drawn
 // as four lines, moved by +-h in x, then in y, h = alpha / 2, alpha = clamp(
 // 10/9 - w / 360, 0, 1) of its first end (w through the program's matrix),
@@ -289,8 +430,17 @@ void outline() {
 }
 
 void main() {
-    if ((uint(M.q[2].w) & 16u) != 0u) {
+    uint mode = uint(M.q[2].w);
+    if ((mode & 16u) != 0u) {
         outline();
+        return;
+    }
+    if ((mode & 32u) != 0u) {
+        particle();
+        return;
+    }
+    if ((mode & 64u) != 0u) {
+        volume();
         return;
     }
     vec3 a = position(inA, inBonesA, inWeightsA, inNormal);
@@ -424,16 +574,5 @@ void main() {
         }
     }
 
-    vec4 clip = draw.clip * vec4(p, 1.0);
-    vec4 window = draw.viewport * clip;
-    outDraw = inDraw;
-    outUv = uv;
-    outColor = min(color, draw.colorMax) * draw.vertexUnits.x;
-    outFog = clamp(draw.fog.x + draw.fog.w * clip.w, draw.fog.z, draw.fog.y);
-    float depth = dot(draw.depthRow, vec4(p, 1.0));
-    if (draw.depthLimit.y != 0.0 && clip.w > 0.0)
-        depth = min(depth, draw.depthLimit.x * clip.w);
-    gl_Position = vec4(window.x, window.y, depth + draw.target.w * clip.w, clip.w);
-    if (skip)
-        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+    emit(p, uv, color, skip);
 }

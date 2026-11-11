@@ -88,7 +88,8 @@ stacked PRs at the end).
       drawn by the renderer's model vertex stage, with skinning, lighting
       and UV generation on the GPU;
     - known chunks no longer travel in the list (step 2);
-    - particles are a mesh the renderer projects;
+    - particles, shadow volumes and outlines are made by the model stage
+      too (billboards, volumes, lines on the GPU);
     - the retained static meshes are deleted.
   - M4's core: 2D blocks are made on the game thread (src/native_blocks.*)
     and sent in the stream's order.
@@ -810,12 +811,18 @@ recovers.
   - every strip chunk the model stage can draw goes to it (a chunk with
     no id yet, or whose inputs change every frame, with its inputs);
   - the float-input and projector programs, too;
-  - the particles as a world-space mesh;
-  - the shadow volumes as two world-space meshes. Each follows its blend's
-    packet (quad 38's or 35's) and is colored by that packet's RGBAQ; the
-    renderer's backface rule keeps the facing triangles in one and the
-    others in the other, from the same projected corners. A packet that
-    sets no RGBAQ keeps the old window packets;
+  - the particles in the model vertex stage (`particle()`, flag 32): six
+    inputs a particle (position, shape, corner offsets, texel, color); the
+    shader turns each to face the eye (buildParticles' arithmetic, its sine
+    polynomial included) in world space;
+  - the shadow volumes in the model vertex stage (`volume()`, flag 64): the
+    chunk's triangles as inputs, skinned there, drawn twice. Each draw
+    follows its blend's packet (quad 38's or 35's) and is colored by that
+    packet's RGBAQ; the shader makes each lit triangle's volume (corners
+    and the same pushed from the light, skipped when a corner is outside
+    its own w), and the backface rule keeps the facing triangles in one
+    draw and the others in the other. A packet that sets no RGBAQ keeps
+    the old window packets;
   - the outlines in the model vertex stage (`outline()` in
     `native_model.vert`, flag 16 of the row): each edge's points go as
     inputs (skinned there), 24 vertices an edge; the shader makes

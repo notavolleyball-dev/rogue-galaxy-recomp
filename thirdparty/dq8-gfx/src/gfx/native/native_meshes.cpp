@@ -1064,6 +1064,7 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
             continue;
         const uint32_t triangles =
             d.modelEdge != 0u ? uint32_t(d.modelInputs.size() / d.modelEdge) * (kOutlineEdgeVertices / 3u)
+            : d.modelVolume   ? uint32_t(d.modelInputs.size() / 3u) * (kVolumeTriangleVertices / 3u)
                               : modelTriangleCount(d.modelInputs.size(), d.modelList);
         if (triangles == 0u)
             continue;
@@ -1071,6 +1072,8 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         m_transientVertices.resize(at + size_t(triangles) * 3u);
         if (d.modelEdge != 0u)
             outlineVertices(d.modelInputs, d.modelEdge, m_transientVertices.data() + at);
+        else if (d.modelVolume)
+            volumeVertices(d.modelInputs, m_transientVertices.data() + at);
         else
             modelTriangles(d.modelInputs, d.modelList, m_transientVertices.data() + at);
         m_transient[n] = {static_cast<uint32_t>(at), triangles * 3u, true, true};

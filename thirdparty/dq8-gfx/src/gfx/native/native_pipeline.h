@@ -92,6 +92,11 @@ void modelTriangles(const std::vector<ModelInput> &in, bool list, ModelVertex *o
 // vertex (line x 6 + which of the six), corner.y the points an edge.
 constexpr uint32_t kOutlineEdgeVertices = 24u;
 void outlineVertices(const std::vector<ModelInput> &in, uint32_t edge, ModelVertex *out);
+// A shadow volume draw's (MeshDraw::modelVolume): 30 vertices a triangle of
+// its list, its volume's five fans of two triangles, each with the
+// triangle's three corners; corner.x the vertex (fan x 6 + which of six).
+constexpr uint32_t kVolumeTriangleVertices = 30u;
+void volumeVertices(const std::vector<ModelInput> &in, ModelVertex *out);
 
 // Bumped when the renderer lets go of every retained mesh (its buffer
 // filled): the ids the producer handed out before are no longer drawn, and

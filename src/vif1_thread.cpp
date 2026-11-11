@@ -404,6 +404,8 @@ struct ModelPayload
     bool active = false, define = false, list = false, transient = false;
     // An outline chunk's: its points a edge (4 or 2), its inputs edges.
     uint32_t edge = 0u;
+    // A shadow volume draw's: its inputs triangles, each drawn as its volume.
+    bool volume = false;
     std::vector<dq8::gfx::native::ModelInput> inputs;
     dq8::gfx::native::ModelRow row{};
     std::vector<float> palette;
@@ -981,8 +983,9 @@ public:
         const uint32_t size = 16u + static_cast<uint32_t>(sizeof(m.row)) + floats * 4u +
                               inputs * static_cast<uint32_t>(sizeof(dq8::gfx::native::ModelInput));
         uint8_t *at = append(Kind::Model, size, ~0u, ~0u, 0u);
-        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u) | (m.transient ? 4u : 0u), inputs,
-                                  floats, m.edge};
+        const uint32_t head[4] = {(m.define ? 1u : 0u) | (m.list ? 2u : 0u) | (m.transient ? 4u : 0u) |
+                                      (m.volume ? 8u : 0u),
+                                  inputs, floats, m.edge};
         std::memcpy(at, head, sizeof(head));
         at += 16u;
         std::memcpy(at, &m.row, sizeof(m.row));
@@ -1207,6 +1210,7 @@ private:
                         m.list = (head[0] & 2u) != 0u;
                         m.transient = (head[0] & 4u) != 0u;
                         m.edge = head[3];
+                        m.volume = (head[0] & 8u) != 0u;
                         std::memcpy(&m.row, from, sizeof(m.row));
                         from += sizeof(m.row);
                         m.palette.resize(head[2]);
@@ -1463,6 +1467,7 @@ public:
                     t_model.transient = false;
                     t_model.list = false;
                     t_model.edge = 0u;
+                    t_model.volume = false;
                     m_modelId = mark->chunk.id;
                     m_particleMesh = false;
                     m_shadowMesh = false;
@@ -1496,12 +1501,12 @@ public:
                     m_particleMesh = false;
                     m_shadowMesh = false;
                     m_outlineMesh = false;
-                    if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Shadow &&
+                    if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Shadow &&
                         rg::vu1native::shadowMeshes(*native, memory.getVU1Data(), top, m_shadowPackets,
-                                                    m_shadowMeshes))
+                                                    m_shadowMeshes, m_shadowInputs, m_shadowRows, m_shadowPalette))
                     {
-                        // M5: the shadow volumes as two meshes in world space
-                        // (the facing ones' blend and the others').
+                        // M5: the shadow volumes to the model vertex stage,
+                        // twice (the facing ones' blend and the others').
                         m_nativeBounds.made = false;
                         m_shadowMesh = true;
                         m_nativePackets.clear();
@@ -1518,15 +1523,25 @@ public:
                         t_model.define = false;
                         t_model.list = false;
                         t_model.transient = true;
+                        t_model.volume = false;
                         m_modelId = 0u;
                         m_outlineMesh = true;
                     }
-                    else if (gpu && modelGpuOn() && native->kind == rg::vu1native::Kind::Particles)
+                    else if (gpu && modelGpuOn() && toDrawStage() && native->kind == rg::vu1native::Kind::Particles)
                     {
-                        // M5: the particles as a mesh in world space, which
-                        // the renderer projects (not window packets).
-                        rg::vu1native::particleMesh(memory.getVU1Data(), top, m_nativePackets, m_nativeMesh);
+                        // M5: the particles to the model vertex stage, which
+                        // makes each billboard in world space.
+                        rg::vu1native::particleMesh(memory.getVU1Data(), top, m_nativePackets, m_nativeMesh,
+                                                    t_model.inputs, t_model.row);
+                        t_model.palette.clear();
                         m_nativeBounds.made = false;
+                        t_model.active = true;
+                        t_model.define = false;
+                        t_model.list = true;
+                        t_model.transient = true;
+                        t_model.edge = 0u;
+                        t_model.volume = false;
+                        m_modelId = 0u;
                         m_particleMesh = true;
                     }
                     else if (gpu && modelGpuOn() && toDrawStage() && rg::vu1native::modelOnGpu(*native))
@@ -1549,6 +1564,7 @@ public:
                         m_nativeBounds.made = false;
                         t_model.active = true;
                         t_model.edge = 0u;
+                        t_model.volume = false;
                         m_modelId = modelId;
                     }
                     else if (gpu)
@@ -1593,11 +1609,21 @@ public:
                     std::memcpy(m_particleQuads + 60u * 16u, identity, sizeof(identity));
                     for (int i = 0; i < 2; ++i)
                     {
-                        if (m_shadowMeshes[i].vertices.empty())
-                            continue;
                         for (const auto &packet : m_shadowPackets[i])
                             deliverPacket(m_runtime.gs(), packet.data(), static_cast<uint32_t>(packet.size()));
+                        t_model.active = true;
+                        t_model.define = false;
+                        t_model.list = true;
+                        t_model.transient = true;
+                        t_model.edge = 0u;
+                        t_model.volume = true;
+                        t_model.inputs = m_shadowInputs;
+                        t_model.row = m_shadowRows[i];
+                        t_model.palette = m_shadowPalette;
+                        t_retain = {};
                         deliverMesh(m_runtime.gs(), m_shadowMeshes[i], m_particleQuads);
+                        t_model.active = false;
+                        t_model.volume = false;
                     }
                     m_shadowMesh = false;
                 }
@@ -2028,6 +2054,9 @@ private:
     bool m_shadowMesh = false;            // the chunk is shadow volumes as two meshes (shadowMeshes)
     std::vector<std::vector<uint8_t>> m_shadowPackets[2];
     GSNativeMesh m_shadowMeshes[2];
+    std::vector<dq8::gfx::native::ModelInput> m_shadowInputs;
+    dq8::gfx::native::ModelRow m_shadowRows[2]{};
+    std::vector<float> m_shadowPalette;
     std::shared_ptr<rg::nativemodels::GameDraw> m_gameDraw; // the mark's, made on the game thread
     alignas(16) uint8_t m_particleQuads[64u * 16u] = {}; // its VU1 quads, the model the identity
     struct SpanLearning
@@ -3202,6 +3231,7 @@ void deliverMesh(GS &gs, const GSNativeMesh &mesh, const uint8_t *vu1Data)
             model.row = &t_model.row;
             model.palette = &t_model.palette;
             model.edge = t_model.edge;
+            model.volume = t_model.volume;
         }
         if (rg::nativeproducer::mesh(mesh, &state, vu1Data, t_vu1Source, t_retain.id,
                                      t_model.active ? &model : nullptr))

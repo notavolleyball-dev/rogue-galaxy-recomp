@@ -418,6 +418,26 @@ void outlineVertices(const std::vector<ModelInput> &in, uint32_t edge, ModelVert
     }
 }
 
+void volumeVertices(const std::vector<ModelInput> &in, ModelVertex *out)
+{
+    for (size_t at = 0; at + 3u <= in.size(); at += 3u)
+    {
+        ModelVertex v{};
+        for (int i = 0; i < 3; ++i)
+        {
+            std::memcpy(v.position[i], in[at + i].position, sizeof(v.position[i]));
+            std::memcpy(v.bones[i], in[at + i].bones, sizeof(v.bones[i]));
+            std::memcpy(v.weights[i], in[at + i].weights, sizeof(v.weights[i]));
+        }
+        v.parity = 1.0f;
+        for (uint32_t k = 0; k < kVolumeTriangleVertices; ++k, ++out)
+        {
+            *out = v;
+            out->corner = float(k);
+        }
+    }
+}
+
 // A defining draw: its triangles into the buffer's pending part, under its
 // id. Taken at the record, not at the frame: a frame may be dropped, its
 // definitions may not.

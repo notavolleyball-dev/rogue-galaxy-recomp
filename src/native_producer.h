@@ -129,6 +129,7 @@ struct ModelDraw
 {
     bool define = false, list = false;
     uint32_t edge = 0u; // an outline chunk's points a edge (MeshDraw::modelEdge)
+    bool volume = false; // a shadow volume draw (MeshDraw::modelVolume)
     const std::vector<dq8::gfx::native::ModelInput> *inputs = nullptr;
     const dq8::gfx::native::ModelRow *row = nullptr;
     const std::vector<float> *palette = nullptr;

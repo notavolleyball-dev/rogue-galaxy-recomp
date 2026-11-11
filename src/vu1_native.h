@@ -144,13 +144,17 @@ inline bool drawsAtCall(const Program &program)
 // code image.
 const Program *identify(const uint8_t *code, uint32_t startPC);
 
-// The shadow volumes program's chunk as two meshes in world space (M5): the
-// volumes' triangles after quad 38's packet with the facing ones kept, and
-// after quad 35's with the others, each colored by its packet's RGBAQ (the
-// model matrix the identity, as particleMesh's). False when a packet sets
-// no RGBAQ: the caller keeps buildChunk's packets.
+// The shadow volumes program's chunk for the model vertex stage (M5): its
+// triangles as inputs (a list), drawn twice, after quad 38's packet with
+// each volume's facing triangles kept and after quad 35's with the others,
+// each with its row (flag 64; colored by its packet's RGBAQ) and header (no
+// vertices; world to window: the model matrix the identity, as
+// particleMesh's). False when a packet sets no RGBAQ: the caller keeps
+// buildChunk's packets.
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2]);
+                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                  std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
+                  std::vector<float> &palette);
 
 // The base piece's run (MSCAL 0x000) on `data`, as the VU1 would leave it
 // (quads 64-75, 100-102, 111), its packets not made: for a copy of VU1 data
@@ -205,10 +209,13 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 // modelRow: the constants the stage reads for this draw (its layout is
 // native_model.vert's), and the bones' matrices the chunk uses.
 bool modelOnGpu(const Program &program);
-// The particles program's chunk as a mesh in world space (M5): drawn with
-// the model matrix the identity (the caller's VU1 quads 60-63 made so).
+// The particles program's chunk for the model vertex stage (M5): six inputs
+// a particle (a list) and the row (flag 32) from which the stage makes each
+// billboard in world space; drawn with the model matrix the identity (the
+// caller's VU1 quads 60-63 made so).
 void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets,
-                  GSNativeMesh &mesh);
+                  GSNativeMesh &mesh, std::vector<dq8::gfx::native::ModelInput> &inputs,
+                  dq8::gfx::native::ModelRow &row);
 // The outline program's chunk for the model vertex stage (M5): its points
 // as inputs (in fours or twos, outlineEdge's count a edge), its packets
 // (PRIM, PRMODE), a header with the program's matrix to the window (quads

@@ -1290,17 +1290,24 @@ void buildShadow(const Program &program, const VuData &vu, uint32_t top,
     }
 }
 
-// The shadow volumes as two meshes (M5): every lit triangle's volume (its
-// corners and the same pushed from the light, world space, buildShadow's
-// arithmetic and its skip of a volume with a corner outside its own w) as
-// triangles, once with the facing ones kept (the A+D packet at quad 38
-// before it) and once with the others (quad 35's), the renderer's backface
-// rule choosing between them from the same projected corners. Each mesh's
-// color is the RGBAQ its packet sets; false when one sets none (the caller
+// The shadow volumes for the model vertex stage (M5, flag 64 of the row):
+// the chunk's triangles as inputs (a list, skinned there), drawn twice:
+// after the A+D packet at quad 38 with the facing triangles of each
+// triangle's volume kept, and after quad 35's with the others, the
+// renderer's backface rule choosing from the same projected corners. The
+// stage makes buildShadow's volume: the corners and the same pushed from the
+// light (rows 38-41: the model times quads 30-33), in world space, none
+// when the triangle is not lit (row 42: the light's direction, its
+// threshold) or a corner is outside its own w (rows 44-47: the camera,
+// scaled by quad 16); five fans of two triangles. Each draw's color (row
+// 43) is the RGBAQ its packet sets; false when one sets none (the caller
 // keeps the packets).
-bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
-                    std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2])
+bool shadowMeshFrom(const Program &program, const uint8_t *data, uint32_t top,
+                    std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                    std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
+                    std::vector<float> &palette)
 {
+    const VuData vu(data);
     // The colors the two packets set (decoded twice from two different
     // colors: a packet that sets RGBAQ ends on the same one).
     const std::vector<uint8_t> state[2] = {gifPacket(vu, 38), gifPacket(vu, 35)};
@@ -1319,8 +1326,7 @@ bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
             rgba[i][l] = float(a.rgba[l]);
     }
     const uint32_t count = vu.half(top, 1);
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    Vec4 model[4], light[4], view[4], projection[4], away[4], camera[4], window[4], rows[4];
+    Vec4 model[4], away[4], camera[4], window[4], light[4], view[4], world[4];
     for (uint32_t i = 0; i < 4u; ++i)
     {
         model[i] = vu.quad(60u + i);
@@ -1335,13 +1341,34 @@ bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
         view[i] = transform(camera, vu.quad(24u + i));
         view[i].x *= viewport.x;
         view[i].y *= viewport.y;
-        projection[i] = vu.quad(12u + i);
-        rows[i] = transform(window, transform(camera, vu.quad(24u + i)));
+        world[i] = transform(window, transform(camera, vu.quad(24u + i)));
+    }
+    bool list = false;
+    modelChunk(program, data, top, inputs, list);
+    inputs.resize(std::min<size_t>(inputs.size(), count / 3u * 3u));
+    modelRow(program, data, top, rows[0], palette);
+    dq8::gfx::native::ModelRow &row = rows[0];
+    const auto put = [&](uint32_t at, const Vec4 &v) {
+        row.q[at][0] = v.x;
+        row.q[at][1] = v.y;
+        row.q[at][2] = v.z;
+        row.q[at][3] = v.w;
+    };
+    row.q[0][3] = 0.0f;
+    row.q[1][3] = 0.0f;
+    row.q[2][3] = 64.0f;
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        put(38u + i, light[i]);
+        put(44u + i, view[i]);
     }
     const Vec4 toLight = vu.quad(34);
-    const float lit = fromBits(0x38d1b717u);
+    put(42u, {toLight.x, toLight.y, toLight.z, fromBits(0x38d1b717u)});
+    rows[1] = rows[0];
     for (int i = 0; i < 2; ++i)
     {
+        for (int l = 0; l < 4; ++l)
+            rows[i].q[43][l] = rgba[i][l];
         packets[i].clear();
         packets[i].push_back(state[i]);
         std::vector<uint8_t> &prim = packets[i].emplace_back();
@@ -1355,10 +1382,10 @@ bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
         h = GSNativeMesh::Header{};
         for (uint32_t r = 0; r < 4u; ++r)
         {
-            h.matrix[r][0] = rows[r].x;
-            h.matrix[r][1] = rows[r].y;
-            h.matrix[r][2] = rows[r].z;
-            h.matrix[r][3] = rows[r].w;
+            h.matrix[r][0] = world[r].x;
+            h.matrix[r][1] = world[r].y;
+            h.matrix[r][2] = world[r].z;
+            h.matrix[r][3] = world[r].w;
         }
         const Vec4 fogQuad = vu.quad(40);
         std::memcpy(h.fog, &fogQuad, sizeof(h.fog));
@@ -1371,50 +1398,7 @@ bool shadowMeshFrom(const Program &program, const VuData &vu, uint32_t top,
         h.winding = i == 0 ? 1.0f : -1.0f;
         meshes[i].vertices.clear();
     }
-    constexpr uint8_t kFans[5][4] = {{0, 3, 4, 1}, {1, 4, 5, 2}, {2, 5, 3, 0}, {0, 1, 2, 2}, {5, 4, 3, 3}};
-    for (uint32_t first = 0; first + 2u < count; first += 3u)
-    {
-        Vec4 world[3], pushed[3];
-        for (uint32_t j = 0; j < 3u; ++j)
-        {
-            float p[3];
-            decodePosition(vu, top, first + j, bones, p);
-            const Vec4 point{p[0], p[1], p[2], 1.0f};
-            world[j] = transform(model, point);
-            pushed[j] = transform(light, point);
-        }
-        const Vec4 a = sub(world[1], world[0]), b = sub(world[2], world[0]);
-        const float nx = a.y * b.z - b.y * a.z, ny = a.z * b.x - b.z * a.x, nz = a.x * b.y - b.x * a.y;
-        if (!(toLight.x * nx + toLight.y * ny + toLight.z * nz > lit))
-            continue;
-        bool outside = false;
-        for (uint32_t j = 0; j < 3u; ++j)
-        {
-            outside = outside || clipsOwnW(transform(view, world[j]));
-            outside = outside || clipsOwnW(transform(view, pushed[j]));
-        }
-        if (outside)
-            continue;
-        const Vec4 corners[6] = {world[0], world[1], world[2], pushed[0], pushed[1], pushed[2]};
-        for (const auto &fan : kFans)
-            for (const uint8_t t : {0, 1, 2, 0, 2, 3})
-                for (int i = 0; i < 2; ++i)
-                {
-                    GSNativeMesh::Vertex v;
-                    const Vec4 &c = corners[fan[t]];
-                    v.x = c.x;
-                    v.y = c.y;
-                    v.z = c.z;
-                    v.r = rgba[i][0];
-                    v.g = rgba[i][1];
-                    v.b = rgba[i][2];
-                    v.a = rgba[i][3];
-                    meshes[i].vertices.push_back(v);
-                }
-    }
-    for (int i = 0; i < 2; ++i)
-        meshes[i].header.vertexCount = static_cast<uint32_t>(meshes[i].vertices.size());
-    return true;
+    return !inputs.empty();
 }
 
 // The base piece (12ad73d2), run by an MSCAL at 0x000 before each object's
@@ -1636,12 +1620,16 @@ void buildParticles(const VuData &vu, uint32_t top, std::vector<std::vector<uint
     }
 }
 
-// The particles as a mesh (M5): each particle's four corners in world space
-// (buildParticles' arithmetic), two triangles a particle, for the renderer
-// to project; the header's matrix world to window (quads 8-11, 24-27,
-// 12-15), no cull. The state packets are buildParticles' (FOGCOL, then the
-// GIF header, PRIM and PRMODE).
-void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+// The particles for the model vertex stage (M5, flag 32 of the row): each
+// particle six inputs (its strip's triangles 0 1 2 and 1 2 3 as a list),
+// each with the particle's position, its shape (bones: x, y and the angle),
+// the corner's offsets (normal) and texel (uv), and its color quad; the
+// stage makes buildParticles' billboard (the eye from quad 28, the model
+// from 60-63) in world space. The header's matrix world to window (quads
+// 8-11, 24-27, 12-15), no cull. The state packets are buildParticles'
+// (FOGCOL, then the GIF header, PRIM and PRMODE).
+void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                  std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow &row)
 {
     packets.clear();
     std::vector<uint8_t> &fog = packets.emplace_back();
@@ -1664,11 +1652,10 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
     const uint32_t offsets = positions + vu.half(top, 3);
     const uint32_t uvs = positions + vu.half(top + 1u, 0);
     const uint32_t colors = positions + vu.half(top + 1u, 1);
-    Vec4 camera[4], window[4], model[4], rows[4];
+    Vec4 camera[4], window[4], rows[4];
     for (uint32_t i = 0; i < 4u; ++i)
     {
         camera[i] = vu.quad(8u + i);
-        model[i] = vu.quad(60u + i);
         window[i] = vu.quad(12u + i);
     }
     for (uint32_t i = 0; i < 4u; ++i)
@@ -1687,57 +1674,50 @@ void particleMesh(const VuData &vu, uint32_t top, std::vector<std::vector<uint8_
     for (float &c : h.colorMax)
         c = 255.0f;
     h.triangleList = 1u;
-    const Vec4 eye = vu.quad(28);
-    const float halfPi = fromBits(0x3fc90fd8u);
     mesh.vertices.clear();
-    mesh.vertices.reserve(size_t(count) * 6u);
+
+    row = {};
+    const auto put = [&](uint32_t at, const Vec4 &v) {
+        row.q[at][0] = v.x;
+        row.q[at][1] = v.y;
+        row.q[at][2] = v.z;
+        row.q[at][3] = v.w;
+    };
+    for (uint32_t i = 0; i < 4u; ++i)
+        put(20u + i, vu.quad(60u + i));
+    put(27u, vu.quad(28));
+    row.q[2][3] = 32.0f;
+
+    inputs.clear();
+    inputs.reserve(size_t(count) * 6u);
     for (uint32_t i = 0; i < count; ++i)
     {
         const Vec4 p = vu.quad(positions + 2u * i), shape = vu.quad(positions + 2u * i + 1u);
-        const Vec4 world = transform(model, {p.x, p.y, p.z, 1.0f});
-        const float ex = eye.x - world.x, ey = eye.y - world.y, ez = eye.z - world.z;
-        const float rx = 0.0f + ez, ry = 0.0f, rz = 0.0f - ex;
-        const float rr = rx * rx + ry * ry + rz * rz;
-        const float ux = ey * rz - ry * ez, uy = ez * rx - rz * ex, uz = ex * ry - rx * ey;
-        const float uu = ux * ux + uy * uy + uz * uz;
-        const float rq = vuReciprocalRoot(rr), uq = vuReciprocalRoot(uu);
-        const float rs[3] = {rx * rq * shape.x, ry * rq * shape.x, rz * rq * shape.x};
-        const float us[3] = {ux * uq * shape.y, uy * uq * shape.y, uz * uq * shape.y};
-        const float c = 0.0f - particleCosine(shape.z - halfPi), s = particleCosine(shape.z);
-        float a[3], b[3];
-        for (int l = 0; l < 3; ++l)
-        {
-            a[l] = rs[l] * s - us[l] * c;
-            b[l] = rs[l] * c + us[l] * s;
-        }
         const Vec4 o0 = vu.quad(offsets + 2u * i), o1 = vu.quad(offsets + 2u * i + 1u);
         const Vec4 uv0 = vu.quad(uvs + 2u * i), uv1 = vu.quad(uvs + 2u * i + 1u);
         const float corners[4][2] = {{o0.x, o0.y}, {o1.x, o0.y}, {o0.x, o1.y}, {o1.x, o1.y}};
         const float texels[4][2] = {{uv0.x, uv0.y}, {uv1.x, uv0.y}, {uv0.x, uv1.y}, {uv1.x, uv1.y}};
         const Vec4 color = vu.quad(colors + i);
-        const float lanes[4] = {color.x, color.y, color.z, color.w};
-        float rgba[4];
-        for (int l = 0; l < 4; ++l)
-            rgba[l] = float(gsNativeFtoi(rg::fmax(rg::fmin(lanes[l] * 128.0f, 128.0f), 0.0f), 1.0f));
-        GSNativeMesh::Vertex quad[4];
-        for (uint32_t v = 0; v < 4u; ++v)
-        {
-            GSNativeMesh::Vertex &out = quad[v];
-            out.x = b[0] * corners[v][1] + world.x + a[0] * corners[v][0];
-            out.y = b[1] * corners[v][1] + world.y + a[1] * corners[v][0];
-            out.z = b[2] * corners[v][1] + world.z + a[2] * corners[v][0];
-            out.u = texels[v][0];
-            out.v = texels[v][1];
-            out.r = rgba[0];
-            out.g = rgba[1];
-            out.b = rgba[2];
-            out.a = rgba[3];
-        }
-        // The strip's two triangles: 0 1 2 and 1 2 3.
         for (const uint32_t k : {0u, 1u, 2u, 1u, 2u, 3u})
-            mesh.vertices.push_back(quad[k]);
+        {
+            dq8::gfx::native::ModelInput &v = inputs.emplace_back();
+            v = {};
+            v.position[0] = p.x;
+            v.position[1] = p.y;
+            v.position[2] = p.z;
+            v.bones[0] = shape.x;
+            v.bones[1] = shape.y;
+            v.bones[2] = shape.z;
+            v.normal[0] = corners[k][0];
+            v.normal[1] = corners[k][1];
+            v.uv[0] = texels[k][0];
+            v.uv[1] = texels[k][1];
+            v.color[0] = color.x;
+            v.color[1] = color.y;
+            v.color[2] = color.z;
+            v.color[3] = color.w;
+        }
     }
-    h.vertexCount = static_cast<uint32_t>(mesh.vertices.size());
 }
 
 // The projected texture program. F: each vertex's UV is its position through
@@ -1968,9 +1948,12 @@ void runOverlay(uint8_t *data, std::vector<std::vector<uint8_t>> *packets)
 } // namespace
 
 bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
-                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2])
+                  std::vector<std::vector<uint8_t>> (&packets)[2], GSNativeMesh (&meshes)[2],
+                  std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
+                  std::vector<float> &palette)
 {
-    return shadowMeshFrom(program, VuData(data), top, packets, meshes);
+    const VuRounding rounding;
+    return shadowMeshFrom(program, data, top, packets, meshes, inputs, rows, palette);
 }
 
 void baseProgram(uint8_t *data)
@@ -2468,9 +2451,10 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
 
 // --- M5: the strip programs on the GPU (native_model.vert) ---------------
 
-void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+void particleMesh(const uint8_t *data, uint32_t top, std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh,
+                  std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow &row)
 {
-    particleMesh(VuData(data), top, packets, mesh);
+    particleMesh(VuData(data), top, packets, mesh, inputs, row);
 }
 
 bool modelOnGpu(const Program &program)

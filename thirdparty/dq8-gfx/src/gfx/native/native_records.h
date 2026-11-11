@@ -293,7 +293,7 @@ static_assert(sizeof(ModelInput) == 80u, "tightly packed");
 
 // What the model vertex stage reads for one draw, made per draw from the
 // VU1 constants (vu1_native's modelRow; the layout is native_model.vert's).
-constexpr uint32_t kModelRowQuads = 44u;
+constexpr uint32_t kModelRowQuads = 48u;
 struct ModelRow
 {
     float q[kModelRowQuads][4];
@@ -373,6 +373,10 @@ struct MeshDraw
     // ends, the second's far corner; 2: the edge alone), each drawn as four
     // lines (native_model.vert's outline()).
     uint32_t modelEdge = 0u;
+    // A shadow volume draw's (its row's flag 64): its inputs a list of
+    // triangles, each drawn as its volume's five fans (native_model.vert's
+    // volume()).
+    bool modelVolume = false;
 };
 
 // What a 2D draw belongs to, for passes that treat the layers apart (the

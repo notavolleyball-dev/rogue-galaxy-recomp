@@ -2180,6 +2180,7 @@ bool mesh(const GSNativeMesh &mesh, const GSDrawState *drawState, const uint8_t 
             draw.modelInputs = *chunkModel->inputs;
             draw.modelList = chunkModel->list;
             draw.modelEdge = chunkModel->edge;
+            draw.modelVolume = chunkModel->volume;
         }
         std::memcpy(draw.cullMatrix, h.matrix, sizeof(draw.cullMatrix));
         std::memcpy(draw.bandScale, h.bandScale, sizeof(draw.bandScale));
