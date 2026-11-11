@@ -116,6 +116,9 @@ bool writeMarker(uint32_t unit);
 // An effect's hooked call is in progress (game thread), and how many have
 // begun so far: what a 2D block drawn inside one is.
 bool inEffectCall();
+// ModelDrawOffscreenComposite's call is in progress (its blocks are its
+// head's and tail's, which its ranges route).
+bool inCompositeCall();
 uint64_t effectCallsBegun();
 uint8_t currentLayer();
 

@@ -524,6 +524,10 @@ uint32_t g_shadowUnit = 0u; // game thread
 void afterShadow(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
     addRange(top, stackTop(), Effect::Shadow, g_shadowUnit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (g_shadowUnit != 0u)
+        writePassMarker(g_shadowUnit);
     g_shadowUnit = 0u;
 }
 
@@ -583,6 +587,10 @@ uint32_t g_cblurUnit = 0u; // game thread
 void afterCBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
     addRange(top, stackTop(), Effect::CBlur, g_cblurUnit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (g_cblurUnit != 0u)
+        writePassMarker(g_cblurUnit);
     g_cblurUnit = 0u;
 }
 
@@ -771,6 +779,10 @@ uint32_t g_cblurDrawUnit = 0u; // game thread
 void afterCBlurDraw(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
     addRange(top, stackTop(), Effect::CBlurDraw, g_cblurDrawUnit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (g_cblurDrawUnit != 0u)
+        writePassMarker(g_cblurDrawUnit);
     g_cblurDrawUnit = 0u;
 }
 
@@ -859,6 +871,10 @@ void afterFocus(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
     }
     g_framesSet.clear();
     addRange(top, stackTop(), Effect::Focus, unit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (unit != 0u)
+        writePassMarker(unit);
 }
 
 // FocusFilterDrawMaybe_17c000(arg): arg +0x84 and +0x88 the focus distances;
@@ -894,6 +910,10 @@ uint32_t g_shadowMapUnit = 0u; // game thread
 void afterShadowMapBlur(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 {
     addRange(top, stackTop(), Effect::ShadowMapBlur, g_shadowMapUnit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (g_shadowMapUnit != 0u)
+        writePassMarker(g_shadowMapUnit);
     g_shadowMapUnit = 0u;
 }
 
@@ -958,6 +978,10 @@ void afterRefraction(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
         unit = keepPass(request);
     }
     addRange(top, stackTop(), Effect::Refraction, unit);
+    // M6: its 2D blocks are not written (src/native_blocks.cpp): the pass
+    // comes at a marker where the call's output ends.
+    if (unit != 0u)
+        writePassMarker(unit);
 }
 
 void refractionCaptureFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1737,6 +1761,11 @@ bool writeMarker(uint32_t unit)
 bool inEffectCall()
 {
     return g_effectDepth > 0;
+}
+
+bool inCompositeCall()
+{
+    return g_composite.unit != 0u;
 }
 
 uint64_t effectCallsBegun()

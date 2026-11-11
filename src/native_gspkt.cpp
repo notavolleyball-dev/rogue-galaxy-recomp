@@ -516,7 +516,7 @@ void beginBlock(bool skip)
     g_shadows.emplace_back();
     g_shadows.back().bytes.reserve(4096u);
     g_shadows.back().skip = skip;
-    // A block the game writes (an effect's) is not followed.
+    // A block the game writes (a composite's) is not followed.
     if (!skip)
         g_shadows.back().broken = true;
 }

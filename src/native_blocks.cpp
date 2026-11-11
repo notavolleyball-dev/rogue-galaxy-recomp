@@ -83,7 +83,7 @@ uint32_t g_units = 0u;
 std::atomic<uint64_t> g_kept{0u}, g_emitted{0u}, g_unknown{0u}, g_mismatch{0u};
 // Blocks drawn from their shadow (the game wrote none of them), and those
 // lost (a block written through something the shadow does not follow).
-std::atomic<uint64_t> g_unwritten{0u}, g_lost{0u};
+std::atomic<uint64_t> g_unwritten{0u}, g_lost{0u}, g_discarded{0u};
 
 // The blocks open (they nest): their owners, whether skipped, and whether
 // DrawListEndPrim's hook already made the block.
@@ -186,12 +186,14 @@ void pktBegin(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     if (g_depth > 0)
         g_nested = true;
     ++g_depth;
-    // Every block is drawn from its shadow and the game writes none of it,
-    // but a block inside an effect's call: the effect's (its pass draws it,
-    // or its range withholds it), written as the game writes it.
+    // Every block is drawn from its shadow and the game writes none of it.
+    // A block inside a pass effect's call is not written and not drawn: the
+    // effect's pass draws it. A composite's blocks are written as the game
+    // writes them (its head's and tail's ranges route them).
     const bool effect = rg::nativefx::inEffectCall();
-    const bool skip = !effect;
-    g_open.push_back({owner, skip, false, effect, rg::nativefx::effectCallsBegun()});
+    const bool composite = rg::nativefx::inCompositeCall();
+    const bool skip = !composite;
+    g_open.push_back({owner, skip, false, effect && !composite, rg::nativefx::effectCallsBegun()});
     rg::gspkt::beginBlock(skip);
     g_envs.clear();
     g_blockOwner = owner;
@@ -340,7 +342,15 @@ void afterEnd(uint8_t *, R5900Context *ctx, PS2Runtime *, uint32_t)
 // then, after it, a written block read.
 void pktEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
-    if (!g_open.empty() && g_open.back().skip && g_state)
+    if (!g_open.empty() && g_open.back().skip && g_open.back().effect)
+    {
+        // A pass effect's block: not written, not drawn (its pass is).
+        thread_local std::vector<uint8_t> unused;
+        rg::gspkt::endBlock(unused);
+        ++g_discarded;
+        g_open.back().made = true;
+    }
+    else if (!g_open.empty() && g_open.back().skip && g_state)
     {
         g_blockOwner = g_open.back().owner;
         makeSkipped();
@@ -436,10 +446,10 @@ bool emit(uint32_t unit)
     if (emitted == 1u || emitted % 60000u == 0u)
         std::fprintf(stderr,
                      "[native-blocks] blocks drawn from the builder's calls %llu (made %llu, not found %llu, lost "
-                     "%llu), state differing at a block's end %llu\n",
+                     "%llu), effects' blocks left to their passes %llu, state differing at a block's end %llu\n",
                      (unsigned long long)emitted, (unsigned long long)g_kept.load(),
                      (unsigned long long)g_unknown.load(), (unsigned long long)g_lost.load(),
-                     (unsigned long long)g_mismatch.load());
+                     (unsigned long long)g_discarded.load(), (unsigned long long)g_mismatch.load());
     return true;
 }
 

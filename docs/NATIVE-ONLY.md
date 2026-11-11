@@ -810,8 +810,13 @@ Done:
     blocks, the per-owner comparison and the Block2D ranges are deleted.
     A block written through something the shadow does not follow (a raw
     write; an outer block an inner one reset) loses what was skipped of
-    it (`lost`, counted). An effect's blocks are written as the game
-    writes them (its pass or range takes them).
+    it (`lost`, counted). A pass effect's blocks (the effects that still
+    run their originals: plane shadow, CBlur, CBlurDraw, focus, shadow-map
+    blur, refraction) are not written and not drawn: each such effect's
+    pass now comes at a marker where its call's output ends, as the
+    skipped effects' do (`effects' blocks left to their passes`). A
+    composite's blocks are still written (its head's and tail's ranges
+    route them).
 - **Fixed:** blocks were never read before (their range ended in RET
   tags; see the commit). The counts above are the first real ones.
 
