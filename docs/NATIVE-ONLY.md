@@ -56,33 +56,24 @@ terms:
 The only place the current state and the next step are written. Rewrite it
 (do not append) at the end of every session.
 
-**State (2026-11-11, branch `native-only/m0-plan`).** M0 is done apart from
-the user's review of the record contract v2. M2 waits on that review; M1
-does not. The compile check built the branch (the tag's code) in full on
-2026-11-11, with 32 warnings. A full build under emulation is slow
-(not timed). After a change to `src/` only, use `compile-check.sh build`.
+**State (2026-11-11).** The user's instruction for this run: work through
+the milestones without waiting on play tests, commit often (each commit
+compile-checked, so a breakage can be bisected), push often, and stack the
+branches (each milestone's branch starts from the previous one's, for
+stacked PRs at the end).
 
-**Next: M1, in this order.** Branch `native-only/m1-gs-backend` from
-`native-only/m0-plan`.
-1. **Whole-texture packs on the native path.** Read `src/texture_pack.cpp`
-   and the hashing in `sdlgpu_textures.cpp` (PCSX2's XXH3 over GS blocks and
-   palette). Reproduce the hash in the producer when it makes a texture
-   record, from the guest bytes the texture hook already reads. Send the
-   pack's texels in the record. Move `xxhash.h` out of the backend.
-2. **The native pipeline as the only path.** Remove `RG_NATIVE_PIPELINE`,
-   `RG_NATIVE_RENDERER`, the F1 switch and `native_renderer.*`. Default
-   `RG_VU1_NATIVE` to `gpu` with no user-facing modes (`check` stays until
-   M5).
-3. **The presenter as its own interface.** Take it off `GSRasterBackend` and
-   `PresentationFrame`. Give the runtime a null `GSRasterBackend` that logs
-   any call once, replacing `gs_tripwire.*`. Then:
-   - `SdlGpuDevice::create` without the GS shaders;
-   - scale changes without the target cache;
-   - the stats line and the F1 stats page from the native renderer.
-4. **Delete** everything M1 lists. The compile check must build after each
-   large deletion.
-5. **Hand off:** push the branch, then give the user what to play and the
-   counters to expect.
+- **M1 is done in code** on `native-only/m1-gs-backend` (from
+  `native-only/m0-plan`): the native pipeline is the only path; the GS
+  backend, its caches, `dq8_gfx_gs`, the GS shaders, the dual-source SDL
+  patch, the tripwire (now `src/gs_null.*`), `depth_reads`, the GS half of
+  flip pacing, `gs_census`, `gs_timing` and `RG_SELFTEST` are deleted; the
+  presenter (`sdlgpu_presenter.*`) replaces the backend; whole-texture packs
+  work from the producer (`src/pcsx2_hash.*`). Not yet play-tested: see
+  "Handoff" in M1 below for what to check.
+- **M2 is next**, on `native-only/m2-contract` from M1's branch. The record
+  contract v2 has not been reviewed by the user; per the instruction above
+  M2 goes ahead on the draft as written, and a review that changes it is
+  applied on top.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -432,6 +423,48 @@ The native pipeline becomes the only path:
 - whole-texture packs load (one check on the user's pack);
 - `native-check.sh` is clean;
 - the GS memory is no longer allocated (the log says so).
+
+**Status (2026-11-11): done in code, not play-tested.** Commits on
+`native-only/m1-gs-backend`, each compile-checked:
+1. the native pipeline is the only path (the switches, `native_renderer.*`,
+   the VU1 modes but `gpu` and `check`; the null GS backend);
+2. the presenter replaces the GS backend, which is deleted with its
+   caches, `dq8_gfx_gs`, the GS shaders, the dual-source SDL patch, the
+   selftest, the software fallback (`RG_GS_SDLGPU`, `RG_HAS_SDLGPU`), and
+   `RG_GS`, `RG_GS_NO_WINDOW`; `RG_GS_SCALE` is `RG_SCALE`;
+3. whole-texture packs from the producer;
+4. scripts, launchers and docs.
+
+The log says `[rg] GS backend: none; GS local memory is not mirrored`. The
+runtime itself still allocates its 4 MiB of GS local memory (`PS2Memory`);
+that goes with the runtime's GS patches in M6.
+
+**Handoff (what to play and expect).** Build the branch, play any save for
+a few minutes through a town, a battle and the menus, with
+`DQ8_GFX_STATS_EVERY=600`:
+- the picture as on the tag's native pipeline (`RG_NATIVE_RENDERER=1
+  RG_NATIVE_PIPELINE=1` on `gs-path-final`); nothing the native path draws
+  changed;
+- no `[native-gs] the GS backend was entered` line, and at exit
+  `[native-gs] GS backend calls: none`;
+- a `[gfx] ... fps (backend ...% of wall) ... draws=` line, the
+  `[native-pipeline]` line and the `[native-producer]` line, which now ends
+  with `texture packs: pairs looked up N, pictures made N, none N, draws
+  from a picture N`;
+- with a PCSX2 pack in `textures\packs`: the 3D drawn from it (pictures
+  made and draws from a picture above 0), the menus and icons not;
+- the menu (F1): Display > Internal resolution changes the picture's
+  sharpness at once; the Renderer statistics page shows meshes, GPU draw
+  calls, passes, copies and textures;
+- `tools/native-check.sh NAME` clean.
+
+Expected differences from the tag: packs of 2D art (by region) are not
+drawn (until M4); the "Sharper picture" switch is gone.
+
+Left for later milestones, by name: the VIF1 thread's program tags and
+camera registry (`g_tagPrograms`, `t_vu1Tag`, `t_vu1Camera`), which fed the
+GS backend's jitter and camera log and still ride the GIF stage's headers,
+go with the packet path in M6; so does `uploadsTaken()`, now a constant.
 
 ### M2: record contract v2
 
