@@ -222,8 +222,12 @@ void texBuildUpload(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             level.bufferWidth = preSwizzled ? (textureTbw > 1u ? textureTbw : 1u) : tbw;
             level.preSwizzled = preSwizzled;
             level.cbp = static_cast<uint32_t>((tex0 >> 37) & 0x3FFFu);
+            level.address = at;
             levels.push_back(level);
-            bind = bind && level.bufferWidth <= 0xFFu && producer::bindable(level);
+            // A captured frame uploaded back goes through texture(), which
+            // makes it from the GPU's copy (colorReadKeep).
+            bind = bind && level.bufferWidth <= 0xFFu && producer::bindable(level) &&
+                   !producer::keptColorRead(at, level.ram, level.ramBytes);
             if (bind)
                 entries.push_back({at, static_cast<uint16_t>(level.transferWidth),
                                    static_cast<uint16_t>(level.transferHeight), producer::kBindRegister,
@@ -340,8 +344,12 @@ void toFormat(const std::vector<uint8_t> &rgba, uint32_t psm, size_t pixels, std
     }
 }
 
-// The read's bytes, or false to leave it to the GS.
-bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
+// Whether the last answer was the renderer's (not a stand-in).
+thread_local bool t_served = false;
+
+// The read's bytes, or false to leave it to the GS. `buffer`: where in the
+// EE they go (physical).
+bool answer(const StoreImageCall &q, uint32_t buffer, std::vector<uint8_t> &bytes)
 {
     const uint32_t psm = q.psm;
     const bool depth = psm == 0x30u || psm == 0x31u || psm == 0x32u || psm == 0x3Au;
@@ -353,6 +361,7 @@ bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
     namespace native = dq8::gfx::native;
     native::ColorRead read;
     read.target = rg::nativeproducer::captureTarget(q.base);
+    read.keep = rg::nativeproducer::colorReadKeep(buffer, q.width, q.height);
     read.rect = {static_cast<int32_t>(q.x), static_cast<int32_t>(q.y), static_cast<int32_t>(q.x + q.width),
                  static_cast<int32_t>(q.y + q.height)};
     // The presenting thread answers it (step 7d), nothing on the GS queue.
@@ -373,6 +382,7 @@ bool answer(const StoreImageCall &q, std::vector<uint8_t> &bytes)
         toFormat(rgba, psm, static_cast<size_t>(q.width) * q.height, bytes);
         if (!bytes.empty())
         {
+            t_served = true;
             std::lock_guard lock(lastMutex);
             last = bytes;
             lastWidth = q.width;
@@ -405,9 +415,13 @@ void execStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     const uint32_t si = getRegU32(ctx, 4);
     const uint32_t buffer = getRegU32(ctx, 5);
     thread_local std::vector<uint8_t> bytes;
-    if (si == t_storeImage.si && answer(t_storeImage, bytes))
+    t_served = false;
+    if (si == t_storeImage.si && answer(t_storeImage, physical(buffer), bytes))
     {
-        std::memcpy(g_rdram + physical(buffer), bytes.data(), std::min<size_t>(bytes.size(), PS2_RAM_SIZE - physical(buffer)));
+        const size_t size = std::min<size_t>(bytes.size(), PS2_RAM_SIZE - physical(buffer));
+        std::memcpy(g_rdram + physical(buffer), bytes.data(), size);
+        // (A stand-in answer is not the kept pixels: no texture from them.)
+        rg::nativeproducer::colorReadAnswered(physical(buffer), g_rdram + physical(buffer), t_served ? size : 0u);
         t_storeImage.si = 0u;
         setReturnS32(ctx, 0);
         ctx->pc = getRegU32(ctx, 31);

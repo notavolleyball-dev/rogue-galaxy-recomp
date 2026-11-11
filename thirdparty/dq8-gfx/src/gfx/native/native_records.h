@@ -64,6 +64,11 @@ struct Texture
     // own. A texture pack's picture of a texture is larger than the game's.
     uint16_t logicalWidth = 0;
     uint16_t logicalHeight = 0;
+    // Its texels are this target's, as a colour read kept it on the GPU
+    // (ColorRead::keep) at the renderer's resolution, addressed at the
+    // game's size (width, height); `texels` stand in when the target is not
+    // there. 0: none.
+    Id fromTarget = 0;
 };
 
 struct Palette

@@ -71,7 +71,7 @@ constexpr float kFogUnit = 1.0f / 255.0f; // the GS's fog factor F, 0 to 255
 
 struct Counts
 {
-    uint64_t levels = 0, texturesNew = 0, texturesKnown = 0, texturesResent = 0;
+    uint64_t levels = 0, texturesNew = 0, texturesKnown = 0, texturesResent = 0, texturesFromReads = 0;
     uint64_t refusedFormat = 0, refusedBytes = 0, refusedLayout = 0;
     uint64_t palettesNew = 0, palettesKnown = 0, palettesRefused = 0;
     uint64_t targetsNew = 0, targetsAuto = 0, targetsGrown = 0, texturesOverTargets = 0;
@@ -206,6 +206,16 @@ struct State
     // GS memory still holds (forgetEvicted sends it again); forgotten with
     // the renderer's other evictions.
     std::unordered_map<native::Id, Kept> texels;
+    // Colour reads kept on the GPU (colorReadKeep), by the EE address their
+    // answer went to: the target, the answer's size and hash.
+    struct KeptRead
+    {
+        native::Id id = 0u;
+        uint32_t width = 0u, height = 0u;
+        size_t size = 0u;
+        uint64_t hash = 0u;
+    };
+    std::unordered_map<uint32_t, KeptRead> keptReads;
     // Every palette record's colours (palettes are never evicted), for the
     // texture packs' hash of a palette.
     std::unordered_map<native::Id, std::shared_ptr<const std::vector<uint8_t>>> paletteColors;
@@ -407,7 +417,8 @@ std::string statsLine()
     const auto d = [](uint64_t a, uint64_t b) { return std::to_string(a - b); };
     std::string line = "[native-producer] texture levels " + d(n.levels, r.levels) + ": new " +
                        d(n.texturesNew, r.texturesNew) + ", known " + d(n.texturesKnown, r.texturesKnown) +
-                       ", resent " + d(n.texturesResent, r.texturesResent) + ", refused: format " + d(n.refusedFormat, r.refusedFormat) + ", bytes " +
+                       ", resent " + d(n.texturesResent, r.texturesResent) + ", from kept reads " +
+                       d(n.texturesFromReads, r.texturesFromReads) + ", refused: format " + d(n.refusedFormat, r.refusedFormat) + ", bytes " +
                        d(n.refusedBytes, r.refusedBytes) + ", layout " + d(n.refusedLayout, r.refusedLayout) +
                        " | palettes new " + d(n.palettesNew, r.palettesNew) + ", known " +
                        d(n.palettesKnown, r.palettesKnown) + ", refused " + d(n.palettesRefused, r.palettesRefused) +
@@ -881,9 +892,100 @@ native::Id bindPalette(State &s, const uint8_t *ram, uint32_t ramBytes, uint32_t
 
 // The game thread's, for every level it sends with its upload (the texture
 // hook's old way: the upload follows and is withheld, takeProduced).
+uint32_t colorReadKeep(uint32_t address, uint32_t width, uint32_t height)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    State::KeptRead &k = s.keptReads[address];
+    if (k.id == 0u)
+        k.id = s.nextTarget++;
+    if (k.width != width || k.height != height)
+    {
+        k.width = width;
+        k.height = height;
+        native::Target record;
+        record.id = k.id;
+        record.role = native::TargetRole::Offscreen;
+        record.width = static_cast<uint16_t>(std::min<uint32_t>(width, 4096u));
+        record.height = static_cast<uint16_t>(std::min<uint32_t>(height, 4096u));
+        native::push(native::Target(record));
+        ++s.counts.targetsNew;
+    }
+    k.size = 0u;
+    k.hash = 0u;
+    return k.id;
+}
+
+void colorReadAnswered(uint32_t address, const uint8_t *bytes, size_t size)
+{
+    const uint64_t hash = bytes && size ? imageHash(bytes, size) : 0u;
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    const auto k = s.keptReads.find(address);
+    if (k == s.keptReads.end())
+        return;
+    k->second.size = size;
+    k->second.hash = hash;
+}
+
+namespace
+{
+// Locked. The kept read whose answer `ram` still holds, or null.
+const State::KeptRead *keptReadAt(State &s, uint32_t address, const uint8_t *ram, size_t ramBytes)
+{
+    if (address == 0u || !ram)
+        return nullptr;
+    const auto k = s.keptReads.find(address);
+    if (k == s.keptReads.end() || k->second.size == 0u || ramBytes < k->second.size)
+        return nullptr;
+    return imageHash(ram, k->second.size) == k->second.hash ? &k->second : nullptr;
+}
+} // namespace
+
+bool keptColorRead(uint32_t address, const uint8_t *ram, size_t ramBytes)
+{
+    State &s = state();
+    std::lock_guard lock(s.mutex);
+    return keptReadAt(s, address, ram, ramBytes) != nullptr;
+}
+
 void texture(const TextureLevel &l)
 {
     State &s = state();
+    {
+        // A captured frame uploaded back, unchanged: a copy of the kept
+        // target, at the renderer's resolution (the bytes stand in).
+        std::lock_guard lock(s.mutex);
+        if (const State::KeptRead *k = keptReadAt(s, l.address, l.ram, l.ramBytes);
+            k && l.width == k->width && l.height == k->height && !l.preSwizzled)
+        {
+            const uint32_t psm = l.psm & 0x3Fu;
+            const uint64_t key = keyOf(k->hash, psm | 0x800u, l.width, l.height);
+            native::Id id = 0u;
+            if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
+                id = known->second;
+            else
+            {
+                native::Texture record;
+                record.id = id = s.nextTexture++;
+                record.width = static_cast<uint16_t>(l.width);
+                record.height = static_cast<uint16_t>(l.height);
+                record.fromTarget = k->id;
+                record.format = native::PixelFormat::Rgba8;
+                record.scale = kTexelScale;
+                if (psm == kCT32)
+                    record.texels = std::make_shared<std::vector<uint8_t>>(l.ram, l.ram + k->size);
+                s.textureIds[key] = id;
+                s.textureKeys[id] = key;
+                native::push(std::move(record));
+                ++s.counts.texturesFromReads;
+            }
+            s.textureAt[l.tbp] = {psm, id};
+            noteProduced(s, l.tbp, l.transferBufferWidth, l.transferPsm, l.transferWidth, l.transferHeight, false,
+                         l.tbp, psm, id, k->hash, static_cast<uint32_t>(k->size));
+            return;
+        }
+    }
     bool format = false;
     const size_t bytes = levelBytes(l, format);
     {

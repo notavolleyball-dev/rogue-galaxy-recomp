@@ -116,6 +116,11 @@ struct ColorRead
 {
     Id target = 0;
     Rect rect; // in the target's game pixels
+    // When set: the same pixels also kept on the GPU in this target, at the
+    // renderer's resolution, for a texture made of the game's copy later
+    // (Texture::fromTarget), so the frame a fade lays over stays as sharp
+    // as it was drawn.
+    Id keep = 0;
 };
 uint32_t beginColorRead(const ColorRead &read);
 // Any thread: a read was opened and not answered yet.
@@ -323,6 +328,14 @@ private:
     std::deque<Id> m_imageOrder;              // oldest first, for the budget
     uint64_t m_imageBytes = 0;
     std::vector<PendingUpload> m_uploads;
+    // Textures made from a kept target (Texture::fromTarget): copied at the
+    // next upload.
+    struct PendingCopy
+    {
+        SDL_GPUTexture *from = nullptr, *to = nullptr;
+        uint32_t width = 0, height = 0;
+    };
+    std::vector<PendingCopy> m_targetCopies;
     std::deque<Id> m_recent; // the newest textures, for the view
     Id m_sceneTarget = 0;
     uint64_t m_records[std::variant_size_v<Record>] = {};
@@ -417,5 +430,6 @@ private:
     };
     DepthCounts m_depthCounts, m_depthReported;
     uint64_t m_colorReads = 0, m_colorReadsFailed = 0, m_colorReadsReported = 0, m_colorFailedReported = 0;
+    uint64_t m_keptTextures = 0, m_keptTexturesReported = 0; // textures made from a kept colour read
 };
 } // namespace dq8::gfx::native

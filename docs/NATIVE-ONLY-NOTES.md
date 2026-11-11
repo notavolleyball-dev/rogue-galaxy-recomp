@@ -344,3 +344,22 @@ from the code.
   alpha test drops.
 - **Open:** a projected point (`+0x28`) turns on Z writes for the
   lay-over; the Z the overlay program writes is not reproduced.
+
+### `ScreenFadeBlockCaptureFrame_177ed0` and `ScreenFadeBlockDraw_177540` (M3)
+
+- **Capture:** with `a0+0x2C` set and its `+0x50` (an EE buffer) set, the
+  frame's descriptor (`DrawEnvGetFrameTexDesc`) downloaded into that buffer
+  (`GsDownloadImage_140f20`: `sceGsSetDefStoreImage`, `sceGsExecStoreImage`).
+- **Draw:** with `+0x24` and a texture node at `+0x2C` (whose image is the
+  captured buffer), the node loaded (`DrawListAddTexLoad`) and drawn with
+  TEXA `0x8080 / 0x80`, preset 1, either as wipe strips (`+0x20 == 1`,
+  `ScreenFadeBlockDrawWipeStrips_177a70`) or tiled over the screen at
+  `(r, g, b, a * +0x28)`; else an untextured tint. `+0x30` lays the display
+  buffer over itself, zoomed by `+0x3C`.
+- **Native:** every colour read (`native_capture.cpp`) is also kept on the
+  GPU at the renderer's resolution (`ColorRead::keep`, a target per EE
+  buffer). An upload from that buffer while it still holds the bytes the
+  read wrote (their hash) becomes a texture copied from the kept target
+  (`Texture::fromTarget`), addressed at the game's size: the faded frame
+  is as sharp as it was drawn. The read still writes the EE buffer, for
+  any reader on the CPU.

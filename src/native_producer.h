@@ -37,8 +37,21 @@ struct TextureLevel
     uint32_t transferBufferWidth = 0;
     uint32_t transferPsm = 0;
     uint32_t cbp = 0; // the node's palette (TEX0's CBP), for an indexed texture
+    uint32_t address = 0; // where `ram` is in the EE (physical), 0 unknown
 };
 void texture(const TextureLevel &level);
+
+// A colour read of `width` by `height` (sceGsExecStoreImage) into the EE at
+// `address` (physical): the target the renderer keeps the same pixels in
+// on the GPU (native::ColorRead::keep), made the first time.
+uint32_t colorReadKeep(uint32_t address, uint32_t width, uint32_t height);
+// The read's answer as written there. A texture uploaded from there while
+// those bytes are unchanged (a fade's captured frame) is made from the
+// kept target, at the renderer's resolution, not from the bytes.
+void colorReadAnswered(uint32_t address, const uint8_t *bytes, size_t size);
+// Whether an upload from `address` is such a texture (the uploader then
+// makes it through texture(), not a bind entry).
+bool keptColorRead(uint32_t address, const uint8_t *ram, size_t ramBytes);
 
 // A palette as the node uploads it (game thread): 256 entries (a 16x16
 // image, CSM1's order) or 16 (8x2), CT32 or CT16, to the GS block `cbp`.

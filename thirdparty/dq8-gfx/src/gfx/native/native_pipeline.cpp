@@ -527,6 +527,42 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             }
             else if constexpr (std::is_same_v<T, Texture>)
             {
+                // A copy of a kept target: at its resolution, read at the
+                // game's size, in the target's units.
+                if (r.fromTarget != 0u && r.id != 0u)
+                {
+                    const auto kept = m_gpuTargets.find(r.fromTarget);
+                    if (kept != m_gpuTargets.end() && kept->second.texture && kept->second.width != 0u)
+                    {
+                        const uint32_t s = std::max<uint32_t>(m_frameScale, 1u);
+                        const uint32_t w = std::min<uint32_t>(kept->second.width, uint32_t(r.width) * s);
+                        const uint32_t h = std::min<uint32_t>(kept->second.height, uint32_t(r.height) * s);
+                        SDL_GPUTextureCreateInfo info{};
+                        info.type = SDL_GPU_TEXTURETYPE_2D;
+                        info.format = kColorFormat;
+                        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+                        info.width = w;
+                        info.height = h;
+                        info.layer_count_or_depth = 1;
+                        info.num_levels = 1;
+                        if (SDL_GPUTexture *texture = SDL_CreateGPUTexture(device, &info))
+                        {
+                            if (const auto old = m_images.find(r.id); old != m_images.end())
+                            {
+                                SDL_ReleaseGPUTexture(device, old->second.texture);
+                                m_imageBytes -= old->second.bytes;
+                                m_imageOrder.erase(std::find(m_imageOrder.begin(), m_imageOrder.end(), r.id));
+                            }
+                            const uint64_t bytes = uint64_t(w) * h * 8u;
+                            m_images[r.id] = Image{texture, PixelFormat::Rgba8, w, h, 0u, bytes, r.width, r.height, 1.0f};
+                            m_imageOrder.push_back(r.id);
+                            m_imageBytes += bytes;
+                            m_targetCopies.push_back({kept->second.texture, texture, w, h});
+                            ++m_keptTextures;
+                            return;
+                        }
+                    }
+                }
                 // Bytes a texel, or a 4x4 block for the block formats.
                 SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
                 uint64_t bytes = 0u;
@@ -655,6 +691,20 @@ Bytes Renderer::ct16Texels(SDL_GPUDevice *device, const Bytes &raw, size_t count
 
 bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std::string &error)
 {
+    for (const PendingCopy &c : m_targetCopies)
+    {
+        SDL_GPUBlitInfo blit{};
+        blit.source.texture = c.from;
+        blit.source.w = c.width;
+        blit.source.h = c.height;
+        blit.destination.texture = c.to;
+        blit.destination.w = c.width;
+        blit.destination.h = c.height;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = SDL_GPU_FILTER_NEAREST;
+        SDL_BlitGPUTexture(commands, &blit);
+    }
+    m_targetCopies.clear();
     if (m_uploads.empty())
         return true;
     // Each upload at a multiple of 16 bytes: a block format's offset has to
@@ -1184,9 +1234,11 @@ std::string Renderer::statsLine()
     m_depthReported = m_depthCounts;
     if (m_colorReads != m_colorReadsReported || m_colorReadsFailed != m_colorFailedReported)
         line += "  [native-pipeline] colour reads: served " + d(m_colorReads, m_colorReadsReported) + ", failed " +
-                d(m_colorReadsFailed, m_colorFailedReported) + "\n";
+                d(m_colorReadsFailed, m_colorFailedReported) + ", textures from kept reads " +
+                d(m_keptTextures, m_keptTexturesReported) + "\n";
     m_colorReadsReported = m_colorReads;
     m_colorFailedReported = m_colorReadsFailed;
+    m_keptTexturesReported = m_keptTextures;
     m_meshReported = m_meshCounts;
     m_readinessReported = m_readiness;
     std::function<std::string()> producer;
@@ -1459,6 +1511,27 @@ void Renderer::serveColorReads(SDL_GPUDevice *device)
         // is averaged below. The EE waits on this read.
         SDL_GPUCommandBuffer *commands = SDL_AcquireGPUCommandBuffer(device);
         std::vector<SDL_GPUTexture *> halves;
+        // Kept on the GPU as well, at this resolution (ColorRead::keep).
+        if (read.keep != 0u && commands)
+        {
+            bool fresh = false;
+            std::string keepError;
+            if (SDL_GPUTexture *keep = targetTexture(device, read.keep, false, w * s, h * s, fresh, keepError))
+            {
+                SDL_GPUBlitInfo blit{};
+                blit.source.texture = texture;
+                blit.source.x = uint32_t(r.x0) * s;
+                blit.source.y = uint32_t(r.y0) * s;
+                blit.source.w = w * s;
+                blit.source.h = h * s;
+                blit.destination.texture = keep;
+                blit.destination.w = w * s;
+                blit.destination.h = h * s;
+                blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+                blit.filter = SDL_GPU_FILTER_NEAREST;
+                SDL_BlitGPUTexture(commands, &blit);
+            }
+        }
         SDL_GPUTexture *from = texture;
         uint32_t fromX = uint32_t(r.x0) * s, fromY = uint32_t(r.y0) * s;
         uint32_t left = s;
