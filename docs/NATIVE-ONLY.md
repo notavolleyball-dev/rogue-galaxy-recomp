@@ -78,10 +78,12 @@ stacked PRs at the end).
   sprite builder is deleted, CT16 decoding and fade captures moved to the
   GPU. See M3's status for what is carried over (step 2, TexAnime to M4,
   lens flare and depth probe).
-- **Next: M4** on `native-only/m4-2d` (from M3's branch): 2D at its
-  source. Per the user's direction (see "Decisions"), the 2D layer's
-  transforms (HUD size, widescreen anchoring) go to the GPU as layer
-  transforms rather than vertex patches.
+- **M4, first part** on `native-only/m4-2d` (from M3's branch): layer tags
+  for 2D from the running draw task. The rest of M4 waits for M5 (see
+  "Decisions").
+- **Now: M5** on `native-only/m5-geometry` (from M4's branch): geometry
+  off VU1 memory, with transforms, skinning, lighting and UV generation on
+  the GPU.
 
 **Working setup** (development machine: macOS, arm64):
 - The game cannot be built or run here. Only `tools/docker/compile-check.sh`
@@ -124,6 +126,14 @@ stacked PRs at the end).
   - the M5 transforms, skinning, lighting and UV generation.
   A CPU fallback, where a device lacks a format, lives in the renderer and
   not in the producer.
+- **M5 before the rest of M4** (the user, 2026-11-11). 2D records made on
+  the game thread would be ordered against meshes that still come from the
+  VIF1 stream a frame later: the producer's choice between an upload and a
+  drawn target at the same address (render-to-texture read by 2D) could
+  read the wrong one. So geometry moves to game-time records first (M5);
+  M4's blocks then make records directly from the `GsPkt*` setters. M4's
+  branch holds its first part (layer tags); M5's branch stacks on it, and
+  the rest of M4 follows on its own branch after M5.
 - **Platforms:** Windows, Linux and later Android, all through SDL GPU with
   SPIR-V. macOS is not a target: the native shaders are SPIR-V only, and
   the guest code assumes x86 rounding.
