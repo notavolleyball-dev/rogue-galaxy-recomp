@@ -218,7 +218,6 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
 // are not in memory (a chunk the list no longer carries); ~0u: read them.
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
               std::vector<float> &palette, uint32_t knownSlots = ~0u);
-uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top);
 
 // What the VIF1 thread did with each chunk: drawn natively (the model
 // vertex stage, or buildChunk's packets), or left to the VU1 and why; a

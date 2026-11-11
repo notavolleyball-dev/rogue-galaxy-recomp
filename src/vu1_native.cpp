@@ -1690,17 +1690,6 @@ void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
     }
 }
 
-uint32_t modelSlots(const Program &program, const uint8_t *data, uint32_t top)
-{
-    const VuData vu(data);
-    const Sections s = sectionsOf(program, vu, top);
-    uint32_t slots = 0u;
-    for (uint32_t k = 0; k < s.count; ++k)
-        for (uint32_t b = 0; b < s.bones; ++b)
-            slots = std::max(slots, uint32_t(slotOf(vu.half(s.skin + k * 2u, b))) + 1u);
-    return slots;
-}
-
 void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
               std::vector<float> &palette, uint32_t knownSlots)
 {

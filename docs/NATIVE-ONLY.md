@@ -973,19 +973,10 @@ recovers.
   it can be drawn; none is seen to be frequent, but a play session's
   counts will say. Unknown programs (identify finds no pieces) run the VU1
   too.
-- **Step 2 in code too:** a REF payload of chunks whose every MSCNT drew a
-  known chunk is learned (by its guest address, size and the write watch's
-  stamp). From then on the game thread's gather leaves it in guest memory
-  and puts an MSCNT a chunk in its place; the VIF1 thread draws each from
-  what it learned (its header and palette size) with the current VU1
-  constants, with no copy, no UNPACK and no VU1.
-  - `[model-elide]` lines count the spans learned, the spans and chunks
-    left in guest memory, and the marks not drawn (should stay 0).
-  - `RG_MODEL_ELIDE=0` carries every chunk again.
-  - Needs the write watch (Linux): elsewhere nothing is elided.
-
-**How (decided 2026-11-11, from the notes in NATIVE-ONLY-NOTES.md, "M5").**
-The notes change the order of the steps above:
+- **Step 2 deleted (M6):** the learning of REF payloads and the MSCNT marks
+  that stood for them in the list (`RG_MODEL_ELIDE`, `[model-elide]`) went
+  once the model draw calls were drawn from their records: the list no
+  longer carries those chunks at all.
 - Ordinary meshes, skinned ones too, are VIF packets built once at load and
   only CALLed each frame (`ModelMeshLinks`).
 - No EE code reads VU1 memory back. Quads 98/99 only feed the overlay
