@@ -197,6 +197,69 @@ game (recompiled, unchanged logic)
   by the renderer;
 - a stub that answers the game's SIGNAL, FINISH and LABEL waits.
 
+## The record contract v2 (draft for review, 2026-11-11)
+
+What the renderer receives once M2 lands; M3 to M5 only fill it in. It is
+designed whole now, so later milestones and later features (TAA, ray
+tracing) add producers, not fields. It replaces `native_records.h`'s
+records. Everything still goes through the one ordered queue
+(`native::push`), in the order the game built it, and every reference is
+an id.
+
+**Units and conventions:**
+- **Color** is float, linear in the game's terms, with 1.0 the game's full
+  intensity (its 0x80). Values up to 2.0 are legal: the game's colors and
+  alphas reach 0xFF.
+- **Matrices** are row vectors, as the game keeps them.
+- **Projections** are standard: they map to clip space with x and y in
+  [-1, 1] and z in [0, 1], reversed (1 is near). The producer turns the
+  game's projection-to-GS-window chain into this. No record carries a GS
+  window coordinate.
+- **Scissors and rectangles** are in the target's own pixels at the game's
+  size (640x448 for the scene). The renderer scales them.
+
+**Resources** (sent once, kept by id until replaced or evicted):
+
+| Record | Fields |
+|---|---|
+| `Texture` | id, format (`Rgba8`, `Index8`), width, height, every mip level, its own palette, `alphaScale` (what a texel's alpha byte is worth; 255/128 for the game's art). Texels are already decoded: no TEXA, no CSM, no swizzle |
+| `Palette` | id, 16 or 256 colors (`Rgba8`), `alphaScale` |
+| `Target` | id, role (`SceneColor`, `SceneDepth`, `Display`, `Offscreen`), the game's width and height, format (`Color`: RGBA16F; `Depth`: D32 with stencil), `persistent` (content kept between frames, as for CBlur's state) |
+| `Camera` | id, view, projection (standard, as above), viewport in the target's pixels, jitter |
+| `Mesh` | id, a vertex buffer (position, normal, uv, color, up to 4 bone indices and weights; each attribute optional) and an index buffer of triangles. Retained by the renderer: static geometry is sent once |
+| `LightSet` | id, up to 3 directional lights (direction, color), ambient, up to 4 point lights (position, color, radius), as the VU1's lighting pieces use them |
+
+**`Material`** is a value, not a resource; the renderer deduplicates it:
+- texture and palette, or `sourceTarget` (a target's color as drawn so far);
+- sampler: filter (nearest or linear), mip mode, wrap per axis (repeat or
+  clamp);
+- combine: `Modulate`, `Decal`, `Highlight`, `Highlight2`; whether the
+  texture's alpha is used; `opaqueSource`;
+- blend: source and destination factors, op, a float constant;
+- alpha test (compare, a float reference) and what a failing pixel still
+  writes;
+- stencil test and write (the destination-alpha test becomes a stencil bit
+  set where alpha ≥ 1);
+- depth test and write, and `decalBias`;
+- color write mask, cull mode, fog on or off.
+
+**Draws and commands:**
+
+| Record | Fields |
+|---|---|
+| `MeshDraw` | target, depth target, camera, `Mesh` id (or inline vertices for geometry built each frame), model, previous model, object id (stable across frames), a skin palette (bone matrices), `LightSet` id, material, scissor, fog (start, end, color), UV generator (scroll, sphere map, reflection, wave, ramp, beam, with parameters), source tag |
+| `Draw2D` | layer (`Scene`, `Hud`, `Menu`, `Text`, `Fade`, `Overlay`), target, positions in a virtual 640x448 space, uv, color, indices, material, scissor, an optional depth (a 2D draw that tests against the scene, its z in the scene's depth convention), source tag |
+| `Pass` | kind (`Glare`, `Bloom`, `DepthOfField`, `PlaneShadow`, `CBlur`, `ColorFilter`, `Fade`, `Capture`, `TexAnime`, `Focus`, `ShadowMap`, `Flare`), the targets it reads and writes, and a parameter struct per kind, filled from the hooked function's arguments (M3 notes define each) |
+| `LayerBegin`, `LayerEnd` | an object layer (stage E): the layer target and box at the start; the composite parameters (glow and lay-over alpha, halo mode) at the end. The draws between go to the layer |
+| `Clear` | target, rectangle, color, depth or stencil, each optional |
+| `FrameBegin`, `Present` | the frame number; the target and rectangle shown |
+| `ColorRead`, `DepthRead` | a request the game is waiting on, answered through the producer's mailbox (as `beginColorRead` and `readDepth` today) |
+
+**Not in v2:** any GS register, address, page, format code, integer Z,
+window coordinate, CLAMP region, TEXA or channel shuffle; `RawVertex`,
+`rawHeader` and the program's cull (the raw path goes in M5; until then it
+stays as it is, the only v1 holdover, listed in M2's done line).
+
 ## Rules for every milestone
 
 1. **The game stays playable** at the end of every milestone, on the native
@@ -209,7 +272,8 @@ game (recompiled, unchanged logic)
 3. **Notes before code.** Each hooked function gets a section in
    NATIVE-ONLY-NOTES.md before its hook is written. Use this template:
    - address and size;
-   - arguments (rgcpu's IN set, plus what RGDecomp's C names);
+   - arguments (RGDecomp's signature and the disassembly, from
+     `tools/fninfo.py`);
    - structures read and written, with offsets;
    - callees;
    - side effects;
@@ -258,58 +322,74 @@ M1 to M6 run in order. Within M3 and M4, items are independent.
 
 ### M0: groundwork (no change to the game)
 
-**Claude, without the game:**
-- `tools/run/reference.sh`: runs a build over the reference routes with the
-  deterministic setup `native-run.sh` uses:
+**Claude, without the game** (branch `native-only/m0-plan`):
+- [done] `tools/run/reference.sh LABEL MODE [ROUTE...]` runs one build in
+  one mode (`gs` or `native`) over the reference routes, with the
+  deterministic setup of `native-run.sh`:
   - `RG_INPUT_CLOCK=pad`, `RG_FPS=30`, scale 1x;
-  - the bench memory card;
-  - `DQ8_GFX_SCREENSHOT_DIR` at fixed pad reads.
+  - a fresh copy of each route's memory card;
+  - default settings;
+  - `DQ8_GFX_SCREENSHOT_DIR` every N pad reads.
 
-  It writes `build/reference/<route>/<build>/frame_N.ppm`, plus the stats
-  lines. Captures come from the disc and are never committed.
-- `tools/framediff.py`: compares two capture directories.
-  - Per frame, it reports the pixels over a tolerance, the maximum
-    difference, and a heat-map PNG.
-  - Per route, it gives a summary.
-  - It can be tested on synthetic images, without the game.
-- Get RGDecomp at its pinned commit into a gitignored folder, and add a
-  `tools/fninfo.py ADDR` that prints, for one function:
-  - its disassembly;
-  - its callers;
-  - rgcpu's IN set;
-  - the matching C from RGDecomp.
+  It writes `build/reference/<route>/<label>/frame_N.ppm`, the game's log and
+  a manifest. Captures come from the disc and are never committed. `EXE=`
+  points it at another build (the tag's).
+- [done] `tools/framediff.py A B`, or `--root build/reference LABEL_A
+  LABEL_B` for every route, compares capture sets:
+  - per frame: the pixels over the tolerance, the largest difference and the
+    box they sit in, plus a heat-map PNG with `--heatmaps`;
+  - per route: a summary;
+  - frames present in only one set;
+  - the exit status, for scripts.
 
-  This is the basis of every note.
-- A compile check Claude can run here: an x86_64 Linux build in Docker, so
-  a branch compiles before it is handed over. This needs the PS2Recomp and
-  imgui submodules checked out.
-- **The record contract v2** written into this page (M2's design), for
-  review before any code depends on it.
+  Checked on synthetic frames.
+- [done] RGDecomp at its pinned commit in `build/rgdecomp`, and
+  `tools/fninfo.py NAME_OR_ADDRESS`, which prints a function's map entry,
+  callers and callees (main executable), RGDecomp's C and, with `--dis`, its
+  disassembly. This is the basis of every note. rgcpu's IN set needs the
+  recompiler's generated code, which only the compile check has; arguments
+  come from RGDecomp's signatures and the disassembly.
+- [in progress] The compile check, `tools/docker/compile-check.sh`: an
+  x86_64 Arch Linux container on the development machine builds the
+  checkout (`setup.py tools`, `recompile`, `build`) without running it. The
+  build trees live in the Docker volume `rg-build`. The submodules are
+  checked out.
+- [done, for review] The record contract v2, above.
 
-**User, once:**
+**User, once, on Linux:**
 - The tag `gs-path-final` exists (done 2026-11-11, `8431766`).
-- Run `reference.sh` on the tag twice:
-  - **GS path**: the oracle for what the game should look like;
-  - **native pipeline**: the baseline for what the native path draws today.
+- Build the tag in a worktree of its own:
 
-  Comparing the two separates "native was already wrong" from regressions
-  introduced later.
-- **Routes:**
-  - the field walk;
-  - the town square;
-  - the battle bench;
-  - the boss gate;
-  - an event with an item message and a battle dissolve;
-  - the item menu;
-  - the title screen;
-  - a movie;
-  - Zerard's plaza.
+      git worktree add ../rg-gs-path-final gs-path-final
+      cd ../rg-gs-path-final && git submodule update --init && ln -s "$OLDPWD/disc" disc
+      python setup.py tools && python setup.py recompile && python setup.py build
 
-  Add routes later for the rare effects (lens flare, shadow map, focus), once
+- From this checkout (the script and the route cards in `build/run/`), capture
+  it twice:
+
+      EXE=../rg-gs-path-final/build/game/src/roguegalaxy tools/run/reference.sh tag-gs gs
+      EXE=../rg-gs-path-final/build/game/src/roguegalaxy tools/run/reference.sh tag-native native
+      python3 tools/framediff.py --root build/reference tag-gs tag-native --quiet
+
+  `tag-gs` is the oracle for what the game should look like; `tag-native` is
+  the baseline for what the native path draws today. The framediff between
+  them separates "native was already wrong" from regressions introduced
+  later. Also run `tag-native` a second time under another label, to confirm
+  that two runs give identical frames: every later "pixel for pixel" check
+  depends on it.
+- **Routes in the script:** walk, town, battle, gate, late (Zerard), title
+  (boot, the opening movie, the title screen). Each uses the memory cards
+  `tools/bench/walk.sh` and `tools/run/late-run.sh` keep in `build/run/`.
+  **Still needed from you:** an input script (`RG_INPUT` entries) for an
+  event with an item message and a battle dissolve, and for the item menu.
+  Routes for the rare effects (lens flare, shadow map, focus) follow once
   M3's notes say how to reach them.
 
-**Done when** both capture sets exist, framediff reads them, and the
-compile check builds the tag.
+**Done when:**
+- both capture sets exist and are reproducible;
+- framediff reads them;
+- the compile check builds the tag;
+- the user has reviewed the record contract v2.
 
 ### M1: delete the GS backend
 
