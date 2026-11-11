@@ -145,6 +145,9 @@ bool isPass(Effect effect);
 // (native_capture.cpp's hook); an effect's call in progress may record it.
 void noteFrameDesc(uint32_t desc);
 bool emitPass(Effect effect, uint32_t unit, bool fromLayer = false);
+// M3 step 2: a pass marker's (writePassMarker) register, and its pass sent.
+constexpr uint8_t kPassRegister = 0x7Du;
+bool emitPassUnit(uint32_t unit);
 // The packet with every drawing kick made a plain vertex write: what is left
 // of a pass's packets (uploads, registers) still goes on.
 void withholdKicks(std::vector<uint8_t> &bytes);

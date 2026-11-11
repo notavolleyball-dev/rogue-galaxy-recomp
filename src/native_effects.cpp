@@ -397,6 +397,39 @@ void afterGlare(uint8_t *, R5900Context *, PS2Runtime *, uint32_t top)
 // (+0, +4), the alpha a pixel must be over (+8, s32), the streaks' strength
 // (+0xC), their spread (+0x10) and the strength laid over the frame
 // (+0x14), floats (RGDecomp's C; docs/NATIVE-ONLY-NOTES.md).
+// M3 step 2: a pass in place of its function's packets. The function is
+// not run; the list gets a marker where its packets would have been (a cnt
+// tag, NOP and DIRECT 2, and a GIF A+D write of the pass's unit to a
+// register the GS does not have), and the VIF1 thread sends the pass when
+// it reaches it. False: no list being built.
+bool writePassMarker(uint32_t unit)
+{
+    const uint32_t drawCtx = read32(kDrawCtxPointer);
+    if (drawCtx == 0u || !g_rdram)
+        return false;
+    const uint32_t dst = read32(drawCtx + 4u);
+    if (dst == 0u)
+        return false;
+    const uint64_t words[6] = {
+        2ull | (1ull << 28),                    // cnt, 2 quadwords
+        uint64_t(0x50000002u) << 32,            // VIF NOP, DIRECT 2
+        1ull | (1ull << 15) | (1ull << 60),     // GIF: NLOOP 1, EOP, PACKED, NREG 1
+        0xEull,                                 // A+D
+        unit,                                   // the pass's unit
+        rg::nativefx::kPassRegister,            // to the marker's register
+    };
+    std::memcpy(g_rdram + physical(dst), words, sizeof(words));
+    const uint32_t next = dst + 48u;
+    std::memcpy(g_rdram + physical(drawCtx + 4u), &next, sizeof(next));
+    return true;
+}
+
+void returnFromHook(R5900Context *ctx)
+{
+    setReturnS32(ctx, 0);
+    ctx->pc = getRegU32(ctx, 31);
+}
+
 void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     const uint32_t arg = getRegU32(ctx, 4);
@@ -414,7 +447,15 @@ void glareFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         const int32_t final = static_cast<int32_t>(128.0f * readFloatAt(arg + 0x14u));
         request.params[3] = float(std::clamp(final, 0, 255)) / 128.0f;
         request.params[4] = 255.0f / 128.0f;
-        g_passUnit = keepPass(request);
+        // The glare has no side effects outside its packets (its note): the
+        // pass alone, at a marker, and the function is not run.
+        const uint32_t unit = keepPass(request);
+        if (writePassMarker(unit))
+        {
+            returnFromHook(ctx);
+            return;
+        }
+        g_passUnit = unit;
     }
     rg::hooks::callThen(g_glareOriginal, rdram, ctx, runtime, &afterGlare, stackTop());
 }
@@ -1772,6 +1813,11 @@ bool isPass(Effect effect)
            effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof ||
            effect == Effect::Focus || effect == Effect::Shadow ||
            effect == Effect::CBlur || effect == Effect::CBlurDraw || effect == Effect::CompositeTail;
+}
+
+bool emitPassUnit(uint32_t unit)
+{
+    return emitPass(Effect::Glare, unit, false);
 }
 
 bool emitPass(Effect effect, uint32_t unit, bool fromLayer)

@@ -3001,6 +3001,18 @@ void deliverPacket(GS &gs, const uint8_t *data, uint32_t size)
 
 void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t address, uint32_t cursor)
 {
+    // M3 step 2: a pass marker, where a function the hook did not run would
+    // have put its packets: the pass, in the stream's order.
+    if (data && size >= 32u && (data[8] & 0xFu) == 0xEu && data[24] == rg::nativefx::kPassRegister)
+    {
+        if (nativeEffects() && t_onVif1Thread)
+            flushEffect();
+        uint64_t unit = 0u;
+        std::memcpy(&unit, data + 16u, sizeof(unit));
+        countEffect(rg::nativefx::emitPassUnit(static_cast<uint32_t>(unit)), rg::nativefx::Effect::Glare,
+                    "its pass was not kept", {});
+        return;
+    }
     // M4: the layer of the draw task that wrote it (what a VU1 program
     // kicked: the task whose list holds the MSCAL), for its 2D.
     t_layer = rg::nativefx::layerAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
