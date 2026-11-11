@@ -1093,20 +1093,21 @@ from the material's GsEnv; TEX0 from its texture node; TEX1, CLAMP from
 its packet), and each chunk's header from the group's chain of spans in
 EE memory.
 
-**Step 2 in code, guarded per mesh:** a call whose every item's mesh is a
-`ModelMeshLinks` (static chains) whose chunks agreed with the list eight
-times and never differed, every group a strip or projector program the
-table names, is not written: the hook leaves a marker in the list with
-the call's record and returns 0 quadwords (the emitter's caches left as
-they are). Where the list's run reaches the marker, each item is drawn
-from the record: its model matrix put in VU1 memory and the base piece
-run (as its p14's MSCAL 0 would), its header and palette put (p18, p1C),
-each group's material quads and texenv register writes (the material's
-GsEnv with the draw environment's frame and depth base, TEX1, CLAMP,
-TEX0) applied, each chunk unpacked from its span in EE memory to the
-item's VIF BASE and drawn as any model chunk. The camera, view and light
-packets still come from the list. `[model-emit] ... calls the game did
-not write N` counts them. The shadow casters
+**Step 2 in code, unconditional:** a call whose every item's mesh is a
+`ModelMeshLinks` (static chains) and every group a strip or projector
+program the table names is not written: the hook leaves a marker in the
+list with the call's record and returns 0 quadwords (the emitter's caches
+left as they are). Where the list's run reaches the marker, each item is
+drawn from the record: its model matrix put in VU1 memory and the base
+piece run (as its p14's MSCAL 0 would), its header and palette put (p18,
+p1C), each group's material quads and texenv register writes (the
+material's GsEnv with the draw environment's frame and depth base, TEX1,
+CLAMP, TEX0) applied, each chunk unpacked from its span in EE memory to
+the item's VIF BASE and drawn as any model chunk. The camera, view and
+light packets still come from the list. The comparison (step 1's markers
+and per-chunk checks, the per-mesh trust) is deleted; `[model-emit]`
+counts the calls drawn from the game's structures and those the game
+still writes. The shadow casters
 (`ModelEmitShadowCasterPacketsMaybe`, one material for every group) go
 the same way. **The sorted path too:** `ModelQueueSortedPackets` keeps a
 record of each queued node (by its item's p14 and its chain), and

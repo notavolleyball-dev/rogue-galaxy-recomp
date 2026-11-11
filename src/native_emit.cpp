@@ -33,7 +33,7 @@ constexpr uint32_t kModelEmitShadowCaster = 0x0014E780u;
 constexpr uint32_t kQueueSorted = 0x0014F0D0u;
 constexpr uint32_t kEmitBucket = 0x001405A0u;
 // The markers' kinds (the unit's high byte; 1 passes, 2 blocks).
-constexpr uint32_t kBegin = 3u, kEnd = 4u, kUnwritten = 5u;
+constexpr uint32_t kUnwritten = 5u;
 // ModelMeshLinks: its chains are built once at load (static spans), so a
 // call of only these can be drawn from its record with nothing written.
 constexpr uint32_t kMeshLinks = 0x00470010u;
@@ -68,7 +68,7 @@ Quad readQuad(uint32_t address)
 std::mutex g_mutex;
 std::deque<Call> g_calls; // by unit, until the list reaches them
 uint32_t g_units = 0u;
-std::atomic<uint64_t> g_same{0u}, g_differ{0u}, g_unknown{0u}, g_outside{0u};
+std::atomic<uint64_t> g_unknown{0u};
 
 // p18's quads (WriteVuHeader): 76-79 at +0x20.., 81 right after the UNPACK
 // word at +0x68 (unaligned), 42 at +0x80.
@@ -296,19 +296,12 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false)
     }
 }
 
-// By mesh (game thread): its chunks that agreed with the list and whether
-// one ever did not. A call whose every item's mesh is a ModelMeshLinks that
-// agreed kTrusted times and never differed, every group's program a strip
-// or projector one, is drawn from its record: the game writes nothing for
-// it.
-struct MeshRecord
-{
-    uint32_t agreed = 0u;
-    bool bad = false;
-};
-std::unordered_map<uint32_t, MeshRecord> g_meshes;
-constexpr uint32_t kTrusted = 8u;
-std::atomic<uint64_t> g_unwrittenCalls{0u};
+// A call whose every item's mesh is a ModelMeshLinks (static chains), and
+// every group a strip or projector program the microcode table names, is
+// drawn from its record: the game writes nothing for it. Others (the
+// ModelMesh class, rebuilt every frame; a program the table leaves to what
+// is resident) are written as the game writes them.
+std::atomic<uint64_t> g_unwrittenCalls{0u}, g_writtenCalls{0u};
 
 bool drawable(const Call &call)
 {
@@ -316,9 +309,7 @@ bool drawable(const Call &call)
         return false;
     for (const Item &item : call.items)
     {
-        const auto known = g_meshes.find(item.mesh);
-        if (known == g_meshes.end() || known->second.bad || known->second.agreed < kTrusted ||
-            read32(item.mesh + 0x50u) != kMeshLinks)
+        if (read32(item.mesh + 0x50u) != kMeshLinks)
             return false;
         for (const Group &group : item.groups)
             if (!group.programKnown || !group.program || !rg::vu1native::modelOnGpu(*group.program) ||
@@ -334,19 +325,6 @@ PS2Runtime::RecompiledFunction g_casterOriginal = nullptr;
 // nest outside effects, which are not followed).
 uint32_t t_pendingReq = 0u, t_pendingDctx = 0u;
 bool t_pendingCaster = false;
-
-void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
-{
-    // data: the unit.
-    Call call;
-    call.unit = data;
-    predict(t_pendingDctx, t_pendingReq, call, t_pendingCaster);
-    rg::nativefx::writeMarker(kEnd << 24);
-    std::lock_guard lock(g_mutex);
-    if (g_calls.size() >= 4096u)
-        g_calls.pop_front();
-    g_calls.push_back(std::move(call));
-}
 
 void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdram, R5900Context *ctx,
               PS2Runtime *runtime)
@@ -380,16 +358,8 @@ void emitWith(PS2Runtime::RecompiledFunction original, bool caster, uint8_t *rdr
             return;
         }
     }
-    const uint32_t unit = g_units | (kBegin << 24);
-    if (!rg::nativefx::writeMarker(unit))
-    {
-        original(rdram, ctx, runtime);
-        return;
-    }
-    t_pendingReq = getRegU32(ctx, 6);
-    t_pendingDctx = getRegU32(ctx, 5);
-    t_pendingCaster = caster;
-    rg::hooks::callThen(original, rdram, ctx, runtime, &afterEmit, unit);
+    ++g_writtenCalls;
+    original(rdram, ctx, runtime);
 }
 
 void emit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -530,16 +500,6 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
                 continue;
             }
         }
-        uint32_t unit = 0u;
-        if (found != g_sorted.end())
-        {
-            Call node = found->second;
-            node.unit = unit = nextUnit(kBegin);
-            if (rg::nativefx::writeMarker(unit))
-                keepCall(std::move(node));
-            else
-                unit = 0u;
-        }
         // DrawCtxAddChangedCallTags(dctx, e+0x18, e+0x14): six slots, a CALL
         // for each that differs from the cache at dctx+0x3C48.
         const uint32_t programs = read32(e + 0x18u), slots = read32(e + 0x14u);
@@ -563,8 +523,6 @@ void emitBucket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         }
         call(ha);
         call(chain);
-        if (unit != 0u)
-            rg::nativefx::writeMarker(kEnd << 24);
     }
     // MemStackAllocQw(pk, 1): the RET+MSCAL quadword.
     if (read32(pk + 0x20u) == 0u && read32(pk + 0x2Cu) + 1u <= read32(pk + 0x34u))
@@ -577,22 +535,15 @@ void emitCaster(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     emitWith(g_casterOriginal, true, rdram, ctx, runtime);
 }
 
-// The list side.
-Call t_current;
-bool t_in = false;
-int t_item = -1, t_group = -1;
-
 void report()
 {
-    const uint64_t n = g_same.load() + g_differ.load();
+    const uint64_t n = g_unwrittenCalls.load();
     if (n == 1u || n % 60000u == 0u)
         std::fprintf(stderr,
-                     "[model-emit] chunks against their emit call's structures: the same %llu, differing %llu; "
-                     "calls not found %llu, chunks outside an item or group %llu; calls the game did not write "
-                     "%llu\n",
-                     (unsigned long long)g_same.load(), (unsigned long long)g_differ.load(),
-                     (unsigned long long)g_unknown.load(), (unsigned long long)g_outside.load(),
-                     (unsigned long long)g_unwrittenCalls.load());
+                     "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu, "
+                     "records not found %llu\n",
+                     (unsigned long long)n, (unsigned long long)g_writtenCalls.load(),
+                     (unsigned long long)g_unknown.load());
 }
 } // namespace
 
@@ -622,152 +573,10 @@ bool takeUnwritten(uint32_t unit, Call &out)
 
 bool marker(uint32_t unit, bool &unwritten)
 {
-    const uint32_t kind = unit >> 24;
-    unwritten = kind == kUnwritten;
+    unwritten = (unit >> 24) == kUnwritten;
     if (unwritten)
-        return true;
-    if (kind == kEnd)
-    {
-        t_in = false;
-        t_current = Call{};
-        return true;
-    }
-    if (kind != kBegin)
-        return false;
-    t_in = false;
-    t_item = t_group = -1;
-    std::lock_guard lock(g_mutex);
-    for (auto it = g_calls.begin(); it != g_calls.end(); ++it)
-        if (it->unit == unit)
-        {
-            t_current = std::move(*it);
-            g_calls.erase(it);
-            t_in = true;
-            if (t_current.single)
-                t_item = 0;
-            return true;
-        }
-    ++g_unknown;
-    return true;
-}
-
-void mscal(uint32_t startPC)
-{
-    if (!t_in)
-        return;
-    if (startPC == 0u)
-    {
-        if (!t_current.single)
-            ++t_item;
-        t_group = -1;
-    }
-    else if (startPC == 0x320u)
-        ++t_group;
-}
-
-void chunk(const uint8_t *vu1Data, uint32_t top, const void *program)
-{
-    if (!t_in)
-        return;
-    if (t_item < 0 || t_group < 0 || size_t(t_item) >= t_current.items.size() ||
-        size_t(t_group) >= t_current.items[size_t(t_item)].groups.size())
-    {
-        ++g_outside;
-        return;
-    }
-    const Item &item = t_current.items[size_t(t_item)];
-    Group &group = t_current.items[size_t(t_item)].groups[size_t(t_group)];
-    const uint32_t index = group.drawn++;
-    const auto quad = [&](uint32_t q) {
-        Quad v;
-        std::memcpy(v.data(), vu1Data + q * 16u, sizeof(v));
-        return v;
-    };
-    const char *what = nullptr;
-    Quad seen{}, want{};
-    const auto check = [&](const char *name, uint32_t q, const Quad &expected, uint32_t lanes = 0xFu) {
-        if (what)
-            return;
-        const Quad v = quad(q);
-        for (int l = 0; l < 4; ++l)
-            if (((lanes >> l) & 1u) && v[size_t(l)] != expected[size_t(l)])
-            {
-                what = name;
-                seen = v;
-                want = expected;
-                return;
-            }
-    };
-    for (uint32_t r = 0; r < 4u; ++r)
-        check("model (60-63)", 60u + r, item.model[r]);
-    check("76", 76u, item.q76, 0x7u);
-    check("77", 77u, item.q77);
-    check("78", 78u, item.q78);
-    check("79", 79u, item.q79);
-    check("81", 81u, item.q81);
-    check("42", 42u, item.q42);
-    check("82", 82u, group.q82);
-    check("84", 84u, group.q84);
-    check("86", 86u, group.q86, 0xEu); // (its NLOOP is the chunk's)
-    check("87", 87u, group.q87);
-    if (!what && group.chunksKnown)
-    {
-        if (index >= group.chunks.size())
-            what = "a chunk past the chain's";
-        else
-        {
-            check("the chunk's header (TOP)", top & 1023u, group.chunks[index][0]);
-            check("the chunk's header (TOP+1)", (top + 1u) & 1023u, group.chunks[index][1]);
-        }
-    }
-    if (!what && group.programKnown && group.program != program)
-    {
-        what = "the program (the table's against what the VU1 holds)";
-        seen = Quad{uint32_t(reinterpret_cast<uintptr_t>(program)), 0u, 0u, 0u};
-        want = Quad{uint32_t(reinterpret_cast<uintptr_t>(group.program)), 0u, 0u, 0u};
-    }
-    if (!what && group.stateKnown)
-    {
-        const rg::DrawState state = rg::drawstate::current();
-        const rg::DrawContext &c = state.context;
-        const auto lo = [](uint64_t v) { return uint32_t(v); };
-        const auto hi = [](uint64_t v) { return uint32_t(v >> 32); };
-        const auto gs = [&](const char *name, uint64_t have, uint64_t expected) {
-            if (!what && have != expected)
-            {
-                what = name;
-                seen = Quad{lo(have), hi(have), 0u, 0u};
-                want = Quad{lo(expected), hi(expected), 0u, 0u};
-            }
-        };
-        gs("ALPHA", c.alpha, group.alpha);
-        gs("TEST", c.test, group.test);
-        gs("FBA", c.fba & 1u, group.fba);
-        gs("ZBUF's mask", c.zbuf.zmask ? 1u : 0u, group.zmask ? 1u : 0u);
-        if (group.textured)
-        {
-            gs("TEX0's TBP0", c.tex0.tbp0, group.tex0 & 0x3FFFu);
-            gs("TEX0's PSM", c.tex0.psm, (group.tex0 >> 20) & 0x3Fu);
-            gs("TEX0's CBP", c.tex0.cbp, (group.tex0 >> 37) & 0x3FFFu);
-            gs("TEX1", c.tex1, group.tex1);
-            gs("CLAMP", c.clamp, group.clamp);
-        }
-    }
-    if (!what)
-    {
-        ++g_same;
-        ++g_meshes[item.mesh].agreed;
         report();
-        return;
-    }
-    g_meshes[item.mesh].bad = true;
-    const uint64_t n = ++g_differ;
-    if (n <= 12u)
-        std::fprintf(stderr,
-                     "[model-emit] a chunk differs from its emit call's structures (item %d group %d): quad %s "
-                     "VU1 %08x %08x %08x %08x, expected %08x %08x %08x %08x\n",
-                     t_item, t_group, what, seen[0], seen[1], seen[2], seen[3], want[0], want[1], want[2], want[3]);
-    report();
+    return unwritten;
 }
 
 } // namespace rg::nativeemit

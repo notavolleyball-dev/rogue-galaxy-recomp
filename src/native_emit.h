@@ -86,7 +86,5 @@ void install(PS2Runtime &runtime);
 // True: a marker of this module's; `unwritten` set for one of a call the
 // game did not write (takeUnwritten then has its record).
 bool marker(uint32_t unit, bool &unwritten);
-void mscal(uint32_t startPC);
-void chunk(const uint8_t *vu1Data, uint32_t top, const void *program);
 
 } // namespace rg::nativeemit
