@@ -57,10 +57,10 @@ The only place the current state and the next step are written. Rewrite it
 (do not append) at the end of every session.
 
 **State (2026-11-11, branch `native-only/m0-plan`).** M0 is done apart from
-two points:
-- the compile check's first full build (see M0);
-- the user's review of the record contract v2. M2 waits on that review; M1
-  does not.
+the user's review of the record contract v2. M2 waits on that review; M1
+does not. The compile check built the branch (the tag's code) in full on
+2026-11-11: about 1 h 15 min under emulation from scratch, with 32
+warnings. After a change to `src/` only, use `compile-check.sh build`.
 
 **Next: M1, in this order.** Branch `native-only/m1-gs-backend` from
 `native-only/m0-plan`.
@@ -374,7 +374,7 @@ M1 to M6 run in order. Within M3 and M4, items are independent.
   disassembly. This is the basis of every note. rgcpu's IN set needs the
   recompiler's generated code, which only the compile check has; arguments
   come from RGDecomp's signatures and the disassembly.
-- [in progress] The compile check, `tools/docker/compile-check.sh`: an
+- [done 2026-11-11] The compile check, `tools/docker/compile-check.sh`: an
   x86_64 Arch Linux container on the development machine builds the
   checkout (`setup.py tools`, `recompile`, `build`) without running it. The
   build trees live in the Docker volume `rg-build`.
