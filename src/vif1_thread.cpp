@@ -1968,30 +1968,20 @@ void reportFinished(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 
 } // namespace
 // Whether the texture hook writes binding markers in place of uploads
-// (docs/NATIVE-BOUNDARY.md): with the lists copied here (the send resolves
-// the markers), under the pipeline (which applies them), and no tool that
-// records the lists. RG_TEXTURE_BIND=0: uploads, withheld, as before.
+// (docs/NATIVE-BOUNDARY.md): whenever the lists are sent through here (the
+// send resolves the markers).
 bool bindingTextures()
 {
-    static const bool on = [] {
-        const char *value = std::getenv("RG_TEXTURE_BIND");
-        return g_thread && uploadsTaken() && !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
+    return g_thread != nullptr; // (RG_TEXTURE_BIND went in M6)
 }
 namespace
 {
-// Whether a list's withheld texture uploads stay uncopied (gatherChain's
-// holes): with the draw stage, which takes a hole as a record of its own and
-// reads no byte of it, and no tool that reads the list's bytes whole.
-// RG_UPLOAD_ELIDE=0 copies them as before.
-bool elidingUploads()
+// A list's withheld texture uploads stay uncopied (gatherChain's holes):
+// the producer takes a hole as a record of its own and reads no byte of it.
+// (RG_UPLOAD_ELIDE went in M6.)
+constexpr bool elidingUploads()
 {
-    static const bool on = [] {
-        const char *value = std::getenv("RG_UPLOAD_ELIDE");
-        return uploadsTaken() && !(value && std::strcmp(value, "0") == 0);
-    }();
-    return on;
+    return true;
 }
 
 // sceDmaSend/SendI (chain) and SendN (normal) to VIF1 go to the thread;
