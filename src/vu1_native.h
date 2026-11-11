@@ -7,6 +7,12 @@
 
 #include "runtime/gs/gs_types.h"
 
+namespace dq8::gfx::native
+{
+struct ModelInput;
+struct ModelRow;
+} // namespace dq8::gfx::native
+
 // VU1 programs done natively: what a program would kick for a mesh chunk,
 // computed from the same VU1 data memory, for docs/NATIVE-RENDERER.md's phase 1.
 //
@@ -176,6 +182,23 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
 // depth: the same projection of the same vertex, done once instead of twice.
 void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
                std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh, Bounds *bounds = nullptr);
+
+// M5 of docs/NATIVE-ONLY.md: a strip program's chunks drawn by the
+// renderer's model vertex stage (native_model.vert), which runs B, F and C
+// on the GPU. modelOnGpu: whether it can (int16 inputs, a mesh).
+// modelChunkHash: an identity of the chunk's inputs (its header and
+// sections). modelChunk: its vertices as the program reads them (a strip,
+// or a list). modelHeader: buildMesh's packets and header with no vertices.
+// modelRow: the constants the stage reads for this draw (its layout is
+// native_model.vert's), and the bones' matrices the chunk uses.
+bool modelOnGpu(const Program &program);
+uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top);
+void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
+                std::vector<dq8::gfx::native::ModelInput> &out, bool &list);
+void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
+                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh);
+void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
+              std::vector<float> &palette);
 
 // RG_VU1_NATIVE, in the game (src/vif1_thread.cpp), for the chunks done
 // natively: unset, each is sent as a mesh the renderer transforms, without

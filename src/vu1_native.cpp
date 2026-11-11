@@ -16,7 +16,9 @@
 #include <xmmintrin.h>
 #endif
 
+#include "gfx/native/native_records.h"
 #include "gif_events.h"
+#include "xxhash.h"
 
 // The strip programs, piece by piece (byte addresses):
 //   the MSCAL at 0x320 only ends; each mesh chunk is UNPACKed and then run by
@@ -797,7 +799,10 @@ struct Chunk
     GSNativeMesh mesh;
 };
 
-void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &chunk)
+// The chunk's header (readChunk's first part): the FOGCOL packet, the GIF
+// header, PRIM and PRMODE, and the mesh header (matrices, fog, cull, depth,
+// clip), without its vertices.
+void chunkHeader(const Program &program, const VuData &vu, uint32_t top, Chunk &chunk)
 {
     // FOGCOL (quad 41) behind the tag in quad 19, NLOOP 1 and EOP.
     uint32_t fogTag[4];
@@ -867,6 +872,15 @@ void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &ch
         }
     }
 
+}
+
+void readChunk(const Program &program, const VuData &vu, uint32_t top, Chunk &chunk)
+{
+    chunkHeader(program, vu, top, chunk);
+    const uint32_t count = vu.half(top, 1);
+    const uint32_t positions = top + 2u;
+    const uint32_t uvs = positions + vu.half(top + 1u, 0);
+    const uint32_t colors = positions + vu.half(top + 1u, 1);
     const Vec4 uvScale = vu.quad(79);
     Vec4 material = vu.quad(82);
     material.w *= vu.quad(81).w;
@@ -2252,6 +2266,204 @@ void buildMesh(const Program &program, const uint8_t *data, uint32_t top,
         }
     }
     mesh = std::move(chunk.mesh);
+}
+
+// --- M5: the strip programs on the GPU (native_model.vert) ---------------
+
+bool modelOnGpu(const Program &program)
+{
+    return program.kind == Kind::Strip && hasMesh(program) && !program.rawFloats && !program.rawColor &&
+           !program.affine;
+}
+
+namespace
+{
+// The chunk's sections: its count, where each lies, and its bones (0: not
+// skinned).
+struct Sections
+{
+    uint32_t count, positions, normals, uvs, colors, skin, bones;
+};
+Sections sectionsOf(const Program &program, const VuData &vu, uint32_t top)
+{
+    Sections s{};
+    s.count = std::min<uint32_t>(vu.half(top, 1), 256u);
+    s.positions = top + 2u;
+    s.normals = s.positions + vu.half(top, 3);
+    s.uvs = s.positions + vu.half(top + 1u, 0);
+    s.colors = s.positions + vu.half(top + 1u, 1);
+    s.skin = s.positions + vu.half(top + 1u, 2);
+    s.bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
+    return s;
+}
+
+// A bone's palette slot from its index half (as skin() addresses its
+// matrix, 900 + 2 * index, wrapped): quad 896 - 4 x is slot x.
+float slotOf(uint32_t half)
+{
+    const uint32_t quad = (900u + ((half * 2u) & 0xFFFFu)) & 1023u;
+    if (quad > 896u || (896u - quad) % 4u != 0u || (896u - quad) / 4u > 35u)
+        return 0.0f;
+    return float((896u - quad) / 4u);
+}
+} // namespace
+
+uint64_t modelChunkHash(const Program &program, const uint8_t *data, uint32_t top)
+{
+    const VuData vu(data);
+    const Sections s = sectionsOf(program, vu, top);
+    thread_local std::vector<uint8_t> bytes;
+    bytes.clear();
+    const auto add = [&](const void *p, size_t n) {
+        const auto *b = static_cast<const uint8_t *>(p);
+        bytes.insert(bytes.end(), b, b + n);
+    };
+    add(vu.bytes(top), 16u);
+    add(vu.bytes(top + 1u), 16u);
+    const uint32_t fields[2] = {s.bones, static_cast<uint32_t>(program.uv)};
+    add(fields, sizeof(fields));
+    const auto section = [&](uint32_t first, uint32_t quads) {
+        for (uint32_t q = 0; q < quads; ++q)
+            add(vu.bytes(first + q), 16u);
+    };
+    section(s.positions, s.count);
+    section(s.normals, s.count);
+    section(s.uvs, s.count);
+    section(s.colors, s.count);
+    if (s.bones)
+        section(s.skin, s.count * 2u);
+    return XXH3_64bits(bytes.data(), bytes.size());
+}
+
+void modelChunk(const Program &program, const uint8_t *data, uint32_t top,
+                std::vector<dq8::gfx::native::ModelInput> &out, bool &list)
+{
+    const VuData vu(data);
+    const Sections s = sectionsOf(program, vu, top);
+    list = (vu.half(top, 0) & 7u) == 3u;
+    out.resize(s.count);
+    for (uint32_t k = 0; k < s.count; ++k)
+    {
+        dq8::gfx::native::ModelInput &v = out[k];
+        for (uint32_t i = 0; i < 3u; ++i)
+        {
+            v.position[i] = float(vu.word(s.positions + k, i));
+            v.normal[i] = float(vu.word(s.normals + k, i));
+        }
+        v.uv[0] = float(vu.word(s.uvs + k, 0));
+        v.uv[1] = float(vu.word(s.uvs + k, 1));
+        for (uint32_t i = 0; i < 4u; ++i)
+            v.color[i] = float(vu.word(s.colors + k, i));
+        for (uint32_t b = 0; b < 4u; ++b)
+        {
+            const bool used = b < s.bones;
+            v.bones[b] = used ? slotOf(vu.half(s.skin + k * 2u, b)) : 0.0f;
+            v.weights[b] = used ? float(vu.word(s.skin + k * 2u + 1u, b)) : 0.0f;
+        }
+    }
+}
+
+void modelHeader(const Program &program, const uint8_t *data, uint32_t top,
+                 std::vector<std::vector<uint8_t>> &packets, GSNativeMesh &mesh)
+{
+    Chunk chunk;
+    chunkHeader(program, VuData(data), top, chunk);
+    packets.clear();
+    packets.push_back(std::move(chunk.fog));
+    std::vector<uint8_t> &state = packets.emplace_back();
+    uint32_t tag[4];
+    std::memcpy(tag, chunk.header[0], sizeof(tag));
+    tag[0] |= 0x8000u;
+    putQuad(state, tag);
+    putQuad(state, chunk.header[1]);
+    putQuad(state, chunk.header[2]);
+    mesh.header = chunk.mesh.header;
+    mesh.vertices.clear();
+}
+
+void modelRow(const Program &program, const uint8_t *data, uint32_t top, dq8::gfx::native::ModelRow &row,
+              std::vector<float> &palette)
+{
+    const VuData vu(data);
+    const Sections s = sectionsOf(program, vu, top);
+    row = {};
+    const auto put = [&](uint32_t at, float x, float y, float z, float w) {
+        row.q[at][0] = x;
+        row.q[at][1] = y;
+        row.q[at][2] = z;
+        row.q[at][3] = w;
+    };
+    const auto quad = [&](uint32_t at, uint32_t q) {
+        const Vec4 v = vu.quad(q);
+        put(at, v.x, v.y, v.z, v.w);
+    };
+    const Vec4 q77 = vu.quad(77), q78 = vu.quad(78), q79 = vu.quad(79);
+    const uint32_t flags87 = vu.half(87, 1);
+    put(0, q77.x, q77.y, q77.z, float(static_cast<uint32_t>(program.color)));
+    put(1, q78.x, q78.y, q78.z, float(static_cast<uint32_t>(program.uv)));
+    put(2, q79.x, q79.y, float(s.bones),
+        float((program.white ? 1u : 0u) | ((flags87 & 0x100u) ? 2u : 0u) | (program.skinNormals ? 4u : 0u)));
+    // The base color (readChunk's): the material times 42 and the ambient
+    // 83, or with 87.y & 0x200 the material times 43.
+    Vec4 material = vu.quad(82);
+    material.w *= vu.quad(81).w;
+    const Vec4 light = vu.quad(42), ambient = vu.quad(83);
+    Vec4 base{material.x * light.x + ambient.x * 128.0f, material.y * light.y + ambient.y * 128.0f,
+              material.z * light.z + ambient.z * 128.0f, material.w * light.w};
+    if ((program.color == Color::PerVertex || program.color == Color::Material) && (flags87 & 0x200u))
+    {
+        const Vec4 other = vu.quad(43);
+        base = {material.x * other.x, material.y * other.y, material.z * other.z, material.w * other.w};
+    }
+    put(3, base.x, base.y, base.z, base.w);
+    const Lights lights(vu);
+    for (uint32_t i = 0; i < 3u; ++i)
+        put(4u + i, lights.direction[i].x, lights.direction[i].y, lights.direction[i].z, lights.direction[i].w);
+    for (uint32_t i = 0; i < 4u; ++i)
+        put(7u + i, lights.color[i].x, lights.color[i].y, lights.color[i].z, 0.0f);
+    put(11, lights.ambient.x, lights.ambient.y, lights.ambient.z, lights.ambient.w);
+    const PointLights points(vu);
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        put(12u + i, points.position[i].x, points.position[i].y, points.position[i].z, points.position[i].w);
+        put(16u + i, points.color[i][0], points.color[i][1], points.color[i][2], 0.0f);
+    }
+    for (uint32_t i = 0; i < 4u; ++i)
+        quad(20u + i, 60u + i);
+    for (uint32_t i = 0; i < 3u; ++i)
+        quad(24u + i, 64u + i);
+    quad(27, 28);
+    const SphereMap sphere(vu);
+    put(28, sphere.rows[0][0], sphere.rows[0][1], sphere.rows[1][0], sphere.rows[1][1]);
+    const Wave wave(vu);
+    put(29, sphere.rows[2][0], sphere.rows[2][1], wave.a, wave.q);
+    const Beam beam(vu);
+    put(30, beam.shiftX, beam.shiftY, beam.centerX, beam.centerY);
+    const Swell swell(vu);
+    put(31, beam.scale, swell.q, swell.far, swell.inverseFar);
+    for (uint32_t i = 0; i < 4u; ++i)
+        put(32u + i, beam.col[i].x, beam.col[i].y, beam.col[i].z, beam.col[i].w);
+    put(36, swell.lane[0], swell.lane[1], swell.lane[2], swell.lane[3]);
+    // The bones the chunk uses: slot x is quads 896 - 4x to 899 - 4x.
+    palette.clear();
+    if (s.bones)
+    {
+        uint32_t slots = 0u;
+        for (uint32_t k = 0; k < s.count; ++k)
+            for (uint32_t b = 0; b < s.bones; ++b)
+                slots = std::max(slots, uint32_t(slotOf(vu.half(s.skin + k * 2u, b))) + 1u);
+        palette.resize(size_t(slots) * 16u);
+        for (uint32_t x = 0; x < slots; ++x)
+            for (uint32_t r = 0; r < 4u; ++r)
+            {
+                const Vec4 m = vu.quad(896u - 4u * x + r);
+                float *at = palette.data() + (size_t(x) * 4u + r) * 4u;
+                at[0] = m.x;
+                at[1] = m.y;
+                at[2] = m.z;
+                at[3] = m.w;
+            }
+    }
 }
 
 Mode modeFromEnvironment()

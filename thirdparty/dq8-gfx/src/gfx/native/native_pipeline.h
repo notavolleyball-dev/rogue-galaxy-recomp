@@ -76,6 +76,22 @@ struct StaticVertex
 static_assert(sizeof(StaticVertex) == 68u, "tightly packed");
 constexpr uint32_t kStaticVertices = 1u << 19; // 34 MiB
 
+// A model chunk's triangle vertex (Renderer::retain): its triangle's three
+// corners' positions, bones and weights (the program's backface rule needs
+// all three, through the same skinning), its own normal, UV and color.
+struct ModelVertex
+{
+    float position[3][3];
+    float bones[3][4];
+    float weights[3][4];
+    float normal[3];
+    float uv[2];
+    float color[4];
+    float corner, parity;
+};
+static_assert(sizeof(ModelVertex) == 176u, "tightly packed");
+constexpr uint32_t kModelVertices = 1u << 18; // 44 MiB
+
 // Bumped when the renderer lets go of every retained mesh (its buffer
 // filled): the ids the producer handed out before are no longer drawn, and
 // it defines its meshes again under new ones. Any thread.

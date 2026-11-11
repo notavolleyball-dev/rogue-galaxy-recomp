@@ -276,6 +276,29 @@ struct RawVertex
     float depth;
 };
 
+// A model chunk's vertex as the game's VU1 program reads it, before the
+// program (M5 of the game's docs/NATIVE-ONLY.md): the int values of its
+// position, normal, UV and color, its bones' palette slots (0-35) and their
+// weights (0-255; 0: none). native_model.vert runs the program on it.
+struct ModelInput
+{
+    float position[3];
+    float bones[4];
+    float weights[4];
+    float normal[3];
+    float uv[2];
+    float color[4];
+};
+static_assert(sizeof(ModelInput) == 80u, "tightly packed");
+
+// What the model vertex stage reads for one draw, made per draw from the
+// VU1 constants (vu1_native's modelRow; the layout is native_model.vert's).
+constexpr uint32_t kModelRowQuads = 40u;
+struct ModelRow
+{
+    float q[kModelRowQuads][4];
+};
+
 // With hasModel, vertices are in object space, through the model and the
 // camera. Without it, they are the target's pixels (x, y) and the game's
 // window depth (z), which the camera, when there is one, maps to the
@@ -335,6 +358,12 @@ struct MeshDraw
     float winding = 1.0f;
     bool guardBand = false, backface = false, clips = false;
     alignas(16) unsigned char rawHeader[256];
+    // A model chunk's draw (its RetainedMesh has `model`): the program's
+    // constants, and its bones' matrices (4 rows of 4 floats a slot, row
+    // vectors, slot x at palette[16 x]).
+    bool hasModelRow = false;
+    ModelRow modelRow{};
+    std::vector<float> palette;
 };
 
 // What a 2D draw belongs to, for passes that treat the layers apart (the
@@ -484,6 +513,10 @@ struct RetainedMesh
     Id id = 0;
     bool list = false;
     std::vector<RawVertex> raw;
+    // A model chunk instead (M5): its vertices as the program reads them
+    // (a strip, or a list with `list`), drawn through native_model.vert
+    // from MeshDraw::modelRow and its palette.
+    std::vector<ModelInput> model;
 };
 
 using Record = std::variant<Texture, Palette, Target, Camera, MeshDraw, Draw2D, Pass, Clear, FrameBegin, Present,
