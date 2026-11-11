@@ -12,7 +12,7 @@ RUN sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
 RUN pacman -Syu --noconfirm --needed \
         base-devel clang lld llvm cmake ninja git python pkgconf \
         ffmpeg shaderc glslang \
-        libx11 libxext libxrandr libxcursor libxi libxss libxtst libxkbcommon \
+        libx11 libxext libxrandr libxcursor libxi libxss libxtst libxinerama libxfixes libxrender libxkbcommon \
         wayland wayland-protocols libdecor mesa vulkan-headers vulkan-icd-loader \
         alsa-lib libpulse pipewire jack2 dbus \
     && pacman -Scc --noconfirm
