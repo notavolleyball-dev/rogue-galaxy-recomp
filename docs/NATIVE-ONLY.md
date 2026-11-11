@@ -723,6 +723,13 @@ Done:
     thread's at a block's end (should stay 0).
   - `RG_NATIVE_BLOCKS=0` turns it off.
 
+- **The census for "Done when":** `[native2d] pieces the converter made,
+  by draw task` lines (every 20000 pieces) name the draw tasks
+  (`TaskDraw@address`, `tools/fninfo.py` names them) whose packets the
+  draw stage's converter still turns into 2D, and `no task@0` for
+  packets outside any task. Each named one is a source left to move to
+  the game thread; the VU1 packet programs' are expected to stay.
+
 Not done:
 - fonts as glyph records;
 - libgraph's `sceGsPutDrawEnv`/`sceGsSwapDBuff` clears and the `sceGifPk`

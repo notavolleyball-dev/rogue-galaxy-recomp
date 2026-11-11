@@ -116,6 +116,9 @@ uint8_t currentLayer();
 // M4: the layer (native::Layer's value) of the draw task whose packets the
 // EE address holds; 0 (Scene) for none.
 uint8_t layerAt(uint32_t address);
+// M4's census: the address of the draw task (TaskDraw*) whose packets the
+// EE address holds; 0 for none.
+uint32_t taskAt(uint32_t address);
 
 // The effect whose packets the EE address holds (any of RDRAM's windows).
 Effect effectAt(uint32_t address);

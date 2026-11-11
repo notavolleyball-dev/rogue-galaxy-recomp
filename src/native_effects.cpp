@@ -97,6 +97,15 @@ struct LayerRange
     uint8_t layer = 0u;
 };
 std::vector<LayerRange> g_layerRanges; // under g_mutex, by start
+// M4's census: every draw task's packet range with the task (its index in
+// kDrawTasks), apart from the layers (an outer task would replace an inner
+// one's layer there).
+struct TaskRange
+{
+    uint32_t start = 0u, end = 0u;
+    uint16_t task = 0u;
+};
+std::vector<TaskRange> g_taskRanges; // under g_mutex, by start
 
 // The ranges `start`-`end` overlaps go: the memory is something else's now.
 void dropRangesLocked(uint32_t start, uint32_t end)
@@ -134,6 +143,9 @@ void dropRanges(uint32_t start, uint32_t end)
     g_layerRanges.erase(std::remove_if(g_layerRanges.begin(), g_layerRanges.end(),
                                        [&](const LayerRange &r) { return r.start < end && start < r.end; }),
                         g_layerRanges.end());
+    g_taskRanges.erase(std::remove_if(g_taskRanges.begin(), g_taskRanges.end(),
+                                      [&](const TaskRange &r) { return r.start < end && start < r.end; }),
+                       g_taskRanges.end());
 }
 
 PS2Runtime::RecompiledFunction g_frameBeginOriginal = nullptr;
@@ -172,6 +184,23 @@ void addLayerRange(uint32_t start, uint32_t end, uint8_t layer)
     g_layerRanges.insert(std::upper_bound(g_layerRanges.begin(), g_layerRanges.end(), range,
                                           [](const LayerRange &x, const LayerRange &y) { return x.start < y.start; }),
                          range);
+}
+
+// M4's census: a draw task's range (an inner task's, written first, stays:
+// only the outer one's own stretches are its).
+void addTaskRange(uint32_t start, uint32_t end, uint16_t task)
+{
+    start = physical(start);
+    end = physical(end);
+    if (end <= start || end - start > (4u << 20))
+        return;
+    std::lock_guard lock(g_mutex);
+    const TaskRange range{start, end, task};
+    g_taskRanges.insert(std::upper_bound(g_taskRanges.begin(), g_taskRanges.end(), range,
+                                         [](const TaskRange &x, const TaskRange &y) { return x.start < y.start; }),
+                        range);
+    if (g_taskRanges.size() > 65536u)
+        g_taskRanges.erase(g_taskRanges.begin(), g_taskRanges.begin() + 32768);
 }
 
 // The draw tasks (TaskDraw*), each with the layer its 2D is: by what the
@@ -266,6 +295,8 @@ void afterDrawTask(uint8_t *, R5900Context *, PS2Runtime *, uint32_t data)
     g_currentLayer = 0u;
     if (index < kDrawTaskCount && kDrawTasks[index].layer != Layer::Scene)
         addLayerRange(top, stackTop(), static_cast<uint8_t>(kDrawTasks[index].layer));
+    if (index < kDrawTaskCount)
+        addTaskRange(top, stackTop(), static_cast<uint16_t>(index));
 }
 
 template <size_t I> void drawTask(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1693,6 +1724,23 @@ uint8_t layerAt(uint32_t address)
         return 0u;
     --it;
     return address < it->end ? it->layer : 0u;
+}
+
+uint32_t taskAt(uint32_t address)
+{
+    address = physical(address);
+    std::lock_guard lock(g_mutex);
+    // The innermost range holding it: the last whose start is at most it
+    // and whose end is past it, searching back over the outer ones.
+    auto it = std::upper_bound(g_taskRanges.begin(), g_taskRanges.end(), address,
+                               [](uint32_t value, const TaskRange &range) { return value < range.start; });
+    for (int back = 0; it != g_taskRanges.begin() && back < 8; ++back)
+    {
+        --it;
+        if (address < it->end)
+            return kDrawTasks[it->task].address;
+    }
+    return 0u;
 }
 
 Effect effectAt(uint32_t address)

@@ -2308,6 +2308,36 @@ std::atomic<uint64_t> g_packetsConverted{0u}, g_packetsRefused{0u}, g_piecesMade
 // pipeline, where the absorbed packets go (the producer's line says why).
 // The layer of the packet being delivered (deliverPacketAt).
 thread_local uint8_t t_layer = 0u;
+// M4's census: the draw task whose packets are being delivered, and the
+// pieces the converter still makes, by task (M4 is done when only the VU1
+// packet programs' reach it). A line every 20000 pieces.
+thread_local uint32_t t_task = 0u;
+void countConverted(size_t pieces)
+{
+    static std::mutex mutex;
+    static std::unordered_map<uint32_t, uint64_t> byTask;
+    static uint64_t total = 0u, nextReport = 1u;
+    std::lock_guard lock(mutex);
+    byTask[t_task] += pieces;
+    total += pieces;
+    if (total < nextReport)
+        return;
+    nextReport = total + 20000u;
+    std::vector<std::pair<uint64_t, uint32_t>> top;
+    for (const auto &[task, count] : byTask)
+        top.emplace_back(count, task);
+    std::sort(top.rbegin(), top.rend());
+    std::string line;
+    for (size_t i = 0; i < top.size() && i < 12u; ++i)
+    {
+        char item[48];
+        std::snprintf(item, sizeof(item), " %s%06x=%llu", top[i].second ? "TaskDraw@" : "no task@", top[i].second,
+                      (unsigned long long)top[i].first);
+        line += item;
+    }
+    std::fprintf(stderr, "[native2d] pieces the converter made, by draw task (%llu):%s\n", (unsigned long long)total,
+                 line.c_str());
+}
 
 void deliverPiece(GS &gs, const rg::native2d::Piece &piece)
 {
@@ -2354,9 +2384,11 @@ void sendPacket(GS &gs, const uint8_t *data, uint32_t size)
         std::string why;
         if (rg::native2d::build(&one, 1u, pieces, why))
         {
-            const bool anyMesh = std::any_of(pieces.begin(), pieces.end(), [](const rg::native2d::Piece &p) {
+            const size_t meshes = static_cast<size_t>(std::count_if(pieces.begin(), pieces.end(), [](const rg::native2d::Piece &p) {
                 return !p.isPacket() && !p.isWrites();
-            });
+            }));
+            if (meshes != 0u)
+                countConverted(meshes);
             // Under absorb a packet without meshes goes as its pieces too:
             // its register writes reach the mirror without a second decode.
             for (const rg::native2d::Piece &piece : pieces)
@@ -2816,6 +2848,7 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     // M4: the layer of the draw task that wrote it (what a VU1 program
     // kicked: the task whose list holds the MSCAL), for its 2D.
     t_layer = rg::nativefx::layerAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
+    t_task = rg::nativefx::taskAt(address != ~0u ? address : cursor != ~0u ? cursor : 0u);
     // Step 5: an effect's packets, held until the effect's run ends. A
     // packet outside the held run ends it first, before a composite can
     // take the packet: the effect goes on ahead of what follows it.
