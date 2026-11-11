@@ -146,7 +146,7 @@ bool nativeEffects()
     static const bool on = rg::nativefx::enabled();
     return on;
 }
-// RG_NATIVE_COMPOSITE: stage E's objects in object layers (deliverPacket).
+// Stage E's objects in object layers (deliverPacket).
 bool composites()
 {
     static const bool on = rg::nativefx::compositesBatched();
@@ -2731,26 +2731,6 @@ uint32_t listAddress(const uint8_t *data)
 // packets go on with their kicks withheld (the registers they set still
 // reach the GS and the draw-state mirror). False, with `why`, leaves the
 // packets to go on as they are.
-bool drawEffect(rg::nativefx::Effect kind, const std::vector<std::vector<uint8_t>> &packets, uint32_t unit,
-                GS &gs, std::string &why)
-{
-    thread_local GSNativeEffect effect;
-    thread_local std::vector<std::vector<uint8_t>> withheld;
-    if (!rg::nativefx::build(kind, packets, effect, withheld, why, unit))
-        return false;
-    rg::nativeproducer::noteEffect(effect);
-    if (!rg::nativeproducer::effect(effect))
-    {
-        why = "the producer cannot draw it (its stats line says why)";
-        return false;
-    }
-    for (const std::vector<uint8_t> &packet : withheld)
-    {
-        sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
-    }
-    return true;
-}
-
 void countEffect(bool drawn, rg::nativefx::Effect kind, const std::string &why,
                  const std::vector<std::vector<uint8_t>> &packets)
 {
@@ -2787,47 +2767,31 @@ void flushEffect()
         return;
     }
     GS &gs = *t_held.gs;
-    std::string why;
-    // A pass: the renderer draws it from the function's parameters, and its
-    // packets go nowhere (M3 of docs/NATIVE-ONLY.md).
-    if (rg::nativefx::isPass(t_held.effect))
+    // A pass: the renderer draws it from the function's parameters (M3 of
+    // docs/NATIVE-ONLY.md); the packets' uploads and register writes still
+    // go on, their draws not. (Anything else held, a composite's packets
+    // outside its object, goes on as it is.)
+    const bool pass = rg::nativefx::isPass(t_held.effect);
+    const bool sent = pass && rg::nativefx::emitPass(t_held.effect, t_held.unit);
+    countEffect(sent, t_held.effect,
+                pass ? "its pass was not sent (its parameters or buffers unknown)" : "not a pass", t_held.packets);
+    for (std::vector<uint8_t> &packet : t_held.packets)
     {
-        const bool sent = rg::nativefx::emitPass(t_held.effect, t_held.unit);
-        countEffect(sent, t_held.effect, "its pass was not sent (its parameters or buffers unknown)",
-                    t_held.packets);
-        // Its uploads and register writes still go on, its draws not.
-        for (std::vector<uint8_t> &packet : t_held.packets)
-        {
+        if (pass)
             rg::nativefx::withholdKicks(packet);
-            if (t_held.gs)
-                sendPacket(*t_held.gs, packet.data(), static_cast<uint32_t>(packet.size()));
-        }
-        t_held.effect = rg::nativefx::Effect::None;
-        t_held.unit = 0u;
-        t_held.packets.clear();
-        return;
+        sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
     }
-    const bool drawn = drawEffect(t_held.effect, t_held.packets, t_held.unit, gs, why);
-    if (!drawn)
-    {
-        for (const std::vector<uint8_t> &packet : t_held.packets)
-        {
-            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
-        }
-    }
-    countEffect(drawn, t_held.effect, why, t_held.packets);
     t_held.effect = rg::nativefx::Effect::None;
     t_held.unit = 0u;
     t_held.packets.clear();
 }
 
-// RG_NATIVE_COMPOSITE: stage E's objects, each drawn into the offscreen
+// Stage E's objects, each drawn into the offscreen
 // buffer (its head: a clear of its box, its model) and then laid over the
 // frame (its tail), drawn by the renderer into object layers of its own
-// (GSNativeEffect::kRouteLayer): the head's draws into the buffer go to the
-// object's layer, the tail's sprites become a kObjectTail from that layer,
-// their kicks withheld, and the waiting tails are drawn together
-// (kComposite) before anything else reaches the GS. Uploads and TEXFLUSHes
+// (rg::nativeproducer::routeLayer): the head's draws into the buffer go to
+// the object's layer, the tail becomes ObjectLayer passes reading it, its
+// packets' kicks withheld. Uploads and TEXFLUSHes
 // between objects go on: the layers are not GS memory. So the GS's buffer is
 // never drawn, and the renderer switches target twice a run of objects
 // instead of twice an object.
@@ -2853,21 +2817,6 @@ struct CompositeBatch
 thread_local CompositeBatch t_batch;
 std::atomic<uint64_t> g_compositeUnits{0u}, g_compositeRouted{0u}, g_compositeRuns{0u}, g_compositeRefused{0u};
 
-// A layer command or a tail to the producer; false when it refused it.
-bool sendEffect(GS &, const GSNativeEffect &effect)
-{
-    rg::nativeproducer::noteEffect(effect);
-    return rg::nativeproducer::effect(effect);
-}
-
-void sendCommand(GS &gs, uint32_t command)
-{
-    thread_local GSNativeEffect effect;
-    effect = GSNativeEffect{};
-    effect.command = command;
-    sendEffect(gs, effect);
-}
-
 // The waiting tails drawn, before what comes next.
 void compositeRun()
 {
@@ -2876,7 +2825,6 @@ void compositeRun()
         return;
     batch.waiting = false;
     ++g_compositeRuns;
-    sendCommand(*batch.gs, GSNativeEffect::kComposite);
 }
 
 // The head's box is known (or will not be): routed to a layer with it, or,
@@ -2887,17 +2835,8 @@ void decideHead()
     batch.routed = rg::nativefx::clearBox(batch.head, batch.box);
     if (batch.routed)
     {
-        thread_local GSNativeEffect route;
-        route = GSNativeEffect{};
-        route.command = GSNativeEffect::kRouteLayer;
-        route.bufferCount = 1u;
-        route.buffers[0].base = batch.box.base;
-        route.buffers[0].fbw = batch.box.fbw;
-        route.box[0] = batch.box.x0;
-        route.box[1] = batch.box.y0;
-        route.box[2] = batch.box.x1;
-        route.box[3] = batch.box.y1;
-        sendEffect(*batch.gs, route);
+        const int32_t box[4] = {batch.box.x0, batch.box.y0, batch.box.x1, batch.box.y1};
+        rg::nativeproducer::routeLayer(batch.box.base, batch.box.fbw, box);
         ++g_compositeRouted;
     }
     else
@@ -2953,7 +2892,7 @@ void endObject()
     if (batch.state == CompositeBatch::State::Head && !batch.decided)
         decideHead();
     if (batch.state == CompositeBatch::State::Head && batch.routed)
-        sendCommand(*batch.gs, GSNativeEffect::kRouteEnd);
+        rg::nativeproducer::routeEnd();
     finishTail();
     batch.state = CompositeBatch::State::Outside;
     batch.routed = false;
@@ -3072,7 +3011,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
             if (!batch.decided)
                 decideHead();
             if (batch.routed)
-                sendCommand(gs, GSNativeEffect::kRouteEnd);
+                rg::nativeproducer::routeEnd();
             batch.state = CompositeBatch::State::Tail;
         }
         batch.tail.emplace_back(data, data + size);
@@ -3149,11 +3088,8 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     }
     if (effects)
     {
-        if (effect == rg::nativefx::Effect::ShadowSetup)
-        {
-            rg::nativefx::observe(effect, data, size);
-        }
-        else if (effect != rg::nativefx::Effect::None)
+        // (The plane shadow's setup goes on as it is.)
+        if (effect != rg::nativefx::Effect::None && effect != rg::nativefx::Effect::ShadowSetup)
         {
             t_held.effect = effect;
             t_held.unit = unit;
@@ -3166,29 +3102,22 @@ void deliverPacketAt(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
     // the GS would get it.
     if (!t_onVif1Thread && rg::nativefx::flipNative())
     {
-        thread_local GSNativeEffect effect;
-        thread_local std::vector<std::vector<uint8_t>> withheld;
-        if (rg::nativefx::flipPacket(data, size, effect, withheld))
+        uint32_t source = 0u, target = 0u;
+        if (rg::nativefx::flipPacket(data, size, source, target))
         {
             g_thread->drain();
             // M3: the flip's copy as a pass, the frame copied whole into the
             // display buffer (32 sprites before).
-            bool drawn = false;
-            if (effect.opCount != 0u && effect.ops[0].target < effect.bufferCount && effect.ops[0].source >= 0 &&
-                static_cast<uint32_t>(effect.ops[0].source) < effect.bufferCount)
-            {
-                rg::nativeproducer::PassRequest request;
-                request.kind = 7u; // native::PassKind::Capture
-                request.frameBase = effect.buffers[effect.ops[0].source].base;
-                request.workBases[0] = effect.buffers[effect.ops[0].target].base;
-                drawn = rg::nativeproducer::pass(request);
-            }
+            rg::nativeproducer::PassRequest request;
+            request.kind = 7u; // native::PassKind::Capture
+            request.frameBase = source;
+            request.workBases[0] = target;
+            const bool drawn = rg::nativeproducer::pass(request);
             if (drawn)
             {
-                for (const std::vector<uint8_t> &packet : withheld)
-                {
-                    sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
-                }
+                std::vector<uint8_t> packet(data, data + size);
+                rg::nativefx::withholdKicks(packet);
+                sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
             }
             else
             {

@@ -7,7 +7,6 @@
 
 struct GSNativeMesh;
 struct GSDrawState;
-struct GSNativeEffect;
 
 // The game side of the native pipeline (docs/NATIVE-PIPELINE.md): what turns
 // the game's GS-shaped data into the renderer's records. The renderer sees
@@ -113,10 +112,6 @@ void nameSource(uint32_t source, const char *name);
 // out before are no longer drawn (the renderer let go of them all).
 uint64_t retainedEpoch();
 
-// Step 5a's survey (counts only): an effect on its way to be drawn (by
-// command; a sprite effect's ops by what they draw into and from).
-void noteEffect(const GSNativeEffect &effect);
-
 // Step 5b: a 2D piece (src/native_2d.h: primitives the converter made a
 // mesh in the GS's window coordinates) under its draw state, as the
 // renderer's window-space mesh draw. `texels`: its UVs are texels (FST),
@@ -127,11 +122,12 @@ void noteEffect(const GSNativeEffect &effect);
 bool piece(const GSNativeMesh &mesh, const GSDrawState *state, bool texels,
            const std::vector<uint32_t> &indices = {});
 
-// Step 5b: an effect's sprites (src/native_effects.h) as the renderer's
-// window-space mesh draws, and step 5c's object layer commands. True when
-// made: the GS does not draw it then. False leaves it to the GS (counted by
-// why): the effect's packets go on as they are.
-bool effect(const GSNativeEffect &effect);
+// Step 5c: an object's head draws into the buffer at `base` (`fbw`) go to
+// the object layer instead, cleared over `box` (x0, y0, x1, y1 in the
+// buffer's pixels) first, until routeEnd(). Its tail's ObjectLayer passes
+// read the layer.
+void routeLayer(uint32_t base, uint32_t fbw, const int32_t box[4]);
+void routeEnd();
 
 // Step 3b's counts (the VIF1 thread, which withholds named uploads the
 // producer sent from the GS): one withheld (palette or texture), one sent on

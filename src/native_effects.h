@@ -4,37 +4,24 @@
 #include <string>
 #include <vector>
 
-#include "native_effect.h"
 
 class PS2Runtime;
 
-// The game's post effects as the native pipeline's own draws
-// (docs/NATIVE-PIPELINE.md, step 5), instead of the GS sprites the game
-// builds for them.
+// The game's post effects as the native pipeline's own draws (M3 of
+// docs/NATIVE-ONLY.md), instead of the GS sprites the game builds for them.
 //
 // The game's function still runs, so all it does besides drawing stays as
-// it was; a hook notes which of the frame's packet memory it wrote. The VIF1
-// thread holds the packets it reads from there, turns their sprites into a
-// GSNativeEffect (each sprite as the GS would draw it, its strips joined)
-// for rg::nativeproducer::effect, and sends the packets on with their kicks
-// withheld (XYZ2 as XYZ3: the GS registers end as they would have). Packets
-// that are not the shape expected, or an effect the producer cannot make,
-// go on as they are.
+// it was. Its hook reads the function's arguments into a pass request
+// (rg::nativeproducer::PassRequest) kept under the unit of the packet range
+// the call wrote. The VIF1 thread, reaching that range, sends the Pass
+// (emitPass) in the stream's order and the packets on with their kicks
+// withheld (XYZ2 as XYZ3: uploads and registers go on, no draws). The
+// renderer expands the pass into its own draws (native_passes.cpp). Each
+// function hooked has a note in docs/NATIVE-ONLY-NOTES.md.
 //
-// Only with the native pipeline on (RG_NATIVE_PIPELINE=1). Each effect is on
-// unless its variable is 0: RG_NATIVE_GLARE (GlareFilterDrawMaybe: the
-// frame's bright parts down to 192x192, 20 shifted adds of that buffer onto
-// itself, back onto the frame), RG_NATIVE_SHADOW (DrawListEndPlaneShadowPass:
-// the shadow volumes' mask, blurred, onto the frame), RG_NATIVE_CBLUR
-// (CBlurTexBlurMaybe and CBlurDrawMaybe), RG_NATIVE_BLOOM
-// (BloomExtractBlurMaybe, as the glare), RG_NATIVE_DOF (DofFilterDrawMaybe),
-// RG_NATIVE_REFRACTION (RefractionCaptureFrame), RG_NATIVE_FLIP (the flip's
-// copy), RG_NATIVE_COLOR_FILTER (ScreenColorFilterMaybe), RG_NATIVE_FOCUS
-// (FocusFilterDrawMaybe), RG_NATIVE_SHADOW_MAP (ShadowMapBlur),
-// RG_NATIVE_COMPOSITE (the per-object composites, as object layers).
-// RG_NATIVE_EFFECTS_LOG=1 prints the first of each effect built;
-// RG_NATIVE_EFFECTS_TRACE=1 traces the sprites of a few and dumps refused
-// effects' packets.
+// RG_NATIVE_EFFECTS_LOG=1 logs the effects' first passes;
+// RG_NATIVE_EFFECTS_TRACE=1 dumps the packets of an effect whose pass was
+// not sent.
 namespace rg::nativefx
 {
 
@@ -94,7 +81,7 @@ struct Place
 // variable is 0).
 bool enabled();
 const char *name(Effect effect);
-// RG_NATIVE_COMPOSITE (on unless 0): stage E's objects as object layers.
+// Stage E's objects as object layers (false only when its hooks failed).
 bool compositesBatched();
 
 // After loadELF(): hooks the effects' functions.
@@ -107,22 +94,19 @@ void install(PS2Runtime &runtime);
 // bilinear sprite when the display's height is not the frame's); then the
 // environment back. The flip's hook (src/flip_pacing.cpp) marks it; the
 // game thread's packets go through flipPacket, which turns the sprites into
-// a Flip effect: one copy instead of 32 draws.
+// a Capture pass: one copy instead of 32 draws.
 bool flipNative();
 void beginFlip();
 void endFlip();
 // The game thread's own GIF packet: true when it was the flip's copy, with
-// the effect and what to send in its place (the sprites' packet, its kicks
-// withheld: the GS registers end as they would have).
-bool flipPacket(const uint8_t *data, uint32_t size, GSNativeEffect &out,
-                std::vector<std::vector<uint8_t>> &withheld);
+// the buffer it reads (the frame) and the one it draws into (the display
+// buffer), as GS bases.
+bool flipPacket(const uint8_t *data, uint32_t size, uint32_t &source, uint32_t &target);
 
 // The effect whose packets the EE address holds (any of RDRAM's windows).
 Effect effectAt(uint32_t address);
 Place placeAt(uint32_t address);
 
-// A ShadowSetup packet: the registers it writes, for the next shadow.
-void observe(Effect effect, const uint8_t *data, uint32_t size);
 
 // A composite's head: the box its clear sprites cover in the offscreen
 // buffer (CT32 at `base`, `fbw`), in pixels, x1 and y1 exclusive.
@@ -139,9 +123,6 @@ bool uploadPages(const uint8_t *data, uint32_t size, uint32_t &first, uint32_t &
 // Debugging: the registers and primitives of `packets`, one line each.
 void dumpPackets(const char *what, const std::vector<std::vector<uint8_t>> &packets);
 
-// From the packets an effect's function wrote, in order: the effect, and
-// the packets with their kicks withheld. False, with `why`, when they are
-// not the sprites expected. `unit`: the colour filter's colour.
 // M3: an effect sent as a Pass record (native_records.h) in place of its
 // packets: whether it is one, and the pass of the call whose packet range
 // carries `unit`, sent (false: not found, or its buffers unknown).
@@ -151,10 +132,7 @@ bool isPass(Effect effect);
 void noteFrameDesc(uint32_t desc);
 bool emitPass(Effect effect, uint32_t unit, bool fromLayer = false);
 // The packet with every drawing kick made a plain vertex write: what is left
-// of a pass's packets (uploads, registers) still goes on, as it did under the
-// sprite builder.
+// of a pass's packets (uploads, registers) still goes on.
 void withholdKicks(std::vector<uint8_t> &bytes);
-bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,
-           std::vector<std::vector<uint8_t>> &withheld, std::string &why, uint32_t unit = 0u);
 
 } // namespace rg::nativefx

@@ -101,13 +101,11 @@ game built them. Every reference is an id (`native_records.h`):
   buffer (its head: a clear, the model) and lay it over the frame (its
   tail). Hooks mark each object's head and tail packets; the VIF1 thread
   routes the head's draws into an object layer of the renderer's own,
-  cleared over the head's clear box (`kRouteLayer`), and makes the tail's
-  sprites read that layer (`kObjectTail`). The GS's buffer, which shadow
-  volumes and uploads also use, is never read for it, so no boxes. A tail
-  the builder or the producer refuses puts the layer back into the buffer
-  first and goes on as packets. VU1 kicks are placed in a tail by where the
-  MSCAL that ran them sits in the list (patch 0032, `vif1Cursor`).
-  `RG_NATIVE_COMPOSITE=0` turns the batching off.
+  cleared over the head's clear box (`routeLayer`), and the tail is
+  `ObjectLayer` passes made from the overlay calls' arguments, reading that
+  layer (M3 of NATIVE-ONLY.md). The GS's buffer, which shadow volumes and
+  uploads also use, is never read for it. VU1 kicks are placed in a tail by
+  where the MSCAL that ran them sits in the list (patch 0032, `vif1Cursor`).
 - **Uploads** (steps 3b and 6): an upload the producer already made a
   record of is withheld from the GS (its transfer registers and its image
   data, in the packet and in the continuations after it); the rest of the

@@ -15,13 +15,13 @@ verdict "7: GS backend never entered (the null backend)" "$(grep -ac '^\[native-
 grep -a '^\[native-gs\] GS backend calls' "$LOG" | tail -1 | sed 's/^/INFO  7 null backend: /'
 verdict "5: no effect left as packets" "$(grep -ac '^\[nativefx\] an effect stays packets' "$LOG")"
 verdict "5b: no packet left unconverted" "$(grep -ac '^\[native2d\] a packet stays a packet' "$LOG")"
-verdict "5c: no composite tail left as packets" "$(grep -ac '^\[composite\] a tail stays packets' "$LOG")"
+verdict "5c: every composite tail's passes drawn" "$(grep -ac "^\[composite\] a tail's passes were not all drawn" "$LOG")"
 verdict "7c: every colour read served" "$(grep -ac 'a colour read was not served' "$LOG")"
 grep -a 'source is unknown' "$LOG" | sort | uniq -c | sed 's/^/INFO  6: /'
 echo "INFO  6: local copies mirrored: $(count 'local copies mirrored'), other format: $(count 'other format'), no source: $(count 'no source'), no destination: $(count 'no destination')"
 grep -ao "pieces made [0-9]*, to the GS [0-9]*, dropped [0-9]*" "$LOG" | tail -1 | sed 's/^/INFO  5b refused pieces (dropped, not the tripwire): /'
 echo "INFO  5b: green-to-alpha ops made: $(count 'made green to alpha')"
-echo "INFO  5c: objects routed: $(count 'object layers: routed'), tails made: $(count 'tails made'), put back: $(count 'put back for packets')"
+echo "INFO  5c: objects routed: $(count 'object layers: routed')"
 grep -ao "depth reads: asked.*" "$LOG" | tail -1 | sed 's/^/INFO  7b renderer: /'
 grep -ao "colour reads: served.*" "$LOG" | tail -1 | sed 's/^/INFO  7c renderer: /'
 grep -ao "texture packs: pairs looked up [0-9]*, pictures made [0-9]*, none [0-9]*, draws from a picture [0-9]*" "$LOG" | tail -1 | sed 's/^/INFO  M1 /'
