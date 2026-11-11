@@ -208,29 +208,7 @@ void hostUpload(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t x, uint32_t 
 // producer holds at its source and destination (the first few).
 void noteLocalCopy(uint32_t sbp, uint32_t sbw, uint32_t spsm, uint32_t sx, uint32_t sy, uint32_t dbp, uint32_t dbw,
                    uint32_t dpsm, uint32_t dx, uint32_t dy, uint32_t width, uint32_t height);
-// A withheld upload whose data as sent differs from the guest memory its
-// record was made from (the game wrote it after the texture hook): the
-// record made again from `data` and resident in its place (VIF1 thread, in
-// the stream's order). Palettes of 16 or 256 entries; textures uploaded as
-// the format they are read in.
-void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, uint32_t height, const uint8_t *data,
-                   uint32_t bytes);
-// The hash takeProduced's `hash` is of, for bytes the VIF1 thread saw sent.
-uint64_t uploadHash(const uint8_t *data, size_t size);
-void noteWithheld(bool palette, uint32_t imageBytes);
-// Whether `size` bytes at `at` (guest RAM) are a texture level texture()
-// hashed and no write has reached since (rg::writewatch); `hash` is then
-// that hash, the one takeProduced gives for its record. On the game thread
-// only. An upload sent from such memory carries nothing the record does not
-// already hold: the DMA send leaves its bytes where they are (vif1_thread's
-// elided spans).
-bool sourceUnchanged(const uint8_t *at, size_t size, uint64_t &hash);
-// An elided upload withheld without its bytes; `fetched`: one that needed
-// them after all (read from guest memory, late).
-void noteElided(uint32_t imageBytes, bool fetched);
 void notePassed(Passed why);
-void noteSplit();
-void noteContinuedInPacket();
 
 // Step 7b: a depth read the game makes (sceGsExecStoreImage of a Z buffer:
 // the lens flare's 8x8 block at the sun), from the renderer's depth a frame

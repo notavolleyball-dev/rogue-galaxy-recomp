@@ -1095,7 +1095,6 @@ thread_local uint64_t t_bitbltbuf = 0u, t_trxpos = 0u, t_trxreg = 0u;
 // task that wrote them (below, with the packets' census).
 enum class UploadPath : uint8_t
 {
-    Withheld,   // a record the texture hook made, published here
     Host,       // a host upload nobody made a record of (captured)
     LocalCopy,  // a local-to-local copy (mirrored)
     Taken,      // a take marker's record (no transfer in the list)
@@ -1103,71 +1102,7 @@ enum class UploadPath : uint8_t
 };
 void countUpload(UploadPath path);
 
-// Step 3b.
-struct UploadWithhold
-{
-    uint32_t transferBytes = 0; // the withheld transfer's data still to come in IMAGE tags
-    uint32_t imageBytes = 0;    // an IMAGE tag's data still to come outside its packet
-    bool palette = false;
-    // The withheld data as sent, against the record's hash of the guest
-    // memory it was made from (a record made before the game finished
-    // writing that memory is stale): RG_NATIVE_UPLOAD_CHECK.
-    std::vector<uint8_t> seen;
-    uint64_t expectHash = 0u;
-    uint32_t expectBytes = 0u, dbp = 0u, dpsm = 0u, width = 0u, height = 0u;
-};
-std::atomic<uint64_t> g_uploadsChecked{0}, g_uploadsStale{0};
-
-// On under the pipeline (RG_NATIVE_UPLOAD_CHECK=0 off): a stale record is
-// made again from what was sent (rg::nativeproducer::replaceUpload).
-bool checkingUploads()
-{
-    static const bool on = [] {
-        const char *v = std::getenv("RG_NATIVE_UPLOAD_CHECK");
-        return !(v && *v == '0');
-    }();
-    return on;
-}
-
-// The largest upload checked (RG_NATIVE_UPLOAD_CHECK=all: every one). The
-// stale records seen were all palettes (1 KiB) and 64x64 CT32 textures
-// (16 KiB); at the boss, checking every upload was about a twentieth of
-// this thread and found none.
-uint32_t checkedUploadLimit()
-{
-    static const uint32_t limit = [] {
-        const char *v = std::getenv("RG_NATIVE_UPLOAD_CHECK");
-        return v && std::strcmp(v, "all") == 0 ? ~0u : 16u * 1024u;
-    }();
-    return limit;
-}
-thread_local UploadWithhold t_upload;
-
-// Withheld bytes, for the check; compared when all have come.
-void seeWithheld(const uint8_t *data, uint32_t size)
-{
-    UploadWithhold &u = t_upload;
-    if (!checkingUploads() || u.expectBytes == 0u || u.seen.size() >= u.expectBytes)
-        return;
-    const uint32_t n = std::min<uint32_t>(size, u.expectBytes - static_cast<uint32_t>(u.seen.size()));
-    u.seen.insert(u.seen.end(), data, data + n);
-    if (u.seen.size() < u.expectBytes)
-        return;
-    g_uploadsChecked.fetch_add(1u, std::memory_order_relaxed);
-    if (rg::nativeproducer::uploadHash(u.seen.data(), u.expectBytes) != u.expectHash)
-    {
-        const uint64_t stale = g_uploadsStale.fetch_add(1u, std::memory_order_relaxed);
-        if (stale < 8u)
-            std::fprintf(stderr,
-                         "[native-upload] stale record: DBP %04x DPSM %02x %ux%u%s, %u bytes (sent differs from the "
-                         "record's guest memory): made again from what was sent\n",
-                         u.dbp, u.dpsm, u.width, u.height, u.palette ? " (palette)" : "", u.expectBytes);
-        rg::nativeproducer::replaceUpload(u.palette, u.dbp, u.dpsm, u.width, u.height, u.seen.data(),
-                                          u.expectBytes);
-    }
-    u.expectBytes = 0u;
-}
-
+// Bits a transfer sends a pixel of, by DPSM; 0: not one taken.
 uint32_t transferBits(uint32_t psm)
 {
     switch (psm & 0x3Fu)
@@ -1181,28 +1116,19 @@ uint32_t transferBits(uint32_t psm)
     }
 }
 
-// What of the packet goes to the GS, into `kept`; false: all of it, as it is.
-bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &kept)
+// M6: the texture hook's and the upload builders' markers in the list
+// (src/native_producer.h): an A+D block of writes to kBindRegister (bound
+// records), kTakeRegister (records the hook made, published here) or
+// kHostRegister/kHostSourceRegister (an upload by reference, its record or
+// a host upload of its source as it is now), applied here in the stream's
+// order. A block of markers alone is dropped (into `kept`, true); anything
+// else (a transfer the game wrote some other way) goes on as it is.
+bool takeMarkers(const uint8_t *data, uint32_t size, std::vector<uint8_t> &kept)
 {
     namespace producer = rg::nativeproducer;
-    if (!uploadsTaken())
-        return false;
     kept.clear();
     bool changed = false;
-    // `kept` is filled only once something is dropped: until then the
-    // packet goes on as it is, uncopied.
-    bool copying = false;
     uint32_t pos = 0u;
-    if (t_upload.imageBytes > 0u)
-    {
-        // A withheld image's data at the packet's start, not behind a tag.
-        const uint32_t n = std::min(t_upload.imageBytes, size);
-        t_upload.imageBytes -= n;
-        seeWithheld(data, n);
-        pos = n;
-        changed = copying = true;
-        producer::noteContinuedInPacket();
-    }
     while (pos + 16u <= size)
     {
         uint64_t lo = 0u, hi = 0u;
@@ -1219,26 +1145,18 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
         bool drop = false;
         if (flg == 0u && nreg == 1u && (hi & 0xFu) == 0xEu)
         {
-            // A+D: a transfer's registers alone, its TRXDIR host to local?
-            uint64_t bitbltbuf = 0u, trxreg = 0u, trxdir = ~0ull;
-            uint32_t others = 0u;
             thread_local std::vector<uint64_t> binds, takes, hosts, sources;
             binds.clear();
             takes.clear();
             hosts.clear();
             sources.clear();
+            uint32_t others = 0u;
             for (uint32_t at = pos + 16u; at + 16u <= end; at += 16u)
             {
                 uint64_t value = 0u;
                 std::memcpy(&value, data + at, 8u);
                 const uint8_t reg = data[at + 8u];
-                if (reg == 0x50u)
-                    bitbltbuf = value;
-                else if (reg == 0x52u)
-                    trxreg = value;
-                else if (reg == 0x53u)
-                    trxdir = value;
-                else if (reg == producer::kBindRegister)
+                if (reg == producer::kBindRegister)
                     binds.push_back(value);
                 else if (reg == producer::kTakeRegister)
                     takes.push_back(value);
@@ -1246,21 +1164,38 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                     hosts.push_back(value);
                 else if (reg == producer::kHostSourceRegister)
                     sources.push_back(value);
-                else if (reg != 0x51u)
+                else
                     ++others;
             }
-            if (!hosts.empty() && hosts.size() == sources.size())
+            if (!binds.empty())
+                producer::bound(binds.data(), binds.size());
+            const auto shape = [](uint64_t v, uint32_t &dbp, uint32_t &dbw, uint32_t &dpsm, uint32_t &w, uint32_t &h) {
+                dbp = uint32_t(v & 0x3FFFu);
+                dbw = uint32_t((v >> 14) & 0x3Fu);
+                dpsm = uint32_t((v >> 20) & 0x3Fu);
+                w = uint32_t((v >> 26) & 0xFFFu);
+                h = uint32_t((v >> 38) & 0xFFFu);
+            };
+            for (const uint64_t v : takes)
             {
-                // A host marker (an upload by reference, M6): the hook's
-                // record of the transfer when one is queued, else a host
-                // upload of its source as it is now.
+                uint32_t dbp, dbw, dpsm, w, h;
+                shape(v, dbp, dbw, dpsm, w, h);
+                bool palette = false;
+                uint64_t hash = 0u;
+                uint32_t hashed = 0u;
+                if (producer::takeProduced(dbp, dbw, dpsm, w, h, palette, hash, hashed))
+                    countUpload(UploadPath::Taken);
+                else
+                    producer::notePassed(producer::Passed::NotProduced);
+            }
+            if (hosts.size() == sources.size())
+            {
                 uint8_t *ram = g_runtime->memory().getRDRAM();
                 for (size_t i = 0; i < hosts.size(); ++i)
                 {
-                    const uint64_t v = hosts[i], src = sources[i];
-                    const uint32_t dbp = uint32_t(v & 0x3FFFu), dbw = uint32_t((v >> 14) & 0x3Fu),
-                                   dpsm = uint32_t((v >> 20) & 0x3Fu), w = uint32_t((v >> 26) & 0xFFFu),
-                                   h = uint32_t((v >> 38) & 0xFFFu);
+                    uint32_t dbp, dbw, dpsm, w, h;
+                    shape(hosts[i], dbp, dbw, dpsm, w, h);
+                    const uint64_t src = sources[i];
                     bool palette = false;
                     uint64_t hash = 0u;
                     uint32_t hashed = 0u;
@@ -1279,145 +1214,21 @@ bool withholdUploads(const uint8_t *data, uint32_t size, std::vector<uint8_t> &k
                         countUpload(UploadPath::HostMarker);
                     }
                 }
-                if (others == 0u && trxdir == ~0ull && binds.empty() && takes.empty())
-                {
-                    drop = true;
-                    if (!copying)
-                    {
-                        kept.assign(data, data + pos);
-                        copying = true;
-                    }
-                }
             }
-            if (!takes.empty())
-            {
-                // A take marker (the texture hook's records, M6): each
-                // published here as its transfer would have been.
-                for (const uint64_t v : takes)
-                {
-                    bool palette = false;
-                    uint64_t hash = 0u;
-                    uint32_t hashed = 0u;
-                    const uint32_t dbp = uint32_t(v & 0x3FFFu), dbw = uint32_t((v >> 14) & 0x3Fu),
-                                   dpsm = uint32_t((v >> 20) & 0x3Fu), w = uint32_t((v >> 26) & 0xFFFu),
-                                   h = uint32_t((v >> 38) & 0xFFFu);
-                    if (producer::takeProduced(dbp, dbw, dpsm, w, h, palette, hash, hashed))
-                        countUpload(UploadPath::Taken);
-                    else
-                        producer::notePassed(producer::Passed::NotProduced);
-                }
-                if (others == 0u && trxdir == ~0ull && binds.empty() && hosts.empty())
-                {
-                    drop = true;
-                    if (!copying)
-                    {
-                        kept.assign(data, data + pos);
-                        copying = true;
-                    }
-                }
-            }
-            if (!binds.empty())
-            {
-                // A texture binding marker (the texture hook's, resolved by
-                // the send): applied here, in the stream's order, and gone.
-                producer::bound(binds.data(), binds.size());
-                if (others == 0u && trxdir == ~0ull)
-                {
-                    drop = true;
-                    if (!copying)
-                    {
-                        kept.assign(data, data + pos);
-                        copying = true;
-                    }
-                }
-            }
-            if (trxdir != ~0ull)
-            {
-                t_upload.transferBytes = 0u;
-                const uint32_t dbp = static_cast<uint32_t>((bitbltbuf >> 32) & 0x3FFFu);
-                const uint32_t dbw = std::max<uint32_t>(static_cast<uint32_t>((bitbltbuf >> 48) & 0x3Fu), 1u);
-                const uint32_t dpsm = static_cast<uint32_t>((bitbltbuf >> 56) & 0x3Fu);
-                const uint32_t rrw = static_cast<uint32_t>(trxreg & 0xFFFu);
-                const uint32_t rrh = static_cast<uint32_t>((trxreg >> 32) & 0xFFFu);
-                const uint32_t bits = transferBits(dpsm);
-                bool palette = false;
-                uint64_t hash = 0u;
-                uint32_t hashedBytes = 0u;
-                if ((trxdir & 3u) != 0u || bits == 0u)
-                    ; // not an upload this takes
-                else if (!producer::takeProduced(dbp, dbw, dpsm, rrw, rrh, palette, hash, hashedBytes))
-                    producer::notePassed(producer::Passed::NotProduced);
-                else
-                {
-                    t_upload.transferBytes = (rrw * rrh * bits / 8u + 15u) & ~15u;
-                    t_upload.palette = palette;
-                    t_upload.seen.clear();
-                    t_upload.expectHash = hash;
-                    t_upload.expectBytes = hashedBytes <= checkedUploadLimit() ? hashedBytes : 0u;
-                    t_upload.dbp = dbp;
-                    t_upload.dpsm = dpsm;
-                    t_upload.width = rrw;
-                    t_upload.height = rrh;
-                    countUpload(UploadPath::Withheld);
-                    drop = true;
-                    if (!copying)
-                    {
-                        kept.assign(data, data + pos);
-                        copying = true;
-                    }
-                    if (others != 0u)
-                    {
-                        // The block's other registers, as a block of their own.
-                        const uint64_t tag = (lo & ~uint64_t(0x7FFFu)) | others;
-                        const size_t at = kept.size();
-                        kept.resize(at + 16u);
-                        std::memcpy(kept.data() + at, &tag, 8u);
-                        std::memcpy(kept.data() + at + 8u, &hi, 8u);
-                        for (uint32_t q = pos + 16u; q + 16u <= end; q += 16u)
-                            if (data[q + 8u] < 0x50u || data[q + 8u] > 0x53u)
-                                kept.insert(kept.end(), data + q, data + q + 16u);
-                        producer::noteSplit();
-                    }
-                }
-            }
+            drop = others == 0u && (!binds.empty() || !takes.empty() || !hosts.empty());
         }
-        else if (flg >= 2u && t_upload.transferBytes > 0u)
+        if (drop && !changed)
         {
-            // The withheld transfer's data, as many IMAGE tags as it takes.
-            drop = true;
-            if (!copying)
-            {
-                kept.assign(data, data + pos);
-                copying = true;
-            }
-            const uint32_t taken = static_cast<uint32_t>(std::min<uint64_t>(body, t_upload.transferBytes));
-            t_upload.transferBytes -= taken;
-            seeWithheld(data + pos + 16u, std::min<uint32_t>(taken, end - (pos + 16u)));
-            t_upload.imageBytes = static_cast<uint32_t>(pos + 16u + body - end);
-            if (t_upload.transferBytes == 0u)
-                producer::noteWithheld(t_upload.palette, taken);
-        }
-        if (drop)
+            kept.assign(data, data + pos);
             changed = true;
-        else if (copying)
+        }
+        else if (!drop && changed)
             kept.insert(kept.end(), data + pos, data + end);
         pos = end;
     }
     if (changed && pos < size)
         kept.insert(kept.end(), data + pos, data + size);
     return changed;
-}
-
-// An image continuation's bytes that belong to a withheld upload; the rest,
-// if any, goes on.
-uint32_t withheldContinuation(const uint8_t *data, uint32_t size)
-{
-    if (t_upload.imageBytes == 0u)
-        return 0u;
-    const uint32_t n = std::min(t_upload.imageBytes, size);
-    t_upload.imageBytes -= n;
-    seeWithheld(data, n);
-    return n;
 }
 
 // A host upload nobody took (no record withheld it), its pixels gathered
@@ -1599,7 +1410,7 @@ void sendRaw(const uint8_t *data, uint32_t size)
     if (uploadsTaken())
     {
         thread_local std::vector<uint8_t> kept;
-        if (withholdUploads(data, size, kept))
+        if (takeMarkers(data, size, kept))
         {
             if (kept.empty())
                 return;
@@ -1661,17 +1472,17 @@ void countUndrawn()
 void countUpload(UploadPath path)
 {
     static std::mutex mutex;
-    static std::unordered_map<uint32_t, uint64_t> byTask[5];
+    static std::unordered_map<uint32_t, uint64_t> byTask[4];
     static uint64_t total = 0u, nextReport = 1u;
     std::lock_guard lock(mutex);
     byTask[static_cast<int>(path)][t_task] += 1u;
     if (++total < nextReport)
         return;
     nextReport = total + 2000u;
-    static const char *const names[5] = {"withheld (hook's record)", "host (no record)", "local copies",
-                                         "taken at a marker (no transfer)", "host at a marker (no transfer)"};
+    static const char *const names[4] = {"host (no record)", "local copies", "taken at a marker (no transfer)",
+                                         "host at a marker (no transfer)"};
     std::string line;
-    for (int k = 0; k < 5; ++k)
+    for (int k = 0; k < 4; ++k)
     {
         std::vector<std::pair<uint64_t, uint32_t>> top;
         for (const auto &[task, count] : byTask[k])
@@ -1706,7 +1517,7 @@ void sendPacket(const uint8_t *data, uint32_t size)
     for (const auto &[reg, value] : writes)
         transfer |= (reg >= 0x50u && reg <= 0x54u) || reg == rg::nativeproducer::kBindRegister ||
                     reg == rg::nativeproducer::kTakeRegister || reg == rg::nativeproducer::kHostRegister;
-    if (transfer || t_upload.imageBytes != 0u)
+    if (transfer || t_capture.active)
     {
         sendRaw(data, size);
         return;
@@ -1912,7 +1723,7 @@ void deliverMesh(const rg::NativeMesh &mesh, const uint8_t *vu1Data)
     // stream's state, below); as a packet only when image data is due first.
     if (t_meshWriteCount != 0u)
     {
-        if (t_upload.imageBytes == 0u)
+        if (!t_capture.active)
             g_absorbedPackets.fetch_add(1u, std::memory_order_relaxed);
         else
         {
@@ -2294,13 +2105,7 @@ void deliverImage(const uint8_t *data, uint32_t size)
 {
     if (uploadsTaken())
     {
-        // A withheld upload's rest goes no further; another's is
-        // gathered for the producer on its way.
-        const uint32_t withheld = withheldContinuation(data, size);
-        data += withheld;
-        size -= withheld;
-        if (size == 0u)
-            return;
+        // A host upload's data, gathered for the producer on its way.
         feedCapture(data, size);
     }
 }

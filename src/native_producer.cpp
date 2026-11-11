@@ -1354,156 +1354,12 @@ bool takeProduced(uint32_t dbp, uint32_t dbw, uint32_t dpsm, uint32_t width, uin
     return false;
 }
 
-void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, uint32_t height, const uint8_t *data,
-                   uint32_t bytes)
-{
-    if (!data)
-        return;
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    forgetEvicted(s);
-    dpsm &= 0x3Fu;
-    const uint64_t hash = imageHash(data, bytes);
-    if (palette)
-    {
-        const uint32_t entries = width * height;
-        const bool is16 = dpsm == kCT16 || dpsm == kCT16S;
-        if ((entries != 16u && entries != 256u) || (dpsm != kCT32 && !is16) || bytes < entries * (is16 ? 2u : 4u))
-            return;
-        const uint64_t key = keyOf(hash, dpsm, entries, 0u);
-        native::Id id = 0u;
-        if (const auto known = s.paletteIds.find(key); known != s.paletteIds.end())
-            id = known->second;
-        else
-        {
-            const uint32_t entryBytes = is16 ? 2u : 4u;
-            auto colors = std::make_shared<std::vector<uint8_t>>(entries * entryBytes);
-            for (uint32_t i = 0; i < entries; ++i)
-            {
-                const uint32_t at = entries == 256u ? ((i & 0xE7u) | ((i & 0x08u) << 1) | ((i & 0x10u) >> 1)) : i;
-                std::copy_n(data + at * entryBytes, entryBytes, colors->data() + i * entryBytes);
-            }
-            native::Palette record;
-            record.format = is16 ? native::PixelFormat::Ct16 : native::PixelFormat::Rgba8;
-            record.scale = texelScale(record.format);
-            record.id = id = s.nextPalette++;
-            record.entries = static_cast<uint16_t>(entries);
-            s.paletteColors[record.id] = colors;
-            record.colors = std::move(colors);
-            s.paletteIds[key] = record.id;
-            native::push(std::move(record));
-        }
-        s.residentPalette[dbp] = id;
-        s.takenPaletteSeq[dbp] = ++s.sequence;
-        ++s.counts.palettesReplaced;
-        return;
-    }
-    // A texture: only one sent as the format it is read in (not pre-swizzled).
-    const auto resident = s.residentTexture.find(dbp);
-    if (resident == s.residentTexture.end() || resident->second.first != dpsm)
-        return;
-    const size_t texels = size_t(width) * height;
-    native::Texture record;
-    record.scale = kTexelScale;
-    auto out = std::make_shared<std::vector<uint8_t>>();
-    if (dpsm == kCT32 && bytes >= texels * 4u)
-    {
-        record.format = native::PixelFormat::Rgba8;
-        out->assign(data, data + texels * 4u);
-    }
-    else if ((dpsm == kCT16 || dpsm == kCT16S) && bytes >= texels * 2u)
-    {
-        record.format = native::PixelFormat::Ct16;
-        out->assign(data, data + texels * 2u);
-    }
-    else if (dpsm == kT8 && bytes >= texels)
-    {
-        record.format = native::PixelFormat::Index8;
-        out->assign(data, data + texels);
-    }
-    else if (dpsm == kT4 && bytes >= (texels + 1u) / 2u && (width & 1u) == 0u)
-    {
-        record.format = native::PixelFormat::Index4;
-        out->assign(data, data + texels / 2u);
-    }
-    else if (dpsm == kT4 && bytes >= (texels + 1u) / 2u)
-    {
-        record.format = native::PixelFormat::Index8;
-        out->resize(texels);
-        widenIndex4(data, texels, out->data());
-    }
-    else
-        return;
-    const uint64_t key = keyOf(hash, dpsm, width, height);
-    native::Id id = 0u;
-    if (const auto known = s.textureIds.find(key); known != s.textureIds.end())
-        id = known->second;
-    else
-    {
-        record.width = static_cast<uint16_t>(width);
-        record.height = static_cast<uint16_t>(height);
-        record.scale = texelScale(record.format);
-        record.id = id = s.nextTexture++;
-        s.texels[record.id] = {out, record.width, record.height, record.format};
-        record.texels = std::move(out);
-        s.textureIds[key] = record.id;
-        s.textureKeys[record.id] = key;
-        native::push(std::move(record));
-    }
-    resident->second.second = id;
-    s.uploadedSeq[dbp] = s.takenSeq[dbp] = ++s.sequence;
-    ++s.counts.texturesReplaced;
-}
-
-bool sourceUnchanged(const uint8_t *at, size_t size, uint64_t &hash)
-{
-    if (!rg::writewatch::enabled())
-        return false;
-    const auto it = t_seenSources.find(seenKey(at, size));
-    if (it == t_seenSources.end() || it->second.at != at || it->second.size != size || it->second.stamp == 0u ||
-        !rg::writewatch::unchanged(at, size, it->second.stamp))
-        return false;
-    hash = it->second.hash;
-    return true;
-}
-
-void noteElided(uint32_t imageBytes, bool fetched)
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    ++(fetched ? s.counts.elidedFetched : s.counts.elided);
-    if (!fetched)
-        s.counts.elidedBytes += imageBytes;
-}
-
-void noteWithheld(bool palette, uint32_t imageBytes)
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    ++(palette ? s.counts.withheldPalettes : s.counts.withheldTextures);
-    s.counts.withheldBytes += imageBytes;
-}
-
 void notePassed(Passed why)
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
     (void)why;
     ++s.counts.passedNotProduced;
-}
-
-void noteSplit()
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    ++s.counts.split;
-}
-
-void noteContinuedInPacket()
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    ++s.counts.continuedInPacket;
 }
 
 namespace
@@ -3548,11 +3404,6 @@ void routeEnd()
     State &s = state();
     std::lock_guard lock(s.mutex);
     s.routing = false;
-}
-
-uint64_t uploadHash(const uint8_t *data, size_t size)
-{
-    return imageHash(data, size);
 }
 
 uint32_t paletteAt(uint32_t cbp)
