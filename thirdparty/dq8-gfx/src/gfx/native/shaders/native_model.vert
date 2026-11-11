@@ -372,7 +372,7 @@ void volume() {
     emit(p, vec2(0.0), M.q[43], skip);
 }
 
-// The outline C (src/vu1_native.cpp's buildOutline), flag 16: an edge drawn
+// The outline C (src/vu1_native.cpp, above outlinePoints), flag 16: an edge drawn
 // as four lines, moved by +-h in x, then in y, h = alpha / 2, alpha = clamp(
 // 10/9 - w / 360, 0, 1) of its first end (w through the program's matrix),
 // colored (16, 16, 16, alpha * 64); none when an end is outside the guard

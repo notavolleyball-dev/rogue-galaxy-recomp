@@ -174,8 +174,7 @@ void applyMemoryEffects(const Program &program, uint8_t *data, uint32_t top);
 
 // The GS packets the program kicks for that chunk, in order: the programs
 // the model vertex stage does not draw (the overlay, the base piece) and
-// the fallbacks (a shadow chunk whose packets set no RGBAQ, an outline
-// chunk of no whole edge).
+// the fallback of a shadow chunk whose packets set no RGBAQ.
 void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets);
 

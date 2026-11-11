@@ -49,8 +49,8 @@
 // (native_model.vert) from the inputs and constants made here; this file no
 // longer makes a vertex. The other programs (Kind) are written out below,
 // each by itself: the outlines, shadow volumes and particles for the same
-// stage (outlineDraw, shadowMeshes, particleMesh), buildOutline and
-// buildShadow as their packet fallbacks, runOverlay and runBase for what
+// stage (outlineDraw, shadowMeshes, particleMesh), buildShadow as the
+// shadows' packet fallback, runOverlay and runBase for what
 // they leave in VU1 memory.
 // The arithmetic runs in the VU's rounding (toward zero), set around each
 // entry point (VuRounding): the compiler must not move float work across it.
@@ -785,99 +785,6 @@ uint32_t outlineLoopWord(const VuData &vu, uint32_t top)
 {
     const float share = outlinePoints(vu, top) == 4u ? 0.25f : 0.5f;
     return static_cast<uint32_t>(gsNativeFtoi(static_cast<float>(vu.half(top, 1)) * share + 32768.0f, 1.0f));
-}
-
-void buildOutline(const Program &program, const VuData &vu, uint32_t top,
-                  std::vector<std::vector<uint8_t>> &packets)
-{
-    const uint32_t count = vu.half(top, 1);
-    const uint32_t points = outlinePoints(vu, top);
-    const uint32_t first = points == 4u ? 1u : 0u; // the edge's first end
-    const uint32_t bones = program.decode == Decode::Skinned ? bonesOf(program, vu, top) : 0u;
-    packets.clear();
-    std::vector<uint8_t> &packet = packets.emplace_back();
-    packet.reserve(64u + count / points * 144u);
-    putQuad(packet, vu.bytes(0));
-    putWords(packet, 1u, 0u, 0u, 0u);
-    putWords(packet, vu.half(87, 0), 0u, 27u, 0u);
-    uint32_t tag[4];
-    std::memcpy(tag, vu.bytes(86), sizeof(tag));
-    tag[0] = outlineLoopWord(vu, top);
-    putQuad(packet, tag);
-
-    float m[4][4];
-    for (uint32_t row = 0; row < 4u; ++row)
-    {
-        std::memcpy(m[row], vu.bytes(68u + row), sizeof(m[row]));
-    }
-    // The guard band as A leaves it: 109 = 17 with xy times 16.xy, 110 = 18;
-    // a point p is inside when every |p * 109 + 110 * 109| <= 1.
-    const Vec4 viewport = vu.quad(16), band = vu.quad(17), offset = vu.quad(18);
-    const float bandScale[3] = {band.x * viewport.x, band.y * viewport.y, band.z};
-    const float bandOffset[3] = {offset.x * bandScale[0], offset.y * bandScale[1], offset.z * bandScale[2]};
-    const float fadeBase = fromBits(0x3f8e38e4u);  // 10/9
-    const float fadeSlope = fromBits(0xbb360b61u); // -1/360
-
-    for (uint32_t edge = 0; edge < count / points; ++edge)
-    {
-        float s[4][3];
-        float w1 = 0.0f;
-        for (uint32_t j = 0; j < points; ++j)
-        {
-            float p[3];
-            decodePosition(vu, top, edge * points + j, bones, p);
-            float clip[4];
-            for (int i = 0; i < 4; ++i)
-            {
-                clip[i] = p[0] * m[0][i] + p[1] * m[1][i] + p[2] * m[2][i] + m[3][i];
-            }
-            const float q = gsNativeReciprocal(clip[3]);
-            for (int i = 0; i < 3; ++i)
-            {
-                s[j][i] = clip[i] * q;
-            }
-            if (j == first)
-            {
-                w1 = clip[3];
-            }
-        }
-        bool outside = false;
-        for (uint32_t j = first; j <= first + 1u; ++j)
-        {
-            for (int i = 0; i < 3; ++i)
-            {
-                const float g = s[j][i] * bandScale[i] + bandOffset[i];
-                outside = outside || g > 1.0f || g < -1.0f;
-            }
-        }
-        bool hidden = outside;
-        if (points == 4u)
-        {
-            const float ax = s[1][0] - s[0][0], ay = s[1][1] - s[0][1];
-            const float bx = s[2][0] - s[0][0], by = s[2][1] - s[0][1];
-            const float cx = s[2][0] - s[1][0], cy = s[2][1] - s[1][1];
-            const float ex = s[3][0] - s[1][0], ey = s[3][1] - s[1][1];
-            const float near = ax * by - bx * ay;
-            const float far = cx * ey - ex * cy;
-            hidden = hidden || near * far < 0.0f;
-        }
-        const float alpha = rg::fmin(rg::fmax(fadeSlope * w1 + fadeBase, 0.0f), 1.0f);
-        const float h = 0.5f * alpha;
-        putWords(packet, 16u, 16u, 16u, static_cast<uint32_t>(gsNativeFtoi(alpha * 64.0f, 1.0f)));
-        // MFIR sign-extends ADC's 0x8000 into the word (0xffff8000, an
-        // exponent of 255), and adding the offset's 0 clamps that to -Fmax,
-        // as the VU does: ADC, and fog 0xff.
-        const uint32_t adc = hidden ? 0xff7fffffu : 0u;
-        const float dx[8] = {h, h, -h, -h, 0.0f, 0.0f, 0.0f, 0.0f};
-        const float dy[8] = {0.0f, 0.0f, 0.0f, 0.0f, -h, -h, h, h};
-        for (uint32_t v = 0; v < 8u; ++v)
-        {
-            const float *end = s[first + (v & 1u)];
-            putWords(packet, static_cast<uint32_t>(gsNativeFtoi(end[0] + dx[v], 16.0f)),
-                     static_cast<uint32_t>(gsNativeFtoi(end[1] + dy[v], 16.0f)),
-                     static_cast<uint32_t>(gsNativeFtoi(end[2] + 0.0f, 16.0f)), adc);
-        }
-    }
 }
 
 // The GIF packet at quad `q` as XGKICK sends it: tags and their data up to
@@ -1644,11 +1551,6 @@ void buildChunk(const Program &program, const uint8_t *data, uint32_t top,
                 std::vector<std::vector<uint8_t>> &packets)
 {
     const VuRounding rounding;
-    if (program.kind == Kind::Outline)
-    {
-        buildOutline(program, VuData(data), top, packets);
-        return;
-    }
     if (program.kind == Kind::Shadow)
     {
         buildShadow(program, VuData(data), top, packets);
