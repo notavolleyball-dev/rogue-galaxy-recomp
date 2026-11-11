@@ -144,10 +144,19 @@ stacked PRs at the end).
   call and compared with the list's (`[model-emit]`), and calls whose
   meshes agreed are no longer written: they are drawn from their records
   (state from the material's GsEnv and the draw environment, geometry
-  from the static spans). Left on that side: the sorted path, the
-  ModelMesh class (rebuilt every frame), and the view, camera and light
-  packets. Then the 2D's remaining sources, and the mirror, `native_2d`
-  and `gif_events` can go.
+  from the static spans), on the direct and the sorted path and for the
+  shadow casters. Left: the ModelMesh class (named above), and the view,
+  camera and light packets (VU1 state the drawn records still read where
+  the list puts it).
+  - **What the rest of M4 and M6 waits on is the play test's counts.**
+    Both switches are guarded by the comparison itself (a block owner or
+    mesh is drawn from its record only once its records agreed with the
+    game's bytes, never otherwise), so the old paths are still the
+    fallbacks. Once a session shows `[native-blocks]` and `[model-emit]`
+    differing at 0 and the census shows what the converter still sees,
+    the guards become unconditional, the comparison code and the list
+    path for those draws are deleted, and with them the mirror,
+    `native_2d` and `gif_events`.
   - **For the play test:** `[model-emit]` (the same / differing: should
     be all the same; calls the game did not write: should grow), and
     `[native-blocks]` as above.
@@ -1110,8 +1119,12 @@ record of each queued node (by its item's p14 and its chain), and
 `DrawListEmitBucket` is reimplemented as the game writes it, each node it
 knows compared between markers or, its mesh trusted, drawn from its record
 (its header's changed CALLs still written; the next written node CALLs
-its texenv again). Next: the ModelMesh class (rebuilt every frame), then
-the view, camera and light packets as records. The sorted path (`ModelQueueSortedPackets`,
+its texenv again). The ModelMesh class (cloth and other meshes whose
+chunks the game rebuilds into the frame's buffer at every emit) is
+compared but not skipped: skipping would mean rebuilding its chunks and
+their buffer allocation here for a draw the game already pays for; it
+stays on the list path, its chunks drawn by the model stage as transient
+inputs. Named, for the user's review. The sorted path (`ModelQueueSortedPackets`,
 drawn at the buckets' replay) and the shadow casters come after.
 
 **And:** the overlay B's packet builder (`runOverlay`) is deleted: its
