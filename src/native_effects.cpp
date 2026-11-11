@@ -629,6 +629,14 @@ uint32_t colorFilterPass(uint32_t r, uint32_t g, uint32_t b)
 void colorFilter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
     g_colorFilterUnit = colorFilterPass(getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6));
+    // No side effects outside its packets (its CT16 view is a local node):
+    // the pass alone, at a marker.
+    if (g_colorFilterUnit != 0u && writePassMarker(g_colorFilterUnit))
+    {
+        g_colorFilterUnit = 0u;
+        returnFromHook(ctx);
+        return;
+    }
     rg::hooks::callThen(g_colorFilterOriginal, rdram, ctx, runtime, &afterColorFilter, stackTop());
 }
 
@@ -937,7 +945,15 @@ void dofFilterDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             request.depthParams |= 3u << (2 + 2 * i);
         }
         request.sceneDepth = true;
-        g_dofUnit = keepPass(request);
+        // No side effects outside its packets (it reads and copies nodes
+        // into locals only): the pass alone, at a marker.
+        const uint32_t unit = keepPass(request);
+        if (writePassMarker(unit))
+        {
+            returnFromHook(ctx);
+            return;
+        }
+        g_dofUnit = unit;
     }
     rg::hooks::callThen(g_dofOriginal, rdram, ctx, runtime, &afterDof, stackTop());
 }
