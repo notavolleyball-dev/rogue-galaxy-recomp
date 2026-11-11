@@ -3546,28 +3546,12 @@ uint64_t uploadHash(const uint8_t *data, size_t size)
     return imageHash(data, size);
 }
 
-uint32_t textureAt(uint32_t tbp, uint32_t psm)
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    const auto it = s.textureAt.find(tbp);
-    return it != s.textureAt.end() && it->second.first == (psm & 0x3Fu) ? it->second.second : 0u;
-}
-
 uint32_t paletteAt(uint32_t cbp)
 {
     State &s = state();
     std::lock_guard lock(s.mutex);
     const auto it = s.paletteAt.find(cbp);
     return it != s.paletteAt.end() ? it->second : 0u;
-}
-
-uint32_t targetAt(uint32_t base)
-{
-    State &s = state();
-    std::lock_guard lock(s.mutex);
-    const auto it = s.targetAt.find(base);
-    return it != s.targetAt.end() ? it->second : 0u;
 }
 
 uint32_t captureTarget(uint32_t base)

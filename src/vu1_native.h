@@ -156,16 +156,10 @@ bool shadowMeshes(const Program &program, const uint8_t *data, uint32_t top,
                   std::vector<dq8::gfx::native::ModelInput> &inputs, dq8::gfx::native::ModelRow (&rows)[2],
                   std::vector<float> &palette);
 
-// Why the chunk an MSCNT runs (its header at `top`, in quadwords) is left to
-// the VU1, or null when it is done natively. Slot E's chunks are done too
+// Why the chunk an MSCNT runs (its header at `top`, in quadwords) is not
+// drawn (M6: nothing runs the VU1), or null when it is done natively. Slot E's chunks are done too
 // for the programs with a mesh (hasMesh): the GPU clips them.
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top);
-
-// Which of the pieces this file knows the code at `startPC` has, slot by
-// slot, for rg_vu1_oracle --inventory: "A F B:plain C:vertex colors D:guard
-// band" when all of a program, "A F B:? C:one color D:?" when B and D are
-// other pieces.
-std::string describePieces(const uint8_t *code, uint32_t startPC);
 
 // What the program leaves in VU1 data memory that a later run reads, where
 // the VU1 did not run: the base piece's run, the outline's count at quad

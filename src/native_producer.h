@@ -103,12 +103,9 @@ void bound(const uint64_t *values, size_t count);
 // frame, 2 the display buffer). Any thread.
 void target(uint32_t base, uint32_t bufferWidth, uint32_t width, uint32_t height, uint32_t psm, int kind);
 
-// The tables, for draw producers (any thread): the id of the latest texture
-// at this block in this format, the palette at this block, the target at
-// this base. 0 when none.
-uint32_t textureAt(uint32_t tbp, uint32_t psm);
+// The table, for draw producers (any thread): the palette at this block. 0
+// when none.
 uint32_t paletteAt(uint32_t cbp);
-uint32_t targetAt(uint32_t base);
 
 // Step 4a: a VU1 program's mesh as the renderer's mesh draw (the VIF1
 // thread, as the mesh goes to the GS). `vu1Data` is the VU1 data memory the

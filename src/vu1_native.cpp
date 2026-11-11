@@ -1197,61 +1197,6 @@ const Program *identify(const uint8_t *code, uint32_t startPC)
     return intern(shape);
 }
 
-std::string describePieces(const uint8_t *code, uint32_t startPC)
-{
-    if (const Program *program = identify(code, startPC); program && program->kind != Kind::Strip)
-    {
-        return std::string("all: ") + program->name;
-    }
-    if (startPC != kEntry)
-    {
-        return "-";
-    }
-    std::string out;
-    for (size_t i = 0; i < std::size(kCommon); ++i)
-    {
-        out += matches(code, kCommon[i]) ? kCommonNames[i] : matches(code, kBeamA) ? "A:beam" : "-";
-        out += ' ';
-    }
-    const DecodePiece *decode = present(code, kDecodes, &DecodePiece::b);
-    out += !decode                             ? "B:? "
-           : decode->decode == Decode::Skinned ? "B:skinned "
-                                               : "B:plain ";
-    const UvPiece *uv = present(code, kUvs, &UvPiece::f);
-    out += !uv ? "F:? " : uv->uv == Uv::SphereMap ? "F:sphere map " : uv->uv == Uv::Wave ? "F:wave " : uv->uv == Uv::Reflect ? "F:reflection " : uv->uv == Uv::Ramp ? "F:ramp " : uv->uv == Uv::Beam ? "F:beam " : uv->uv == Uv::Swell ? "F:swell " : "F:scroll ";
-    const char *color = "C:?";
-    for (const ColorPiece &candidate : kColors)
-    {
-        if (matches(code, candidate.c))
-        {
-            color = candidate.color == Color::PerVertex   ? "C:vertex colors"
-                    : candidate.color == Color::Lit       ? "C:lit"
-                    : candidate.color == Color::LitVertex ? "C:lit vertex colors"
-                    : candidate.color == Color::LitPoint ? "C:lit, point lights"
-                    : candidate.color == Color::LitPointVertex ? "C:lit, point lights, vertex colors"
-                                                          : "C:one color";
-        }
-    }
-    const char *finish = "D:?";
-    for (const Finish &candidate : kFinishes)
-    {
-        if (matches(code, candidate.d))
-        {
-            finish = candidate.rawColor ? "D:guard band and backfaces, float colors"
-                     : candidate.white ? "D:guard band, depth, white"
-                     : !candidate.bounds ? "D:guard band, depth"
-                     : candidate.depthBounds && candidate.cull == Cull::GuardBandAndBackface
-                         ? "D:guard band and backfaces, depth and bounds"
-                     : candidate.depthBounds && candidate.cull == Cull::GuardBand ? "D:guard band, depth and bounds"
-                     : candidate.depthBounds                        ? "D:depth and bounds"
-                     : candidate.cull == Cull::GuardBandAndBackface ? "D:guard band and backfaces"
-                     : candidate.cull == Cull::GuardBand            ? "D:guard band"
-                                                                    : "D:no culling";
-        }
-    }
-    return out + color + " " + finish;
-}
-
 const char *declineChunk(const Program &program, const uint8_t *data, uint32_t top)
 {
     const VuData vu(data);
