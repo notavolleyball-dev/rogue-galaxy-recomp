@@ -1187,8 +1187,77 @@ void afterEmit(uint8_t *, R5900Context *, PS2Runtime *, uint32_t)
         g_composite.headEnd = stackTop();
 }
 
+// M5's census: the model draws' items by mesh class (the vtable at
+// mesh+0x50: 0x470010 ModelMeshLinks, prebuilt chains; 0x470040 ModelMesh,
+// rebuilt into the frame's buffer each draw; 0x4701C0 ModelMeshMode1) and
+// skinned (a palette packet), by emitter. Printed every 600 frames' worth
+// (docs/NATIVE-ONLY-NOTES.md, "Model draws").
+struct ModelCensus
+{
+    uint64_t calls = 0, items = 0, links = 0, plain = 0, mode1 = 0, other = 0, skinned = 0;
+};
+ModelCensus g_census[3]; // Emit, sorted, shadow casters (game thread)
+uint64_t g_censusDraws = 0u;
+
+void censusItems(int emitter, uint32_t request)
+{
+    ModelCensus &c = g_census[emitter];
+    ++c.calls;
+    const uint32_t meshes = read32(read32(request + 0x0Cu) + 4u);
+    uint32_t node = read32(request + 0x44u);
+    for (int guard = 0; node != 0u && guard < 4096; ++guard, node = read32(node))
+    {
+        if (read32(node + 0x24u) == 0u || read32(node + 0x28u) == 0u)
+            continue;
+        const uint32_t mesh = meshes ? read32(meshes + 4u * read32(node + 0x18u)) : 0u;
+        if (mesh == 0u)
+            continue;
+        ++c.items;
+        switch (read32(mesh + 0x50u))
+        {
+        case 0x470010u: ++c.links; break;
+        case 0x470040u: ++c.plain; break;
+        case 0x4701C0u: ++c.mode1; break;
+        default: ++c.other; break;
+        }
+        const uint32_t palette = read32(node + 0x2Cu);
+        if (palette != 0u && (read32(palette) & 0xFFFFu) != 0u)
+            ++c.skinned;
+    }
+    if (++g_censusDraws % 60000u == 0u)
+    {
+        static const char *names[3] = {"emit", "sorted", "shadow casters"};
+        for (int e = 0; e < 3; ++e)
+        {
+            const ModelCensus &k = g_census[e];
+            std::fprintf(stderr,
+                         "[model-census] %s: calls %llu, items %llu: links %llu, plain %llu, mode1 %llu, other %llu; "
+                         "skinned %llu\n",
+                         names[e], (unsigned long long)k.calls, (unsigned long long)k.items,
+                         (unsigned long long)k.links, (unsigned long long)k.plain, (unsigned long long)k.mode1,
+                         (unsigned long long)k.other, (unsigned long long)k.skinned);
+        }
+    }
+}
+
+PS2Runtime::RecompiledFunction g_sortedEmitOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_shadowEmitOriginal = nullptr;
+
+void sortedEmit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    censusItems(1, getRegU32(ctx, 6));
+    g_sortedEmitOriginal(rdram, ctx, runtime);
+}
+
+void shadowEmit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    censusItems(2, getRegU32(ctx, 6));
+    g_shadowEmitOriginal(rdram, ctx, runtime);
+}
+
 void modelEmitDrawPackets(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
 {
+    censusItems(0, getRegU32(ctx, 6));
     if (g_composite.unit == 0u)
     {
         g_emitOriginal(rdram, ctx, runtime);
@@ -1320,6 +1389,9 @@ void install(PS2Runtime &runtime)
         return;
     }
     hookDrawTasks(runtime, std::make_index_sequence<kDrawTaskCount>{});
+    // M5's census (the Emit hook is the composites' below).
+    rg::timing::hookFunction(runtime, 0x0014F0D0u, &sortedEmit, g_sortedEmitOriginal);   // ModelQueueSortedPackets
+    rg::timing::hookFunction(runtime, 0x0014E780u, &shadowEmit, g_shadowEmitOriginal);   // ModelEmitShadowCasterPacketsMaybe
     if (!rg::timing::hookFunction(runtime, kGlareFilterDraw, &glareFilterDraw, g_glareOriginal))
     {
         std::fprintf(stderr, "[nativefx] the glare stays GS packets\n");
