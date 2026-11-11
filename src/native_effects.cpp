@@ -595,7 +595,19 @@ void bloomExtractBlur(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         for (int c = 0; c < 3; ++c)
             request.params[1 + c] = float(static_cast<int32_t>(64.0f * readFloatAt(obj + 0x10u + 4u * c))) / 128.0f;
         request.params[4] = float(static_cast<int32_t>(128.0f * readFloatAt(obj + 0x1Cu))) / 128.0f;
-        g_bloomUnit = keepPass(request);
+        const uint32_t unit = keepPass(request);
+        // Its one write outside its packets (0x1793e4-0x179420): the high
+        // word of the draw environment's quadword at +0x80 cleared. Made
+        // here, the pass at a marker, the function not run.
+        const uint32_t env = read32(read32(kDrawCtxPointer) + 0x270u);
+        if (env != 0u && writePassMarker(unit))
+        {
+            const uint32_t zero = 0u;
+            std::memcpy(g_rdram + physical(env + 0x84u), &zero, sizeof(zero));
+            returnFromHook(ctx);
+            return;
+        }
+        g_bloomUnit = unit;
     }
     rg::hooks::callThen(g_bloomOriginal, rdram, ctx, runtime, &afterBloom, stackTop());
 }

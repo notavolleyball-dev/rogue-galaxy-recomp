@@ -58,7 +58,8 @@ from the code.
      `clamp((s32)(128 x14), 0, 255)`, UVs as above.
 - **Side effects to reproduce:** none outside the packet stack: the
   environment is pushed and popped, and the list's environment records
-  restore the frame's.
+  restore the frame's. The hook skips the call (M3 step 2): the pass
+  stands at a marker in the list.
 - **The hook emits:** a `Pass` (`PassKind::Glare`), its parameters read at
   the call; the call still runs and its packet range is replaced by the pass
   where the VIF1 thread reaches it (until M5 lets the hook skip the call:
@@ -77,8 +78,9 @@ from the code.
   (a, b); `+0x10`, `+0x14`, `+0x18` the color it is added at (floats, times
   64), `+0x1C` its alpha (times 128), `+0x20` the blur's offset (times 16).
   Caller: `TaskDrawTBox_3387a0+0x124`.
-- **Writes:** besides the packet stack, `ctx->f270->f80.hi = 0` (a word of
-  the draw context's frame record): the call keeps running for it.
+- **Writes:** besides the packet stack, `ctx->f270->f80.hi = 0`: the word
+  at `*(ctx+0x270)+0x84` cleared (0x1793e4-0x179420). The hook makes that
+  write itself and skips the call (M3 step 2).
 - **What it draws** (sixteenths of a pixel; 0x80 = 1):
   1. a cleared to 0; the frame onto a at `-8`, nearest (`GsPktSetTexFilter
      0`), color `(0, 0, 0, 0x80)`, alpha test LESS than 0x80; then an
