@@ -76,6 +76,10 @@ enum class Lookup
 Lookup whole(uint64_t texels, uint64_t clut, uint32_t width, uint32_t height, int blockFormats, Picture &out);
 
 // Changes whenever the packs switched: what was answered before is stale.
+// Any thread, without a lock.
 uint64_t generation();
+
+// Whether any enabled pack has a picture at all. Any thread, without a lock.
+bool active();
 
 } // namespace rg::texturePack

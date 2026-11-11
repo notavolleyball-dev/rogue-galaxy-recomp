@@ -681,8 +681,10 @@ void Renderer::planDraws(SDL_GPUDevice *device, const PassPlan &pass, uint32_t s
             }
             const Image &img = it->second;
             image = palette = img.texture;
-            ownW = float(img.width);
-            ownH = float(img.height);
+            // A larger picture of a texture (a texture pack's) is addressed
+            // at the game's size.
+            ownW = float(img.logicalWidth ? img.logicalWidth : img.width);
+            ownH = float(img.logicalHeight ? img.logicalHeight : img.height);
             mu.mode[0] = 1u;
             if (img.format == PixelFormat::Index8)
             {

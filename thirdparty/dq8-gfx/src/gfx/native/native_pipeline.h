@@ -27,6 +27,10 @@ namespace dq8::gfx::native
 // Any thread.
 void push(Record &&record);
 
+// The block-compressed formats the renderer's device samples, or'd: 1 BC1,
+// 2 BC2, 4 BC3, 8 BC7. 0 until the renderer has first run. Any thread.
+int blockFormats();
+
 // Debug: with draw labels on, the renderer puts a label before each mesh
 // call in the command buffer, for a frame capture (RenderDoc) to show:
 //   rg f=FRAME n=FIRST-LAST tgt=T dt=D tex=X stex=S obj=O cam=C model=0|1 src=NAME
@@ -174,6 +178,7 @@ private:
         uint32_t height = 0;
         Id palette = 0;
         uint64_t bytes = 0;
+        uint32_t logicalWidth = 0, logicalHeight = 0; // the game's size, when it differs
     };
     struct PendingUpload
     {

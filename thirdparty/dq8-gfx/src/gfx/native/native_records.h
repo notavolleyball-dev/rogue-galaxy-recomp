@@ -24,6 +24,12 @@ enum class PixelFormat : uint8_t
     Rgba8,   // 8 bits a channel; alpha as the game stores it, 0x80 is opaque
     Index8,  // palette indices, one byte each (4-bit art is widened to this)
     Depth32, // a depth target
+    // A replacement picture's blocks as its file has them (a texture pack's
+    // DDS), 4x4 texels a block, a row of blocks after another.
+    Bc1,
+    Bc2,
+    Bc3,
+    Bc7,
 };
 
 // A texture's texels as the producer decoded them: shared, never copied.
@@ -38,6 +44,10 @@ struct Texture
     uint8_t mips = 1;
     Id palette = 0; // an Index8 texture's own palette, when the producer knows it
     Bytes texels;   // mip 0 first, rows in order
+    // The size the game knows it at, which its draws address it by; 0: its
+    // own. A texture pack's picture of a texture is larger than the game's.
+    uint16_t logicalWidth = 0;
+    uint16_t logicalHeight = 0;
 };
 
 struct Palette

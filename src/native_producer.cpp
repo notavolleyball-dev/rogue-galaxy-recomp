@@ -23,6 +23,8 @@
 #include "draw_state_mirror.h"
 #include "guest_write_watch.h"
 #include "flip_pacing.h"
+#include "pcsx2_hash.h"
+#include "texture_pack.h"
 
 #include <cmath>
 #include <cstdio>
@@ -88,6 +90,9 @@ struct Counts
     // Stale records made again from what was sent (replaceUpload).
     uint64_t palettesReplaced = 0, texturesReplaced = 0;
     uint64_t copiesMirrored = 0, copiesOtherFormat = 0, copiesNoSource = 0, copiesNoDestination = 0;
+    // Texture packs: pairs of a texture and a palette looked up, pictures
+    // made records, pairs with none, and draws given a picture.
+    uint64_t wholesAsked = 0, wholesMade = 0, wholesNone = 0, wholesDrawn = 0;
 };
 
 struct State
@@ -186,6 +191,23 @@ struct State
     // GS memory still holds (forgetEvicted sends it again); forgotten with
     // the renderer's other evictions.
     std::unordered_map<native::Id, Kept> texels;
+    // Every palette record's colours (palettes are never evicted), for the
+    // texture packs' hash of a palette.
+    std::unordered_map<native::Id, std::shared_ptr<const std::vector<uint8_t>>> paletteColors;
+    // Texture packs (texture_pack.h): by texture and palette ids, the pack's
+    // picture made a texture record of its own (id), none, or still being
+    // read; PCSX2's hashes of each, made once. Forgotten when the packs
+    // switch (packGeneration) and when the renderer evicts a picture.
+    struct Whole
+    {
+        native::Id id = 0u;
+        bool none = false, nearest = false, hashed = false;
+        uint64_t texels = 0u, clut = 0u;
+    };
+    std::unordered_map<uint64_t, Whole> wholes;          // texture << 32 | palette
+    std::unordered_map<native::Id, uint64_t> wholeOf;    // a picture's record -> its key
+    std::unordered_map<native::Id, uint64_t> clutHashes; // palette id -> PCSX2's hash
+    uint64_t packGeneration = 0u;
     std::set<uint64_t> dumped;
     Counts counts, reported;
     bool statsSet = false;
@@ -434,7 +456,10 @@ std::string statsLine()
                        d(n.viewWrites, r.viewWrites) + ", reads of them " + d(n.viewReads, r.viewReads) +
                        " | depth reads (all so far) " +
                        std::to_string(s.depthReads) + ": answered " + std::to_string(s.depthAnswered) +
-                       ", no depth target there " + std::to_string(s.depthNoTarget);
+                       ", no depth target there " + std::to_string(s.depthNoTarget) +
+                       " | texture packs: pairs looked up " + d(n.wholesAsked, r.wholesAsked) + ", pictures made " +
+                       d(n.wholesMade, r.wholesMade) + ", none " + d(n.wholesNone, r.wholesNone) +
+                       ", draws from a picture " + d(n.wholesDrawn, r.wholesDrawn);
     s.reported = s.counts;
     return line;
 }
@@ -479,6 +504,13 @@ void forgetEvicted(State &s)
         g_evictEpoch.fetch_add(1u, std::memory_order_relaxed);
     for (const native::Id id : evicted)
     {
+        // A texture pack's picture: looked up again at its next draw.
+        if (const auto whole = s.wholeOf.find(id); whole != s.wholeOf.end())
+        {
+            s.wholes.erase(whole->second);
+            s.wholeOf.erase(whole);
+            continue;
+        }
         const auto key = s.textureKeys.find(id);
         if (key == s.textureKeys.end())
             continue;
@@ -730,6 +762,7 @@ native::Id paletteRecord(State &s, const uint8_t *ram, uint32_t cbp, uint32_t cp
     record.entries = static_cast<uint16_t>(entries);
     if (dumpingTextures())
         s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
+    s.paletteColors[record.id] = colors;
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     if (note)
@@ -1197,6 +1230,7 @@ void replaceUpload(bool palette, uint32_t dbp, uint32_t dpsm, uint32_t width, ui
             record.entries = static_cast<uint16_t>(entries);
             if (dumpingTextures())
                 s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
+            s.paletteColors[record.id] = colors;
             record.colors = std::move(colors);
             s.paletteIds[key] = record.id;
             native::push(std::move(record));
@@ -1487,6 +1521,7 @@ bool testOf(uint64_t test, bool zmask, native::Material &m)
 // has no exact meaning here (counted by reason).
 } // namespace
 bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m);
+void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m);
 namespace
 {
 bool materialOf(State &s, const GSDrawState &state, native::Material &m)
@@ -1549,6 +1584,7 @@ bool materialOf(State &s, const GSDrawState &state, native::Material &m)
             native::TextureFunction::Highlight2};
         m.function = functions[t.tfx & 3u];
         m.textureAlpha = t.tcc != 0u;
+        replaceWhole(s, t, m);
     }
 
     if (state.prim.abe && !blendOf(c.alpha, m))
@@ -2171,6 +2207,7 @@ native::Id hostPalette(State &s, const State::HostImage &image, uint32_t cbp, ui
     record.entries = static_cast<uint16_t>(entries);
     if (dumpingTextures())
         s.keptPalettes[record.id] = {colors, record.entries, 1u, false};
+    s.paletteColors[record.id] = colors;
     record.colors = std::move(colors);
     s.paletteIds[key] = record.id;
     made.id = record.id;
@@ -2289,6 +2326,147 @@ bool sourceOf(State &s, const GSTex0Reg &t, native::Material &m)
             return false;
     }
     return m.texture != 0u;
+}
+
+namespace
+{
+// RG_TEXTURE_DUMP_WHOLE=DIR: each new pair of an indexed texture and its
+// palette drawn, whole and in colour, named as a PCSX2 pack names it
+// (TEX0HASH-CLUTHASH-BITS.pam, the hashes in hex without leading zeros), so
+// a pack can be made for the textures the game really uses. A PAM is RGBA
+// with the game's alpha (0x80 opaque).
+const char *wholeDumpDirectory()
+{
+    static const char *directory = [] {
+        const char *value = std::getenv("RG_TEXTURE_DUMP_WHOLE");
+        return value && *value ? value : nullptr;
+    }();
+    return directory;
+}
+
+void dumpWhole(const uint8_t *indices, const std::vector<uint8_t> &colors, uint32_t entries, uint32_t width,
+               uint32_t height, uint32_t psm, uint64_t texels, uint64_t clut)
+{
+    char name[512];
+    std::snprintf(name, sizeof name, "%s/%llx-%llx-%08x.pam", wholeDumpDirectory(),
+                  static_cast<unsigned long long>(texels), static_cast<unsigned long long>(clut),
+                  rg::pcsx2::nameBits(psm, width, height));
+    std::FILE *file = std::fopen(name, "wb");
+    if (!file)
+        return;
+    std::fprintf(file, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", width, height);
+    std::vector<uint8_t> rgba(size_t(width) * height * 4u);
+    for (size_t i = 0; i < size_t(width) * height; ++i)
+        std::copy_n(colors.data() + std::min<uint32_t>(indices[i], entries - 1u) * 4u, 4u, rgba.data() + i * 4u);
+    std::fwrite(rgba.data(), 1u, rgba.size(), file);
+    std::fclose(file);
+}
+
+native::PixelFormat blockFormat(int blocks)
+{
+    switch (blocks)
+    {
+    case rg::texturePack::kBc1: return native::PixelFormat::Bc1;
+    case rg::texturePack::kBc2: return native::PixelFormat::Bc2;
+    case rg::texturePack::kBc3: return native::PixelFormat::Bc3;
+    case rg::texturePack::kBc7: return native::PixelFormat::Bc7;
+    default: return native::PixelFormat::Rgba8;
+    }
+}
+} // namespace
+
+// Locked. Texture packs (texture_pack.h): an indexed texture with its
+// palette, drawn from the pack's picture of it when it has one, as the GS
+// backend's texture cache drew it until M1 of docs/NATIVE-ONLY.md. The
+// picture is a texture record of its own (RGBA8, or the pack's BC blocks),
+// larger than the game's, addressed at the game's size and filtered unless
+// the pack says "nearest". Not for a tile of a sheet (region clamp or
+// repeat), fetched by the game's texel.
+void replaceWhole(State &s, const GSTex0Reg &t, native::Material &m)
+{
+    const bool dumping = wholeDumpDirectory() != nullptr;
+    if ((!rg::texturePack::active() && !dumping) || m.texture == 0u || m.palette == 0u || m.sourceTarget != 0u ||
+        m.wrapU >= 2u || m.wrapV >= 2u)
+        return;
+    const uint32_t psm = t.psm & 0x3Fu;
+    const auto tex = s.texels.find(m.texture);
+    if (tex == s.texels.end() || !tex->second.indexed || !tex->second.data)
+        return;
+    const uint32_t width = tex->second.width, height = tex->second.height;
+    if (!rg::pcsx2::hashable(psm, width, height) || width != (1u << std::min<uint32_t>(t.tw, 10u)) ||
+        height != (1u << std::min<uint32_t>(t.th, 10u)))
+        return;
+    const uint32_t entries = psm == kT4 ? 16u : 256u;
+    const auto colors = s.paletteColors.find(m.palette);
+    if (colors == s.paletteColors.end() || !colors->second || colors->second->size() < entries * 4u)
+        return;
+    if (const uint64_t generation = rg::texturePack::generation(); generation != s.packGeneration)
+    {
+        s.wholes.clear();
+        s.wholeOf.clear();
+        s.packGeneration = generation;
+    }
+    const uint64_t key = (uint64_t(m.texture) << 32u) | m.palette;
+    State::Whole &w = s.wholes[key];
+    if (!w.hashed)
+    {
+        w.hashed = true;
+        w.texels = rg::pcsx2::texelHash(tex->second.data->data(), width, height, psm);
+        const auto known = s.clutHashes.find(m.palette);
+        w.clut = known != s.clutHashes.end() ? known->second
+                                              : (s.clutHashes[m.palette] =
+                                                     rg::pcsx2::clutHash(colors->second->data(), entries));
+        ++s.counts.wholesAsked;
+        if (dumping && s.dumped.insert(w.texels * 1099511628211ull ^ w.clut).second)
+            dumpWhole(tex->second.data->data(), *colors->second, entries, width, height, psm, w.texels, w.clut);
+    }
+    if (w.id == 0u && !w.none)
+    {
+        rg::texturePack::Picture picture;
+        switch (rg::texturePack::whole(w.texels, w.clut, width, height, native::blockFormats(), picture))
+        {
+        case rg::texturePack::Lookup::Pending:
+            return;
+        case rg::texturePack::Lookup::None:
+            w.none = true;
+            ++s.counts.wholesNone;
+            return;
+        case rg::texturePack::Lookup::Ready:
+            break;
+        }
+        // A whole multiple of the game's size, 1 to 16 times; a block
+        // format's in whole blocks.
+        const uint32_t factor = picture.width / width;
+        if (factor < 1u || factor > 16u || picture.width != width * factor || picture.height != height * factor ||
+            (picture.blocks != 0 && (picture.width % 4u || picture.height % 4u)) || picture.width > 16384u ||
+            picture.height > 16384u)
+        {
+            std::fprintf(stderr, "[native-producer] texture pack: a %ux%u picture for a %ux%u texture, left out\n",
+                         picture.width, picture.height, width, height);
+            w.none = true;
+            ++s.counts.wholesNone;
+            return;
+        }
+        native::Texture record;
+        record.id = s.nextTexture++;
+        record.format = blockFormat(picture.blocks);
+        record.width = static_cast<uint16_t>(picture.width);
+        record.height = static_cast<uint16_t>(picture.height);
+        record.logicalWidth = static_cast<uint16_t>(width);
+        record.logicalHeight = static_cast<uint16_t>(height);
+        record.texels = std::make_shared<const std::vector<uint8_t>>(std::move(picture.data));
+        w.id = record.id;
+        w.nearest = picture.nearest;
+        s.wholeOf[record.id] = key;
+        ++s.counts.wholesMade;
+        native::push(std::move(record));
+    }
+    if (w.id == 0u)
+        return;
+    m.texture = w.id;
+    m.palette = 0u;
+    m.linear = !w.nearest;
+    ++s.counts.wholesDrawn;
 }
 
 namespace
@@ -2692,6 +2870,7 @@ bool piece(const GSNativeMesh &mesh, const GSDrawState *drawState, bool texels, 
             native::TextureFunction::Highlight2};
         m.function = functions[c.tex0.tfx & 3u];
         m.textureAlpha = c.tex0.tcc != 0u;
+        replaceWhole(s, c.tex0, m);
     }
     if (drawState->prim.abe)
         if (!blendOf(c.alpha, m))

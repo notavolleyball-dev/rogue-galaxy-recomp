@@ -125,6 +125,7 @@ std::condition_variable g_wake;
 std::shared_ptr<const Merged> g_merged = std::make_shared<Merged>();
 std::atomic<bool> g_anyPicture{false};
 uint64_t g_generation = 0u;
+std::atomic<uint64_t> g_publishedGeneration{0u};
 std::deque<Pending> g_queue;
 std::unordered_set<uint64_t> g_asked;
 std::unordered_map<uint64_t, Image> g_ready;
@@ -519,6 +520,7 @@ void rebuild()
     g_anyPicture.store(!merged->exact.empty() || !merged->wildcard.empty(), std::memory_order_relaxed);
     g_merged = std::move(merged);
     ++g_generation;
+    g_publishedGeneration.store(g_generation, std::memory_order_relaxed);
     g_queue.clear();
     g_asked.clear();
     g_ready.clear();
@@ -699,8 +701,12 @@ Lookup whole(uint64_t texels, uint64_t clut, uint32_t width, uint32_t height, in
 
 uint64_t generation()
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    return g_generation;
+    return g_publishedGeneration.load(std::memory_order_relaxed);
+}
+
+bool active()
+{
+    return g_anyPicture.load(std::memory_order_relaxed);
 }
 
 std::vector<PackInfo> packs()

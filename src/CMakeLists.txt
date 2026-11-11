@@ -125,6 +125,7 @@ add_executable(roguegalaxy
     step_fixes.cpp
     stick_response.cpp
     texture_pack.cpp
+    pcsx2_hash.cpp
     vif1_thread.cpp
     vu1_native.cpp
     draw_state_mirror.cpp

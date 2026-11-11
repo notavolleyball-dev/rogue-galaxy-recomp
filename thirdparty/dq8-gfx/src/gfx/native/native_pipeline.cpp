@@ -291,6 +291,13 @@ void push(Record &&record)
     q.records.push_back(std::move(record));
 }
 
+std::atomic<int> g_blockFormats{0};
+
+int blockFormats()
+{
+    return g_blockFormats.load(std::memory_order_relaxed);
+}
+
 std::atomic<uint64_t> g_retainedEpoch{1u};
 uint64_t retainedEpoch()
 {
@@ -443,16 +450,46 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
             }
             else if constexpr (std::is_same_v<T, Texture>)
             {
-                const uint32_t bpp = r.format == PixelFormat::Rgba8 ? 4u : r.format == PixelFormat::Index8 ? 1u : 0u;
-                const uint64_t bytes = uint64_t(r.width) * r.height * bpp;
-                if (r.id == 0u || bpp == 0u || bytes == 0u || !r.texels || r.texels->size() < bytes)
+                // Bytes a texel, or a 4x4 block for the block formats.
+                SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
+                uint64_t bytes = 0u;
+                const uint64_t blocks = uint64_t((r.width + 3u) / 4u) * ((r.height + 3u) / 4u);
+                switch (r.format)
+                {
+                case PixelFormat::Rgba8:
+                    format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+                    bytes = uint64_t(r.width) * r.height * 4u;
+                    break;
+                case PixelFormat::Index8:
+                    format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+                    bytes = uint64_t(r.width) * r.height;
+                    break;
+                case PixelFormat::Bc1:
+                    format = SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
+                    bytes = blocks * 8u;
+                    break;
+                case PixelFormat::Bc2:
+                    format = SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM;
+                    bytes = blocks * 16u;
+                    break;
+                case PixelFormat::Bc3:
+                    format = SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
+                    bytes = blocks * 16u;
+                    break;
+                case PixelFormat::Bc7:
+                    format = SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
+                    bytes = blocks * 16u;
+                    break;
+                default:
+                    break;
+                }
+                if (r.id == 0u || format == SDL_GPU_TEXTUREFORMAT_INVALID || bytes == 0u || !r.texels ||
+                    r.texels->size() < bytes)
                 {
                     ++m_refused;
                     return;
                 }
-                SDL_GPUTexture *texture = createTexture(
-                    device, bpp == 4u ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM : SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-                    r.width, r.height, error);
+                SDL_GPUTexture *texture = createTexture(device, format, r.width, r.height, error);
                 if (!texture)
                     return;
                 if (const auto old = m_images.find(r.id); old != m_images.end())
@@ -461,7 +498,8 @@ void Renderer::apply(SDL_GPUDevice *device, Record &record, std::string &error)
                     m_imageBytes -= old->second.bytes;
                     m_imageOrder.erase(std::find(m_imageOrder.begin(), m_imageOrder.end(), r.id));
                 }
-                m_images[r.id] = Image{texture, r.format, r.width, r.height, r.palette, bytes};
+                m_images[r.id] = Image{texture, r.format, r.width, r.height, r.palette, bytes, r.logicalWidth,
+                                       r.logicalHeight};
                 m_imageOrder.push_back(r.id);
                 m_imageBytes += bytes;
                 m_uploads.push_back({texture, r.width, r.height, r.texels});
@@ -503,9 +541,12 @@ bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std
 {
     if (m_uploads.empty())
         return true;
+    // Each upload at a multiple of 16 bytes: a block format's offset has to
+    // be a whole number of its blocks.
+    const auto aligned = [](uint64_t n) { return (n + 15u) & ~uint64_t(15u); };
     uint64_t total = 0u;
     for (const PendingUpload &u : m_uploads)
-        total += u.bytes->size();
+        total += aligned(u.bytes->size());
     SDL_GPUTransferBufferCreateInfo info{};
     info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     info.size = static_cast<uint32_t>(total);
@@ -526,7 +567,7 @@ bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std
     for (const PendingUpload &u : m_uploads)
     {
         std::memcpy(mapped + offset, u.bytes->data(), u.bytes->size());
-        offset += static_cast<uint32_t>(u.bytes->size());
+        offset += static_cast<uint32_t>(aligned(u.bytes->size()));
     }
     SDL_UnmapGPUTransferBuffer(device, buffer);
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
@@ -544,7 +585,7 @@ bool Renderer::upload(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, std
         destination.h = u.height;
         destination.d = 1u;
         SDL_UploadToGPUTexture(copy, &source, &destination, false);
-        offset += static_cast<uint32_t>(u.bytes->size());
+        offset += static_cast<uint32_t>(aligned(u.bytes->size()));
     }
     SDL_EndGPUCopyPass(copy);
     // Freed once the GPU is done with it.
@@ -696,6 +737,20 @@ void Renderer::drawView(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pass)
 bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uint32_t scale, Frame &out,
                       std::string &error)
 {
+    // Once: the block formats a texture pack's pictures may keep.
+    static const bool formatsKnown = [device] {
+        int formats = 0;
+        const std::pair<SDL_GPUTextureFormat, int> known[] = {{SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM, 1},
+                                                              {SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM, 2},
+                                                              {SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM, 4},
+                                                              {SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM, 8}};
+        for (const auto &[format, bit] : known)
+            if (SDL_GPUTextureSupportsFormat(device, format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER))
+                formats |= bit;
+        g_blockFormats.store(formats, std::memory_order_relaxed);
+        return true;
+    }();
+    (void)formatsKnown;
     {
         Queue &q = queue();
         std::lock_guard lock(q.mutex);
