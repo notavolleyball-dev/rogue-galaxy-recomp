@@ -410,6 +410,15 @@ enum class PassKind : uint8_t
     // at 0x449EF0), 3 S is small (a color, not the frame's copy), 4-7 the
     // color, 8-9 the draw environment's size, 10-11 its frame's.
     CBlurDraw,
+    // ModelDrawOffscreenComposite's tail, a draw each (its overlay calls,
+    // its blur mask): work[0] the object's layer (or its buffer), work[1]
+    // the character blur's trail. params: 1 into work[1] alpha only (else
+    // the frame), 2-5 the rectangle in the target's pixels, 6-9 its texels,
+    // 10-13 the color, 14 the blend (0 none, 1 (Cs - Cd) As + Cd, 2 the same
+    // by FIX), 15 FIX, 16 the alpha test (5 GEQUAL, 6 GREATER), 17 its
+    // reference, 18 the source read as CT24 with black clear, 19 how many
+    // offsets, 20-27 the offsets (x, y) in pixels.
+    ObjectLayer,
 };
 
 struct Pass
@@ -418,7 +427,7 @@ struct Pass
     Id frame = 0;
     Id work[4] = {};
     Id depth = 0; // the frame's depth, for a pass that tests against it
-    float params[24] = {};
+    float params[32] = {};
 };
 
 // A target, or a rectangle of it, set to a color, a depth or both, in order

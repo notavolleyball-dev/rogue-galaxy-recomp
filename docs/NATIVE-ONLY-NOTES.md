@@ -299,3 +299,48 @@ from the code.
     preset `a2`: S over the frame, color `128 (r, g, b)`, alpha `64 a`,
     from `(-1 - dx, -2 - dy)` to `(W - dx - 1, H - dy - 2)`.
 - **The hook emits:** a `Pass` (`PassKind::CBlurDraw`).
+
+### `ModelDrawOffscreenCompositeMaybe_16aac0` (M3; its tail)
+
+- **Arguments:** `a0` the settings (`+0x20` the offscreen buffer's node,
+  `+0x24` (f) the glow's size, `+0x28` a point to project, `+0x40..+0x48`
+  the glow's color, `+0x50`, `+0x5C` on, `+0x60` the lay-over's kind,
+  `+0x64` the glow's mode); `a1` the object; `f12` a scale; `f13` the
+  alpha. `ModelDrawOffscreenCompositeAtMaybe_16b8a0` copies a quad into
+  `a0+0x30` and calls it.
+- **The head:** the parts' bounds (`ModelPrepareDrawMaybe`, the box at
+  each part's `+0x20`) united and clipped to the centered viewport; on the
+  buffer (origin mode 2: centered), a clear of that box widened by 8 pixels
+  and a pixel more, then the parts' models.
+- **The tail:** back on the frame, TEX0's PSM set to CT24 in the frame
+  descriptor's copy (`+0x3A` bits 4-9 are PSM, not a level of detail) with
+  TEXA `TA0 = 0x80`, AEM:
+  - When glowing, `ScreenTexOverlayDrawMultiMaybe_16a510(pkt, rect, tex,
+    color, mode, ofs)`: preset 1, alpha test GREATER 0, linear; mode 1 one
+    copy, mode 2 two at `+-3/4 ofs`, mode 3 four at `(+-ofs.x, 0)` and
+    `(0, +-ofs.y)`. The color is the settings' mixed toward the table at
+    `0x47DF60` by the float at `0x47DF54`.
+  - `ScreenTexOverlayDrawSingleMaybe_16a780(pkt, rect, tex, rgba)` (it
+    reads no more arguments; the composite's fifth is unused), color the
+    s32 table at `0x47DF80`, alpha test GEQUAL 1: with `+0x60` 0, preset 1
+    at alpha `128 alpha`; with `+0x60` and a glow, CT32 and `(Cs - Cd) FIX
+    + Cd` with FIX `128 alpha`; otherwise both, the second CT32 with alpha
+    test GEQUAL 0x81.
+  - The rect is (ly, lx, hy, hx) in centered sixteenths. The overlay calls
+    write no GS packets: each is a VIF packet that runs VU1's overlay
+    program (`MSCAL 0x12C`, docs/VU1-NATIVE.md's `:960` rows), whose
+    sprites cover the vertex bounds within the rect, at `rect / 16 +
+    center` (the environment's `+0x0C`, `+0x10`) from texels `rect / 16 +
+    size / 2`.
+  - When the object's character blur is on (`a1+0x454` its trail, `a1+0x458`
+    (f) the strength, above the float at `0x47D24C`): on the trail, alpha
+    only, the buffer's texels `lx / 16 + w / 2 + 1 .. hx / 16 + w / 2 - 1`
+    scaled to the trail, alpha `128 strength`, GEQUAL 1.
+- **The hooks emit:** an `ObjectLayer` pass for each overlay call
+  (recorded while a composite runs) and one for the blur mask, all under
+  the composite's unit; the VIF1 thread sends them at the tail, reading
+  the object's layer when its head was routed there. The whole rect is
+  drawn: outside the object the layer is its clear, alpha 0, which the
+  alpha test drops.
+- **Open:** a projected point (`+0x28`) turns on Z writes for the
+  lay-over; the Z the overlay program writes is not reproduced.

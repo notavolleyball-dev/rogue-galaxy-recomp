@@ -28,6 +28,8 @@ constexpr uint32_t kPlaneShadowBegin = 0x00147B80u; // DrawListBeginPlaneShadowP
 // into ModelDrawOffscreenCompositeMaybe_16aac0 past the function table).
 constexpr uint32_t kCompositeAt = 0x0016B8A0u;
 constexpr uint32_t kModelEmitDrawPackets = 0x0014EC20u; // ModelEmitDrawPacketsMaybe
+constexpr uint32_t kOverlayMulti = 0x0016A510u;         // ScreenTexOverlayDrawMultiMaybe
+constexpr uint32_t kOverlaySingle = 0x0016A780u;        // ScreenTexOverlayDrawSingleMaybe
 constexpr uint32_t kDrawListFrameBegin = 0x001425D0u;
 constexpr uint32_t kCBlurTexBlur = 0x001789E0u; // CBlurTexBlurMaybe
 constexpr uint32_t kBloom = 0x00179360u;        // BloomExtractBlurMaybe
@@ -151,13 +153,23 @@ uint32_t g_nextPassUnit = 0u;
 // The unit of the call in progress (game thread), and where it began.
 uint32_t g_passUnit = 0u;
 
-uint32_t keepPass(const rg::nativeproducer::PassRequest &request)
+// A pass kept under `unit` (several may share one: sent in order).
+void keepPassAs(uint32_t unit, const rg::nativeproducer::PassRequest &request)
 {
     std::lock_guard lock(g_passMutex);
-    const uint32_t unit = (++g_nextPassUnit & 0xFFFFFFu) | (1u << 24);
-    if (g_passes.size() >= 64u) // a few frames' worth; an older one was never reached
+    if (g_passes.size() >= 1024u) // a few frames' worth; an older one was never reached
         g_passes.erase(g_passes.begin());
     g_passes.emplace_back(unit, request);
+}
+
+uint32_t keepPass(const rg::nativeproducer::PassRequest &request)
+{
+    uint32_t unit;
+    {
+        std::lock_guard lock(g_passMutex);
+        unit = (++g_nextPassUnit & 0xFFFFFFu) | (1u << 24);
+    }
+    keepPassAs(unit, request);
     return unit;
 }
 
@@ -756,6 +768,13 @@ struct Composite
     uint32_t unit = 0u;
     uint32_t start = 0u;
     uint32_t headEnd = 0u;
+    // The call's arguments (a0 its settings, a1 the object, f13 the alpha)
+    // and what its overlay calls left (the tail's passes, docs/NATIVE-ONLY-NOTES.md).
+    uint32_t settings = 0u, object = 0u;
+    float alpha = 1.0f;
+    int singles = 0;
+    bool haveRect = false;
+    int32_t rect[4] = {}; // lx, ly, hx, hy: the first single's, centered sixteenths
 };
 Composite g_composite;
 uint32_t g_units = 0u;
@@ -820,11 +839,179 @@ void markTailCall()
     }
 }
 
+// The object layer's passes (native::PassKind::ObjectLayer). work[0]: the
+// offscreen buffer (the producer reads the object's layer in its place
+// when the head was routed). params: 0 from the layer (the VIF1 thread's),
+// 1 into work[1] alpha only (else the frame), 2-5 the rectangle in the
+// target's pixels, 6-9 its texels, 10-13 the color, 14 the blend (0 none,
+// 1 preset 1, 2 Cs FIX + Cd (1 - FIX)), 15 FIX, 16 the alpha test (5
+// GEQUAL, 6 GREATER), 17 its reference, 18 the buffer read as CT24 with
+// AEM (black clear), 19 how many offsets, 20-27 the offsets (x, y) in
+// pixels.
+rg::nativeproducer::PassRequest objectPass(uint32_t settings)
+{
+    rg::nativeproducer::PassRequest request;
+    request.kind = 13u; // native::PassKind::ObjectLayer
+    const uint32_t buffer = read32(settings + 0x20u);
+    request.workBases[0] = descriptorBase(buffer);
+    request.workSizes[0][0] = nodeSide(buffer, 2u);
+    request.workSizes[0][1] = nodeSide(buffer, 4u);
+    return request;
+}
+
+bool descriptorIsCt24(uint32_t desc)
+{
+    uint64_t tex0 = 0u;
+    std::memcpy(&tex0, g_rdram + (physical(desc) & ~7u) + 0x38u, sizeof(tex0));
+    return ((tex0 >> 20) & 0x3Fu) == 1u;
+}
+
+// ScreenTexOverlayDrawMultiMaybe_16a510 (a1 the rectangle: ly, lx, hy, hx
+// in centered sixteenths; a2 the texture; a3 the color; t0 the mode; t1
+// the offset) and ScreenTexOverlayDrawSingleMaybe_16a780 (a1, a2, a3 the
+// same, no offset): the VU1 overlay program's sprites, inside a composite
+// the tail's. Their blend is the composite's (preset 1 and GREATER 0 for
+// the multi; for the singles, by the settings' +0x60 and +0x24).
+void overlayCall(R5900Context *ctx, bool multi)
+{
+    Composite &c = g_composite;
+    const uint32_t rectAt = getRegU32(ctx, 5), tex = getRegU32(ctx, 6), color = getRegU32(ctx, 7);
+    const int32_t mode = multi ? static_cast<int32_t>(getRegU32(ctx, 8)) : 1;
+    const uint32_t ofsAt = multi ? getRegU32(ctx, 9) : 0u;
+    if (rectAt == 0u || tex == 0u || color == 0u || (multi && (mode <= 0 || mode > 3)))
+        return;
+    const int32_t ly = static_cast<int32_t>(read32(rectAt)), lx = static_cast<int32_t>(read32(rectAt + 4u));
+    const int32_t hy = static_cast<int32_t>(read32(rectAt + 8u)), hx = static_cast<int32_t>(read32(rectAt + 12u));
+    const uint32_t env = read32(read32(kDrawCtxPointer) + 0x270u);
+    const float W = float(static_cast<int32_t>(read32(env + 4u))), H = float(static_cast<int32_t>(read32(env + 8u)));
+    const float cx = float(static_cast<int32_t>(read32(env + 0x0Cu)));
+    const float cy = float(static_cast<int32_t>(read32(env + 0x10u)));
+    rg::nativeproducer::PassRequest request = objectPass(c.settings);
+    request.params[2] = float(lx) / 16.0f + cx;
+    request.params[3] = float(ly) / 16.0f + cy;
+    request.params[4] = float(hx) / 16.0f + cx;
+    request.params[5] = float(hy) / 16.0f + cy;
+    request.params[6] = float(lx) / 16.0f + W * 0.5f;
+    request.params[7] = float(ly) / 16.0f + H * 0.5f;
+    request.params[8] = float(hx) / 16.0f + W * 0.5f;
+    request.params[9] = float(hy) / 16.0f + H * 0.5f;
+    for (int k = 0; k < 4; ++k)
+        request.params[10 + k] = float(static_cast<int32_t>(read32(color + 4u * k))) / 128.0f;
+    request.params[18] = descriptorIsCt24(tex) ? 1.0f : 0.0f;
+    const int32_t t = int32_t(128.0f * c.alpha);
+    if (multi)
+    {
+        request.params[14] = 1.0f;
+        request.params[16] = 6.0f;
+        request.params[17] = 0.0f;
+        const int32_t ox = static_cast<int32_t>(read32(ofsAt)), oy = static_cast<int32_t>(read32(ofsAt + 4u));
+        int32_t d[4][2] = {};
+        int n = 0;
+        if (mode == 1)
+            n = 1;
+        else if (mode == 2)
+        {
+            d[0][0] = ox * 3 / 4, d[0][1] = oy * 3 / 4;
+            d[1][0] = -ox * 3 / 4, d[1][1] = -oy * 3 / 4;
+            n = 2;
+        }
+        else
+        {
+            d[0][0] = ox, d[1][0] = -ox, d[2][1] = oy, d[3][1] = -oy;
+            n = 4;
+        }
+        request.params[19] = float(n);
+        for (int k = 0; k < n; ++k)
+        {
+            request.params[20 + 2 * k] = float(d[k][0]) / 16.0f;
+            request.params[21 + 2 * k] = float(d[k][1]) / 16.0f;
+        }
+    }
+    else
+    {
+        const bool fixedFirst = read32(c.settings + 0x60u) != 0u && readFloatAt(c.settings + 0x24u) > 0.0f;
+        const bool fixed = fixedFirst || c.singles > 0;
+        request.params[14] = fixed ? 2.0f : 1.0f;
+        request.params[15] = float(t) / 128.0f;
+        request.params[16] = 5.0f;
+        request.params[17] = (c.singles > 0 ? 0x81 : 1) / 128.0f;
+        request.params[19] = 1.0f;
+        if (!c.haveRect)
+        {
+            c.haveRect = true;
+            c.rect[0] = lx, c.rect[1] = ly, c.rect[2] = hx, c.rect[3] = hy;
+        }
+        ++c.singles;
+    }
+    keepPassAs(c.unit, request);
+}
+
+PS2Runtime::RecompiledFunction g_overlayMultiOriginal = nullptr;
+PS2Runtime::RecompiledFunction g_overlaySingleOriginal = nullptr;
+
+void overlayMulti(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (g_composite.unit != 0u)
+        overlayCall(ctx, true);
+    g_overlayMultiOriginal(rdram, ctx, runtime);
+}
+
+void overlaySingle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (g_composite.unit != 0u)
+        overlayCall(ctx, false);
+    g_overlaySingleOriginal(rdram, ctx, runtime);
+}
+
+// The composite's last draw: the object's layer, alpha only, into its
+// character blur's trail (the object's +0x454, at the strength +0x458 when
+// above the float at 0x47D24C), the layer's texels lx/16 + w/2 + 1 to
+// hx/16 + w/2 - 1 scaled to the trail.
+void compositeBlurMask()
+{
+    Composite &c = g_composite;
+    if (c.object == 0u || !c.haveRect)
+        return;
+    const uint32_t trail = read32(c.object + 0x454u);
+    const float strength = readFloatAt(c.object + 0x458u);
+    if (trail == 0u || strength <= readFloatAt(0x47D24Cu))
+        return;
+    const uint32_t buffer = read32(c.settings + 0x20u);
+    const int32_t w = static_cast<int32_t>(nodeSide(buffer, 2u)), h = static_cast<int32_t>(nodeSide(buffer, 4u));
+    const int32_t tw = static_cast<int32_t>(nodeSide(trail, 2u)), th = static_cast<int32_t>(nodeSide(trail, 4u));
+    if (w <= 0 || h <= 0 || tw <= 0 || th <= 0)
+        return;
+    const int32_t u0 = c.rect[0] / 16 + w / 2 + 1, v0 = c.rect[1] / 16 + h / 2 + 1;
+    const int32_t u1 = c.rect[2] / 16 + w / 2 - 1, v1 = c.rect[3] / 16 + h / 2 - 1;
+    rg::nativeproducer::PassRequest request = objectPass(c.settings);
+    request.workBases[1] = descriptorBase(trail);
+    request.workSizes[1][0] = static_cast<uint32_t>(tw);
+    request.workSizes[1][1] = static_cast<uint32_t>(th);
+    request.params[1] = 1.0f;
+    request.params[2] = float(u0 * tw / w);
+    request.params[3] = float(v0 * th / h);
+    request.params[4] = float(u1 * tw / w);
+    request.params[5] = float(v1 * th / h);
+    request.params[6] = float(u0);
+    request.params[7] = float(v0);
+    request.params[8] = float(u1);
+    request.params[9] = float(v1);
+    request.params[10] = request.params[11] = request.params[12] = 1.0f;
+    request.params[13] = float(int32_t(128.0f * strength)) / 128.0f;
+    request.params[14] = 1.0f;
+    request.params[16] = 5.0f;
+    request.params[17] = 1.0f / 128.0f;
+    request.params[18] = read32(c.settings + 0x60u) == 0u ? 1.0f : 0.0f; // the f60 == 0 branch leaves it CT24
+    request.params[19] = 1.0f;
+    keepPassAs(c.unit, request);
+}
+
 void afterComposite(uint8_t *, R5900Context *, PS2Runtime *, uint32_t unit)
 {
     if (g_composite.unit != unit)
         return;
     markTailCall();
+    compositeBlurMask();
     const uint32_t end = stackTop();
     if (g_composite.headEnd > g_composite.start && g_composite.headEnd < end)
     {
@@ -844,8 +1031,14 @@ void compositeAt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         g_compositeOriginal(rdram, ctx, runtime);
         return;
     }
-    g_units = g_units + 1u == 0u ? 1u : g_units + 1u;
-    g_composite = Composite{g_units, stackTop(), 0u};
+    g_units = (g_units + 1u) & 0xFFFFFFu;
+    g_units = g_units == 0u ? 1u : g_units;
+    g_composite = Composite{};
+    g_composite.unit = g_units;
+    g_composite.start = stackTop();
+    g_composite.settings = settings;
+    g_composite.object = getRegU32(ctx, 5);
+    g_composite.alpha = ctx->f[13];
     rg::hooks::callThen(g_compositeOriginal, rdram, ctx, runtime, &afterComposite, g_units);
 }
 
@@ -1523,7 +1716,9 @@ void install(PS2Runtime &runtime)
         rg::timing::hookFunction(runtime, kGameSceneTintApply, &gameSceneTintApply, g_tintApplyOriginal);
     if (g_composites &&
         (!rg::timing::hookFunction(runtime, kCompositeAt, &compositeAt, g_compositeOriginal) ||
-         !rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &modelEmitDrawPackets, g_emitOriginal)))
+         !rg::timing::hookFunction(runtime, kModelEmitDrawPackets, &modelEmitDrawPackets, g_emitOriginal) ||
+         !rg::timing::hookFunction(runtime, kOverlayMulti, &overlayMulti, g_overlayMultiOriginal) ||
+         !rg::timing::hookFunction(runtime, kOverlaySingle, &overlaySingle, g_overlaySingleOriginal)))
     {
         g_composites = false;
         std::fprintf(stderr, "[nativefx] the composites stay GS packets\n");
@@ -1946,24 +2141,37 @@ bool isPass(Effect effect)
     return effect == Effect::Glare || effect == Effect::Bloom || effect == Effect::ColorFilter ||
            effect == Effect::Refraction || effect == Effect::ShadowMapBlur || effect == Effect::Dof ||
            effect == Effect::Focus || effect == Effect::Shadow ||
-           effect == Effect::CBlur || effect == Effect::CBlurDraw;
+           effect == Effect::CBlur || effect == Effect::CBlurDraw || effect == Effect::CompositeTail;
 }
 
-bool emitPass(Effect effect, uint32_t unit)
+bool emitPass(Effect effect, uint32_t unit, bool fromLayer)
 {
     if (!isPass(effect) || unit == 0u)
         return false;
-    rg::nativeproducer::PassRequest request;
+    std::vector<rg::nativeproducer::PassRequest> requests;
     {
         std::lock_guard lock(g_passMutex);
-        const auto it = std::find_if(g_passes.begin(), g_passes.end(),
-                                     [&](const auto &kept) { return kept.first == unit; });
-        if (it == g_passes.end())
-            return false;
-        request = it->second;
-        g_passes.erase(it);
+        for (auto it = g_passes.begin(); it != g_passes.end();)
+        {
+            if (it->first == unit)
+            {
+                requests.push_back(it->second);
+                it = g_passes.erase(it);
+            }
+            else
+                ++it;
+        }
     }
-    return rg::nativeproducer::pass(request);
+    if (requests.empty())
+        return false;
+    bool all = true;
+    for (rg::nativeproducer::PassRequest &request : requests)
+    {
+        if (request.kind == 13u)
+            request.params[0] = fromLayer ? 1.0f : 0.0f;
+        all = rg::nativeproducer::pass(request) && all;
+    }
+    return all;
 }
 
 bool build(Effect effect, const std::vector<std::vector<uint8_t>> &packets, GSNativeEffect &out,

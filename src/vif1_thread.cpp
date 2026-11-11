@@ -2916,76 +2916,33 @@ void decideHead()
                      static_cast<unsigned long long>(g_compositeRefused.load()));
 }
 
-// A routed object's tail, whole: its sprites to the renderer, from the
-// layer, and its packets to the GS with their kicks withheld. Refused, the
-// object's layer goes back into the GS's buffer first (kObjectTail without
-// sprites) and the packets as they are.
+// An object's tail, whole: its passes (an ObjectLayer each for its overlay
+// calls and its blur mask, from the object's layer when routed, else from
+// the buffer the head drew into), and its packets with their kicks
+// withheld (M3 of docs/NATIVE-ONLY.md).
 void finishTail()
 {
     CompositeBatch &batch = t_batch;
     if (batch.tail.empty())
         return;
     GS &gs = *batch.gs;
-    thread_local GSNativeEffect effect;
-    thread_local std::vector<std::vector<uint8_t>> withheld;
-    std::string why;
-    bool ok = rg::nativefx::build(rg::nativefx::Effect::CompositeTail, batch.tail, effect, withheld, why);
-    if (ok)
+    const bool sent = rg::nativefx::emitPass(rg::nativefx::Effect::CompositeTail, batch.unit, batch.routed);
+    if (!sent)
     {
-        bool fromLayer = false;
-        for (uint32_t i = 0; i < effect.bufferCount; ++i)
+        ++g_compositeRefused;
+        static bool told = false;
+        if (!told)
         {
-            GSNativeEffect::Buffer &buffer = effect.buffers[i];
-            if (buffer.base == batch.box.base && buffer.fbw == batch.box.fbw)
-            {
-                buffer.layer = 1u;
-                fromLayer = true;
-            }
+            told = true;
+            std::fprintf(stderr, "[composite] a tail's passes were not all drawn (none kept, or a buffer unknown)\n");
         }
-        ok = fromLayer;
-        why = ok ? why : "no sprite from the object's buffer";
     }
-    if (ok)
+    for (std::vector<uint8_t> &packet : batch.tail)
     {
-        effect.command = GSNativeEffect::kObjectTail;
-        ok = sendEffect(gs, effect);
-        why = ok ? why : "the producer cannot draw it (its stats line says why)";
+        rg::nativefx::withholdKicks(packet);
+        sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
     }
-    if (ok)
-    {
-        for (const std::vector<uint8_t> &packet : withheld)
-            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
-        batch.waiting = true;
-    }
-    else
-    {
-        const bool nothing = why == "no sprites";
-        static std::vector<std::string> told;
-        if (!nothing && told.size() < 8u && std::find(told.begin(), told.end(), why) == told.end())
-        {
-            told.push_back(why);
-            std::fprintf(stderr, "[composite] a tail stays packets: %s\n", why.c_str());
-        }
-        if (!nothing)
-            ++g_compositeRefused;
-        static const bool trace = std::getenv("RG_COMPOSITE_TRACE") != nullptr;
-        static int dumped = 0;
-        if (trace && !nothing && dumped++ < 3)
-        {
-            std::fprintf(stderr, "[composite] refused (%s), box %d,%d-%d,%d:\n", why.c_str(), batch.box.x0, batch.box.y0,
-                         batch.box.x1, batch.box.y1);
-            rg::nativefx::dumpPackets("composite", batch.tail);
-        }
-        effect = GSNativeEffect{};
-        effect.command = GSNativeEffect::kObjectTail;
-        effect.bufferCount = nothing ? 0u : 1u;
-        effect.buffers[0].base = batch.box.base;
-        effect.buffers[0].fbw = batch.box.fbw;
-        sendEffect(gs, effect);
-        batch.waiting = false;
-        for (const std::vector<uint8_t> &packet : batch.tail)
-            sendPacket(gs, packet.data(), static_cast<uint32_t>(packet.size()));
-    }
+    batch.waiting = sent;
     batch.tail.clear();
 }
 
@@ -3118,10 +3075,7 @@ bool compositePacket(GS &gs, const uint8_t *data, uint32_t size, uint32_t addres
                 sendCommand(gs, GSNativeEffect::kRouteEnd);
             batch.state = CompositeBatch::State::Tail;
         }
-        if (batch.routed)
-            batch.tail.emplace_back(data, data + size);
-        else
-            sendPacket(gs, data, size);
+        batch.tail.emplace_back(data, data + size);
         return true;
     }
     // The upload's data, as an IMAGE packet.

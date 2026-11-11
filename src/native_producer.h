@@ -214,7 +214,7 @@ struct PassRequest
     // A work buffer the game never declared (it set its frame directly):
     // declared at this size (CT32), when given.
     uint32_t workSizes[4][2] = {};
-    float params[24] = {};
+    float params[32] = {};
     // The params (a bit each) that are the GS's window Z, turned into the
     // renderer's depth through the frame's camera; and whether the pass
     // tests against the scene's depth.

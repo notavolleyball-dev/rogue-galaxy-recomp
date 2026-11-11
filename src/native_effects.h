@@ -149,7 +149,7 @@ bool isPass(Effect effect);
 // Game thread: DrawEnvSetFrameFromDesc_144fe0 was called with `desc`
 // (native_capture.cpp's hook); an effect's call in progress may record it.
 void noteFrameDesc(uint32_t desc);
-bool emitPass(Effect effect, uint32_t unit);
+bool emitPass(Effect effect, uint32_t unit, bool fromLayer = false);
 // The packet with every drawing kick made a plain vertex write: what is left
 // of a pass's packets (uploads, registers) still goes on, as it did under the
 // sprite builder.

@@ -734,6 +734,51 @@ bool Renderer::expandPass(const Pass &pass)
         passRect(frame, sprite, rect, spriteRect, rgba, over);
         return true;
     }
+    case PassKind::ObjectLayer:
+    {
+        // ModelDrawOffscreenCompositeMaybe_16aac0's tail: the object's layer
+        // laid over the frame (and its glow copies), or into its blur's
+        // trail, alpha only. The VU1 overlay program's sprites cover the
+        // object's vertex bounds within the rectangle; the rest of the
+        // rectangle is the layer's clear (alpha 0), which the alpha test
+        // drops, so the rectangle is drawn whole.
+        const bool intoTrail = pass.params[1] != 0.0f;
+        const Id source = pass.work[0], target = intoTrail ? pass.work[1] : pass.frame;
+        float sw = 0.0f, sh = 0.0f, tw = 0.0f, th = 0.0f;
+        if (source == 0u || target == 0u || !size(source, sw, sh) || !size(target, tw, th))
+            return false;
+        Material m = spriteMaterial();
+        const int blend = int(pass.params[14]);
+        if (blend == 1)
+            m = presetBlend(m, 1);
+        else if (blend == 2)
+        {
+            m.blending = true;
+            m.srcFactor = BlendFactor::Fixed;
+            m.dstFactor = BlendFactor::InvFixed;
+            m.blendConstant = pass.params[15];
+        }
+        m.alphaTest = int(pass.params[16]) == 6 ? Compare::Greater : Compare::GreaterEqual;
+        m.alphaReference = pass.params[17];
+        m.alphaFail = AlphaFail::Nothing;
+        if (pass.params[18] != 0.0f)
+        {
+            m.sourceAlpha = 1.0f; // TEXA TA0 0x80
+            m.alphaZeroOnBlack = true;
+        }
+        if (intoTrail)
+            m.colorWrite = 0x8u;
+        const float uv[4] = {pass.params[6], pass.params[7], pass.params[8], pass.params[9]};
+        const float rgba[4] = {pass.params[10], pass.params[11], pass.params[12], pass.params[13]};
+        const int offsets = std::clamp(int(pass.params[19]), 1, 4);
+        for (int k = 0; k < offsets; ++k)
+        {
+            const float dx = pass.params[20 + 2 * k], dy = pass.params[21 + 2 * k];
+            const float rect[4] = {pass.params[2] + dx, pass.params[3] + dy, pass.params[4] + dx, pass.params[5] + dy};
+            passRect(target, source, rect, uv, rgba, m);
+        }
+        return true;
+    }
     case PassKind::PlaneShadow:
     {
         // DrawListEndPlaneShadowPass_146cc0. The volumes were drawn into the

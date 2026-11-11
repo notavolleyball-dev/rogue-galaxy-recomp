@@ -3621,8 +3621,18 @@ bool pass(const PassRequest &request)
         const auto at = s.targetAt.find(request.frameBase);
         record.frame = at != s.targetAt.end() ? at->second : 0u;
     }
+    // An object layer's pass reads the object's layer, where its head's
+    // draws went, in place of the buffer (step 5c).
+    const bool fromLayer = request.kind == 13u && request.params[0] != 0.0f;
     for (int i = 0; i < 4; ++i)
     {
+        if (i == 0 && fromLayer)
+        {
+            record.work[0] = s.layer;
+            if (record.work[0] == 0u)
+                record.frame = 0u;
+            continue;
+        }
         if (request.workBases[i] == 0u)
             continue;
         auto at = s.targetAt.find(request.workBases[i]);
@@ -3641,7 +3651,7 @@ bool pass(const PassRequest &request)
         return false;
     }
     std::copy(std::begin(request.params), std::end(request.params), record.params);
-    for (int i = 0; i < 24; ++i)
+    for (int i = 0; i < 32; ++i)
         if (request.depthParams & (1u << i))
             record.params[i] = standardDepth(record.params[i], s.lastDepthScale, s.lastDepthOffset);
     if (request.sceneDepth)
