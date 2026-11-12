@@ -72,4 +72,4 @@ differs from both its neighbours where they agree is reported:
   flash, after), 192x56.
 
 Pan until it has flashed a few times; push the log and `build/run/flash/`.
-At most 60 reports a run.
+At most 300 reports a run.

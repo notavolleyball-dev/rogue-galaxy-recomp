@@ -1308,7 +1308,7 @@ void Renderer::watchJudge(SDL_GPUDevice *device)
             const uint32_t x = uint32_t(cell % kWatchW), y = uint32_t(cell / kWatchW);
             x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
         }
-        if (spiked < 6u || m_watchReports >= 60u)
+        if (spiked < 6u || m_watchReports >= 300u)
             continue;
         ++m_watchReports;
         std::fprintf(stderr,
