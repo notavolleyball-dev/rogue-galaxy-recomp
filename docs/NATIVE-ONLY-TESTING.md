@@ -73,3 +73,12 @@ differs from both its neighbours where they agree is reported:
 
 Pan until it has flashed a few times; push the log and `build/run/flash/`.
 At most 300 reports a run.
+
+## Every chunk drawn once
+
+`RG_NATIVE_NO_RETAIN=1`: no model chunk is kept in the renderer's buffer;
+each is sent with its draw, as a chunk's first sighting is. The flash
+watch found the flash frames are the ones where most chunks go this way
+(after the buffer resets), so this should hold the flash still: if the
+world is missing all the time, mark it with F8 under RenderDoc, the mouse
+on a missing surface (the ground).

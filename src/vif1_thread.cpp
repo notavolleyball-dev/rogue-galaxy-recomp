@@ -264,6 +264,17 @@ uint32_t modelIdOf(uint64_t hash, bool &define)
 {
     RetainTable &r = t_retained;
     define = false;
+    // RG_NATIVE_NO_RETAIN=1 (a diagnostic): no chunk is ever kept; each is
+    // drawn once, its inputs with it, as a chunk's first sighting is.
+    static const bool never = [] {
+        const char *v = std::getenv("RG_NATIVE_NO_RETAIN");
+        const bool on = v && *v && *v != '0';
+        if (on)
+            std::fprintf(stderr, "[vu1native] RG_NATIVE_NO_RETAIN: every model chunk is drawn once, none kept\n");
+        return on;
+    }();
+    if (never)
+        return 0u;
     const auto [it, fresh] = r.models.try_emplace(hash, RetainTable::Entry{0u, 1u, r.list});
     RetainTable::Entry &entry = it->second;
     if (fresh)
