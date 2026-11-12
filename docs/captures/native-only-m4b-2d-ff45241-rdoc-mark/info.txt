@@ -1,0 +1,15 @@
+time 20261111-195012
+seconds 56.0
+branch native-only/m4b-2d
+commit ff45241
+dirty 1
+flip 2929
+pad_read 2994
+guest_frame 3361
+window 1920 1008
+window_pixels 1920 1008
+mouse_pixels 998 381
+env RG_NATIVE_CPU=1
+env RG_LOG_FILE=build/run/play.log
+env RG_SETTINGS_FILE=build/run/native-on.ini
+env DQ8_GFX_STATS_EVERY=600
