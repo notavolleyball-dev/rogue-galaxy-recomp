@@ -1,0 +1,10 @@
+# composite and model-emit lines from native-only-m4b-2d-c59824d-play.log
+[model-emit] model draw calls drawn from the game's structures 38, written by the game 3 (emit calls by why: program slot empty=3), records not found 0; emitters' output captured 22 (not 0); view, camera and light packets taken out of the list 89 (records without them known: view 0, camera 0, lights 0)
+[composite] 1 objects, 1 in layers (heads that found a clear box: 19), 0 tails not drawn
+[composite] 5000 objects, 3580 in layers (heads that found a clear box: 3588), 1420 tails not drawn
+[composite] 10000 objects, 7560 in layers (heads that found a clear box: 7574), 2440 tails not drawn
+[composite] 15000 objects, 11075 in layers (heads that found a clear box: 11080), 3925 tails not drawn
+[model-emit] model draw calls drawn from the game's structures 64030, written by the game 2707 (emit calls by why: program slot empty=2158 program unknown=549), records not found 0; emitters' output captured 20288 (not 0); view, camera and light packets taken out of the list 71986 (records without them known: view 0, camera 0, lights 0)
+[composite] 20000 objects, 14682 in layers (heads that found a clear box: 14703), 5318 tails not drawn
+[composite] 25000 objects, 18156 in layers (heads that found a clear box: 18174), 6844 tails not drawn
+# model-emit lines in the log: 2
