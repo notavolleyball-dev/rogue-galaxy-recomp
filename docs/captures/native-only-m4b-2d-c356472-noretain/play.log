@@ -1,0 +1,101 @@
+[ee] RG_NATIVE_CPU: checkpoints yield in place
+[pad] connected: X360 Controller
+[rg] renderer: native, SDL GPU (vulkan), internal scale 4x, menu on F1
+INFO: AUDIO: Device initialized successfully
+INFO:     > Backend:       miniaudio | PulseAudio
+INFO:     > Format:        32-bit IEEE Floating Point -> 32-bit Signed Integer
+INFO:     > Channels:      2 -> 2
+INFO:     > Sample rate:   48000 -> 48000
+INFO:     > Periods size:  3600
+[rg] GS backend: none; GS local memory is not mirrored
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+Ignoring invalid code region: start=0x4e9e80 end=0x4e9e80
+[rg] VIF1 lists run on their own thread
+[rg] 60 fps: the flip waits one vblank and the scene takes steps sized by the frame time, half at full rate; step fixes: clock movie npc judge gravity event menu ai texture camera
+[write-watch] guest RAM watched by page (8191 pages)
+[rg] RG_NATIVE_CPU=1 but this build has no native CPU code (tools/rgcpu output in build/generated/native)
+[rg] booting disc/SCUS_974.90
+[native-env] libgraph's environments taken as state and clears (no converter)
+[ps2xIOP] [iop] started Sound_Device_Library at 0x00010000, 22960 bytes
+INFO: STREAM: Initialized successfully (48000 Hz, 16 bit, Stereo)
+[ps2xIOP] [iop] SDR driver version 4.0.1 (C) SCEI
+[ps2xIOP] [iop]  Exit rsd_main 
+[ps2xIOP] [iop] RPC server 2147485441 registered
+[ps2xIOP] [iop] started sdr_driver at 0x00015A00, 7368 bytes
+[ps2xIOP] [iop] started SPU2_Synthesizer_Module at 0x0001A000, 66866 bytes
+[ps2xIOP] [iop] started Midi_Sequencer_Module at 0x0002A600, 16084 bytes
+[ps2xIOP] [iop] started Midi_Message_Input_Module at 0x00017700, 992 bytes
+[ps2xIOP] [iop] started StandardKit/Sound/Foundation at 0x00017B00, 6152 bytes
+[ps2xIOP] [iop] started StandardKit/Sound/HardwareSynthesizer at 0x0002E500, 6228 bytes
+[ps2xIOP] [iop] started StandardKit/Sound/MIDIPlayer at 0x00031D00, 7924 bytes
+[ps2xIOP] [iop] started StandardKit/Sound/MIDI_Sequence_Input at 0x0004D400, 4997 bytes
+[ps2xIOP] [iop] pcm player version 1.2.1
+[ps2xIOP] [iop]  pcm play loader thread 
+[ps2xIOP] [iop] RPC server 1193046 registered
+[ps2xIOP] [iop] goto pplayer cmd loop
+[ps2xIOP] [iop] started pcm_mixer at 0x00050000, 5024 bytes
+[IOP/RPC trace:unhandled] sid=0x80000593 rpc=0x27 pc=0x12ad34 ra=0x12ad34 send=0x0/0 recv=0x448b40/12 sendBytes=[] loadedModules=[cdrom0:/modules/pcmplay.irx; cdrom0:/modules/skmsin.irx; cdrom0:/modules/sio2man.irx; cdrom0:/modules/padman.irx; cdrom0:/modules/mcman.irx; cdrom0:/modules/mcserv.irx]
+[ps2xIOP] [iop] SDR callback thread created
+[ps2xIOP] [iop] pcm allocate = %d
+[ps2xIOP] [iop] start pcm thread
+[IOP/RPC trace:unhandled] sid=0x80000593 rpc=0x23 pc=0x12aba8 ra=0x12aba8 send=0x448f80/4 recv=0x448b40/4 sendBytes=[22 00 00 00] loadedModules=[cdrom0:/modules/pcmplay.irx; cdrom0:/modules/skmsin.irx; cdrom0:/modules/sio2man.irx; cdrom0:/modules/padman.irx; cdrom0:/modules/mcman.irx; cdrom0:/modules/mcserv.irx]
+fioOpen error: fopen failed for '/home/nathan/Projects/rogue-galaxy-recomp/disc/dc3_boot.cfg': No such file or directory
+[overlay] load #1: title (id 2) resident, dispatch 0x004E9EC0..0x004F1898
+[uploads] the list's uploads by path and draw task (1) | host (no record): no task@000000=1 | local copies: | taken at a marker (no transfer): | host at a marker (no transfer):
+[updates] no release read from GitHub
+[gs-packets] packets that draw, not drawn, by draw task (1; state-only 2): no task@000000=1
+[nativefx] a pass not drawn: flip: the producer cannot draw it
+[native-producer] overlays pulled forward by 4 Z units (RG_NATIVE_DECAL_UNITS)
+[native-blocks] blocks drawn from the builder's calls 1 (made 5, not found 0, lost 0), effects' blocks left to their passes 0
+[overlay] load #2: normal (id 5) resident, dispatch 0x004E9EC0..0x00526F54
+[rg] VU0's matrix program native (RG_VU0_NATIVE=0 leaves it to the VU0)
+[model-emit] model draw calls drawn from the game's structures 38, written by the game 3 (emit calls by why: program slot empty=3), records not found 0; emitters' output captured 22 (not 0); view, camera and light packets taken out of the list 89 (records without them known: view 0, camera 0, lights 0)
+[vu1native] RG_NATIVE_NO_RETAIN: every model chunk is drawn once, none kept
+[nativefx] 1 passes drawn by the renderer, 685 not
+[composite] 1 objects, 1 in layers (heads that found a clear box: 19), 0 tails not drawn
+[native-copy] SBP 3960 SBW 4 SPSM 13 (0,216) -> DBP 3920 DBW 2 DPSM 13 (0,58) 127x39, seq 162013
+  source: texture psm 13 id 231 (taken seq 162013)
+  destination: texture psm 13 id 230 (taken seq 162011)
+[native-copy] SBP 3840 SBW 4 SPSM 13 (0,160) -> DBP 3800 DBW 2 DPSM 13 (0,71) 127x31, seq 162044
+  source: texture psm 13 id 237 (taken seq 162026)
+  destination: texture psm 13 id 236 (taken seq 162024) target 4 (drawn seq 0)
+[nativefx] a pass not drawn: glare: its pass was not kept
+[native-copy] SBP 3960 SBW 4 SPSM 13 (0,216) -> DBP 3920 DBW 2 DPSM 13 (0,58) 127x39, seq 162914
+  source: texture psm 13 id 231 (taken seq 162914)
+  destination: texture psm 13 id 230 (taken seq 162912)
+[native-copy] SBP 3840 SBW 4 SPSM 13 (0,160) -> DBP 3800 DBW 2 DPSM 13 (0,71) 127x31, seq 162945
+  source: texture psm 13 id 237 (taken seq 162927)
+  destination: texture psm 13 id 236 (taken seq 162925) target 4 (drawn seq 0)
+[native-copy] SBP 3960 SBW 4 SPSM 13 (0,216) -> DBP 3920 DBW 2 DPSM 13 (0,58) 127x39, seq 163836
+  source: texture psm 13 id 231 (taken seq 163836)
+  destination: texture psm 13 id 230 (taken seq 163834)
+[native-copy] SBP 3840 SBW 4 SPSM 13 (0,160) -> DBP 3800 DBW 2 DPSM 13 (0,71) 127x31, seq 163867
+  source: texture psm 13 id 237 (taken seq 163849)
+  destination: texture psm 13 id 236 (taken seq 163847) target 4 (drawn seq 0)
+[native-copy] SBP 3960 SBW 4 SPSM 13 (0,216) -> DBP 3920 DBW 2 DPSM 13 (0,58) 127x39, seq 164758
+  source: texture psm 13 id 231 (taken seq 164758)
+  destination: texture psm 13 id 230 (taken seq 164756)
+[native-copy] SBP 3840 SBW 4 SPSM 13 (0,160) -> DBP 3800 DBW 2 DPSM 13 (0,71) 127x31, seq 164789
+  source: texture psm 13 id 237 (taken seq 164771)
+  destination: texture psm 13 id 236 (taken seq 164769) target 4 (drawn seq 0)
+[vu1native] gpu: native chunks object setup=9886 outline, skinned=15265 shadow volume=336 shadow volume, skinned=4429 strip=2234 strip, depth and bounds, lit=515 strip, depth and bounds, lit, sphere map, skinned=614 strip, depth and bounds, one color=4532 strip, depth and bounds, one color, skinned=41303 strip, depth and bounds, one color, sphere map=4017 strip, depth and bounds, one color, sphere map, skinned=2266 strip, guard band=1972 strip, guard band and backfaces=37907 strip, guard band and backfaces, depth and bounds=539 strip, guard band and backfaces, one color=4168 strip, guard band and backfaces, wave=910 strip, one color=309 strip, one color, sphere map=103 strip, wave=1820; not drawn none
+[composite] 5000 objects, 3513 in layers (heads that found a clear box: 3514), 1487 tails not drawn
+[vu1native] gpu: native chunks object setup=24645 outline, skinned=34606 shadow volume=625 shadow volume, skinned=9574 strip=5273 strip, depth and bounds=92 strip, depth and bounds, lit=1115 strip, depth and bounds, lit, sphere map, skinned=614 strip, depth and bounds, one color=8710 strip, depth and bounds, one color, skinned=81689 strip, depth and bounds, one color, sphere map=7887 strip, depth and bounds, one color, sphere map, skinned=2640 strip, guard band=4555 strip, guard band and backfaces=104151 strip, guard band and backfaces, depth and bounds=2192 strip, guard band and backfaces, one color=5016 strip, guard band and backfaces, wave=2922 strip, guard band, depth and bounds=46 strip, guard band, depth and bounds, one color, skinned=7397 strip, guard band, depth and bounds, one color, sphere map, skinned=2266 strip, guard band, wave=100 strip, lit vertex colors=280 strip, one color=1001 strip, one color, sphere map=223 strip, wave=5744; not drawn none
+[gfx] 52.6 fps (backend 27% of wall) over 600 frames | draws=94780 meshes=616863 passes=26139 copies=143 submits=600 refreshes=5 | scale 4x | longest frame 83.9 ms
+  movie: get-picture=0 (0%) write-frame=0 (0%) demux=0 (0%) refused=0 es-buffer-peak=135KiB | threads: demux=16 get-picture=15 | ee-dispatches=2125090 (3541/frame) throws=0
+  sched: loop=2153505 (188750/s) resumes=15401 pumps=2153505 enter-guest=2140489 suspends=13127
+  lists busy=4006740698% of wall | main stall 41.6 ms
+[native-pipeline] records: texture 353 palette 206 target 23 camera 587 mesh 431849 2d 225796 pass 14115 clear 1990 frame 0 present 995 retained-mesh 0 | held: textures 353 (141 MiB), palettes 206, evicted 0, refused 0 | retained meshes 0 (defined so far 0, draws so far 407901, of an id not held 0, resets 0) | model chunks: defined so far 0 (0 vertices in this side), draws 407901 (drawn once, inputs with them: 407901) | clears of part of a target (not drawn, so far) 0 | passes drawn (so far) 14114, refused 1 | readiness of 657645 mesh draws: R1 camera+model 431849, R2 object 0, R3 scene float depth 179342, R4 material 635887, R5 normals 0 | meshes drawn 649033 in 97569 GPU calls (offscreen 323232) over 995 frames in 26495 passes; not drawn: target not declared 0, a depth buffer as color 0, no camera 0, texture not held 0, no pipeline 0, source target never drawn 0, reading its own target uncopied 0, copies for those that do 143 (destination alpha tests 0); window space 241132, from a target 38064; a second depth target in a pass 0
+  [native-producer] texture levels 77853: new 209, known 77644, resent 0, from kept reads 0, refused: format 0, bytes 0, layout 0 | palettes new 205, known 77338, refused 0 | targets new 20 (undeclared, from their draws 4; grown to their draws 0) | hashed 385321 KiB | meshes 433287: no draw state 0, camera and model 433287, whole matrix (model check failed) 0, cameras new 588, material known 411426 (misses: texture 0 [another format there 0, a render target there 0], palette 0, target 0; unknown: blend 0, clamp 0, write mask 0, other 21761) | sampled a texture uploaded over a target 251880 | 2D pieces 219794: made 219794 (from a target 1555, as CT24 0, fogged 0), to the GS: no state 0, target not declared 0, source unknown 0 (inside a target 0); made green to alpha 0 | bound in the stream: textures 78071, palettes 77760, no record 0 | withheld from the GS: textures 0, palettes 0 (0 KiB; 0 never copied, 0 KiB, 0 read after all); uploads sent on (no record) 0; A+D blocks split (other registers kept) 0; image continued in a packet 0 | object layers: routed 6330 (230830 draws) | host uploads nobody took 170 (138768 KiB, refused 0): textures made 138, known 16, palettes 1, reads refused 5287 | stale records made again: palettes 0, textures 0 | local copies mirrored 622, other format 0, no source 0, no destination 0 | narrow views new 3, draws into them 20331, reads of them 7039 | depth reads (all so far) 0: answered 0, no depth target there 0 | tiles cut 0 | passes 14164, refused (buffer unknown) 996 | texture packs: pairs looked up 0, pictures made 0, none 0, draws from a picture 0; regions looked up 0, pictures made 0, draws from one 0, not hashable here 0
+[vu1native] gpu: native chunks object setup=37306 outline, skinned=61073 shadow volume=1296 shadow volume, skinned=14734 strip=7085 strip, depth and bounds=208 strip, depth and bounds, lit=1690 strip, depth and bounds, lit, sphere map, skinned=614 strip, depth and bounds, one color=13702 strip, depth and bounds, one color, skinned=146532 strip, depth and bounds, one color, sphere map=12243 strip, depth and bounds, one color, sphere map, skinned=3476 strip, guard band=7193 strip, guard band and backfaces=156410 strip, guard band and backfaces, depth and bounds=4092 strip, guard band and backfaces, one color=7537 strip, guard band and backfaces, wave=3652 strip, guard band, depth and bounds=158 strip, guard band, depth and bounds, one color, skinned=9119 strip, guard band, depth and bounds, one color, sphere map, skinned=4070 strip, guard band, wave=192 strip, lit vertex colors=2200 strip, one color=1358 strip, one color, sphere map=340 strip, wave=7112; not drawn none
+[composite] 10000 objects, 7518 in layers (heads that found a clear box: 7530), 2482 tails not drawn
+[vu1native] gpu: native chunks object setup=51871 outline, skinned=84779 shadow volume=1538 shadow volume, skinned=19684 strip=10593 strip, depth and bounds=254 strip, depth and bounds, lit=2290 strip, depth and bounds, lit, sphere map, skinned=1338 strip, depth and bounds, one color=17913 strip, depth and bounds, one color, skinned=188391 strip, depth and bounds, one color, sphere map=16356 strip, depth and bounds, one color, sphere map, skinned=4378 strip, guard band=9689 strip, guard band and backfaces=224034 strip, guard band and backfaces, depth and bounds=5513 strip, guard band and backfaces, one color=8884 strip, guard band and backfaces, wave=5258 strip, guard band, depth and bounds=176 strip, guard band, depth and bounds, one color, skinned=15853 strip, guard band, depth and bounds, one color, sphere map, skinned=5808 strip, guard band, wave=332 strip, lit vertex colors=2248 strip, one color=2484 strip, one color, sphere map=460 strip, wave=10184; not drawn none
+[rg] runtime stopped after 2 overlay load(s), resident: normal
+INFO: STREAM: Unloaded audio stream data from RAM
+INFO: AUDIO: Device closed successfully
+[native-gs] GS backend calls: none
