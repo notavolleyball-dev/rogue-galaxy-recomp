@@ -1058,8 +1058,11 @@ void overlayCall(R5900Context *ctx, bool multi)
     const int32_t hy = static_cast<int32_t>(read32(rectAt + 8u)), hx = static_cast<int32_t>(read32(rectAt + 12u));
     const uint32_t env = read32(read32(kDrawCtxPointer) + 0x270u);
     const float W = float(static_cast<int32_t>(read32(env + 4u))), H = float(static_cast<int32_t>(read32(env + 8u)));
-    const float cx = float(static_cast<int32_t>(read32(env + 0x0Cu)));
-    const float cy = float(static_cast<int32_t>(read32(env + 0x10u)));
+    // The center is in GS primitive pixels (2048-biased); the target's
+    // pixels are those less the environment's XYOFFSET (+0xA0, sixteenths).
+    const uint32_t ofx = read32(env + 0xA0u) & 0xFFFFu, ofy = read32(env + 0xA4u) & 0xFFFFu;
+    const float cx = float(static_cast<int32_t>(read32(env + 0x0Cu))) - float(ofx) / 16.0f;
+    const float cy = float(static_cast<int32_t>(read32(env + 0x10u))) - float(ofy) / 16.0f;
     rg::nativeproducer::PassRequest request = objectPass(c.settings);
     request.params[2] = float(lx) / 16.0f + cx;
     request.params[3] = float(ly) / 16.0f + cy;

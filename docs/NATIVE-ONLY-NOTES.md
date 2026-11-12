@@ -332,7 +332,8 @@ from the code.
     write no GS packets: each is a VIF packet that runs VU1's overlay
     program (`MSCAL 0x12C`, docs/VU1-NATIVE.md's `:960` rows), whose
     sprites cover the vertex bounds within the rect, at `rect / 16 +
-    center` (the environment's `+0x0C`, `+0x10`) from texels `rect / 16 +
+    center` (the environment's `+0x0C`, `+0x10`, in GS primitive pixels:
+    less XYOFFSET in the target's) from texels `rect / 16 +
     size / 2`.
   - When the object's character blur is on (`a1+0x454` its trail, `a1+0x458`
     (f) the strength, above the float at `0x47D24C`): on the trail, alpha
