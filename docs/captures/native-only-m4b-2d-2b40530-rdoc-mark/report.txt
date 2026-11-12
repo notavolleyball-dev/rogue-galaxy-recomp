@@ -1,0 +1,479 @@
+mark     /home/nathan/Projects/rogue-galaxy-recomp/build/run/marks/20261111-190645
+commit   2b40530 on native-only/m4b-2d (1 tracked files changed)
+at       flip 1211, pad read 1276, 27.7 s
+capture  frame_capture.rdc: 2461 actions, 1 frame ends; reading events 1122-6843 (1135 draws)
+
+== passes of the frame
+  pass  0  events  1174-1932    188 draws    20454 indices  colour 5876 2048x1792  depth 5874
+           156 d44a7ad0, 17 d44a7ac8, 9 d44a7968, 2 2D piece, 2 strip, guard band and backfaces, depth and bounds, 2 d44a7ab8
+  pass  1  events  1949-1949      1 draws       48 indices  colour 11638 1024x256  depth -
+           1 2D piece
+  pass  2  events  1966-1991      7 draws      630 indices  colour 5876 2048x1792  depth 5874
+           4 d44a78e8, 2 d44a7800, 1 d44a7ad0
+  pass  3  events  2009-2013      2 draws       12 indices  colour 11647 2048x1792  depth 5874
+           1 2D piece, 1 50415353
+  pass  4  events  2030-2030      1 draws        6 indices  colour 11660 2048x1792  depth -
+           1 50415353
+  pass  5  events  2046-2046      1 draws        6 indices  colour 11647 2048x1792  depth -
+           1 50415353
+  pass  6  events  2062-2062      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass  7  events  2078-2078      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass  8  events  2094-2094      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass  9  events  2110-2110      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 10  events  2126-2126      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 11  events  2142-2142      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 12  events  2158-2158      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 13  events  2174-2174      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 14  events  2190-2190      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 15  events  2206-2206      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 16  events  2222-2222      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 17  events  2238-2238      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 18  events  2254-2254      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 19  events  2270-2270      1 draws        6 indices  colour 11678 768x1536  depth -
+           1 50415353
+  pass 20  events  2286-2286      1 draws        6 indices  colour 11669 768x1536  depth -
+           1 50415353
+  pass 21  events  2302-2302      1 draws        6 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 22  events  2318-2322      2 draws       12 indices  colour 12875 2048x1792  depth -
+           2 50415353
+  pass 23  events  2338-2338      1 draws        6 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 24  events  2354-2354      1 draws        6 indices  colour 11689 256x512  depth -
+           1 2D piece
+  pass 25  events  2371-2628     65 draws     4188 indices  colour 11696 2048x1792  depth 5874
+           63 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 26  events  2645-2645      1 draws        6 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 27  events  2662-2862     51 draws     3093 indices  colour 11696 2048x1792  depth 5874
+           49 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 28  events  2879-2879      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 29  events  2896-3064     43 draws     3063 indices  colour 11696 2048x1792  depth 5874
+           41 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 30  events  3081-3081      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 31  events  3098-3294     50 draws     3450 indices  colour 11696 2048x1792  depth 5874
+           48 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 32  events  3311-3311      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 33  events  3328-3401     19 draws     1887 indices  colour 11696 2048x1792  depth 5874
+           9 strip, depth and bounds, one color, sphere map, 8 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 34  events  3418-3418      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 35  events  3435-3451      5 draws      312 indices  colour 11696 2048x1792  depth 5874
+           3 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 36  events  3468-3473      2 draws       18 indices  colour 5876 2048x1792  depth -
+           2 50415353
+  pass 37  events  3490-3562     19 draws     1389 indices  colour 11696 2048x1792  depth 5874
+           14 strip, depth and bounds, one color, skinned, 3 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 38  events  3579-3579      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 39  events  3596-3941     87 draws    11478 indices  colour 11696 2048x1792  depth 5874
+           66 outline, skinned, 17 strip, depth and bounds, one color, skinned, 2 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 40  events  3958-3958      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 41  events  3975-4109     34 draws     2097 indices  colour 11696 2048x1792  depth 5874
+           32 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 42  events  4126-4126      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 43  events  4143-4323     46 draws     2724 indices  colour 11696 2048x1792  depth 5874
+           44 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 44  events  4340-4340      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 45  events  4357-4537     46 draws     3120 indices  colour 11696 2048x1792  depth 5874
+           44 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 46  events  4554-4554      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 47  events  4571-4748     45 draws     3333 indices  colour 11696 2048x1792  depth 5874
+           22 strip, depth and bounds, one color, sphere map, skinned, 21 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 48  events  4765-4765      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 49  events  4782-5329    137 draws    13713 indices  colour 11696 2048x1792  depth 5874
+           72 strip, depth and bounds, one color, skinned, 61 outline, skinned, 2 strip, depth and bounds, lit, 1 object layer rectangle, 1 2D piece
+  pass 50  events  5346-5346      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 51  events  5363-5487     32 draws     2178 indices  colour 11696 2048x1792  depth 5874
+           30 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 52  events  5504-5504      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 53  events  5521-5553      9 draws      525 indices  colour 11696 2048x1792  depth 5874
+           7 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 54  events  5570-5570      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 55  events  5587-5631     12 draws      774 indices  colour 11696 2048x1792  depth 5874
+           10 strip, depth and bounds, one color, skinned, 1 object layer rectangle, 1 2D piece
+  pass 56  events  5648-5648      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 57  events  5665-5673      3 draws       99 indices  colour 11696 2048x1792  depth 5874
+           1 object layer rectangle, 1 2D piece, 1 strip, depth and bounds, one color, skinned
+  pass 58  events  5690-5690      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 59  events  5707-5719      4 draws       18 indices  colour 11696 2048x1792  depth 5874
+           2 strip, depth and bounds, lit, 1 object layer rectangle, 1 2D piece
+  pass 60  events  5736-5736      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 61  events  5753-5761      3 draws       15 indices  colour 11696 2048x1792  depth 5874
+           1 object layer rectangle, 1 2D piece, 1 strip, depth and bounds, lit
+  pass 62  events  5778-5778      1 draws       18 indices  colour 5876 2048x1792  depth -
+           1 50415353
+  pass 63  events  5795-5916     31 draws     3351 indices  colour 11696 2048x1792  depth 5874
+           15 strip, depth and bounds, one color, sphere map, 14 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 64  events  5934-5944      3 draws      114 indices  colour 5876 2048x1792  depth 5874
+           1 50415353, 1 d44a7968, 1 d44a7970
+  pass 65  events  5962-6082     31 draws     3381 indices  colour 11696 2048x1792  depth 5874
+           15 strip, depth and bounds, one color, sphere map, 14 strip, depth and bounds, one color, 1 object layer rectangle, 1 2D piece
+  pass 66  events  6099-6104      2 draws       18 indices  colour 5876 2048x1792  depth -
+           2 50415353
+  pass 67  events  6120-6127      3 draws      150 indices  colour 16340 256x256  depth -
+           3 2D piece
+  pass 68  events  6143-6150      3 draws      150 indices  colour 11731 256x256  depth -
+           3 2D piece
+  pass 69  events  6166-6176      4 draws      102 indices  colour 11738 256x256  depth -
+           4 2D piece
+  pass 70  events  6192-6202      4 draws      102 indices  colour 11745 256x256  depth -
+           4 2D piece
+  pass 71  events  6219-6521     74 draws     8319 indices  colour 5876 2048x1792  depth 5874
+           42 d44a7958, 26 d44a7ad0, 6 d44a7ab8
+  pass 72  events  6538-6550      4 draws       96 indices  colour 11715 512x512  depth -
+           4 2D piece
+  pass 73  events  6566-6566      1 draws        6 indices  colour 11756 1024x1024  depth -
+           1 50415353
+  pass 74  events  6582-6582      1 draws        6 indices  colour 11647 2048x1792  depth -
+           1 50415353
+  pass 75  events  6598-6606      3 draws       18 indices  colour 11689 256x512  depth -
+           3 50415353
+  pass 76  events  6622-6622      1 draws        6 indices  colour 12889 256x512  depth -
+           1 50415353
+  pass 77  events  6638-6638      1 draws        6 indices  colour 11689 256x512  depth -
+           1 50415353
+  pass 78  events  6655-6655      1 draws      330 indices  colour 5876 2048x1792  depth 5874
+           1 2D piece
+  pass 79  events  6672-6672      1 draws        6 indices  colour 11647 2048x1792  depth -
+           1 50415353
+  pass 80  events  6689-6703      4 draws      135 indices  colour 5876 2048x1792  depth 5874
+           2 d44a7968, 1 50415353, 1 2D piece
+  pass 81  events  6720-6726      3 draws      354 indices  colour 11769 2048x1792  depth -
+           3 2D piece
+  pass 82  events  6743-6758      5 draws       72 indices  colour 5876 2048x1792  depth 5874
+           5 2D piece
+  pass 83  events  6775-6775      1 draws        6 indices  colour 11778 2048x1792  depth -
+           1 50415353
+  pass 84  events  6786-6786      1 draws        3 indices  colour 2891 2048x1792  depth -
+  pass 85  events  6833-6837      3 draws     4518 indices  colour 599 1920x1008  depth -
+
+frame.png        the picture (texture 599)
+target_5876.png  as the frame leaves it
+target_11638.png  as the frame leaves it
+target_11647.png  as the frame leaves it
+target_11660.png  as the frame leaves it
+target_11669.png  as the frame leaves it
+target_11678.png  as the frame leaves it
+target_12875.png  as the frame leaves it
+target_11689.png  as the frame leaves it
+target_11696.png  as the frame leaves it
+target_16340.png  as the frame leaves it
+target_11731.png  as the frame leaves it
+target_11738.png  as the frame leaves it
+target_11745.png  as the frame leaves it
+target_11715.png  as the frame leaves it
+target_11756.png  as the frame leaves it
+target_12889.png  as the frame leaves it
+target_11769.png  as the frame leaves it
+target_11778.png  as the frame leaves it
+target_2891.png  as the frame leaves it
+
+== the point: 0.5490 0.4266 of the picture, through the last draw's viewport (0.0, 0.0, 1920.0, 1008.0)
+   Each target the frame draws into is asked what touched that point, in order.
+
+-- target 5876 (2048x1792) at 1124,764: 42 touches
+   event  1145 prim     0  vkCmdBeginRenderPass(Clear) 0 indices                WROTE   (0.707 0.448 0.393 1.000) -> (0.000 0.000 0.000 1.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  1174 prim    16  2D piece [untextured] (96 indices)                   WROTE   (0.000 0.000 0.000 1.000) -> (0.000 0.625 1.992 1.000)  shader (0.000 0.625 1.992 1.000)  depth 0.000000 -> 0.000000
+   event  1178 prim     0  2D piece [untextured] (12 indices)                   WROTE   (0.000 0.625 1.992 1.000) -> (1.991 1.921 1.375 1.000)  shader (1.992 1.921 1.375 1.000)  depth 0.000000 -> 0.000000
+   event  1178 prim     2  2D piece [untextured] (12 indices)                   WROTE   (1.991 1.921 1.375 1.000) -> (1.990 1.920 1.375 1.000)  shader (1.990 1.921 1.376 1.000)  depth 0.000000 -> 0.000000
+   event  1207 prim    30  d44a7ac8 [texture 158] (126 indices)                 WROTE   (1.990 1.920 1.375 1.000) -> (1.703 1.781 1.984 1.000)  shader (1.703 1.781 1.984 1.000)  depth 0.000000 -> 0.000000
+   event  1276 prim    32  d44a7ad0 [texture 168] (120 indices)                 WROTE   (1.703 1.781 1.984 1.000) -> (1.319 1.140 0.627 1.000)  shader (1.320 1.140 0.627 1.000)  depth 0.000000 -> 0.004431
+   event  2302 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (1.319 1.140 0.627 1.000) -> (1.319 1.140 0.627 1.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2338 prim     0  50415353 [reads target 8(buffer 2a40)] (6 indices)   WROTE   (1.319 1.140 0.627 1.000) -> (1.319 1.140 0.627 1.000)  shader (1.423 1.319 0.841 0.000)  depth -1.000000 -> -1.000000
+   event  3579 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  3579 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  3579 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  3958 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  3958 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  3958 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4126 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4126 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4126 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4340 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4340 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4340 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4554 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4554 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4554 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4765 prim     1  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4765 prim     3  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  4765 prim     5  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5346 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5346 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5346 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5504 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5504 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5504 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5570 prim     0  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5570 prim     2  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5570 prim     4  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5648 prim     1  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5648 prim     3  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5648 prim     5  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5690 prim     1  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5690 prim     3  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  5690 prim     5  50415353 [reads target 11] (18 indices)              lost to shader discard  (its depth -1.000000, there -1.000000)
+   event  6689 prim    17  50415353 [reads target 3(buffer 2a00)] (96 indices)  lost to depth test  (its depth 0.000215, there 0.004431)
+
+-- target 11638 (1024x256) at 562,109: 2 touches
+   event  1949 prim     6  2D piece [texture 206] (48 indices)                  WROTE   (0.367 0.305 0.312 0.000) -> (0.367 0.305 0.312 0.000)  shader (0.367 0.305 0.312 0.000)  depth -1.000000 -> -1.000000
+   event  1949 prim    14  2D piece [texture 206] (48 indices)                  WROTE   (0.367 0.305 0.312 0.000) -> (0.367 0.305 0.312 0.000)  shader (0.367 0.305 0.312 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11647 (2048x1792) at 1124,764: 3 touches
+   event  2009 prim     0  2D piece [untextured] (6 indices)                    WROTE   (0.000 0.000 0.000 1.000) -> (1.000 1.000 1.000 0.000)  shader (1.000 1.000 1.000 0.000)  depth 0.004431 -> 0.004431
+   event  2013 prim     0  50415353 [untextured] (6 indices)                    WROTE   (1.000 1.000 1.000 0.000) -> (0.000 0.000 0.000 1.000)  shader (1.000 1.000 1.000 1.000)  depth 0.004431 -> 0.004431
+   event  2046 prim     0  50415353 [reads target 4294967045] (6 indices)       WROTE   (0.000 0.000 0.000 1.000) -> (0.000 0.000 0.000 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+
+-- target 11660 (2048x1792) at 1124,764: 1 touches
+   event  2030 prim     0  50415353 [reads target 3(buffer 2a00)] (6 indices)   WROTE   (0.000 0.000 0.000 1.000) -> (0.000 0.000 0.000 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+
+-- target 11669 (768x1536) at 421,655: 8 touches
+   event  2062 prim     0  50415353 [reads target 3(buffer 2a00)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (1.000 1.000 1.000 0.000)  depth -1.000000 -> -1.000000
+   event  2094 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2126 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2158 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2190 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2222 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2254 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2286 prim     0  50415353 [reads target 4294967046] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11678 (768x1536) at 421,655: 7 touches
+   event  2078 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2110 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2142 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2174 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2206 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2238 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  2270 prim     0  50415353 [reads target 4(buffer 3800)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 12875 (2048x1792) at 1124,764: 2 touches
+   event  2318 prim     0  50415353 [reads target 1(buffer 0000)] (6 indices)   WROTE   (1.232 1.100 0.654 0.000) -> (1.319 1.140 0.627 1.000)  shader (1.319 1.140 0.627 1.000)  depth -1.000000 -> -1.000000
+   event  2322 prim     0  50415353 [reads target 5(buffer 3f80)] (6 indices)   WROTE   (1.319 1.140 0.627 1.000) -> (1.319 1.140 0.627 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11689 (256x512) at 140,218: 5 touches
+   event  2354 prim     1  2D piece [untextured] (6 indices)                    WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  6598 prim     0  50415353 [untextured] (6 indices)                    WROTE   (0.000 0.000 0.000 0.000) -> (1.992 1.992 1.992 0.000)  shader (1.992 1.992 1.992 1.000)  depth -1.000000 -> -1.000000
+   event  6602 prim     0  50415353 [untextured] (6 indices)                    WROTE   (1.992 1.992 1.992 0.000) -> (0.000 0.000 0.000 0.000)  shader (1.992 1.992 1.992 1.000)  depth -1.000000 -> -1.000000
+   event  6606 prim     0  50415353 [reads target 3(buffer 2a00)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  6638 prim     0  50415353 [reads target 4294967047] (6 indices)       WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11696 (2048x1792) at 1124,764: 24 touches
+   event  3490 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  3493 prim     7  2D piece [untextured] (66 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  3596 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  3599 prim     3  2D piece [untextured] (30 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  3975 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  3978 prim     5  2D piece [untextured] (42 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4143 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4146 prim     5  2D piece [untextured] (42 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4357 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4360 prim     2  2D piece [untextured] (36 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4571 prim     1  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4574 prim    16  2D piece [untextured] (60 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4782 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  4785 prim     6  2D piece [untextured] (42 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5363 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5366 prim     9  2D piece [untextured] (42 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5521 prim     0  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5524 prim     6  2D piece [untextured] (36 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5587 prim     1  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5590 prim     9  2D piece [untextured] (36 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5665 prim     1  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5668 prim    16  2D piece [untextured] (90 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5962 prim     1  object layer rectangle [untextured] (6 indices)      WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+   event  5965 prim     4  2D piece [untextured] (18 indices)                   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth 0.004431 -> 0.004431
+
+-- target 16340 (256x256) at 140,109: 0 touches
+
+-- target 11731 (256x256) at 140,109: 0 touches
+
+-- target 11738 (256x256) at 140,109: 5 touches
+   event  6166 prim     0  2D piece [texture 259] (6 indices)                   WROTE   (0.008 0.171 1.706 1.000) -> (0.008 0.078 0.664 0.992)  shader (0.008 0.078 0.664 0.992)  depth -1.000000 -> -1.000000
+   event  6169 prim     3  2D piece [texture 259] (24 indices)                  WROTE   (0.008 0.078 0.664 0.992) -> (0.000 0.125 1.320 0.992)  shader (0.000 0.125 1.320 0.992)  depth -1.000000 -> -1.000000
+   event  6173 prim     3  2D piece [texture 259] (24 indices)                  WROTE   (0.000 0.125 1.320 0.992) -> (0.008 0.203 1.886 0.992)  shader (0.008 0.078 0.570 0.992)  depth -1.000000 -> -1.000000
+   event  6176 prim     4  2D piece [texture 260] (48 indices)                  WROTE   (0.008 0.203 1.886 0.992) -> (0.008 0.203 1.886 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+   event  6176 prim    14  2D piece [texture 260] (48 indices)                  WROTE   (0.008 0.203 1.886 1.000) -> (0.008 0.203 1.886 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+
+-- target 11745 (256x256) at 140,109: 5 touches
+   event  6192 prim     0  2D piece [texture 261] (6 indices)                   WROTE   (0.989 0.000 0.047 1.000) -> (0.500 0.000 0.023 0.992)  shader (0.500 0.000 0.023 0.992)  depth -1.000000 -> -1.000000
+   event  6195 prim     3  2D piece [texture 261] (24 indices)                  WROTE   (0.500 0.000 0.023 0.992) -> (0.750 0.000 0.016 0.992)  shader (0.750 0.000 0.016 0.992)  depth -1.000000 -> -1.000000
+   event  6199 prim     3  2D piece [texture 261] (24 indices)                  WROTE   (0.750 0.000 0.016 0.992) -> (1.075 0.000 0.047 0.992)  shader (0.328 0.000 0.031 0.992)  depth -1.000000 -> -1.000000
+   event  6202 prim     4  2D piece [texture 260] (48 indices)                  WROTE   (1.075 0.000 0.047 0.992) -> (1.075 0.000 0.047 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+   event  6202 prim    14  2D piece [texture 260] (48 indices)                  WROTE   (1.075 0.000 0.047 1.000) -> (1.075 0.000 0.047 1.000)  shader (0.000 0.000 0.000 1.000)  depth -1.000000 -> -1.000000
+
+-- target 11715 (512x512) at 281,218: 4 touches
+   event  6538 prim     3  2D piece [texture 246] (24 indices)                  WROTE   (1.617 1.648 1.727 1.000) -> (0.539 0.688 0.602 1.000)  shader (0.539 0.688 0.602 1.000)  depth -1.000000 -> -1.000000
+   event  6542 prim     6  2D piece [texture 247] (24 indices)                  WROTE   (0.539 0.688 0.602 1.000) -> (0.688 0.914 0.805 1.000)  shader (0.148 0.227 0.203 1.000)  depth -1.000000 -> -1.000000
+   event  6546 prim     3  2D piece [texture 253] (24 indices)                  WROTE   (0.688 0.914 0.805 1.000) -> (0.516 0.539 0.578 1.000)  shader (0.516 0.539 0.578 1.000)  depth -1.000000 -> -1.000000
+   event  6550 prim     6  2D piece [texture 254] (24 indices)                  WROTE   (0.516 0.539 0.578 1.000) -> (1.375 1.430 1.523 1.000)  shader (0.859 0.891 0.945 1.000)  depth -1.000000 -> -1.000000
+
+-- target 11756 (1024x1024) at 562,436: 1 touches
+   event  6566 prim     0  50415353 [reads target 1(buffer 0000)] (6 indices)   WROTE   (0.707 0.448 0.393 1.000) -> (1.297 1.111 0.611 1.000)  shader (1.297 1.111 0.611 1.000)  depth -1.000000 -> -1.000000
+
+-- target 12889 (256x512) at 140,218: 1 touches
+   event  6622 prim     0  50415353 [reads target 5(buffer 3f80)] (6 indices)   WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11769 (2048x1792) at 1124,764: 1 touches
+   event  6720 prim     0  2D piece [untextured] (6 indices)                    WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 0.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+-- target 11778 (2048x1792) at 1124,764: 1 touches
+   event  6775 prim     0  50415353 [reads target 1(buffer 0000)] (6 indices)   WROTE   (0.707 0.448 0.393 1.000) -> (1.319 1.140 0.627 1.000)  shader (1.319 1.140 0.627 1.000)  depth -1.000000 -> -1.000000
+
+-- target 2891 (2048x1792) at 1124,764: 1 touches
+   event  6786 prim     0  vkCmdDraw() 3 indices                                WROTE   (1.000 1.000 1.000 1.000) -> (0.663 0.573 0.314 1.000)  shader (0.662 0.572 0.315 1.000)  depth -1.000000 -> -1.000000
+
+-- target 599 (1920x1008) at 1054,430: 2 touches
+   event  6803 prim     0  vkCmdBeginRenderPass(Clear) 0 indices                WROTE   (0.000 0.000 0.000 0.000) -> (0.000 0.000 0.000 1.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+   event  6812 prim     0  vkCmdBlitImage() 0 indices                           WROTE   (0.000 0.000 0.000 1.000) -> (0.588 0.518 0.318 1.000)  shader (0.000 0.000 0.000 0.000)  depth -1.000000 -> -1.000000
+
+== the draws that touched the point
+   event  1174  depth test on AlwaysTrue write on  blend off  reads 3427 1x1
+               2D piece | window space, with a camera | untextured | into 1(buffer 0000) | frame 1216 draws 0-0
+   event  1178  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 1(buffer 0000) | frame 1216 draws 1-2
+   event  1207  depth test on GreaterEqual write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 9815 256x256, 9812 256x1
+               d44a7ac8 | object space, GPU matrices | texture 158 | into 1(buffer 0000) | frame 1216 draws 9-9
+   event  1276  depth test on GreaterEqual write on  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 9875 128x128, 9872 256x1
+               d44a7ad0 | object space, GPU matrices | texture 168 | into 1(buffer 0000) | frame 1216 draws 25-25
+   event  2302  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 1(buffer 0000) | frame 1216 draws 319-319
+   event  2338  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 12875 2048x1792
+               50415353 | window space | reads target 8(buffer 2a40) | into 1(buffer 0000) | frame 1216 draws 322-322
+   event  3579  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 592-594
+   event  3958  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 682-684
+   event  4126  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 719-721
+   event  4340  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 768-770
+   event  4554  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 817-819
+   event  4765  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 865-867
+   event  5346  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 1005-1007
+   event  5504  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 1040-1042
+   event  5570  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 1052-1054
+   event  5648  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 1067-1069
+   event  5690  depth test off AlwaysTrue write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11696 2048x1792
+               50415353 | window space | reads target 11 | into 1(buffer 0000) | frame 1216 draws 1073-1075
+   event  6689  depth test on GreaterEqual write off  blend SrcAlpha*src Add InvSrcAlpha*dst  reads 11647 2048x1792
+               50415353 | window space | reads target 3(buffer 2a00) | into 1(buffer 0000) | frame 1216 draws 1363-1363
+   event  1949  depth test off AlwaysTrue write off  blend off  reads 10248 128x64, 10242 16x1
+               2D piece | window space | texture 206 | into 10 | frame 1216 draws 189-196
+   event  2009  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 3(buffer 2a00) | frame 1216 draws 204-300
+   event  2013  depth test off AlwaysTrue write off  blend One*src ReversedSubtract One*dst  reads 3427 1x1
+               50415353 | window space | untextured | into 3(buffer 2a00) | frame 1216 draws 301-301
+   event  2046  depth test off AlwaysTrue write off  blend off  reads 11660 2048x1792
+               50415353 | window space | reads target 4294967045 | into 3(buffer 2a00) | frame 1216 draws 303-303
+   event  2030  depth test off AlwaysTrue write off  blend off  reads 11647 2048x1792
+               50415353 | window space | reads target 3(buffer 2a00) | into 4294967045 | frame 1216 draws 302-302
+   event  2062  depth test off AlwaysTrue write off  blend SrcAlpha*src Add Zero*dst  reads 11647 2048x1792
+               50415353 | window space | reads target 3(buffer 2a00) | into 4(buffer 3800) | frame 1216 draws 304-304
+   event  2094  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 306-306
+   event  2126  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 308-308
+   event  2158  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 310-310
+   event  2190  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 312-312
+   event  2222  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 314-314
+   event  2254  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 316-316
+   event  2286  depth test off AlwaysTrue write off  blend off  reads 11678 768x1536
+               50415353 | window space | reads target 4294967046 | into 4(buffer 3800) | frame 1216 draws 318-318
+   event  2078  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 305-305
+   event  2110  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 307-307
+   event  2142  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 309-309
+   event  2174  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 311-311
+   event  2206  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 313-313
+   event  2238  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 315-315
+   event  2270  depth test off AlwaysTrue write off  blend off  reads 11669 768x1536
+               50415353 | window space | reads target 4(buffer 3800) | into 4294967046 | frame 1216 draws 317-317
+   event  2318  depth test off AlwaysTrue write off  blend off  reads 5876 2048x1792
+               50415353 | window space | reads target 1(buffer 0000) | into 8(buffer 2a40) | frame 1216 draws 320-320
+   event  2322  depth test off AlwaysTrue write off  blend off  reads 11689 256x512
+               50415353 | window space | reads target 5(buffer 3f80) | into 8(buffer 2a40) | frame 1216 draws 321-321
+   event  2354  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 5(buffer 3f80) | frame 1216 draws 323-323
+   event  6598  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               50415353 | window space | untextured | into 5(buffer 3f80) | frame 1216 draws 1335-1335
+   event  6602  depth test off AlwaysTrue write off  blend DstAlpha*src Add Zero*dst  reads 3427 1x1
+               50415353 | window space | untextured | into 5(buffer 3f80) | frame 1216 draws 1336-1336
+   event  6606  depth test off AlwaysTrue write off  blend One*src Add One*dst  reads 11647 2048x1792
+               50415353 | window space | reads target 3(buffer 2a00) | into 5(buffer 3f80) | frame 1216 draws 1337-1337
+   event  6638  depth test off AlwaysTrue write off  blend off  reads 12889 256x512
+               50415353 | window space | reads target 4294967047 | into 5(buffer 3f80) | frame 1216 draws 1339-1339
+   event  3490  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 573-573
+   event  3493  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 574-574
+   event  3596  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 595-595
+   event  3599  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 596-596
+   event  3975  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 685-685
+   event  3978  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 686-686
+   event  4143  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 722-722
+   event  4146  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 723-723
+   event  4357  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 771-771
+   event  4360  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 772-772
+   event  4571  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 820-820
+   event  4574  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 821-821
+   event  4782  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 868-868
+   event  4785  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               2D piece | window space | untextured | into 11 | frame 1216 draws 869-869
+   event  5363  depth test off AlwaysTrue write off  blend off  reads 3427 1x1
+               object layer rectangle | window space | untextured | into 11 | frame 1216 draws 1008-1008
+
+tex_N.png: the textures those draws read, as they were at the draw.
