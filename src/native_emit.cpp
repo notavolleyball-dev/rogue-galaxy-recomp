@@ -716,8 +716,18 @@ void syncGlobals()
     g_listRead = cursor;
 }
 
+// Records and streams made without the view (0-19), camera (24-28) or
+// lights (30-51) known, for [model-emit].
+std::atomic<uint64_t> g_noView{0u}, g_noCamera{0u}, g_noLights{0u};
 Globals currentGlobals()
 {
+    constexpr uint64_t view = (1ull << 20) - 1u, camera = ((1ull << 5) - 1u) << 24, lights = ((1ull << 22) - 1u) << 30;
+    if ((g_globals.known & view) != view)
+        ++g_noView;
+    if ((g_globals.known & camera) != camera)
+        ++g_noCamera;
+    if ((g_globals.known & lights) != lights)
+        ++g_noLights;
     return g_globals;
 }
 
@@ -754,7 +764,7 @@ void endCapture(const CaptureStart &start)
     }
     applyDrawEnv();
     stream.regs = rg::drawstate::game().registers();
-    stream.globals = g_globals;
+    stream.globals = currentGlobals();
     // The stretch's own view, camera and light packets (it replays them).
     applyGlobals(stream.bytes);
     // The GS state it sets, on the game thread's as where it was written.
@@ -1109,11 +1119,13 @@ void report()
         std::fprintf(stderr,
                      "[model-emit] model draw calls drawn from the game's structures %llu, written by the game %llu "
                      "(emit calls by why:%s), records not found %llu; emitters' output captured %llu (not %llu); "
-                     "view, camera and light packets taken out of the list %llu\n",
+                     "view, camera and light packets taken out of the list %llu (records without them known: view %llu, "
+                     "camera %llu, lights %llu)\n",
                      (unsigned long long)n, (unsigned long long)g_writtenCalls.load(),
                      why.empty() ? " none" : why.c_str(), (unsigned long long)g_unknown.load(),
                      (unsigned long long)g_captured.load(), (unsigned long long)g_captureFailed.load(),
-                     (unsigned long long)g_globalsTaken.load());
+                     (unsigned long long)g_globalsTaken.load(), (unsigned long long)g_noView.load(),
+                     (unsigned long long)g_noCamera.load(), (unsigned long long)g_noLights.load());
     }
 }
 } // namespace

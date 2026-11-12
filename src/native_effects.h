@@ -123,6 +123,8 @@ struct Box
 bool compositeBegin(const Box &box);
 // How many composites' heads began a layer so far (game thread's count).
 uint64_t compositesBegun();
+// The composite in progress has begun its layer.
+bool compositeBegun();
 bool takeCompositeBox(uint32_t unit, Box &box);
 
 

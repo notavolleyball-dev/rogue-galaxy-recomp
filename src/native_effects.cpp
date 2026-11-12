@@ -1590,6 +1590,10 @@ bool inCompositeCall()
 }
 
 std::atomic<uint64_t> g_compositesBegun{0u};
+bool compositeBegun()
+{
+    return g_composite.unit != 0u && g_composite.begun;
+}
 uint64_t compositesBegun()
 {
     return g_compositesBegun.load();

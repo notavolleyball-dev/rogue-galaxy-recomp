@@ -338,19 +338,21 @@ uint32_t keepBlock(Block &block)
     return unit;
 }
 
-// A composite head's clear: the box its untextured sprites cover in the
-// buffer they draw into (all one, CT32), in pixels.
+// A composite head's clear (ModelDrawOffscreenComposite's one block before
+// its parts: sprites over the parts' bounds, padded, into the object's
+// texture): the box its pieces cover in the buffer they draw into, in
+// pixels. False, said for the first few, when no piece has a frame.
 bool clearBox(const Block &block, rg::nativefx::Box &box)
 {
     bool found = false;
     for (const KeptPiece &piece : block.pieces)
     {
         const rg::DrawState &st = piece.state;
-        if (st.prim.tme || st.prim.type != rg::kPrimSprite || piece.mesh.vertices.empty())
+        if (piece.mesh.vertices.empty())
             continue;
         const uint32_t base = st.context.frame.fbp << 5, fbw = st.context.frame.fbw;
-        if (st.context.frame.psm != 0u || fbw == 0u || (found && (base != box.base || fbw != box.fbw)))
-            return false;
+        if (fbw == 0u || (found && (base != box.base || fbw != box.fbw)))
+            continue;
         const int32_t ox = st.context.xyoffset.ofx, oy = st.context.xyoffset.ofy;
         for (const rg::NativeMesh::Vertex &v : piece.mesh.vertices)
         {
@@ -365,6 +367,18 @@ bool clearBox(const Block &block, rg::nativefx::Box &box)
             box.y1 = std::max(box.y1, y1);
             found = true;
         }
+    }
+    static int told = 0;
+    if (!found && told < 4)
+    {
+        ++told;
+        const rg::DrawState *st = block.pieces.empty() ? nullptr : &block.pieces[0].state;
+        std::fprintf(stderr,
+                     "[composite] a head's first block gave no box: %zu pieces, %zu writes; first piece prim %u tme "
+                     "%u frame %x fbw %u psm %u\n",
+                     block.pieces.size(), block.writes.size(), st ? unsigned(st->prim.type) : 0u,
+                     st ? unsigned(st->prim.tme) : 0u, st ? st->context.frame.fbp : 0u,
+                     st ? st->context.frame.fbw : 0u, st ? unsigned(st->context.frame.psm) : 0u);
     }
     return found;
 }
@@ -400,9 +414,10 @@ void makeSkipped()
     }
     if (block.pieces.empty() && block.writes.empty())
         return;
-    // A composite's head: its layer begins at its clear.
+    // A composite's head: its layer begins at its clear (its first block).
     rg::nativefx::Box box;
-    if (rg::nativefx::inCompositeCall() && !rg::nativefx::compositeTail() && clearBox(block, box))
+    if (rg::nativefx::inCompositeCall() && !rg::nativefx::compositeTail() && !rg::nativefx::compositeBegun() &&
+        clearBox(block, box))
         rg::nativefx::compositeBegin(box);
     const uint32_t unit = keepBlock(block);
     if (rg::nativefx::writeMarker(unit))
