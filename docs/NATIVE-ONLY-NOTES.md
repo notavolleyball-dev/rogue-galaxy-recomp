@@ -546,7 +546,7 @@ Runtime `MeshMaterial` (0x50 bytes; one per material per model; built at
 load by `ModelBuildMeshes_152380`): `+0x00` packet EE address (& 0x0FFFFFFF),
 `+0x04` s16 its qwc, `+0x06` u8 per-frame color re-upload flag, `+0x07` the
 desc's +0x52, `+0x08` PRMODE bits, `+0x0A` type, `+0x0C` texture node,
-`+0x10` name, `+0x14` GsEnv (TEST / ALPHA / ZBUF / FBA / FRAME), `+0x18/+0x1A`
+`+0x10` name, `+0x14` **a pointer to** the GsEnv (TEST / ALPHA / ZBUF / FBA / FRAME; DrawListWriteTexEnvPacket reads `*(t+0x14)`), `+0x18/+0x1A`
 program variant indices, `+0x1C` flags, `+0x20` color, `+0x30` param.
 
 The material packet is built at load and only REF'd later:
@@ -2274,7 +2274,7 @@ record {
   q86 = *(t->pkt+0x50) (vertex GIF tag; NLOOP from TOP.z);  q87 = *(t->pkt+0x60) {PRMODE bits, flags, depth scale, 0};  q88 = 0
   // --- per group: GS state (section 3) --------------------------------------------------------
   env  = *(dctx+0x270)
-  ALPHA/TEST/FBA = GsEnv t+0x14: +0x10 / +0x20 / +0x40
+  ALPHA/TEST/FBA = GsEnv `*(t+0x14)` (a pointer): +0x10 / +0x20 / +0x40
   ZBUF  = (t+0x14)+0x30 with ZBP,PSM replaced by env+0x90 (ZMSK kept from the material)
   FRAME = env+0x80, but FBMSK (high word) kept from (t+0x14)+0x50 when (t+0x14)+0x5C != -1
   TEX0  = texnode+0x38 now (texnode = t+0xC); TEX1/CLAMP = t->pkt+0xA0 / +0xB0 (load-time copies of texnode+0x40/+0x48)

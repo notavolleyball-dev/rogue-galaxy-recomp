@@ -287,7 +287,12 @@ void predict(uint32_t dctx, uint32_t req, Call &call, bool caster = false, bool 
             out.q86 = readQuad(pkt + 0x50u);
             out.q87 = readQuad(pkt + 0x60u);
             out.programKnown = programOf(dctx, t, itemFlags, out.program, resident);
-            const uint32_t env = t + 0x14u;
+            // The material's GsEnv: a pointer at t+0x14 (DrawListWriteTexEnvPacket
+            // reads `*(t + 0x14)`; none: no texenv packet, the state left as
+            // it was, so not known here).
+            const uint32_t env = read32(t + 0x14u);
+            if (env == 0u)
+                continue;
             out.alpha = read64(env + 0x10u);
             out.test = read64(env + 0x20u);
             out.zmask = ((read64(env + 0x30u) >> 32) & 1u) != 0u;
