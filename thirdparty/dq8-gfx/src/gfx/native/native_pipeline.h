@@ -71,7 +71,8 @@ struct ModelVertex
     float corner, parity;
 };
 static_assert(sizeof(ModelVertex) == 176u, "tightly packed");
-constexpr uint32_t kModelVertices = 1u << 18; // 44 MiB
+// A side of the model chunks' buffer (two: Renderer::retain). 88 MiB.
+constexpr uint32_t kModelVertices = 1u << 19;
 uint32_t modelTriangleCount(size_t count, bool list);
 void modelTriangles(const std::vector<ModelInput> &in, bool list, ModelVertex *out);
 // An outline draw's (MeshDraw::modelEdge): 24 vertices an edge, its four
@@ -406,6 +407,7 @@ private:
         uint32_t first = 0, count = 0; // vertices
         bool model = false;            // a model chunk's, in m_modelBuffer (ModelVertex)
         bool transient = false;        // this frame's alone, in m_transientBuffer
+        uint8_t side = 0;              // which of m_modelBuffers
     };
     // The frame mesh `n`'s: a retained mesh's or model chunk's, or a model
     // chunk drawn this once (m_transient).
@@ -428,10 +430,14 @@ private:
     // Model chunks (M5): their triangles as ModelVertex in their own buffer,
     // drawn by native_model.vert; each draw's constants (ModelRow) and its
     // bones' matrices in two storage buffers made each frame.
-    SDL_GPUBuffer *m_modelBuffer = nullptr;
+    // Two sides: a full one is left as it is (the draws already made
+    // against its ids still find them) and the other, emptied, takes the
+    // new epoch's.
+    SDL_GPUBuffer *m_modelBuffers[2] = {nullptr, nullptr};
+    uint32_t m_modelSide = 0;
     SDL_GPUShader *m_modelVertex = nullptr;
-    uint32_t m_modelUsed = 0, m_modelUploaded = 0;
-    std::vector<uint8_t> m_modelPending;
+    uint32_t m_modelUsed[2] = {0, 0}, m_modelUploaded[2] = {0, 0};
+    std::vector<uint8_t> m_modelPending[2];
     std::vector<ModelRow> m_modelRows;  // the frame's
     std::vector<float> m_paletteData;   // the frame's, 16 floats a bone
     SDL_GPUBuffer *m_modelRowBuffer = nullptr, *m_paletteBuffer = nullptr;

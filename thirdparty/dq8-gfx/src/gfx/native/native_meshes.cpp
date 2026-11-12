@@ -355,21 +355,24 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
     static_assert(sizeof(GpuDraw) == 464u, "std430, as the shaders read it");
     // The model chunks taken in since the last frame drawn, behind those
     // already in their buffer.
-    if (!m_modelBuffer)
+    for (uint32_t side = 0; side < 2u; ++side)
     {
-        SDL_GPUBufferCreateInfo info{};
-        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-        info.size = kModelVertices * sizeof(ModelVertex);
-        m_modelBuffer = SDL_CreateGPUBuffer(device, &info);
-        if (!m_modelBuffer)
+        if (!m_modelBuffers[side])
         {
-            error = std::string("SDL_CreateGPUBuffer(model chunks): ") + SDL_GetError();
-            return false;
+            SDL_GPUBufferCreateInfo info{};
+            info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+            info.size = kModelVertices * sizeof(ModelVertex);
+            m_modelBuffers[side] = SDL_CreateGPUBuffer(device, &info);
+            if (!m_modelBuffers[side])
+            {
+                error = std::string("SDL_CreateGPUBuffer(model chunks): ") + SDL_GetError();
+                return false;
+            }
         }
-    }
-    if (!m_modelPending.empty())
-    {
-        const uint32_t bytes = static_cast<uint32_t>(m_modelPending.size());
+        std::vector<uint8_t> &pending = m_modelPending[side];
+        if (pending.empty())
+            continue;
+        const uint32_t bytes = static_cast<uint32_t>(pending.size());
         SDL_GPUTransferBufferCreateInfo info{};
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         info.size = bytes;
@@ -380,16 +383,17 @@ bool Renderer::uploadMeshes(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command
             error = std::string("SDL_CreateGPUTransferBuffer(model chunks): ") + SDL_GetError();
             return false;
         }
-        std::memcpy(mapped, m_modelPending.data(), bytes);
+        std::memcpy(mapped, pending.data(), bytes);
         SDL_UnmapGPUTransferBuffer(device, transfer);
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(commands);
         const SDL_GPUTransferBufferLocation source{transfer, 0u};
-        const SDL_GPUBufferRegion destination{m_modelBuffer, m_modelUploaded * uint32_t(sizeof(ModelVertex)), bytes};
+        const SDL_GPUBufferRegion destination{m_modelBuffers[side],
+                                              m_modelUploaded[side] * uint32_t(sizeof(ModelVertex)), bytes};
         SDL_UploadToGPUBuffer(copy, &source, &destination, false);
         SDL_EndGPUCopyPass(copy);
         SDL_ReleaseGPUTransferBuffer(device, transfer);
-        m_modelUploaded += bytes / uint32_t(sizeof(ModelVertex));
-        m_modelPending.clear();
+        m_modelUploaded[side] += bytes / uint32_t(sizeof(ModelVertex));
+        pending.clear();
     }
     // The model chunks drawn this once.
     if (!m_transientVertices.empty())
@@ -910,7 +914,7 @@ void Renderer::recordPass(SDL_GPUCommandBuffer *commands, SDL_GPURenderPass *pas
         }
         if (retained && retained->model)
         {
-            const SDL_GPUBufferBinding modelBinding{retained->transient ? m_transientBuffer : m_modelBuffer, 0u};
+            const SDL_GPUBufferBinding modelBinding{retained->transient ? m_transientBuffer : m_modelBuffers[retained->side], 0u};
             SDL_BindGPUVertexBuffers(pass, 0, &modelBinding, 1);
             SDL_GPUBuffer *storage[3] = {m_drawBuffer, m_modelRowBuffer, m_paletteBuffer};
             SDL_BindGPUVertexStorageBuffers(pass, 0, storage, 3);
@@ -1226,14 +1230,18 @@ void Renderer::releaseMeshes(SDL_GPUDevice *device)
         SDL_ReleaseGPUShader(device, m_meshVertex);
     if (m_modelVertex)
         SDL_ReleaseGPUShader(device, m_modelVertex);
-    for (SDL_GPUBuffer *b : {m_modelBuffer, m_modelRowBuffer, m_paletteBuffer, m_transientBuffer})
+    for (SDL_GPUBuffer *b : {m_modelBuffers[0], m_modelBuffers[1], m_modelRowBuffer, m_paletteBuffer, m_transientBuffer})
         if (b)
             SDL_ReleaseGPUBuffer(device, b);
     m_modelVertex = nullptr;
-    m_modelBuffer = m_modelRowBuffer = m_paletteBuffer = m_transientBuffer = nullptr;
+    m_modelBuffers[0] = m_modelBuffers[1] = m_modelRowBuffer = m_paletteBuffer = m_transientBuffer = nullptr;
     m_modelRowCapacity = m_paletteCapacity = m_transientCapacity = 0u;
-    m_modelPending.clear();
-    m_modelUsed = m_modelUploaded = 0u;
+    for (uint32_t side = 0; side < 2u; ++side)
+    {
+        m_modelPending[side].clear();
+        m_modelUsed[side] = m_modelUploaded[side] = 0u;
+    }
+    m_modelSide = 0u;
     // What the buffer held is gone with it: the producer starts again.
     m_retained.clear();
     retainedReset();

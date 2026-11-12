@@ -407,21 +407,29 @@ void Renderer::retain(const RetainedMesh &d)
         // corners' positions, bones and weights, as the static ones below.
         const uint32_t count = static_cast<uint32_t>(d.model.size());
         const uint32_t triangles = d.list ? count / 3u : (count >= 2u ? count - 2u : 0u);
-        if (m_modelUsed + triangles * 3u > kModelVertices)
+        if (m_modelUsed[m_modelSide] + triangles * 3u > kModelVertices)
         {
-            m_retained.clear();
-            m_modelPending.clear();
-            m_modelUsed = m_modelUploaded = 0u;
+            // This side is full: a new epoch (the producer defines its
+            // chunks again, under new ids) in the other side, emptied of
+            // the epoch before this one. This side's ids stay: the draws
+            // made before the producer sees the epoch are of them.
+            m_modelSide ^= 1u;
+            const uint8_t side = static_cast<uint8_t>(m_modelSide);
+            std::erase_if(m_retained, [&](const auto &e) { return e.second.model && e.second.side == side; });
+            m_modelPending[side].clear();
+            m_modelUsed[side] = m_modelUploaded[side] = 0u;
             ++m_retainedResets;
             g_retainedEpoch.fetch_add(1u, std::memory_order_relaxed);
         }
         if (triangles == 0u || triangles * 3u > kModelVertices)
             return;
-        const size_t at = m_modelPending.size();
-        m_modelPending.resize(at + size_t(triangles) * 3u * sizeof(ModelVertex));
-        modelTriangles(d.model, d.list, reinterpret_cast<ModelVertex *>(m_modelPending.data() + at));
-        m_retained[d.id] = {m_modelUsed, triangles * 3u, true};
-        m_modelUsed += triangles * 3u;
+        const uint8_t side = static_cast<uint8_t>(m_modelSide);
+        std::vector<uint8_t> &pending = m_modelPending[side];
+        const size_t at = pending.size();
+        pending.resize(at + size_t(triangles) * 3u * sizeof(ModelVertex));
+        modelTriangles(d.model, d.list, reinterpret_cast<ModelVertex *>(pending.data() + at));
+        m_retained[d.id] = {m_modelUsed[side], triangles * 3u, true, false, side};
+        m_modelUsed[side] += triangles * 3u;
         ++m_modelDefined;
         return;
     }
@@ -1230,7 +1238,7 @@ std::string Renderer::statsLine()
             std::to_string(m_retainedDefined) + ", draws so far " + std::to_string(m_retainedDrawn) +
             ", of an id not held " + std::to_string(m_retainedMissing) + ", resets " +
             std::to_string(m_retainedResets) + ") | model chunks: defined so far " + std::to_string(m_modelDefined) +
-            " (" + std::to_string(m_modelUsed) + " vertices), draws " + d(m_modelDrawn, m_modelDrawnReported) +
+            " (" + std::to_string(m_modelUsed[m_modelSide]) + " vertices in this side), draws " + d(m_modelDrawn, m_modelDrawnReported) +
             " (drawn once, inputs with them: " + d(m_modelTransient, m_modelTransientReported) + ")" +
             " | clears of part of a target (not drawn, so far) " +
             std::to_string(m_clearsRefused) + " | passes drawn (so far) " + std::to_string(m_passesDrawn) +
