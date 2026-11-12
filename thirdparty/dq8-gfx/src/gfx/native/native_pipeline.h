@@ -93,6 +93,9 @@ void volumeVertices(const std::vector<ModelInput> &in, ModelVertex *out);
 // filled): the ids the producer handed out before are no longer drawn, and
 // it defines its meshes again under new ones. Any thread.
 uint64_t retainedEpoch();
+// RG_FLASH_WATCH=1 (Renderer's flash watch).
+bool watchOn();
+uint64_t watchHash(const void *data, size_t bytes, uint64_t h = 1469598103934665603ull);
 void retainedReset(); // the renderer's own: a new epoch
 
 // Textures the renderer let go of (its memory budget): a producer that sends
@@ -408,6 +411,7 @@ private:
         bool model = false;            // a model chunk's, in m_modelBuffer (ModelVertex)
         bool transient = false;        // this frame's alone, in m_transientBuffer
         uint8_t side = 0;              // which of m_modelBuffers
+        uint64_t hash = 0;             // of its inputs (the flash watch's)
     };
     // The frame mesh `n`'s: a retained mesh's or model chunk's, or a model
     // chunk drawn this once (m_transient).
@@ -426,6 +430,34 @@ private:
         return it != m_retained.end() ? &it->second : nullptr;
     }
     std::unordered_map<Id, Retained> m_retained;
+    // RG_FLASH_WATCH=1 (a diagnostic): each drawn frame's picture, small,
+    // and what its draws were; a frame whose picture differs from both its
+    // neighbours where they agree is reported with the draws only it has
+    // or lacks (native_pipeline.cpp, "the flash watch").
+    struct WatchSig
+    {
+        uint64_t geometry = 0, pose = 0;
+        uint32_t target = 0, state = 0, source = 0;
+        Id texture = 0, palette = 0, sourceTarget = 0;
+    };
+    struct WatchFrame
+    {
+        uint64_t frame = 0;
+        std::vector<WatchSig> sigs;
+        std::vector<uint8_t> thumb; // luminance, kWatchW x kWatchH
+        float camera[16] = {};
+        uint32_t transient = 0, clears = 0;
+        SDL_GPUTransferBuffer *download = nullptr;
+        bool judged = false;
+    };
+    static constexpr uint32_t kWatchW = 64u, kWatchH = 56u;
+    std::vector<WatchFrame> m_watch;
+    WatchFrame m_watchPlanned;
+    std::vector<SDL_GPUTexture *> m_watchMips;
+    uint32_t m_watchMipW = 0, m_watchMipH = 0, m_watchReports = 0;
+    void watchPlan();
+    void watchShot(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands);
+    void watchJudge(SDL_GPUDevice *device);
     uint64_t m_retainedDefined = 0, m_retainedDrawn = 0, m_retainedMissing = 0, m_retainedResets = 0;
     // Model chunks (M5): their triangles as ModelVertex in their own buffer,
     // drawn by native_model.vert; each draw's constants (ModelRow) and its

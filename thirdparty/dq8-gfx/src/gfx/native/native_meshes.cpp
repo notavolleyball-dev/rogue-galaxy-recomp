@@ -1005,6 +1005,8 @@ bool Renderer::drawFrame(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, 
         m_transient[n] = {static_cast<uint32_t>(at), triangles * 3u, true, true};
         ++m_modelTransient;
     }
+    if (watchOn())
+        watchPlan();
     m_passPlans.clear();
     // The Clear records before the draw `upTo` (and at the end, all), each
     // a pass of its own, in order with the draws.

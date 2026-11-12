@@ -396,6 +396,28 @@ void volumeVertices(const std::vector<ModelInput> &in, ModelVertex *out)
     }
 }
 
+// The flash watch (RG_FLASH_WATCH=1; Renderer::watchPlan, watchShot,
+// watchJudge below).
+bool watchOn()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("RG_FLASH_WATCH");
+        const bool set = v && *v && *v != '0';
+        if (set)
+            std::fprintf(stderr, "[flash] watching: every drawn frame's picture is read back (slower)\n");
+        return set;
+    }();
+    return on;
+}
+
+uint64_t watchHash(const void *data, size_t bytes, uint64_t h)
+{
+    const auto *p = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < bytes; ++i)
+        h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
 // A defining draw: its triangles into the buffer's pending part, under its
 // id. Taken at the record, not at the frame: a frame may be dropped, its
 // definitions may not.
@@ -428,7 +450,8 @@ void Renderer::retain(const RetainedMesh &d)
         const size_t at = pending.size();
         pending.resize(at + size_t(triangles) * 3u * sizeof(ModelVertex));
         modelTriangles(d.model, d.list, reinterpret_cast<ModelVertex *>(pending.data() + at));
-        m_retained[d.id] = {m_modelUsed[side], triangles * 3u, true, false, side};
+        m_retained[d.id] = {m_modelUsed[side], triangles * 3u, true, false, side,
+                            watchOn() ? watchHash(d.model.data(), d.model.size() * sizeof(ModelInput)) : 0u};
         m_modelUsed[side] += triangles * 3u;
         ++m_modelDefined;
         return;
@@ -1101,7 +1124,289 @@ bool Renderer::render(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, uin
             drawView(commands, pass);
         SDL_EndGPURenderPass(pass);
     }
-    return shown(true);
+    const bool ok = shown(true);
+    if (ok && drawn && watchOn())
+        watchShot(device, commands);
+    return ok;
+}
+
+// The flash watch. watchPlan: the frame about to be drawn, as its draws'
+// signatures (what is drawn: the geometry's hash; with what: the texture,
+// the palette, a target read, the state; where: the target; `pose`: the
+// model matrix).
+void Renderer::watchPlan()
+{
+    WatchFrame &f = m_watchPlanned;
+    f = WatchFrame{};
+    f.frame = m_meshCounts.frames;
+    f.clears = static_cast<uint32_t>(m_frameClears.size());
+    f.sigs.reserve(m_frameMeshes.size());
+    bool haveCamera = false;
+    for (size_t n = 0; n < m_frameMeshes.size(); ++n)
+    {
+        const MeshDraw &d = m_frameMeshes[n];
+        const Material &m = d.material;
+        WatchSig g;
+        g.target = d.target;
+        g.source = d.source;
+        g.texture = m.texture;
+        g.palette = m.palette;
+        g.sourceTarget = m.sourceTarget;
+        g.state = (m.blending ? 1u : 0u) | (uint32_t(m.srcFactor) & 15u) << 1 | (uint32_t(m.dstFactor) & 15u) << 5 |
+                  (uint32_t(m.blendOp) & 3u) << 9 | (uint32_t(m.alphaTest) & 15u) << 11 |
+                  (uint32_t(m.depthTest) & 15u) << 15 | (m.depthWrite ? 1u : 0u) << 19 |
+                  (uint32_t(m.colorWrite) & 15u) << 20 | (m.known ? 1u : 0u) << 24 |
+                  (uint32_t(m.function) & 3u) << 25 | (m.textureAlpha ? 1u : 0u) << 27 | (d.hasModel ? 1u : 0u) << 28 |
+                  (d.depthTarget != 0u ? 1u : 0u) << 29;
+        if (d.retained != 0u)
+        {
+            const Retained *r = retainedOf(d);
+            g.geometry = r ? r->hash : 1u; // 1: of an id not held
+        }
+        else if (!d.modelInputs.empty())
+        {
+            g.geometry = watchHash(d.modelInputs.data(), d.modelInputs.size() * sizeof(ModelInput));
+            ++f.transient;
+        }
+        else
+            g.geometry = 0x2D000000ull | d.indices.size(); // a 2D piece: its size
+        g.pose = d.hasModel ? watchHash(d.model, sizeof(d.model)) : 0u;
+        if (!haveCamera && d.hasModel && d.target == m_sceneTarget)
+            if (const auto c = m_cameras.find(d.camera); c != m_cameras.end())
+            {
+                std::memcpy(f.camera, c->second.view, sizeof(f.camera));
+                haveCamera = true;
+            }
+        f.sigs.push_back(g);
+    }
+}
+
+// watchShot: the picture just resolved, halved down to kWatchW x kWatchH and
+// downloaded (read two frames on, when the GPU has surely made it).
+void Renderer::watchShot(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands)
+{
+    watchJudge(device);
+    if (!m_output || m_watchPlanned.frame == 0u)
+        return;
+    if (m_watchMips.empty() || m_watchMipW != m_outputWidth || m_watchMipH != m_outputHeight)
+    {
+        for (SDL_GPUTexture *t : m_watchMips)
+            SDL_ReleaseGPUTexture(device, t);
+        m_watchMips.clear();
+        m_watchMipW = m_outputWidth;
+        m_watchMipH = m_outputHeight;
+        uint32_t w = m_outputWidth, h = m_outputHeight;
+        while (w > kWatchW || h > kWatchH)
+        {
+            w = std::max(w / 2u, kWatchW);
+            h = std::max(h / 2u, kWatchH);
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = w;
+            info.height = h;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            SDL_GPUTexture *t = SDL_CreateGPUTexture(device, &info);
+            if (!t)
+                break;
+            m_watchMips.push_back(t);
+        }
+    }
+    if (m_watchMips.empty())
+        return;
+    SDL_GPUTexture *from = m_output;
+    uint32_t w = m_outputWidth, h = m_outputHeight;
+    for (SDL_GPUTexture *to : m_watchMips)
+    {
+        const uint32_t tw = std::max(w / 2u, kWatchW), th = std::max(h / 2u, kWatchH);
+        SDL_GPUBlitInfo blit{};
+        blit.source.texture = from;
+        blit.source.w = w;
+        blit.source.h = h;
+        blit.destination.texture = to;
+        blit.destination.w = tw;
+        blit.destination.h = th;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = SDL_GPU_FILTER_LINEAR;
+        SDL_BlitGPUTexture(commands, &blit);
+        from = to;
+        w = tw;
+        h = th;
+    }
+    if (w != kWatchW || h != kWatchH)
+        return;
+    SDL_GPUTransferBufferCreateInfo info{};
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    info.size = kWatchW * kWatchH * 4u;
+    WatchFrame f = std::move(m_watchPlanned);
+    m_watchPlanned = WatchFrame{};
+    f.download = SDL_CreateGPUTransferBuffer(device, &info);
+    if (!f.download)
+        return;
+    if (SDL_GPUCopyPass *pass = SDL_BeginGPUCopyPass(commands))
+    {
+        SDL_GPUTextureRegion region{};
+        region.texture = from;
+        region.w = kWatchW;
+        region.h = kWatchH;
+        region.d = 1u;
+        SDL_GPUTextureTransferInfo destination{};
+        destination.transfer_buffer = f.download;
+        destination.pixels_per_row = kWatchW;
+        destination.rows_per_layer = kWatchH;
+        SDL_DownloadFromGPUTexture(pass, &region, &destination);
+        SDL_EndGPUCopyPass(pass);
+    }
+    m_watch.push_back(std::move(f));
+}
+
+// watchJudge: the pictures two frames old read; then each frame B between
+// two read ones A and C: the cells where B is far from both and they are
+// near each other. Enough of them is a flash: reported, with the draws B
+// alone has or lacks (by what, with what, where), and the three pictures
+// written side by side.
+void Renderer::watchJudge(SDL_GPUDevice *device)
+{
+    const size_t cells = size_t(kWatchW) * kWatchH;
+    for (size_t i = 0; i + 2u < m_watch.size(); ++i)
+    {
+        WatchFrame &f = m_watch[i];
+        if (!f.download)
+            continue;
+        if (const auto *p = static_cast<const uint8_t *>(SDL_MapGPUTransferBuffer(device, f.download, false)))
+        {
+            f.thumb.resize(cells * 4u);
+            std::memcpy(f.thumb.data(), p, cells * 4u);
+            SDL_UnmapGPUTransferBuffer(device, f.download);
+        }
+        SDL_ReleaseGPUTransferBuffer(device, f.download);
+        f.download = nullptr;
+    }
+    const auto luma = [](const WatchFrame &f, size_t cell) {
+        const uint8_t *p = f.thumb.data() + cell * 4u;
+        return (int(p[0]) * 2 + int(p[1]) * 5 + int(p[2])) / 8;
+    };
+    for (size_t i = 1; i + 1u < m_watch.size(); ++i)
+    {
+        const WatchFrame &a = m_watch[i - 1u], &c = m_watch[i + 1u];
+        WatchFrame &b = m_watch[i];
+        if (b.judged || a.thumb.empty() || b.thumb.empty() || c.thumb.empty())
+            continue;
+        b.judged = true;
+        uint32_t spiked = 0u, x0 = kWatchW, y0 = kWatchH, x1 = 0u, y1 = 0u;
+        uint64_t jump = 0u;
+        for (size_t cell = 0; cell < cells; ++cell)
+        {
+            const int la = luma(a, cell), lb = luma(b, cell), lc = luma(c, cell);
+            const int away = std::min(std::abs(lb - la), std::abs(lb - lc));
+            if (away < 20 || std::abs(la - lc) * 3 > away)
+                continue;
+            ++spiked;
+            jump += uint64_t(away);
+            const uint32_t x = uint32_t(cell % kWatchW), y = uint32_t(cell / kWatchW);
+            x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+        }
+        if (spiked < 6u || m_watchReports >= 60u)
+            continue;
+        ++m_watchReports;
+        std::fprintf(stderr,
+                     "[flash] frame %llu (between %llu and %llu): %u of %zu cells jumped (mean %llu of 255), in "
+                     "%.2f,%.2f-%.2f,%.2f of the picture | draws %zu / %zu / %zu, drawn once %u / %u / %u, clears %u / "
+                     "%u / %u\n",
+                     (unsigned long long)b.frame, (unsigned long long)a.frame, (unsigned long long)c.frame, spiked,
+                     cells, (unsigned long long)(jump / spiked), float(x0) / kWatchW, float(y0) / kWatchH,
+                     float(x1 + 1u) / kWatchW, float(y1 + 1u) / kWatchH, a.sigs.size(), b.sigs.size(), c.sigs.size(),
+                     a.transient, b.transient, c.transient, a.clears, b.clears, c.clears);
+        for (const WatchFrame *f : {&a, static_cast<const WatchFrame *>(&b), &c})
+            std::fprintf(stderr, "[flash]   camera of %llu: %.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f | %.3f %.3f %.3f\n",
+                         (unsigned long long)f->frame, f->camera[0], f->camera[1], f->camera[2], f->camera[4],
+                         f->camera[5], f->camera[6], f->camera[8], f->camera[9], f->camera[10], f->camera[12],
+                         f->camera[13], f->camera[14]);
+        // The draws by what, with what and where; then with the pose too.
+        const auto keyOf = [](const WatchSig &g, bool pose) {
+            uint64_t h = watchHash(&g.geometry, sizeof(g.geometry));
+            h = watchHash(&g.target, sizeof(g.target), h);
+            h = watchHash(&g.state, sizeof(g.state), h);
+            h = watchHash(&g.texture, sizeof(g.texture), h);
+            h = watchHash(&g.palette, sizeof(g.palette), h);
+            h = watchHash(&g.sourceTarget, sizeof(g.sourceTarget), h);
+            if (pose)
+                h = watchHash(&g.pose, sizeof(g.pose), h);
+            return h;
+        };
+        for (const bool pose : {false, true})
+        {
+            struct Tally
+            {
+                int a = 0, b = 0, c = 0;
+                WatchSig sig;
+            };
+            std::unordered_map<uint64_t, Tally> tally;
+            for (const WatchSig &g : a.sigs)
+            {
+                Tally &t = tally[keyOf(g, pose)];
+                ++t.a;
+                t.sig = g;
+            }
+            for (const WatchSig &g : b.sigs)
+            {
+                Tally &t = tally[keyOf(g, pose)];
+                ++t.b;
+                t.sig = g;
+            }
+            for (const WatchSig &g : c.sigs)
+            {
+                Tally &t = tally[keyOf(g, pose)];
+                ++t.c;
+                t.sig = g;
+            }
+            uint32_t missing = 0u, extra = 0u, lines = 0u;
+            for (const auto &[key, t] : tally)
+            {
+                if (t.a != t.c || t.b == t.a)
+                    continue;
+                (t.b < t.a ? missing : extra) += uint32_t(std::abs(t.b - t.a));
+                if (pose || lines >= 40u)
+                    continue;
+                ++lines;
+                const WatchSig &g = t.sig;
+                std::fprintf(stderr,
+                             "[flash]   %s the flash frame (x%d, the others x%d): geometry %016llx target %u %s %u "
+                             "palette %u state %08x source %08x\n",
+                             t.b < t.a ? "fewer in" : "more in", t.b, t.a, (unsigned long long)g.geometry, g.target,
+                             g.sourceTarget ? "reads target" : "texture", g.sourceTarget ? g.sourceTarget : g.texture,
+                             g.palette, g.state, g.source);
+            }
+            std::fprintf(stderr, "[flash]   %s: %u draws the neighbours share are missing from the flash frame, %u are its alone\n",
+                         pose ? "counting the model matrix too" : "by geometry, texture, state and target", missing,
+                         extra);
+        }
+        std::error_code ec;
+        std::filesystem::create_directories("build/run/flash", ec);
+        char name[96];
+        std::snprintf(name, sizeof(name), "build/run/flash/frame%llu.ppm", (unsigned long long)b.frame);
+        if (FILE *file = std::fopen(name, "wb"))
+        {
+            std::fprintf(file, "P6\n%u %u\n255\n", kWatchW * 3u, kWatchH);
+            for (uint32_t y = 0; y < kWatchH; ++y)
+                for (const WatchFrame *f : {&a, static_cast<const WatchFrame *>(&b), &c})
+                    for (uint32_t x = 0; x < kWatchW; ++x)
+                        std::fwrite(f->thumb.data() + (size_t(y) * kWatchW + x) * 4u, 1, 3, file);
+            std::fclose(file);
+            std::fprintf(stderr, "[flash]   pictures (before, flash, after): %s\n", name);
+        }
+    }
+    // Keep the last few.
+    while (m_watch.size() > 6u && m_watch.front().judged)
+        m_watch.erase(m_watch.begin());
+    while (m_watch.size() > 12u)
+    {
+        if (m_watch.front().download)
+            SDL_ReleaseGPUTransferBuffer(device, m_watch.front().download);
+        m_watch.erase(m_watch.begin());
+    }
 }
 
 bool Renderer::resolve(SDL_GPUDevice *device, SDL_GPUCommandBuffer *commands, SDL_GPUTexture *source, uint32_t x,

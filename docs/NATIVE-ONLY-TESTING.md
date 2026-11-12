@@ -57,3 +57,19 @@ The lines most likely to point at a breakage. Paste them with any report.
   breakage can be placed by milestone first.
 - No replay pixel diffs: input replay is not deterministic. Compare by
   the counters and by eye.
+
+## The flash watch
+
+For a flash too short to mark with F8: run with `RG_FLASH_WATCH=1`. Every
+drawn frame's picture is read back small (slower), and a frame that
+differs from both its neighbours where they agree is reported:
+
+- `[flash] frame N ...`: where on the picture, how many draws each of the
+  three frames had, their cameras, and the draws only the flash frame has
+  or lacks (by geometry, texture, state, target; then with the model
+  matrix too).
+- `build/run/flash/frameN.ppm`: the three pictures side by side (before,
+  flash, after), 192x56.
+
+Pan until it has flashed a few times; push the log and `build/run/flash/`.
+At most 60 reports a run.
