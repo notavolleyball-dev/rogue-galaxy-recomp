@@ -1,0 +1,20 @@
+# composite and model-emit lines
+[model-emit] model draw calls drawn from the game's structures 38, written by the game 3 (emit calls by why: program slot empty=3), records not found 0; emitters' output captured 22 (not 0); view, camera and light packets taken out of the list 89 (records without them known: view 0, camera 0, lights 0)
+[composite] 1 objects, 1 in layers (heads that found a clear box: 19), 0 tails not drawn
+[composite] 5000 objects, 3751 in layers (heads that found a clear box: 3759), 1249 tails not drawn
+[composite] 10000 objects, 7427 in layers (heads that found a clear box: 7447), 2573 tails not drawn
+[composite] 15000 objects, 10589 in layers (heads that found a clear box: 10602), 4411 tails not drawn
+[model-emit] model draw calls drawn from the game's structures 63616, written by the game 2203 (emit calls by why: program slot empty=1649 program unknown=554), records not found 0; emitters' output captured 18408 (not 0); view, camera and light packets taken out of the list 73054 (records without them known: view 0, camera 0, lights 0)
+[composite] 20000 objects, 13657 in layers (heads that found a clear box: 13661), 6343 tails not drawn
+[composite] 25000 objects, 16720 in layers (heads that found a clear box: 16739), 8280 tails not drawn
+[composite] 30000 objects, 19781 in layers (heads that found a clear box: 19798), 10219 tails not drawn
+[composite] 35000 objects, 22848 in layers (heads that found a clear box: 22857), 12152 tails not drawn
+[model-emit] model draw calls drawn from the game's structures 126383, written by the game 4003 (emit calls by why: program slot empty=2849 program unknown=1154), records not found 0; emitters' output captured 34540 (not 0); view, camera and light packets taken out of the list 151244 (records without them known: view 0, camera 0, lights 0)
+[composite] 40000 objects, 26462 in layers (heads that found a clear box: 26462), 13538 tails not drawn
+[composite] 45000 objects, 30469 in layers (heads that found a clear box: 30491), 14531 tails not drawn
+[composite] 50000 objects, 34342 in layers (heads that found a clear box: 34355), 15658 tails not drawn
+[model-emit] model draw calls drawn from the game's structures 186695, written by the game 7113 (emit calls by why: program slot empty=5359 program unknown=1754), records not found 0; emitters' output captured 56905 (not 0); view, camera and light packets taken out of the list 225795 (records without them known: view 0, camera 0, lights 0)
+[composite] 55000 objects, 38271 in layers (heads that found a clear box: 38275), 16729 tails not drawn
+[composite] 60000 objects, 42130 in layers (heads that found a clear box: 42152), 17870 tails not drawn
+[composite] 65000 objects, 45987 in layers (heads that found a clear box: 46004), 19013 tails not drawn
+[composite] 70000 objects, 49845 in layers (heads that found a clear box: 49853), 20155 tails not drawn
